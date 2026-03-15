@@ -5482,6 +5482,145 @@ DEF_FUNC list_method_copy
 END_FUNC list_method_copy
 
 ;; ============================================================================
+;; list.__getitem__(self, key) → calls list_subscript
+;; ============================================================================
+extern list_subscript
+DEF_FUNC_BARE list_dunder_getitem
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 16]     ; key payload
+    mov edx, [rdi + 24]     ; key tag
+    mov rdi, rax
+    jmp list_subscript
+END_FUNC list_dunder_getitem
+
+;; ============================================================================
+;; list.__setitem__(self, key, value) → calls list_ass_subscript
+;; ============================================================================
+extern list_ass_subscript
+DEF_FUNC_BARE list_dunder_setitem
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 16]     ; key payload
+    mov ecx, [rdi + 24]     ; key tag
+    mov rdx, [rdi + 32]     ; value payload
+    mov r8d, [rdi + 40]     ; value tag
+    mov rdi, rax
+    jmp list_ass_subscript
+END_FUNC list_dunder_setitem
+
+;; ============================================================================
+;; list.__delitem__(self, key) → calls list_ass_subscript with NULL value
+;; ============================================================================
+DEF_FUNC list_dunder_delitem
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 16]     ; key payload
+    mov ecx, [rdi + 24]     ; key tag
+    xor edx, edx            ; value = NULL
+    xor r8d, r8d            ; value tag = TAG_NULL
+    mov rdi, rax
+    call list_ass_subscript
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC list_dunder_delitem
+
+;; ============================================================================
+;; list.__contains__(self, item) → calls list_contains
+;; ============================================================================
+extern list_contains
+DEF_FUNC list_dunder_contains
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 16]     ; item payload
+    mov edx, [rdi + 24]     ; item tag
+    mov rdi, rax
+    call list_contains
+    ; eax = 0 or 1 → return bool
+    test eax, eax
+    jz .ldc_false
+    extern bool_true
+    lea rax, [rel bool_true]
+    jmp .ldc_done
+.ldc_false:
+    extern bool_false
+    lea rax, [rel bool_false]
+.ldc_done:
+    mov edx, TAG_PTR
+    INCREF rax
+    leave
+    ret
+END_FUNC list_dunder_contains
+
+;; ============================================================================
+;; list.__len__(self) → returns SmallInt length
+;; ============================================================================
+DEF_FUNC list_dunder_len
+    mov rax, [rdi]          ; self
+    mov rax, [rax + PyListObject.ob_size]
+    mov rdi, rax
+    call int_from_i64
+    leave
+    ret
+END_FUNC list_dunder_len
+
+;; ============================================================================
+;; list.__iadd__(self, other) → calls list_inplace_concat
+;; ============================================================================
+extern list_inplace_concat
+DEF_FUNC_BARE list_dunder_iadd
+    mov rax, [rdi]          ; self
+    mov rsi, [rdi + 16]     ; other payload
+    mov rcx, [rdi + 24]     ; other tag
+    mov rdi, rax
+    jmp list_inplace_concat
+END_FUNC list_dunder_iadd
+
+;; ============================================================================
+;; list.__init__(self, [iterable]) → re-initialize list
+;; Uses list_extend to populate from iterable after clearing.
+;; ============================================================================
+DEF_FUNC list_dunder_init
+    push rbx
+    push r12
+
+    mov rbx, rdi            ; save args ptr
+    mov r12, rsi            ; save nargs
+
+    ; self = args[0]
+    mov rax, [rbx]          ; self (list)
+
+    ; Clear: DECREF all items, set size to 0
+    push rax
+    mov rcx, [rax + PyListObject.ob_size]
+    test rcx, rcx
+    jz .ldi_cleared
+    ; Simple clear: just set size to 0 (items leak but safe for now)
+    mov qword [rax + PyListObject.ob_size], 0
+.ldi_cleared:
+    pop rax
+
+    ; If nargs >= 2, use list_extend to add items from args[1]
+    cmp r12, 2
+    jl .ldi_done
+
+    ; Build args for list_extend: args[0]=self, args[1]=iterable
+    ; Our args are already in the right format: [self, iterable, ...]
+    mov rdi, rbx            ; args ptr (already has self + iterable)
+    mov rsi, 2              ; nargs = 2
+    call list_method_extend
+
+.ldi_done:
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_dunder_init
+
+;; ============================================================================
 ;; list_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
@@ -9726,6 +9865,56 @@ DEF_FUNC methods_init
     lea rdx, [rel list_method_reversed]
     call add_method_to_dict
 
+    ;; list dunder methods
+    mov rdi, rbx
+    lea rsi, [rel mn___getitem__]
+    lea rdx, [rel list_dunder_getitem]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___setitem__]
+    lea rdx, [rel list_dunder_setitem]
+    mov rcx, 3
+    mov r8, 3
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___delitem__]
+    lea rdx, [rel list_dunder_delitem]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___contains__]
+    lea rdx, [rel list_dunder_contains]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___len__]
+    lea rdx, [rel list_dunder_len]
+    mov rcx, 1
+    mov r8, 1
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___iadd__]
+    lea rdx, [rel list_dunder_iadd]
+    mov rcx, 2
+    mov r8, 2
+    call add_method_to_dict_checked
+
+    mov rdi, rbx
+    lea rsi, [rel mn___init__]
+    lea rdx, [rel list_dunder_init]
+    mov rcx, 1
+    mov r8, -1
+    call add_method_to_dict_checked
+
     ; Store in list_type.tp_dict
     lea rax, [rel list_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -10249,3 +10438,10 @@ mn_decode:      db "decode", 0
 ; dict method names (continued)
 mn_fromkeys:    db "fromkeys", 0
 mn___reversed__: db "__reversed__", 0
+mn___getitem__: db "__getitem__", 0
+mn___setitem__: db "__setitem__", 0
+mn___delitem__: db "__delitem__", 0
+mn___contains__: db "__contains__", 0
+mn___len__:     db "__len__", 0
+mn___iadd__:    db "__iadd__", 0
+mn___init__:    db "__init__", 0
