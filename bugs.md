@@ -101,6 +101,16 @@
 **Root cause**: `dict_keys_equal` returned "not equal" for any non-string, non-numeric heap pointers. Tuple keys, frozenset keys, etc. all failed equality checks.
 **Fix**: Add `.dke_try_richcompare` fallback that calls `tp_richcompare(PY_EQ)` + `obj_is_true` for non-string heap pointer keys.
 
+### 21. assertRaises double-free on fn(*args) exception (opcodes_call.asm)
+**Symptom**: `assertRaises(ValueError, bad)` crashes with double-free
+**Root cause**: CALL_FUNCTION_EX freed cfex_temp_pending, then eval_exception_unwind freed it again
+**Fix**: Clear cfex_temp_pending before the call, not after
+
+### 22. list `in` operator doesn't call reflected __eq__ (list.asm)
+**Symptom**: `ALWAYS_EQ in [1]` returns False
+**Root cause**: list_contains only tried element's __eq__, not value's reflected __eq__
+**Fix**: Added `.try_reflected` path in list_contains
+
 ### Known Bugs Not Yet Fixed
 - `dict.update(x=1, y=2)` with kwargs segfaults (methods.asm)
 - `repr(d.keys())` returns wrong value (dict view repr not implemented)

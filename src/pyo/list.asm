@@ -1162,6 +1162,65 @@ DEF_FUNC list_contains, LC_FRAME
     call rax
     ; Check for NotImplemented (NULL return = tag 0)
     test edx, edx
+    jnz .elem_check_result
+    ; Element's __eq__ returned NotImplemented — try reflected (value.__eq__(elem))
+    jmp .try_reflected
+
+.try_reflected:
+    ; Try the VALUE's __eq__ (reflected comparison: value.__eq__(elem))
+    mov rdi, [rbp - LC_VPAY]      ; value payload
+    mov r8d, [rbp - LC_VTAG]      ; value tag
+    ; Resolve value type
+    cmp r8d, TAG_PTR
+    jne .try_reflected_nonptr
+    mov rax, [rdi + PyObject.ob_type]
+    jmp .try_reflected_have_type
+.try_reflected_nonptr:
+    cmp r8d, TAG_SMALLINT
+    jne .next
+    lea rax, [rel int_type]
+.try_reflected_have_type:
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jnz .try_reflected_richcmp
+    ; No tp_richcompare — try dunder on heaptype
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .next
+    ; Reload elem payload + tag for the reflected call
+    mov rax, [rbp - LC_IDX]
+    mov rbx, [rbp - LC_LIST]
+    mov rbx, [rbx + PyListObject.ob_item]
+    mov rdx, [rbp - LC_LIST]
+    mov rdx, [rdx + PyListObject.ob_item_tags]
+    mov rsi, [rbx + rax * 8]        ; elem payload
+    movzx ecx, byte [rdx + rax]     ; elem tag
+    ; dunder_call_2(self=value, other=elem, "__eq__", other_tag=elem_tag)
+    ; rdi = value (already set)
+    CSTRING rdx, "__eq__"
+    call dunder_call_2
+    test edx, edx
+    jz .next
+    jmp .elem_check_result
+.try_reflected_richcmp:
+    ; Reload elem for reflected call
+    push rax                         ; save richcompare func
+    mov rcx, [rbp - LC_IDX]
+    mov rbx, [rbp - LC_LIST]
+    mov rbx, [rbx + PyListObject.ob_item]
+    mov rdx, [rbp - LC_LIST]
+    mov rdx, [rdx + PyListObject.ob_item_tags]
+    mov rsi, [rbx + rcx * 8]        ; elem payload
+    movzx r12d, byte [rdx + rcx]    ; elem tag
+    pop rax
+    ; tp_richcompare(value, elem, PY_EQ, value_tag, elem_tag)
+    ; rdi = value (already set)
+    mov edx, PY_EQ
+    mov rcx, [rbp - LC_VTAG]        ; self_tag = value_tag
+    mov r8, r12                      ; other_tag = elem_tag
+    call rax
+    test edx, edx
     jz .next
 
 .elem_check_result:
