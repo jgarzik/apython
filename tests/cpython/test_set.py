@@ -157,9 +157,11 @@ class TestSet(unittest.TestCase):
             self.assertIn(i, s)
 
     def test_update(self):
-        # set.update via |= (update method not available)
         s = {1, 2}
-        s |= {3, 4}
+        s.update({3, 4})
+        self.assertEqual(sorted(s), [1, 2, 3, 4])
+        # No-arg update is a no-op
+        s.update()
         self.assertEqual(sorted(s), [1, 2, 3, 4])
 
     def test_set_from_list(self):

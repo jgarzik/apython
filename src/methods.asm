@@ -5846,6 +5846,11 @@ DEF_FUNC dict_method_update
     push r14
 
     mov rbx, [rdi]          ; self
+
+    ; If nargs == 1 (just self, no args), return None immediately
+    cmp rsi, 1
+    jle .du_done
+
     mov r12, [rdi + 16]     ; other dict
 
     mov r13, [r12 + PyDictObject.capacity]
@@ -6145,29 +6150,34 @@ DEF_FUNC dict_method_popitem
 
 .dpopitem_found:
     ; r13 = key, r14 = value, rcx = value_tag
+    ; Also save key_tag from the entry
+    mov rax, [rbx + PyDictObject.entries]
+    imul rdx, r12, DICT_ENTRY_SIZE
+    add rax, rdx
+    movzx r8d, byte [rax + DictEntry.key_tag]
+    push r8                  ; save key_tag
     push rcx                 ; save value_tag across tuple_new
     ; Create 2-tuple
     mov rdi, 2
     call tuple_new
     pop rcx                  ; restore value_tag
+    pop r8                   ; restore key_tag
     mov r12, rax             ; r12 = tuple
 
-    ; Set tuple[0] = key, tuple[1] = value
+    ; Set tuple[0] = key with correct tag, tuple[1] = value
     mov r9, [r12 + PyTupleObject.ob_item]
     mov r10, [r12 + PyTupleObject.ob_item_tags]
-    ; Key from dict entries — always heap ptr (strings)
     mov [r9], r13
-    mov byte [r10], TAG_PTR
-    INCREF r13
+    mov byte [r10], r8b     ; key tag from entry
+    INCREF_VAL r13, r8
     mov [r9 + 8], r14
-    ; Use stored value_tag from dict entry
-    mov byte [r10 + 1], cl
+    mov byte [r10 + 1], cl  ; value tag from entry
     INCREF_VAL r14, rcx
 
     ; Delete key from dict
     mov rdi, rbx
     mov rsi, r13
-    mov edx, TAG_PTR
+    movzx edx, byte [r10]   ; key tag
     call dict_del
 
     mov rax, r12
@@ -6918,6 +6928,57 @@ DEF_FUNC set_method_union
     CSTRING rsi, "union() takes exactly one argument"
     call raise_exception
 END_FUNC set_method_union
+
+;; ============================================================================
+;; set_method_update(args, nargs) -> None
+;; args[0]=self, args[1]=other (set). Adds all elements of other to self.
+;; ============================================================================
+DEF_FUNC set_method_update
+    push rbx
+    push r12
+    push r13
+
+    mov rbx, [rdi]          ; self
+    ; If no other arg, no-op
+    cmp rsi, 2
+    jl .supd_done
+
+    mov r12, [rdi + 16]     ; other set
+    mov r13, [r12 + PyDictObject.capacity]
+    xor ecx, ecx
+
+.supd_loop:
+    cmp rcx, r13
+    jge .supd_done
+
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, [r12 + PyDictObject.entries]
+    push rcx
+
+    cmp qword [rax + SET_ENTRY_KEY_TAG], 0
+    je .supd_next
+
+    mov rdi, rbx
+    mov rsi, [rax + SET_ENTRY_KEY]
+    mov rdx, [rax + SET_ENTRY_KEY_TAG]
+    call set_add
+
+.supd_next:
+    pop rcx
+    inc ecx
+    jmp .supd_loop
+
+.supd_done:
+    extern none_singleton
+    lea rax, [rel none_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_method_update
 
 ;; ============================================================================
 ;; set_method_intersection(args, nargs) -> new set = self & other
@@ -9779,6 +9840,11 @@ DEF_FUNC methods_init
     mov rdi, rbx
     lea rsi, [rel mn_isdisjoint]
     lea rdx, [rel set_method_isdisjoint]
+    call add_method_to_dict
+
+    mov rdi, rbx
+    lea rsi, [rel mn_update]
+    lea rdx, [rel set_method_update]
     call add_method_to_dict
 
     ; Store in set_type.tp_dict

@@ -81,14 +81,28 @@
 **Root cause**: `dict_type.tp_call = 0`, so `type_call` used generic `instance_new` which allocated a PyDictObject-sized block but didn't initialize the hash table entries array.
 **Fix**: Implement `dict_type_call` that calls `dict_new` for no-args case and copies entries for dict(other_dict) case.
 
+### 17. dict.update() no-args crash (methods.asm)
+**Symptom**: `d.update()` segfaults
+**Root cause**: Always reads `args[1]` without checking nargs first
+**Fix**: Add `cmp rsi, 1; jle .du_done` guard at start
+
+### 18. dict.popitem() key tag hardcoded to TAG_PTR (methods.asm)
+**Symptom**: `d.popitem()` segfaults on dicts with non-string keys
+**Root cause**: Key tag hardcoded to TAG_PTR, `INCREF` used instead of `INCREF_VAL`, key tag not read from entry
+**Fix**: Read key_tag from entry, use INCREF_VAL, pass correct tag to dict_del
+
+### 19. set.update() method missing (methods.asm)
+**Symptom**: `s.update({3,4})` raises AttributeError
+**Root cause**: Method not implemented, not registered in set tp_dict
+**Fix**: Implement set_method_update, register in init_builtin_methods
+
 ### Known Bugs Not Yet Fixed
-- `dict.update()` with no args segfaults (methods.asm)
 - `dict.update(x=1, y=2)` with kwargs segfaults (methods.asm)
-- `dict.popitem()` segfaults (methods.asm)
-- `set.update()` method not implemented (use |= instead)
 - `repr(d.keys())` returns wrong value (dict view repr not implemented)
 - `(1,1) in d.items()` fails (dict_items __contains__ not implemented)
 - `tuple(t) is t` identity optimization not implemented
+- `list.append()` no-args segfaults (method arg count validation missing)
+- `assertRaises(fn)` double-free crash (exception handling memory issue)
 
 ## New Infrastructure Added
 - `list_copy()` - standalone shallow copy function

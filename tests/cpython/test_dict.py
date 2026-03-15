@@ -78,7 +78,7 @@ class DictTest(unittest.TestCase):
         d.update({1: 1, 2: 2, 3: 3})
         self.assertEqual(d, {1: 1, 2: 2, 3: 3})
 
-        # Skip: d.update() with no args crashes (known bug)
+        d.update()
         self.assertEqual(d, {1: 1, 2: 2, 3: 3})
 
     def test_fromkeys(self):
@@ -134,6 +134,19 @@ class DictTest(unittest.TestCase):
         self.assertEqual(d.pop('abc', 'ghi'), 'def')
         self.assertEqual(d.pop('abc', 'ghi'), 'ghi')
         self.assertEqual(len(d), 0)
+
+    def test_popitem(self):
+        d = {1: 'a', 2: 'b', 3: 'c'}
+        items = []
+        while d:
+            items.append(d.popitem())
+        self.assertEqual(len(items), 3)
+        self.assertEqual(sorted(items), [(1, 'a'), (2, 'b'), (3, 'c')])
+        try:
+            d.popitem()
+            self.fail("Expected KeyError")
+        except KeyError:
+            pass
 
     def test_repr(self):
         d = {}
