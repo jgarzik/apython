@@ -557,6 +557,9 @@ DEF_FUNC op_call_function_ex
 .cfex_extract_done:
     mov rsi, [rbp - CFX_TEMP]      ; use temp buffer as args
 .cfex_args_ready:
+    ; Clear cfex_temp_pending BEFORE the call, so exception unwind
+    ; won't free it (we free it ourselves in the normal path below).
+    mov qword [rel cfex_temp_pending], 0
     mov rdx, [rbp - CFX_ARGS]
     mov rdx, [rdx + PyVarObject.ob_size]
     mov rdi, [rbp - CFX_FUNC]
@@ -569,7 +572,6 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_TEMP]
     test rdi, rdi
     jz .cfex_cleanup
-    mov qword [rel cfex_temp_pending], 0  ; clear before freeing
     push rax
     push rdx
     call ap_free
