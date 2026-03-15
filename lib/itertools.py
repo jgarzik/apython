@@ -1,12 +1,8 @@
 # itertools - adapted from CPython for apython
 
-def chain(*iterables):
-    """chain(*iterables) --> chain object
-    Return a chain object whose .__next__() method returns elements from the
-    first iterable until it is exhausted, then elements from the next
-    iterable, until all of the iterables are exhausted."""
-    for it in iterables:
-        yield from it
+# chain is a native builtin (registered in __builtins__)
+# Pull it into module namespace so 'from itertools import chain' works
+chain = chain
 
 
 def islice(iterable, *args):

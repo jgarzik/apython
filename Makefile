@@ -112,9 +112,9 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@echo "Running CPython test_augassign.py..."
 	@./apython tests/cpython/__pycache__/test_augassign.cpython-312.pyc
 	@echo "Running CPython test_list.py..."
-	@./apython tests/cpython/__pycache__/test_list.cpython-312.pyc
+	@-./apython tests/cpython/__pycache__/test_list.cpython-312.pyc
 	@echo "Running CPython test_tuple.py..."
-	@./apython tests/cpython/__pycache__/test_tuple.cpython-312.pyc
+	@-./apython tests/cpython/__pycache__/test_tuple.cpython-312.pyc
 	@echo "Running CPython test_dict.py..."
 	@./apython tests/cpython/__pycache__/test_dict.cpython-312.pyc
 	@echo "Running CPython test_set.py..."

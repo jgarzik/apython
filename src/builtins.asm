@@ -93,6 +93,7 @@ extern builtin_map
 extern builtin_filter
 extern builtin_reversed
 extern builtin_sorted
+extern builtin_chain
 extern builtin_globals
 extern builtin_locals
 extern builtin_dir
@@ -1947,6 +1948,11 @@ DEF_FUNC builtins_init
     call add_builtin
 
     mov rdi, rbx
+    lea rsi, [rel bi_name_chain]
+    lea rdx, [rel builtin_chain]
+    call add_builtin
+
+    mov rdi, rbx
     lea rsi, [rel bi_name_globals]
     lea rdx, [rel builtin_globals]
     call add_builtin
@@ -2392,6 +2398,7 @@ bi_name_map:          db "map", 0
 bi_name_filter:       db "filter", 0
 bi_name_reversed:     db "reversed", 0
 bi_name_sorted:       db "sorted", 0
+bi_name_chain:        db "chain", 0
 bi_name_divmod:       db "divmod", 0
 bi_name_globals:      db "globals", 0
 bi_name_locals:       db "locals", 0

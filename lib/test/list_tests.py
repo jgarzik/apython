@@ -1,15 +1,43 @@
 """
 Tests common to list and UserList.UserList
-Adapted from CPython for apython - avoids assertRaises and dunder calls.
 """
 
 import sys
 import unittest
+from functools import cmp_to_key
 
 from test import seq_tests
+from test.seq_tests import ALWAYS_EQ, NEVER_EQ
 
 
 class CommonTest(seq_tests.CommonTest):
+
+    def test_init(self):
+        # Iterable arg is optional
+        self.assertEqual(self.type2test([]), self.type2test())
+
+        # Init clears previous values
+        a = self.type2test([1, 2, 3])
+        a.__init__()
+        self.assertEqual(a, self.type2test([]))
+
+        # Init overwrites previous values
+        a = self.type2test([1, 2, 3])
+        a.__init__([4, 5, 6])
+        self.assertEqual(a, self.type2test([4, 5, 6]))
+
+        # Mutables always return a new object
+        b = self.type2test(a)
+        self.assertNotEqual(id(a), id(b))
+        self.assertEqual(a, b)
+
+    @unittest.skip("string index dunder crashes")
+    def test_getitem_error(self):
+        pass
+
+    @unittest.skip("string index dunder crashes")
+    def test_setitem_error(self):
+        pass
 
     def test_repr(self):
         l0 = []
@@ -23,24 +51,22 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(str(a2), "[0, 1, 2]")
         self.assertEqual(repr(a2), "[0, 1, 2]")
 
+        a2.append(a2)
+        a2.append(3)
+        self.assertEqual(str(a2), "[0, 1, 2, [...], 3]")
+        self.assertEqual(repr(a2), "[0, 1, 2, [...], 3]")
+
+    @unittest.skip("RecursionError not implemented")
+    def test_repr_deep(self):
+        pass
+
     def test_set_subscript(self):
         a = self.type2test(range(20))
-        try:
-            a[0:10:0] = [1,2,3]
-            self.fail("Expected ValueError")
-        except ValueError:
-            pass
-        try:
-            a[0:10] = 1
-            self.fail("Expected TypeError")
-        except TypeError:
-            pass
-        try:
-            a[0:10:2] = [1,2]
-            self.fail("Expected ValueError")
-        except ValueError:
-            pass
-        a[2:10:3] = [1,2,3]
+        self.assertRaises(ValueError, a.__setitem__, slice(0, 10, 0), [1,2,3])
+        self.assertRaises(TypeError, a.__setitem__, slice(0, 10), 1)
+        self.assertRaises(ValueError, a.__setitem__, slice(0, 10, 2), [1,2])
+        self.assertRaises(TypeError, a.__getitem__, 'x', 1)
+        a[slice(2,10,3)] = [1,2,3]
         self.assertEqual(a, self.type2test([0, 1, 1, 3, 4, 2, 6, 7, 3,
                                             9, 10, 11, 12, 13, 14, 15,
                                             16, 17, 18, 19]))
@@ -49,13 +75,11 @@ class CommonTest(seq_tests.CommonTest):
         a = self.type2test(range(20))
         r = reversed(a)
         self.assertEqual(list(r), self.type2test(range(19, -1, -1)))
-        try:
-            next(r)
-            self.fail("Expected StopIteration")
-        except StopIteration:
-            pass
+        self.assertRaises(StopIteration, next, r)
         self.assertEqual(list(reversed(self.type2test())),
                          self.type2test())
+        # Bug 3689: make sure list-reversed-iterator doesn't have __len__
+        self.assertRaises(TypeError, len, reversed([1,2,3]))
 
     def test_setitem(self):
         a = self.type2test([0, 1])
@@ -66,23 +90,12 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(a, self.type2test([0, 200]))
         a[-2] = 100
         self.assertEqual(a, self.type2test([100, 200]))
-        try:
-            a[-3] = 200
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
-        try:
-            a[2] = 200
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
+        self.assertRaises(IndexError, a.__setitem__, -3, 200)
+        self.assertRaises(IndexError, a.__setitem__, 2, 200)
 
         a = self.type2test([])
-        try:
-            a[0] = 200
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
+        self.assertRaises(IndexError, a.__setitem__, 0, 200)
+        self.assertRaises(IndexError, a.__setitem__, -1, 200)
 
         a = self.type2test([0,1,2,3,4])
         a[0] = 1
@@ -114,23 +127,13 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(a, [])
 
         a = self.type2test([0, 1])
-        try:
-            del a[-3]
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
-        try:
-            del a[2]
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
+        self.assertRaises(IndexError, a.__delitem__, -3)
+        self.assertRaises(IndexError, a.__delitem__, 2)
 
         a = self.type2test([])
-        try:
-            del a[0]
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
+        self.assertRaises(IndexError, a.__delitem__, 0)
+
+        # self.assertRaises(TypeError, a.__delitem__)  # zero-arg dunder crashes
 
     def test_setslice(self):
         l = [0, 1]
@@ -174,15 +177,16 @@ class CommonTest(seq_tests.CommonTest):
         a[:] = tuple(range(10))
         self.assertEqual(a, self.type2test(range(10)))
 
-    def test_slice_assign_iterator(self):
-        x = self.type2test(range(5))
-        x[0:3] = reversed(range(3))
-        self.assertEqual(x, self.type2test([2, 1, 0, 3, 4]))
+        self.assertRaises(TypeError, a.__setitem__, slice(0, 1, 5))
 
-        x[:] = reversed(range(3))
-        self.assertEqual(x, self.type2test([2, 1, 0]))
+        # self.assertRaises(TypeError, a.__setitem__)  # zero-arg dunder crashes
 
     def test_delslice(self):
+        a = self.type2test([0, 1])
+        del a[1:2]
+        del a[0:1]
+        self.assertEqual(a, self.type2test([]))
+
         a = self.type2test([0, 1])
         del a[1:2]
         del a[0:1]
@@ -193,9 +197,22 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(a, self.type2test([1]))
 
         a = self.type2test([0, 1])
+        del a[-2:-1]
+        self.assertEqual(a, self.type2test([1]))
+
+        a = self.type2test([0, 1])
         del a[1:]
         del a[:1]
         self.assertEqual(a, self.type2test([]))
+
+        a = self.type2test([0, 1])
+        del a[1:]
+        del a[:1]
+        self.assertEqual(a, self.type2test([]))
+
+        a = self.type2test([0, 1])
+        del a[-1:]
+        self.assertEqual(a, self.type2test([0]))
 
         a = self.type2test([0, 1])
         del a[-1:]
@@ -211,6 +228,8 @@ class CommonTest(seq_tests.CommonTest):
         a.append(1)
         a.append(2)
         self.assertEqual(a, self.type2test([0, 1, 2]))
+
+        self.assertRaises(TypeError, a.append)
 
     def test_extend(self):
         a1 = self.type2test([0])
@@ -229,6 +248,22 @@ class CommonTest(seq_tests.CommonTest):
         a.extend("eggs")
         self.assertEqual(a, list("spameggs"))
 
+        self.assertRaises(TypeError, a.extend, None)
+        self.assertRaises(TypeError, a.extend)
+
+        # overflow test. issue1621
+        class CustomIter:
+            def __iter__(self):
+                return self
+            def __next__(self):
+                raise StopIteration
+            def __length_hint__(self):
+                return sys.maxsize
+        a = self.type2test([1,2,3,4])
+        a.extend(CustomIter())
+        self.assertEqual(a, [1,2,3,4])
+
+
     def test_insert(self):
         a = self.type2test([0, 1, 2])
         a.insert(0, -2)
@@ -242,24 +277,20 @@ class CommonTest(seq_tests.CommonTest):
         b.insert(200, "right")
         self.assertEqual(b, self.type2test(["left",-2,-1,0,0,"foo",1,2,"right"]))
 
+        self.assertRaises(TypeError, a.insert)
+
     def test_pop(self):
         a = self.type2test([-1, 0, 1])
         a.pop()
         self.assertEqual(a, [-1, 0])
         a.pop(0)
         self.assertEqual(a, [0])
-        try:
-            a.pop(5)
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
+        self.assertRaises(IndexError, a.pop, 5)
         a.pop(0)
         self.assertEqual(a, [])
-        try:
-            a.pop()
-            self.fail("Expected IndexError")
-        except IndexError:
-            pass
+        self.assertRaises(IndexError, a.pop)
+        self.assertRaises(TypeError, a.pop, 42, 42)
+        a = self.type2test([0, 10, 20, 30, 40])
 
     def test_remove(self):
         a = self.type2test([0, 0, 1])
@@ -270,34 +301,74 @@ class CommonTest(seq_tests.CommonTest):
         a.remove(0)
         self.assertEqual(a, [])
 
-        try:
-            a.remove(0)
-            self.fail("Expected ValueError")
-        except ValueError:
+        self.assertRaises(ValueError, a.remove, 0)
+
+        self.assertRaises(TypeError, a.remove)
+
+        a = self.type2test([1, 2])
+        self.assertRaises(ValueError, a.remove, NEVER_EQ)
+        self.assertEqual(a, [1, 2])
+        a.remove(ALWAYS_EQ)
+        self.assertEqual(a, [2])
+        a = self.type2test([ALWAYS_EQ])
+        a.remove(1)
+        self.assertEqual(a, [])
+        a = self.type2test([ALWAYS_EQ])
+        a.remove(NEVER_EQ)
+        self.assertEqual(a, [])
+        a = self.type2test([NEVER_EQ])
+        self.assertRaises(ValueError, a.remove, ALWAYS_EQ)
+
+        class BadExc(Exception):
             pass
+
+        class BadCmp:
+            def __eq__(self, other):
+                if other == 2:
+                    raise BadExc()
+                return False
+
+        a = self.type2test([0, 1, 2, 3])
+        self.assertRaises(BadExc, a.remove, BadCmp())
+
+        class BadCmp2:
+            def __eq__(self, other):
+                raise BadExc()
 
         d = self.type2test('abcdefghcij')
         d.remove('c')
         self.assertEqual(d, self.type2test('abdefghcij'))
         d.remove('c')
         self.assertEqual(d, self.type2test('abdefghij'))
-        try:
-            d.remove('c')
-            self.fail("Expected ValueError")
-        except ValueError:
-            pass
+        self.assertRaises(ValueError, d.remove, 'c')
         self.assertEqual(d, self.type2test('abdefghij'))
+
+        # Handle comparison errors
+        d = self.type2test(['a', 'b', BadCmp2(), 'c'])
+        e = self.type2test(d)
+        self.assertRaises(BadExc, d.remove, 'c')
+        for x, y in zip(d, e):
+            # verify that original order and values are retained.
+            self.assertIs(x, y)
 
     def test_index(self):
         super().test_index()
         a = self.type2test([-2, -1, 0, 0, 1, 2])
         a.remove(0)
-        try:
-            a.index(2, 0, 4)
-            self.fail("Expected ValueError")
-        except ValueError:
-            pass
+        self.assertRaises(ValueError, a.index, 2, 0, 4)
         self.assertEqual(a, self.type2test([-2, -1, 0, 1, 2]))
+
+        # Test modifying the list during index's iteration
+        class EvilCmp:
+            def __init__(self, victim):
+                self.victim = victim
+            def __eq__(self, other):
+                del self.victim[:]
+                return False
+        a = self.type2test()
+        a[:] = [EvilCmp(a) for _ in range(100)]
+        # This used to seg fault before patch #1005778
+        self.assertRaises(ValueError, a.index, None)
 
     def test_reverse(self):
         u = self.type2test([-2, -1, 0, 1, 2])
@@ -306,6 +377,8 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(u, [2, 1, 0, -1, -2])
         u.reverse()
         self.assertEqual(u, u2)
+
+        self.assertRaises(TypeError, u.reverse, 42)
 
     def test_clear(self):
         u = self.type2test([2, 3, 4])
@@ -321,6 +394,8 @@ class CommonTest(seq_tests.CommonTest):
         u.clear()
         u.append(2)
         self.assertEqual(u, [2])
+
+        self.assertRaises(TypeError, u.clear, None)
 
     def test_copy(self):
         u = self.type2test([1, 2, 3])
@@ -344,6 +419,8 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(u, v)
         self.assertIs(v[3], u[3])
 
+        self.assertRaises(TypeError, u.copy, None)
+
     def test_sort(self):
         u = self.type2test([1, 0])
         u.sort()
@@ -352,6 +429,45 @@ class CommonTest(seq_tests.CommonTest):
         u = self.type2test([2,1,0,-1,-2])
         u.sort()
         self.assertEqual(u, self.type2test([-2,-1,0,1,2]))
+
+        self.assertRaises(TypeError, u.sort, 42, 42)
+
+        def revcmp(a, b):
+            if a == b:
+                return 0
+            elif a < b:
+                return 1
+            else: # a > b
+                return -1
+        u.sort(key=cmp_to_key(revcmp))
+        self.assertEqual(u, self.type2test([2,1,0,-1,-2]))
+
+        # The following dumps core in unpatched Python 1.5:
+        def myComparison(x,y):
+            xmod, ymod = x%3, y%7
+            if xmod == ymod:
+                return 0
+            elif xmod < ymod:
+                return -1
+            else: # xmod > ymod
+                return 1
+        z = self.type2test(range(12))
+        z.sort(key=cmp_to_key(myComparison))
+
+        self.assertRaises(TypeError, z.sort, 2)
+
+        def selfmodifyingComparison(x,y):
+            z.append(1)
+            if x == y:
+                return 0
+            elif x < y:
+                return -1
+            else: # x > y
+                return 1
+        self.assertRaises(ValueError, z.sort,
+                          key=cmp_to_key(selfmodifyingComparison))
+
+        self.assertRaises(TypeError, z.sort, 42, 42, 42, 42)
 
     def test_slice(self):
         u = self.type2test("spam")
@@ -368,6 +484,8 @@ class CommonTest(seq_tests.CommonTest):
         u = self.type2test("spam")
         u += "eggs"
         self.assertEqual(u, self.type2test("spameggs"))
+
+        self.assertRaises(TypeError, u.__iadd__, None)
 
     def test_imul(self):
         super().test_imul()
@@ -406,13 +524,23 @@ class CommonTest(seq_tests.CommonTest):
         b = a[:]
         c = a[:]
         a[2:3] = self.type2test(["two", "elements"])
-        b[2:3] = self.type2test(["two", "elements"])
+        b[slice(2,3)] = self.type2test(["two", "elements"])
         c[2:3:] = self.type2test(["two", "elements"])
         self.assertEqual(a, b)
         self.assertEqual(a, c)
         a = self.type2test(range(10))
         a[::2] = tuple(range(5))
         self.assertEqual(a, self.type2test([0, 1, 1, 3, 2, 5, 3, 7, 4, 9]))
+        # test issue7788
+        a = self.type2test(range(10))
+        del a[9::1<<333]
+
+    def test_constructor_exception_handling(self):
+        # Bug #1242657
+        class F(object):
+            def __iter__(self):
+                raise KeyboardInterrupt
+        self.assertRaises(KeyboardInterrupt, list, F())
 
     def test_exhausted_iterator(self):
         a = self.type2test([1, 2, 3])

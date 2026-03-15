@@ -1774,6 +1774,181 @@ DEF_FUNC_LOCAL seq_iter_dealloc
 END_FUNC seq_iter_dealloc
 
 ;; ============================================================================
+;; CHAIN
+;; ============================================================================
+;; ChainIterObject: +0 refcnt, +8 type, +16 it_iters, +24 it_count, +32 it_idx (40B)
+;; Iterates through multiple iterables sequentially.
+
+%define CHAIN_ITERS     16     ; pointer to iterator* array
+%define CHAIN_COUNT     24     ; number of iterators
+%define CHAIN_IDX       32     ; current iterator index
+%define CHAIN_OBJ_SIZE  40
+
+;; builtin_chain(args, nargs) -> ChainIterObject*
+;; chain(*iterables)
+DEF_FUNC builtin_chain
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi            ; args (fat 16B-stride array)
+    mov r12, rsi            ; nargs
+
+    ; Handle zero args: chain() returns empty iterator
+    test r12, r12
+    jz .chain_zero
+
+    ; Allocate array of iterator pointers: nargs * 8
+    lea rdi, [r12 * 8]
+    call ap_malloc
+    mov r13, rax             ; r13 = iterator array
+
+    ; For each arg, get its iterator
+    xor r14d, r14d          ; i = 0
+.chain_iter_loop:
+    cmp r14, r12
+    jge .chain_create
+
+    mov rax, r14
+    shl rax, 4                  ; rax = i * 16
+    mov rdi, [rbx + rax]        ; args[i] payload
+    mov rsi, [rbx + rax + 8]    ; args[i] tag
+    push r13
+    push r14
+    call get_iterator
+    pop r14
+    pop r13
+    mov [r13 + r14 * 8], rax    ; store iterator
+
+    inc r14
+    jmp .chain_iter_loop
+
+.chain_create:
+    ; Allocate ChainIterObject (40 bytes)
+    mov edi, CHAIN_OBJ_SIZE
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel chain_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov [rax + CHAIN_ITERS], r13       ; it_iters (array ptr)
+    mov [rax + CHAIN_COUNT], r12       ; it_count
+    mov qword [rax + CHAIN_IDX], 0     ; start at index 0
+    mov edx, TAG_PTR
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.chain_zero:
+    ; Create a chain with 0 iterators (will immediately exhaust)
+    mov edi, CHAIN_OBJ_SIZE
+    call ap_malloc
+
+    mov qword [rax + PyObject.ob_refcnt], 1
+    lea rcx, [rel chain_iter_type]
+    mov [rax + PyObject.ob_type], rcx
+    mov qword [rax + CHAIN_ITERS], 0   ; NULL iters array
+    mov qword [rax + CHAIN_COUNT], 0   ; 0 iterators
+    mov qword [rax + CHAIN_IDX], 0
+    mov edx, TAG_PTR
+
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC builtin_chain
+
+;; chain_iternext(self) -> (rax=payload, edx=tag) or NULL
+;; Tries current sub-iterator; on exhaustion advances to next.
+DEF_FUNC_LOCAL chain_iternext
+    push rbx
+
+    mov rbx, rdi            ; self
+
+.chain_retry:
+    ; Load current index and count
+    mov rcx, [rbx + CHAIN_IDX]
+    cmp rcx, [rbx + CHAIN_COUNT]
+    jge .chain_exhausted
+
+    ; Get current iterator: iters[idx]
+    mov rax, [rbx + CHAIN_ITERS]
+    mov rdi, [rax + rcx * 8]
+
+    ; Call iternext via helper (handles __next__, clears StopIteration)
+    call call_iternext
+    test edx, edx
+    jnz .chain_got_value
+
+    ; call_iternext clears StopIteration automatically.
+    ; Check for other exceptions — those must propagate.
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .chain_exhausted
+
+    ; Normal exhaustion — advance to next iterator
+    inc qword [rbx + CHAIN_IDX]
+    jmp .chain_retry
+
+.chain_got_value:
+    pop rbx
+    leave
+    ret
+
+.chain_exhausted:
+    RET_NULL
+    pop rbx
+    leave
+    ret
+END_FUNC chain_iternext
+
+;; chain_dealloc(self)
+DEF_FUNC_LOCAL chain_dealloc
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+
+    ; DECREF each iterator in array
+    mov r12, [rbx + CHAIN_COUNT]
+    mov r13, [rbx + CHAIN_ITERS]
+    test r13, r13
+    jz .chain_dealloc_free     ; NULL iters (zero-arg chain)
+
+    xor ecx, ecx
+.chain_dealloc_loop:
+    cmp rcx, r12
+    jge .chain_free_array
+    push rcx
+    mov rdi, [r13 + rcx * 8]
+    call obj_decref
+    pop rcx
+    inc rcx
+    jmp .chain_dealloc_loop
+
+.chain_free_array:
+    mov rdi, r13
+    call ap_free
+
+.chain_dealloc_free:
+    mov rdi, rbx
+    call ap_free
+
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC chain_dealloc
+
+;; ============================================================================
 ;; Data section - type name strings and type objects
 ;; ============================================================================
 section .data
@@ -1784,6 +1959,7 @@ map_iter_name:       db "map", 0
 filter_iter_name:    db "filter", 0
 reversed_iter_name:  db "reversed", 0
 seq_iter_name:       db "iterator", 0
+chain_iter_name:     db "itertools.chain", 0
 
 ; Enumerate iterator type
 align 8
@@ -1958,6 +2134,37 @@ reversed_iter_type:
     dq 0                        ; tp_richcompare
     dq itertools_iter_self      ; tp_iter
     dq reversed_iternext        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq 0                        ; tp_flags
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+
+; Chain iterator type
+align 8
+global chain_iter_type
+chain_iter_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq chain_iter_name          ; tp_name
+    dq CHAIN_OBJ_SIZE           ; tp_basicsize
+    dq chain_dealloc            ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq itertools_iter_self      ; tp_iter
+    dq chain_iternext           ; tp_iternext
     dq 0                        ; tp_init
     dq 0                        ; tp_new
     dq 0                        ; tp_as_number
