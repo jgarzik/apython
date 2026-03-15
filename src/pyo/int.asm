@@ -1206,12 +1206,16 @@ DEF_FUNC_BARE int_mul
     jne .gmp_path
 
     mov rax, rdi
+    push rcx                ; save right_tag (ecx) before clobber
     mov rcx, rsi
     imul rax, rcx
-    jo .gmp_path
+    jo .gmp_path_pop
+    add rsp, 8             ; discard saved right_tag
     RET_TAG_SMALLINT
     ret
 
+.gmp_path_pop:
+    pop rcx                 ; restore right_tag
 .gmp_path:
     push rbp
     mov rbp, rsp

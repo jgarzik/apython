@@ -153,6 +153,12 @@ DEF_FUNC get_iterator
     test edx, edx
     jnz .validate_iter
 
+    ; __iter__ returned NULL — check if exception pending (vs not found)
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jnz .iter_exc_pending         ; exception raised by __iter__, propagate
+
     ; __iter__ not found — try __getitem__ sequence protocol
     mov rdi, rbx
     jmp .try_getitem
@@ -223,6 +229,17 @@ DEF_FUNC get_iterator
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "object is not iterable"
     call raise_exception
+
+.iter_exc_pending:
+    ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
+    extern eval_exception_unwind
+    extern eval_saved_r13
+    extern eval_saved_r15
+    mov [rel eval_saved_r13], r13
+    mov [rel eval_saved_r15], r15
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC get_iterator
 
 ;; ============================================================================
