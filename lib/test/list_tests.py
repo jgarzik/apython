@@ -31,13 +31,13 @@ class CommonTest(seq_tests.CommonTest):
         self.assertNotEqual(id(a), id(b))
         self.assertEqual(a, b)
 
-    @unittest.skip("string index dunder crashes")
     def test_getitem_error(self):
-        pass
+        a = []
+        self.assertRaises(TypeError, a.__getitem__, 'a')
 
-    @unittest.skip("string index dunder crashes")
     def test_setitem_error(self):
-        pass
+        a = []
+        self.assertRaises(TypeError, a.__setitem__, 'a', "python")
 
     def test_repr(self):
         l0 = []

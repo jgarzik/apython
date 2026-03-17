@@ -914,14 +914,26 @@ DEF_FUNC builtin_isinstance
 
 .isinstance_got_type:
     ; rdx = obj's type, rcx = type_to_check (may be tuple)
-    ; Check if type_to_check is a tuple (must be TAG_PTR)
+    ; Second arg must be TAG_PTR (type or tuple)
     cmp r9d, TAG_PTR
-    jne .isinstance_check      ; non-pointer → single type (False result)
+    jne .isinstance_type_error
     mov rax, [rcx + PyObject.ob_type]
     extern tuple_type
     lea r8, [rel tuple_type]
     cmp rax, r8
     je .isinstance_tuple
+    ; Validate it's a type (ob_type == type_type, user_type_metatype, or exc_metatype)
+    lea r8, [rel type_type]
+    cmp rax, r8
+    je .isinstance_check
+    extern user_type_metatype
+    lea r8, [rel user_type_metatype]
+    cmp rax, r8
+    je .isinstance_check
+    extern exc_metatype
+    lea r8, [rel exc_metatype]
+    cmp rax, r8
+    jne .isinstance_type_error
 
 .isinstance_check:
     ; Walk the full type chain: rdx = current type, rcx = target type
@@ -981,6 +993,11 @@ DEF_FUNC builtin_isinstance
     leave
     ret
 
+.isinstance_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "isinstance() arg 2 must be a type, a tuple of types, or a union"
+    call raise_exception
+
 .isinstance_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "isinstance() takes 2 arguments"
@@ -991,24 +1008,100 @@ END_FUNC builtin_isinstance
 ;; builtin_issubclass(PyObject **args, int64_t nargs) -> PyObject*
 ;; issubclass(cls, parent) -> True/False
 ;; Walks the full tp_base chain for inheritance.
+;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
 ;; ============================================================================
 DEF_FUNC builtin_issubclass
+    push rbx
+    push r12
+    push r13
 
     cmp rsi, 2
     jne .issubclass_error
 
-    mov rdx, [rdi]             ; rdx = args[0] = cls (child type)
-    mov rcx, [rdi + 16]       ; rcx = args[1] = parent type
+    mov rdx, [rdi]             ; rdx = args[0] = cls payload
+    mov r8d, [rdi + 8]        ; r8d = args[0] tag
+    mov rcx, [rdi + 16]       ; rcx = args[1] = parent payload
+    mov r9d, [rdi + 24]       ; r9d = args[1] tag
 
-.issubclass_check:
+    ; Validate first arg is a type (TAG_PTR with recognized metatype)
+    cmp r8d, TAG_PTR
+    jne .issubclass_arg1_error
+    mov rax, [rdx + PyObject.ob_type]
+    lea r10, [rel type_type]
+    cmp rax, r10
+    je .issubclass_arg1_ok
+    extern user_type_metatype
+    lea r10, [rel user_type_metatype]
+    cmp rax, r10
+    je .issubclass_arg1_ok
+    extern exc_metatype
+    lea r10, [rel exc_metatype]
+    cmp rax, r10
+    jne .issubclass_arg1_error
+.issubclass_arg1_ok:
+
+    ; Check if second arg is a tuple
+    cmp r9d, TAG_PTR
+    jne .issubclass_arg2_error
+    mov rax, [rcx + PyObject.ob_type]
+    lea r10, [rel tuple_type]
+    cmp rax, r10
+    je .issubclass_tuple
+    ; Validate second arg is a type (recognized metatype)
+    lea r10, [rel type_type]
+    cmp rax, r10
+    je .issubclass_walk
+    lea r10, [rel user_type_metatype]
+    cmp rax, r10
+    je .issubclass_walk
+    lea r10, [rel exc_metatype]
+    cmp rax, r10
+    jne .issubclass_arg2_error
+
+    ; Single type check: walk rdx -> tp_base chain looking for rcx
+.issubclass_walk:
     cmp rdx, rcx
     je .issubclass_true
     mov rdx, [rdx + PyTypeObject.tp_base]
     test rdx, rdx
-    jnz .issubclass_check
+    jnz .issubclass_walk
+    jmp .issubclass_false
 
+.issubclass_tuple:
+    ; rcx = tuple of types. Check cls against each.
+    mov rbx, rcx               ; rbx = tuple
+    mov r12, rdx               ; r12 = cls (saved)
+    mov rsi, [rbx + PyTupleObject.ob_item]  ; payloads array
+    mov r13, [rbx + PyTupleObject.ob_size]  ; count
+    xor r8d, r8d               ; index
+.issubclass_tuple_loop:
+    cmp r8, r13
+    jge .issubclass_false
+    mov rdx, r12               ; reset to cls
+    mov rcx, [rsi + r8*8]     ; type from tuple
+    push rsi
+    push r8
+.issubclass_tuple_walk:
+    cmp rdx, rcx
+    je .issubclass_tuple_match
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jnz .issubclass_tuple_walk
+    pop r8
+    pop rsi
+    inc r8
+    jmp .issubclass_tuple_loop
+
+.issubclass_tuple_match:
+    add rsp, 16               ; pop saved r8, rsi
+    jmp .issubclass_true
+
+.issubclass_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    pop r13
+    pop r12
+    pop rbx
     mov edx, TAG_PTR
     leave
     ret
@@ -1016,9 +1109,22 @@ DEF_FUNC builtin_issubclass
 .issubclass_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    pop r13
+    pop r12
+    pop rbx
     mov edx, TAG_PTR
     leave
     ret
+
+.issubclass_arg1_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issubclass() arg 1 must be a class"
+    call raise_exception
+
+.issubclass_arg2_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
+    call raise_exception
 
 .issubclass_error:
     lea rdi, [rel exc_TypeError_type]
@@ -1457,10 +1563,13 @@ DEF_FUNC builtin___build_class__
     ; Store tp_init (func ptr or 0)
     mov [r12 + PyTypeObject.tp_init], rbx
 
-    ; Set tp_base if we have a base class
+    ; Set tp_base: use explicit base class, or default to object_type
     mov rax, [rbp-48]
     test rax, rax
-    jz .bc_no_set_base
+    jnz .bc_have_base
+    lea rax, [rel object_type]
+    mov [rbp-48], rax           ; update saved base for later use
+.bc_have_base:
     mov [r12 + PyTypeObject.tp_base], rax
     mov rdi, rax
     call obj_incref

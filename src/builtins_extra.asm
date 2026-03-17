@@ -3063,71 +3063,26 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     jmp .pow_error
 
 .pow_two:
-    ; pow(base, exp)
+    ; pow(base, exp) — extract operands and delegate to int_power/float path
     mov rax, [rdi]          ; base payload
     mov ecx, [rdi + 8]     ; base tag
     mov rbx, [rdi + 16]    ; exp payload
     mov r8d, [rdi + 24]    ; exp tag
 
-    ; Both SmallInt?
+    ; Both SmallInt? Delegate to int_power (handles GMP overflow)
     cmp ecx, TAG_SMALLINT
     jne .pow_two_float
     cmp r8d, TAG_SMALLINT
     jne .pow_two_float
 
-    ; int ** int
-    test rbx, rbx
-    js .pow_neg_exp          ; negative exp → float result
-
-    ; Non-negative int exponent: repeated squaring
-    mov r12, rax             ; base
-    mov r13, rbx             ; exp
-    mov rax, 1               ; result = 1
-.pow_sq_loop:
-    test r13, r13
-    jz .pow_sq_done
-    test r13, 1
-    jz .pow_sq_even
-    imul rax, r12            ; result *= base
-.pow_sq_even:
-    imul r12, r12            ; base *= base
-    shr r13, 1
-    jmp .pow_sq_loop
-.pow_sq_done:
-    RET_TAG_SMALLINT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.pow_neg_exp:
-    ; int ** negative_int → float
-    cvtsi2sd xmm0, rax      ; base as double
-    cvtsi2sd xmm1, rbx      ; exp as double (negative)
-    ; Use repeated multiplication for positive abs(exp), then invert
-    neg rbx
-    mov r12, 1               ; result = 1 (integer)
-    mov r13, rbx
-    cvtsi2sd xmm0, rax      ; base
-    movsd xmm2, xmm0        ; save base
-    movq xmm0, [rel const_one] ; result = 1.0
-.pow_neg_loop:
-    test r13, r13
-    jz .pow_neg_done
-    test r13, 1
-    jz .pow_neg_even
-    mulsd xmm0, xmm2        ; result *= base
-.pow_neg_even:
-    mulsd xmm2, xmm2        ; base *= base
-    shr r13, 1
-    jmp .pow_neg_loop
-.pow_neg_done:
-    ; xmm0 = base^|exp|, invert
-    movq xmm1, [rel const_one]
-    divsd xmm1, xmm0        ; 1.0 / base^|exp|
-    movq rax, xmm1
-    mov edx, TAG_FLOAT
+    ; int ** int — call int_power(base, exp, base_tag, exp_tag)
+    extern int_power
+    mov rdi, rax            ; base payload
+    mov rsi, rbx            ; exp payload
+    mov edx, ecx            ; base tag (TAG_SMALLINT)
+    mov ecx, r8d            ; exp tag (TAG_SMALLINT)
+    call int_power
+    ; rax = result payload, edx = result tag
     pop r13
     pop r12
     pop rbx
@@ -3294,10 +3249,13 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     cqo
     idiv r12                ; rax=quot, rdx=rem
     mov rax, rdx            ; base = base % mod
-    ; Handle negative remainder
+    ; Adjust remainder to match Python semantics (sign of mod)
     test rax, rax
-    jns .pow_mod_pos
-    add rax, r12
+    jz .pow_mod_pos
+    mov rdx, rax
+    xor rdx, r12
+    jns .pow_mod_pos         ; same sign → OK
+    add rax, r12             ; different signs → adjust
 .pow_mod_pos:
     mov rcx, 1              ; result = 1
 .pow_mod_loop:
@@ -3313,6 +3271,9 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     idiv r12
     mov rcx, rdx
     test rcx, rcx
+    jz .pow_mod_pos2
+    mov rdx, rcx
+    xor rdx, r12
     jns .pow_mod_pos2
     add rcx, r12
 .pow_mod_pos2:
@@ -3325,6 +3286,9 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     idiv r12
     mov rax, rdx
     test rax, rax
+    jz .pow_mod_pos3
+    mov rdx, rax
+    xor rdx, r12
     jns .pow_mod_pos3
     add rax, r12
 .pow_mod_pos3:
@@ -3332,7 +3296,18 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     shr r13, 1
     jmp .pow_mod_loop
 .pow_mod_done:
+    ; Apply final result % mod (needed for exp=0 case: pow(x,0,mod) = 1 % mod)
     mov rax, rcx
+    cqo
+    idiv r12
+    mov rax, rdx
+    test rax, rax
+    jz .pow_mod_final
+    mov rdx, rax
+    xor rdx, r12
+    jns .pow_mod_final
+    add rax, r12
+.pow_mod_final:
     RET_TAG_SMALLINT
     pop r13
     pop r12

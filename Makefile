@@ -90,6 +90,10 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_scope.py
 	@echo "Compiling tests/cpython/test_generators.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_generators.py
+	@echo "Compiling tests/cpython/test_unary.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_unary.py
+	@echo "Compiling tests/cpython/test_pow.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_pow.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -127,3 +131,7 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_scope.cpython-312.pyc
 	@echo "Running CPython test_generators.py..."
 	@./apython tests/cpython/__pycache__/test_generators.cpython-312.pyc
+	@echo "Running CPython test_unary.py..."
+	@./apython tests/cpython/__pycache__/test_unary.cpython-312.pyc
+	@echo "Running CPython test_pow.py..."
+	@./apython tests/cpython/__pycache__/test_pow.cpython-312.pyc
