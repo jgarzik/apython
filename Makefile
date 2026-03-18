@@ -108,6 +108,12 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_class.py
 	@echo "Compiling tests/cpython/test_compare.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_compare.py
+	@echo "Compiling tests/cpython/test_with.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_with.py
+	@echo "Compiling tests/cpython/test_opcodes.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_opcodes.py
+	@echo "Compiling tests/cpython/test_baseexception.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_baseexception.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -163,3 +169,9 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_class.cpython-312.pyc
 	@echo "Running CPython test_compare.py..."
 	@./apython tests/cpython/__pycache__/test_compare.cpython-312.pyc
+	@echo "Running CPython test_with.py..."
+	@./apython tests/cpython/__pycache__/test_with.cpython-312.pyc
+	@echo "Running CPython test_opcodes.py..."
+	@./apython tests/cpython/__pycache__/test_opcodes.cpython-312.pyc
+	@echo "Running CPython test_baseexception.py..."
+	@./apython tests/cpython/__pycache__/test_baseexception.cpython-312.pyc

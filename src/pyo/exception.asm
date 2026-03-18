@@ -75,6 +75,7 @@ DEF_FUNC exc_new, EN_FRAME
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
     mov qword [rax + PyExceptionObject.exc_args], 0
+    mov qword [rax + PyExceptionObject.exc_dict], 0
 
     ; INCREF the message (tag-aware)
     INCREF_VAL r12, r13
@@ -181,6 +182,13 @@ DEF_FUNC exc_dealloc
     jz .no_args
     call obj_decref
 .no_args:
+
+    ; XDECREF exc_dict
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .no_dict
+    call obj_decref
+.no_dict:
 
     ; Free the object (GC-aware)
     mov rdi, rbx
@@ -342,15 +350,33 @@ DEF_FUNC exc_getattr
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .not_found
+    jz .check_exc_dict
     mov rsi, r12
     mov edx, TAG_PTR
     call dict_get
     test edx, edx
     jnz .found_in_type
 
+.check_exc_dict:
+    ; Check exc_dict for custom instance attributes
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .not_found
+    mov rsi, r12
+    mov edx, TAG_PTR
+    call dict_get
+    test edx, edx
+    jnz .found_in_dict
+
 .not_found:
     RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.found_in_dict:
+    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -445,6 +471,42 @@ DEF_FUNC exc_getattr
     leave
     ret
 END_FUNC exc_getattr
+
+; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
+; Store a custom attribute on an exception object using exc_dict.
+; rdi = exc, rsi = name, rdx = value, ecx = value_tag
+global exc_setattr
+DEF_FUNC exc_setattr
+    push rbx
+    mov rbx, rdi            ; exc
+
+    ; Create exc_dict if needed
+    mov rax, [rbx + PyExceptionObject.exc_dict]
+    test rax, rax
+    jnz .esa_have_dict
+    push rsi
+    push rdx
+    push rcx
+    call dict_new
+    mov [rbx + PyExceptionObject.exc_dict], rax
+    pop rcx
+    pop rdx
+    pop rsi
+.esa_have_dict:
+    ; dict_set(dict, key, value, value_tag, key_tag)
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    ; rsi = name (key), rdx = value already set
+    ; ecx = value_tag, r8d = key_tag (TAG_PTR for string name)
+    mov r8d, TAG_PTR
+    call dict_set
+
+    xor eax, eax            ; return 0 (success)
+    xor edx, edx
+
+    pop rbx
+    leave
+    ret
+END_FUNC exc_setattr
 
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
 ; Check if exception is an instance of type, walking tp_base chain.
@@ -864,7 +926,7 @@ global %1
     dq 0                    ; tp_hash
     dq 0                    ; tp_call
     dq exc_getattr          ; tp_getattr
-    dq 0                    ; tp_setattr
+    dq exc_setattr          ; tp_setattr
     dq 0                    ; tp_richcompare
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
@@ -883,7 +945,8 @@ global %1
 %endmacro
 
 ; Define all exception types
-DEF_EXC_TYPE exc_BaseException_type, exc_name_BaseException, 0
+extern object_type
+DEF_EXC_TYPE exc_BaseException_type, exc_name_BaseException, object_type
 DEF_EXC_TYPE exc_Exception_type, exc_name_Exception, exc_BaseException_type
 DEF_EXC_TYPE exc_TypeError_type, exc_name_TypeError, exc_Exception_type
 DEF_EXC_TYPE exc_ValueError_type, exc_name_ValueError, exc_Exception_type

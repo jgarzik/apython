@@ -900,6 +900,56 @@ DEF_FUNC type_call
     mov rdx, r13
     call exc_type_call
     ; rax = exception object (PyExceptionObject)
+    mov r14, rax                ; r14 = instance
+
+    ; Check if type has __init__ in its dict (for custom exception __init__)
+    mov rdi, [rbx + PyTypeObject.tp_init]
+    test rdi, rdi
+    jz .exc_sub_no_init
+
+    ; Build args: (instance, *original_args) using 16-byte fat value stride
+    lea rax, [r13 + 1]
+    shl rax, 4                  ; (nargs+1) * 16
+    sub rsp, rax
+    mov r15, rsp                ; r15 = new args array
+    mov [r15], r14
+    mov qword [r15 + 8], TAG_PTR
+    ; Copy original args
+    xor ecx, ecx
+.exc_sub_copy_args:
+    cmp rcx, r13
+    jge .exc_sub_args_copied
+    mov rax, rcx
+    shl rax, 4
+    mov rdx, [r12 + rax]
+    mov r8, [r12 + rax + 8]
+    lea r9, [rcx + 1]
+    shl r9, 4
+    mov [r15 + r9], rdx
+    mov [r15 + r9 + 8], r8
+    inc rcx
+    jmp .exc_sub_copy_args
+.exc_sub_args_copied:
+    ; Get __init__'s tp_call
+    mov rdi, [rbx + PyTypeObject.tp_init]
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_call]
+    test rax, rax
+    jz .exc_sub_init_cleanup
+    mov rdi, [rbx + PyTypeObject.tp_init]
+    mov rsi, r15
+    lea rdx, [r13 + 1]
+    call rax
+    ; DECREF return value (should be None)
+    mov rsi, rdx
+    DECREF_VAL rax, rsi
+.exc_sub_init_cleanup:
+    lea rax, [r13 + 1]
+    shl rax, 4
+    add rsp, rax
+
+.exc_sub_no_init:
+    mov rax, r14
     mov edx, TAG_PTR
     add rsp, 24                 ; undo alignment
     pop r15

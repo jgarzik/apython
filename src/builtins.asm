@@ -1598,9 +1598,13 @@ DEF_FUNC builtin___build_class__
     mov [r12 + PyTypeObject.tp_repr], rax
     lea rax, [rel exc_str]
     mov [r12 + PyTypeObject.tp_str], rax
-    ; No getattr/setattr for exceptions (they're not instances)
-    mov qword [r12 + PyTypeObject.tp_getattr], 0
-    mov qword [r12 + PyTypeObject.tp_setattr], 0
+    ; Exception getattr/setattr for custom attributes via exc_dict
+    extern exc_getattr
+    extern exc_setattr
+    lea rax, [rel exc_getattr]
+    mov [r12 + PyTypeObject.tp_getattr], rax
+    lea rax, [rel exc_setattr]
+    mov [r12 + PyTypeObject.tp_setattr], rax
     ; Wire exc traverse/clear for exception subclasses
     extern exc_traverse
     extern exc_clear_gc
