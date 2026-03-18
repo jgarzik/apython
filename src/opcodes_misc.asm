@@ -1013,7 +1013,12 @@ section .text
     mov rsi, [rsp + BO_RIGHT]
     mov rdi, [rsp + BO_LEFT]
     cmp rdi, rsi
+    jne .cmp_id_not_equal
+    ; Payloads match — also check tags (None payload=0 vs SmallInt 0)
+    mov rdi, [rsp + BO_LTAG]
+    cmp rdi, [rsp + BO_RTAG]
     je .cmp_id_equal
+.cmp_id_not_equal:
     ; Not equal
     cmp ecx, PY_NE
     je .cmp_id_true
