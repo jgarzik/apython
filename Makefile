@@ -114,6 +114,16 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_opcodes.py
 	@echo "Compiling tests/cpython/test_baseexception.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_baseexception.py
+	@echo "Compiling tests/cpython/test_extcall.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_extcall.py
+	@echo "Compiling tests/cpython/test_iter.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_iter.py
+	@echo "Compiling tests/cpython/test_lambda.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_lambda.py
+	@echo "Compiling tests/cpython/test_property.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_property.py
+	@echo "Compiling tests/cpython/test_string.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_string.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -175,3 +185,13 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_opcodes.cpython-312.pyc
 	@echo "Running CPython test_baseexception.py..."
 	@./apython tests/cpython/__pycache__/test_baseexception.cpython-312.pyc
+	@echo "Running CPython test_extcall.py..."
+	@./apython tests/cpython/__pycache__/test_extcall.cpython-312.pyc
+	@echo "Running CPython test_iter.py..."
+	@./apython tests/cpython/__pycache__/test_iter.cpython-312.pyc
+	@echo "Running CPython test_lambda.py..."
+	@./apython tests/cpython/__pycache__/test_lambda.cpython-312.pyc
+	@echo "Running CPython test_property.py..."
+	@./apython tests/cpython/__pycache__/test_property.cpython-312.pyc
+	@echo "Running CPython test_string.py..."
+	@./apython tests/cpython/__pycache__/test_string.cpython-312.pyc

@@ -1692,7 +1692,54 @@ DEF_FUNC builtin_next_fn
     push rbx
 
     cmp rsi, 1
-    jne .next_error
+    je .next_one_arg
+    cmp rsi, 2
+    je .next_two_args
+    jmp .next_error
+
+.next_two_args:
+    ; next(iterator, default) — return default on StopIteration
+    push qword [rdi + 24]          ; save default tag
+    push qword [rdi + 16]          ; save default payload
+    ; Fall through to same iterator logic, but with default on stack
+    cmp qword [rdi + 8], TAG_PTR
+    jne .next_two_type_error
+    mov rdi, [rdi]                 ; args[0] = iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .next_two_type_error
+    call rax
+    test edx, edx
+    jz .next_two_default           ; exhausted → return default
+    ; Got value — discard saved default
+    add rsp, 16
+    pop rbx
+    leave
+    ret
+.next_two_default:
+    ; Clear any StopIteration exception
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .next_two_ret_default
+    push rdi
+    mov rdi, rax
+    mov qword [rel current_exception], 0
+    call obj_decref
+    pop rdi
+.next_two_ret_default:
+    pop rax                        ; default payload
+    pop rdx                        ; default tag
+    INCREF_VAL rax, rdx
+    pop rbx
+    leave
+    ret
+.next_two_type_error:
+    add rsp, 16                    ; discard saved default
+    jmp .next_type_error
+
+.next_one_arg:
 
     cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .next_type_error
