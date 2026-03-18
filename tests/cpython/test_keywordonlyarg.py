@@ -89,7 +89,6 @@ class KeywordOnlyArgTestCase(unittest.TestCase):
         except TypeError:
             pass
 
-    @unittest.skip("requires star-unpacking in calls")
     def testFunctionCall(self):
         self.assertEqual(1, posonly_sum(1))
         self.assertEqual(1+2, posonly_sum(1,**{"2":2}))

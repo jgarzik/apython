@@ -2255,9 +2255,7 @@ extern obj_decref
     ; Create tuple of same size
     mov rdi, rcx
     call tuple_new
-    mov rbx, rax               ; CAREFUL: clobbers rbx! Save and restore
-    ; Actually rbx is the bytecode IP, don't clobber it
-    ; Use stack instead
+    ; (tuple in rax — use stack, do NOT clobber rbx which is the bytecode IP)
     pop r11                    ; tags ptr
     pop rsi                    ; payloads ptr
     pop rcx                    ; count

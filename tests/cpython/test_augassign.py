@@ -50,7 +50,6 @@ class AugAssignTest(unittest.TestCase):
         x[0] /= 2
         self.assertEqual(x[0], 3.0)
 
-    @unittest.skip("requires slice augmented assignment")
     def testSequences(self):
         x = [1,2]
         x += [3,4]

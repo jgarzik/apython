@@ -58,16 +58,21 @@ repr_check_active:
     mov eax, 1
     ret
 
-; Push ptr onto repr_stack
+; Push ptr onto repr_stack. Raises RecursionError if too deep.
 repr_push:
     mov rax, [rel repr_depth]
     cmp rax, 64
-    jge .rp_full
+    jge .rp_overflow
     lea rcx, [rel repr_stack]
     mov [rcx + rax*8], rdi
     inc qword [rel repr_depth]
-.rp_full:
     ret
+.rp_overflow:
+    extern exc_RecursionError_type
+    extern raise_exception
+    lea rdi, [rel exc_RecursionError_type]
+    CSTRING rsi, "maximum recursion depth exceeded while getting the repr of an object"
+    call raise_exception
 
 ; Pop from repr_stack
 repr_pop:

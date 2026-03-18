@@ -56,9 +56,11 @@ class CommonTest(seq_tests.CommonTest):
         self.assertEqual(str(a2), "[0, 1, 2, [...], 3]")
         self.assertEqual(repr(a2), "[0, 1, 2, [...], 3]")
 
-    @unittest.skip("RecursionError not implemented")
     def test_repr_deep(self):
-        pass
+        a = self.type2test([])
+        for i in range(100):
+            a = self.type2test([a])
+        self.assertRaises(RecursionError, repr, a)
 
     def test_set_subscript(self):
         a = self.type2test(range(20))
