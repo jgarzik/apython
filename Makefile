@@ -150,6 +150,11 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_unpacking.py
 	@echo "Compiling tests/cpython/test_inheritance.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_inheritance.py
+	@$(PYTHON) -m py_compile tests/cpython/test_del.py
+	@$(PYTHON) -m py_compile tests/cpython/test_assert.py
+	@$(PYTHON) -m py_compile tests/cpython/test_assignment.py
+	@$(PYTHON) -m py_compile tests/cpython/test_exceptions_extra.py
+	@$(PYTHON) -m py_compile tests/cpython/test_generators_extra.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -247,3 +252,13 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_unpacking.cpython-312.pyc
 	@echo "Running CPython test_inheritance.py..."
 	@./apython tests/cpython/__pycache__/test_inheritance.cpython-312.pyc
+	@echo "Running CPython test_del.py..."
+	@./apython tests/cpython/__pycache__/test_del.cpython-312.pyc
+	@echo "Running CPython test_assert.py..."
+	@./apython tests/cpython/__pycache__/test_assert.cpython-312.pyc
+	@echo "Running CPython test_assignment.py..."
+	@./apython tests/cpython/__pycache__/test_assignment.cpython-312.pyc
+	@echo "Running CPython test_exceptions_extra.py..."
+	@./apython tests/cpython/__pycache__/test_exceptions_extra.cpython-312.pyc
+	@echo "Running CPython test_generators_extra.py..."
+	@./apython tests/cpython/__pycache__/test_generators_extra.cpython-312.pyc

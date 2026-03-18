@@ -1863,14 +1863,23 @@ DEF_FUNC op_send, SND_FRAME
     DISPATCH
 
 .send_exhausted:
-    ; Generator exhausted. Push gi_return_value (for yield-from protocol).
-    ; Stack: ... | receiver | → becomes ... | receiver | return_value |
-    ; Then jump to END_SEND which will handle cleanup.
-    mov rdi, [rbp - SND_RECV]  ; receiver = generator
+    ; Receiver exhausted. Push return value (for yield-from protocol).
+    ; Gen/coro/task/awaitable/asend all have gi_return_value at offset +48.
+    ; Guard: only read if receiver's type has tp_basicsize > 56 (enough for +48 field).
+    ; Plain iterators (str_iter, list_iter) have smaller objects → push None.
+    mov rdi, [rbp - SND_RECV]
+    cmp byte [r15 - 1], TAG_PTR
+    jne .send_no_retval
+    test rdi, rdi
+    jz .send_no_retval
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_basicsize], 56
+    jle .send_no_retval
     mov rax, [rdi + PyGenObject.gi_return_value]
     mov rdx, [rdi + PyGenObject.gi_return_tag]
     test edx, edx
     jnz .send_have_retval
+.send_no_retval:
     ; No return value — push None
     lea rax, [rel none_singleton]
     INCREF rax

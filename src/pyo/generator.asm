@@ -1263,6 +1263,7 @@ async_gen_type:
 ags_name_str: db "async_generator_asend", 0
 
 align 8
+global async_gen_asend_type
 async_gen_asend_type:
     dq 1                        ; ob_refcnt (immortal)
     dq type_type                ; ob_type
