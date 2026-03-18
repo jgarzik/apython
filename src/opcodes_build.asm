@@ -699,9 +699,11 @@ END_FUNC op_build_const_key_map
 ;; op_unpack_sequence - Unpack iterable into N items on stack
 ;;
 ;; ecx = count
-;; Pop TOS (tuple/list), push items[count-1], ..., items[0] (reverse order)
+;; Pop TOS (tuple/list/str), push items[count-1], ..., items[0] (reverse order)
 ;; Followed by 1 CACHE entry (2 bytes).
 ;; ============================================================================
+extern str_new
+extern str_type
 DEF_FUNC_BARE op_unpack_sequence
     VPOP_VAL rdi, r8           ; rdi = sequence (tuple or list), r8 = tag
     cmp r8d, TAG_PTR
@@ -723,6 +725,10 @@ DEF_FUNC_BARE op_unpack_sequence
     cmp rax, rdx
     je .unpack_list
 
+    lea rdx, [rel str_type]
+    cmp rax, rdx
+    je .unpack_str
+
 .unpack_type_error:
     ; Unknown type
     lea rdi, [rel exc_TypeError_type]
@@ -730,12 +736,18 @@ DEF_FUNC_BARE op_unpack_sequence
     call raise_exception
 
 .unpack_tuple:
+    ; Validate count matches size
+    cmp rcx, [rdi + PyTupleObject.ob_size]
+    jne .unpack_count_error
     ; Items are in payload/tag arrays
     mov rsi, [rdi + PyTupleObject.ob_item]
     mov r8, [rdi + PyTupleObject.ob_item_tags]
     jmp .unpack_fill
 
 .unpack_list:
+    ; Validate count matches size
+    cmp rcx, [rdi + PyListObject.ob_size]
+    jne .unpack_count_error
     ; Items in payload/tag arrays
     mov rsi, [rdi + PyListObject.ob_item]
     mov r8, [rdi + PyListObject.ob_item_tags]
@@ -768,6 +780,77 @@ DEF_FUNC_BARE op_unpack_sequence
     ; DECREF the sequence (payload + tag)
     pop rdi                    ; sequence payload
     pop rsi                    ; sequence tag
+    DECREF_VAL rdi, rsi
+
+    ; Skip 1 CACHE entry = 2 bytes
+    add rbx, 2
+    DISPATCH
+
+.unpack_count_error:
+    ; Count mismatch: expected ecx items, got different size
+    pop rdi                    ; sequence payload
+    pop rsi                    ; sequence tag
+    DECREF_VAL rdi, rsi
+    lea rdi, [rel exc_ValueError_type]
+    CSTRING rsi, "not enough values to unpack"
+    call raise_exception
+
+.unpack_str:
+    ; String unpacking: a, b, c = "xyz"
+    ; Validate length matches count
+    cmp rcx, [rdi + PyStrObject.ob_size]
+    jne .unpack_count_error
+
+    ; Use rbp-frame for the string unpacking loop
+    ; Save callee-saved regs
+    push rbx                   ; save bytecode IP
+    push r12                   ; save frame
+    push r14                   ; spare
+
+    mov r12, rcx               ; r12 = count
+    mov r14, rdi               ; r14 = string object
+
+    ; Pre-advance stack by count
+    mov edx, ecx
+    shl edx, 3
+    add r13, rdx              ; payload stack += count * 8
+    add r15, rcx              ; tag stack += count
+
+    ; Create single-char strings in reverse order (count-1 down to 0)
+    mov ebx, ecx
+    dec ebx                    ; ebx = source index (count-1)
+    mov rcx, r12
+    neg rcx                    ; rcx = -count (negative offset)
+
+.unpack_str_loop:
+    test ebx, ebx
+    js .unpack_str_done
+
+    ; Create single-char string: str_new(&data[ebx], 1)
+    lea rdi, [r14 + PyStrObject.data]
+    movsxd rax, ebx
+    add rdi, rax               ; rdi = &str.data[ebx]
+    mov rsi, 1                 ; length = 1
+    push rcx                   ; save negative offset
+    push rbx                   ; save source index
+    call str_new
+    pop rbx
+    pop rcx
+    ; rax = new string (TAG_PTR, refcount=1, ownership transferred to stack)
+    mov [r13 + rcx*8], rax
+    mov byte [r15 + rcx], TAG_PTR
+    inc rcx
+    dec ebx
+    jmp .unpack_str_loop
+
+.unpack_str_done:
+    pop r14
+    pop r12
+    pop rbx                    ; restore bytecode IP
+
+    ; DECREF the string
+    pop rdi                    ; string payload
+    pop rsi                    ; string tag
     DECREF_VAL rdi, rsi
 
     ; Skip 1 CACHE entry = 2 bytes
@@ -1264,7 +1347,7 @@ DEF_FUNC_BARE op_contains_op
     mov rax, [rdi + PyObject.ob_type]
     mov rdx, [rax + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .contains_type_error
+    jz .contains_iter_fallback
 
     extern dunder_contains
     extern dunder_call_2
@@ -1274,7 +1357,7 @@ DEF_FUNC_BARE op_contains_op
     mov rcx, [rsp+24]         ; value tag = other_tag
     call dunder_call_2
     test edx, edx             ; TAG_NULL = not found
-    jz .contains_type_error
+    jz .contains_iter_fallback
 
     ; Convert result to boolean (obj_is_true)
     push rdx                   ; save tag
@@ -1305,6 +1388,285 @@ DEF_FUNC_BARE op_contains_op
     jz .contains_false
     lea rax, [rel bool_true]
     jmp .contains_push
+
+.contains_iter_fallback:
+    ; Fallback: iterate container via tp_iter, compare each element
+    mov rdi, [rsp + CN_RIGHT]   ; container
+    cmp qword [rsp + CN_RTAG], TAG_PTR
+    jne .contains_type_error
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .contains_getitem_fallback
+    call rax                     ; tp_iter(container) → iterator
+    test rax, rax
+    jz .contains_getitem_fallback
+    push rax                     ; save iterator (+8 shift)
+
+.contains_iter_loop:
+    ; Call tp_iternext(iterator) → (rax=payload, edx=tag) or (0, TAG_NULL)
+    mov rdi, [rsp]              ; iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    test edx, edx
+    jz .contains_iter_not_found  ; TAG_NULL = exhausted
+
+    ; Identity check: payload and tag both match → found
+    ; +8 for iterator push on stack
+    cmp rax, [rsp + 8 + CN_LEFT]
+    jne .contains_iter_try_eq
+    cmp edx, [rsp + 8 + CN_LTAG]
+    je .contains_iter_found_decref
+
+.contains_iter_try_eq:
+    ; Both SmallInt → direct value compare
+    push rax                     ; save elem payload
+    push rdx                     ; save elem tag
+    mov r8d, edx                ; elem tag
+    mov ecx, [rsp + 16 + 8 + CN_LTAG]  ; value tag
+    cmp r8d, TAG_SMALLINT
+    jne .contains_iter_slow_eq
+    cmp ecx, TAG_SMALLINT
+    jne .contains_iter_slow_eq
+    ; Both SmallInt
+    cmp rax, [rsp + 16 + 8 + CN_LEFT]
+    pop rdx
+    pop rax
+    je .contains_iter_found_decref_elem
+    jmp .contains_iter_loop
+
+.contains_iter_slow_eq:
+    ; Use tp_richcompare for equality
+    ; rdi = elem (already on stack[+8]), rsi = value, edx = PY_EQ, rcx = elem_tag, r8 = value_tag
+    mov rdi, [rsp + 8]            ; elem payload
+    mov rsi, [rsp + 16 + 8 + CN_LEFT]  ; value payload
+    mov edx, 2                     ; PY_EQ
+    mov ecx, [rsp]                 ; elem tag
+    mov r8d, [rsp + 16 + 8 + CN_LTAG] ; value tag
+    ; Resolve element type
+    cmp ecx, TAG_PTR
+    jne .contains_iter_skip_eq     ; for non-PTR non-SmallInt, skip (identity only)
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .contains_iter_skip_eq
+    call rax                        ; tp_richcompare(left, right, PY_EQ, left_tag, right_tag)
+    ; Result: (rax=payload, edx=tag). Check if True
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    extern obj_is_true
+    call obj_is_true
+    mov r8d, eax
+    pop rsi                         ; result tag
+    pop rdi                         ; result payload
+    DECREF_VAL rdi, rsi
+    pop rdx                         ; elem tag
+    pop rax                         ; elem payload
+    test r8d, r8d
+    jnz .contains_iter_found_decref_elem
+    jmp .contains_iter_loop
+
+.contains_iter_skip_eq:
+    pop rdx
+    pop rax
+    jmp .contains_iter_loop
+
+.contains_iter_found_decref_elem:
+    ; DECREF element if needed
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+    jmp .contains_iter_found
+
+.contains_iter_found_decref:
+    ; Element matched by identity, DECREF it
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+
+.contains_iter_found:
+    ; DECREF iterator
+    pop rdi                      ; iterator
+    call obj_decref
+    mov eax, 1                   ; found
+    jmp .contains_iter_result
+
+.contains_iter_not_found:
+    ; DECREF iterator
+    pop rdi                      ; iterator
+    call obj_decref
+    xor eax, eax                ; not found
+
+.contains_iter_result:
+    ; DECREF operands (tag-aware)
+    push rax
+    mov rdi, [rsp + 8 + CN_RIGHT]
+    mov rsi, [rsp + 8 + CN_RTAG]
+    DECREF_VAL rdi, rsi
+    mov rdi, [rsp + 8 + CN_LEFT]
+    mov rsi, [rsp + 8 + CN_LTAG]
+    DECREF_VAL rdi, rsi
+    pop rax
+    add rsp, CN_SIZE - 8         ; discard payloads + tags
+    pop rcx                       ; invert
+    xor eax, ecx
+    test eax, eax
+    jz .contains_false
+    lea rax, [rel bool_true]
+    jmp .contains_push
+
+.contains_getitem_fallback:
+    ; Fallback: iterate via __getitem__(0), __getitem__(1), ... until IndexError
+    ; Check if container is a heaptype with __getitem__
+    mov rdi, [rsp + CN_RIGHT]
+    cmp qword [rsp + CN_RTAG], TAG_PTR
+    jne .contains_type_error
+    mov rax, [rdi + PyObject.ob_type]
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jz .contains_type_error
+    ; Probe __getitem__ exists by trying index 0
+    push qword 0                 ; push index counter (+8 shift)
+
+.contains_gi_loop:
+    mov rdi, [rsp + 8 + CN_RIGHT]  ; container
+    mov rsi, [rsp]                  ; index (SmallInt value)
+    extern dunder_getitem
+    lea rdx, [rel dunder_getitem]
+    mov ecx, TAG_SMALLINT           ; index is SmallInt
+    call dunder_call_2
+    test edx, edx
+    jz .contains_gi_null_result
+    ; Check for exception (IndexError = stop)
+    extern current_exception
+    mov rcx, [rel current_exception]
+    test rcx, rcx
+    jnz .contains_gi_check_exc
+    jmp .contains_gi_got_elem
+
+.contains_gi_null_result:
+    ; TAG_NULL: either dunder not found, or exception raised
+    mov rcx, [rel current_exception]
+    test rcx, rcx
+    jnz .contains_gi_check_exc     ; exception → check if IndexError
+    ; First call with index 0: if no exception and TAG_NULL, dunder not found
+    cmp qword [rsp], 0
+    je .contains_gi_no_dunder
+    ; For index > 0, TAG_NULL without exception means iteration done
+    add rsp, 8
+    xor eax, eax
+    jmp .contains_iter_result
+
+.contains_gi_got_elem:
+
+    ; Got element: (rax=payload, edx=tag). Compare with search value.
+    push rax
+    push rdx
+    ; Identity check
+    cmp rax, [rsp + 16 + 8 + CN_LEFT]
+    jne .contains_gi_try_eq
+    cmp edx, [rsp + 16 + 8 + CN_LTAG]
+    je .contains_gi_found_pop2
+
+.contains_gi_try_eq:
+    ; SmallInt fast path
+    mov r8d, [rsp]                     ; elem tag
+    mov ecx, [rsp + 16 + 8 + CN_LTAG] ; value tag
+    cmp r8d, TAG_SMALLINT
+    jne .contains_gi_slow_eq
+    cmp ecx, TAG_SMALLINT
+    jne .contains_gi_slow_eq
+    cmp rax, [rsp + 16 + 8 + CN_LEFT]
+    pop rdx
+    pop rax
+    je .contains_gi_found
+    jmp .contains_gi_next
+
+.contains_gi_slow_eq:
+    ; Use tp_richcompare for PTR types
+    mov rdi, [rsp + 8]                ; elem payload
+    mov rsi, [rsp + 16 + 8 + CN_LEFT] ; value payload
+    mov edx, 2                         ; PY_EQ
+    mov ecx, [rsp]                     ; elem tag
+    mov r8d, [rsp + 16 + 8 + CN_LTAG] ; value tag
+    cmp ecx, TAG_PTR
+    jne .contains_gi_no_match
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_richcompare]
+    test rax, rax
+    jz .contains_gi_no_match
+    call rax
+    push rax
+    push rdx
+    mov rdi, rax
+    mov rsi, rdx
+    call obj_is_true
+    mov r8d, eax
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    pop rdx                            ; elem tag
+    pop rax                            ; elem payload
+    test r8d, r8d
+    jnz .contains_gi_found_decref_elem
+    jmp .contains_gi_next_decref
+
+.contains_gi_no_match:
+    pop rdx
+    pop rax
+
+.contains_gi_next_decref:
+    ; DECREF element
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+
+.contains_gi_next:
+    inc qword [rsp]                    ; index++
+    jmp .contains_gi_loop
+
+.contains_gi_found_pop2:
+    pop rdx
+    pop rax
+.contains_gi_found_decref_elem:
+    mov rdi, rax
+    mov rsi, rdx
+    DECREF_VAL rdi, rsi
+.contains_gi_found:
+    add rsp, 8                         ; pop index counter
+    mov eax, 1
+    jmp .contains_iter_result
+
+.contains_gi_check_exc:
+    ; Exception raised. If IndexError → not found. Otherwise re-raise.
+    ; DECREF the NULL result if any
+    extern exc_IndexError_type
+    mov rax, [rel current_exception]
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_IndexError_type]
+    cmp rcx, rdx
+    jne .contains_gi_reraise
+    ; IndexError: clear exception and return not found
+    mov rdi, rax
+    mov qword [rel current_exception], 0
+    call obj_decref
+    add rsp, 8                         ; pop index counter
+    xor eax, eax
+    jmp .contains_iter_result
+
+.contains_gi_reraise:
+    ; Re-raise the exception
+    add rsp, 8                         ; pop index counter
+    ; Exception is already set in current_exception
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
+
+.contains_gi_no_dunder:
+    add rsp, 8                         ; pop index counter
+    ; Fall through to type error
 
 .contains_type_error:
     lea rdi, [rel exc_TypeError_type]

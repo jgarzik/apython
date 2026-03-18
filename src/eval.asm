@@ -966,7 +966,24 @@ DEF_FUNC_BARE op_raise_varargs
     jnz .raise_exc_obj
 
     ; Check if rdi is an exception TYPE (e.g., bare "raise ValueError")
-    ; ob_type of a type object is type_type or user_type_metatype
+    ; First verify rdi is actually a type object (ob_type == type_type, exc_metatype,
+    ; or user_type_metatype) to avoid segfault on non-type objects like strings
+    mov rax, [rdi + PyObject.ob_type]
+    extern type_type
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .raise_check_type
+    extern exc_metatype
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .raise_check_type
+    extern user_type_metatype
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    jne .raise_bad               ; not a type object at all
+
+.raise_check_type:
+    ; rdi is a type object — check if it's an exception subclass
     push rdi
     call type_is_exc_subclass
     pop rdi

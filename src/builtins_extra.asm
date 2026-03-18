@@ -1637,11 +1637,53 @@ DEF_FUNC builtin_callable
     jne .callable_false             ; non-pointer tag (TAG_FLOAT etc.)
     mov rdi, [rdi]                     ; args[0] payload
 
+    ; Get type of arg
     mov rax, [rdi + PyObject.ob_type]
+
+    ; Check if arg is a type (all types are callable via type_call)
+    extern type_type
+    lea rcx, [rel type_type]
+    cmp rax, rcx
+    je .callable_true
+    extern exc_metatype
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
+    je .callable_true
+    lea rcx, [rel user_type_metatype]
+    cmp rax, rcx
+    je .callable_true
+
+    ; For heaptypes (user-defined classes): tp_call is set only when __call__ defined
+    mov rdx, [rax + PyTypeObject.tp_flags]
+    test rdx, TYPE_FLAG_HEAPTYPE
+    jnz .callable_check_heaptype
+
+    ; For built-in types: only known callable types return True
+    ; (func, builtin_func, method have genuinely callable instances)
+    extern func_type
+    lea rcx, [rel func_type]
+    cmp rax, rcx
+    je .callable_true
+    extern builtin_func_type
+    lea rcx, [rel builtin_func_type]
+    cmp rax, rcx
+    je .callable_true
+    extern method_type
+    lea rcx, [rel method_type]
+    cmp rax, rcx
+    je .callable_true
+
+    ; Not a known callable built-in type (dict, list, set, etc. instances → not callable)
+    jmp .callable_false
+
+.callable_check_heaptype:
+    ; Heaptype instance: check if type has tp_call set (set when __call__ defined)
     mov rcx, [rax + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .callable_false
+    jnz .callable_true
+    jmp .callable_false
 
+.callable_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
@@ -1692,7 +1734,54 @@ DEF_FUNC builtin_next_fn
     push rbx
 
     cmp rsi, 1
-    jne .next_error
+    je .next_one_arg
+    cmp rsi, 2
+    je .next_two_args
+    jmp .next_error
+
+.next_two_args:
+    ; next(iterator, default) — return default on StopIteration
+    push qword [rdi + 24]          ; save default tag
+    push qword [rdi + 16]          ; save default payload
+    ; Fall through to same iterator logic, but with default on stack
+    cmp qword [rdi + 8], TAG_PTR
+    jne .next_two_type_error
+    mov rdi, [rdi]                 ; args[0] = iterator
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    test rax, rax
+    jz .next_two_type_error
+    call rax
+    test edx, edx
+    jz .next_two_default           ; exhausted → return default
+    ; Got value — discard saved default
+    add rsp, 16
+    pop rbx
+    leave
+    ret
+.next_two_default:
+    ; Clear any StopIteration exception
+    extern current_exception
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .next_two_ret_default
+    push rdi
+    mov rdi, rax
+    mov qword [rel current_exception], 0
+    call obj_decref
+    pop rdi
+.next_two_ret_default:
+    pop rax                        ; default payload
+    pop rdx                        ; default tag
+    INCREF_VAL rax, rdx
+    pop rbx
+    leave
+    ret
+.next_two_type_error:
+    add rsp, 16                    ; discard saved default
+    jmp .next_type_error
+
+.next_one_arg:
 
     cmp qword [rdi + 8], TAG_SMALLINT  ; check args[0] tag
     je .next_type_error
@@ -3063,71 +3152,26 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     jmp .pow_error
 
 .pow_two:
-    ; pow(base, exp)
+    ; pow(base, exp) — extract operands and delegate to int_power/float path
     mov rax, [rdi]          ; base payload
     mov ecx, [rdi + 8]     ; base tag
     mov rbx, [rdi + 16]    ; exp payload
     mov r8d, [rdi + 24]    ; exp tag
 
-    ; Both SmallInt?
+    ; Both SmallInt? Delegate to int_power (handles GMP overflow)
     cmp ecx, TAG_SMALLINT
     jne .pow_two_float
     cmp r8d, TAG_SMALLINT
     jne .pow_two_float
 
-    ; int ** int
-    test rbx, rbx
-    js .pow_neg_exp          ; negative exp → float result
-
-    ; Non-negative int exponent: repeated squaring
-    mov r12, rax             ; base
-    mov r13, rbx             ; exp
-    mov rax, 1               ; result = 1
-.pow_sq_loop:
-    test r13, r13
-    jz .pow_sq_done
-    test r13, 1
-    jz .pow_sq_even
-    imul rax, r12            ; result *= base
-.pow_sq_even:
-    imul r12, r12            ; base *= base
-    shr r13, 1
-    jmp .pow_sq_loop
-.pow_sq_done:
-    RET_TAG_SMALLINT
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.pow_neg_exp:
-    ; int ** negative_int → float
-    cvtsi2sd xmm0, rax      ; base as double
-    cvtsi2sd xmm1, rbx      ; exp as double (negative)
-    ; Use repeated multiplication for positive abs(exp), then invert
-    neg rbx
-    mov r12, 1               ; result = 1 (integer)
-    mov r13, rbx
-    cvtsi2sd xmm0, rax      ; base
-    movsd xmm2, xmm0        ; save base
-    movq xmm0, [rel const_one] ; result = 1.0
-.pow_neg_loop:
-    test r13, r13
-    jz .pow_neg_done
-    test r13, 1
-    jz .pow_neg_even
-    mulsd xmm0, xmm2        ; result *= base
-.pow_neg_even:
-    mulsd xmm2, xmm2        ; base *= base
-    shr r13, 1
-    jmp .pow_neg_loop
-.pow_neg_done:
-    ; xmm0 = base^|exp|, invert
-    movq xmm1, [rel const_one]
-    divsd xmm1, xmm0        ; 1.0 / base^|exp|
-    movq rax, xmm1
-    mov edx, TAG_FLOAT
+    ; int ** int — call int_power(base, exp, base_tag, exp_tag)
+    extern int_power
+    mov rdi, rax            ; base payload
+    mov rsi, rbx            ; exp payload
+    mov edx, ecx            ; base tag (TAG_SMALLINT)
+    mov ecx, r8d            ; exp tag (TAG_SMALLINT)
+    call int_power
+    ; rax = result payload, edx = result tag
     pop r13
     pop r12
     pop rbx
@@ -3294,10 +3338,13 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     cqo
     idiv r12                ; rax=quot, rdx=rem
     mov rax, rdx            ; base = base % mod
-    ; Handle negative remainder
+    ; Adjust remainder to match Python semantics (sign of mod)
     test rax, rax
-    jns .pow_mod_pos
-    add rax, r12
+    jz .pow_mod_pos
+    mov rdx, rax
+    xor rdx, r12
+    jns .pow_mod_pos         ; same sign → OK
+    add rax, r12             ; different signs → adjust
 .pow_mod_pos:
     mov rcx, 1              ; result = 1
 .pow_mod_loop:
@@ -3313,6 +3360,9 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     idiv r12
     mov rcx, rdx
     test rcx, rcx
+    jz .pow_mod_pos2
+    mov rdx, rcx
+    xor rdx, r12
     jns .pow_mod_pos2
     add rcx, r12
 .pow_mod_pos2:
@@ -3325,6 +3375,9 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     idiv r12
     mov rax, rdx
     test rax, rax
+    jz .pow_mod_pos3
+    mov rdx, rax
+    xor rdx, r12
     jns .pow_mod_pos3
     add rax, r12
 .pow_mod_pos3:
@@ -3332,7 +3385,18 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     shr r13, 1
     jmp .pow_mod_loop
 .pow_mod_done:
+    ; Apply final result % mod (needed for exp=0 case: pow(x,0,mod) = 1 % mod)
     mov rax, rcx
+    cqo
+    idiv r12
+    mov rax, rdx
+    test rax, rax
+    jz .pow_mod_final
+    mov rdx, rax
+    xor rdx, r12
+    jns .pow_mod_final
+    add rax, r12
+.pow_mod_final:
     RET_TAG_SMALLINT
     pop r13
     pop r12
@@ -4243,3 +4307,14 @@ DEF_FUNC builtin_import_fn
     CSTRING rsi, "__import__() requires at least 1 argument"
     call raise_exception
 END_FUNC builtin_import_fn
+
+; ============================================================================
+; builtin_breakpoint(args, nargs) - breakpoint() stub (no-op)
+; ============================================================================
+global builtin_breakpoint
+DEF_FUNC_BARE builtin_breakpoint
+    ; No-op: return None
+    xor eax, eax
+    mov edx, TAG_NONE
+    ret
+END_FUNC builtin_breakpoint

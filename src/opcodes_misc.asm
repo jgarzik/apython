@@ -832,8 +832,48 @@ section .text
     pop rcx
 
     test edx, edx
-    jz .cmp_identity            ; dunder not found → identity fallback
-    jmp .cmp_do_call_result     ; rax = result object
+    jnz .cmp_do_call_result     ; got result, proceed
+
+    ; Dunder not found. If NE, try __eq__ + negate (auto-derivation)
+    cmp ecx, PY_NE
+    jne .cmp_identity           ; not NE → identity fallback
+
+    ; Try __eq__ on left's heaptype
+    mov rdi, [rsp + BO_LEFT]
+    mov rsi, [rsp + BO_RIGHT]
+    lea rax, [rel cmp_dunder_table]
+    mov rdx, [rax + PY_EQ*8]   ; rdx = "__eq__" name
+    push rcx
+    mov ecx, [rsp + 8 + BO_RTAG]  ; right_tag (+8 for push rcx)
+    call dunder_call_2
+    pop rcx
+    test edx, edx
+    jz .cmp_identity            ; __eq__ also not found → identity
+
+    ; Negate __eq__ result: if True → False, if False → True
+    cmp edx, TAG_BOOL
+    je .ne_negate_tag_bool
+    ; Check for TAG_PTR bool (bool_true/bool_false singletons)
+    cmp edx, TAG_PTR
+    jne .cmp_do_call_result     ; non-bool result, just use as-is
+    extern bool_true
+    extern bool_false
+    lea rcx, [rel bool_true]
+    cmp rax, rcx
+    je .ne_return_false
+    lea rcx, [rel bool_false]
+    cmp rax, rcx
+    je .ne_return_true
+    jmp .cmp_do_call_result     ; not a bool ptr → use as-is
+.ne_negate_tag_bool:
+    xor eax, 1                  ; flip 0↔1 for TAG_BOOL
+    jmp .cmp_do_call_result
+.ne_return_false:
+    lea rax, [rel bool_false]
+    jmp .cmp_do_call_result
+.ne_return_true:
+    lea rax, [rel bool_true]
+    jmp .cmp_do_call_result
 
 .cmp_use_float:
     extern float_compare
@@ -1013,7 +1053,12 @@ section .text
     mov rsi, [rsp + BO_RIGHT]
     mov rdi, [rsp + BO_LEFT]
     cmp rdi, rsi
+    jne .cmp_id_not_equal
+    ; Payloads match — also check tags (None payload=0 vs SmallInt 0)
+    mov rdi, [rsp + BO_LTAG]
+    cmp rdi, [rsp + BO_RTAG]
     je .cmp_id_equal
+.cmp_id_not_equal:
     ; Not equal
     cmp ecx, PY_NE
     je .cmp_id_true
@@ -1858,14 +1903,23 @@ DEF_FUNC op_send, SND_FRAME
     DISPATCH
 
 .send_exhausted:
-    ; Generator exhausted. Push gi_return_value (for yield-from protocol).
-    ; Stack: ... | receiver | → becomes ... | receiver | return_value |
-    ; Then jump to END_SEND which will handle cleanup.
-    mov rdi, [rbp - SND_RECV]  ; receiver = generator
+    ; Receiver exhausted. Push return value (for yield-from protocol).
+    ; Gen/coro/task/awaitable/asend all have gi_return_value at offset +48.
+    ; Guard: only read if receiver's type has tp_basicsize > 56 (enough for +48 field).
+    ; Plain iterators (str_iter, list_iter) have smaller objects → push None.
+    mov rdi, [rbp - SND_RECV]
+    cmp byte [r15 - 1], TAG_PTR
+    jne .send_no_retval
+    test rdi, rdi
+    jz .send_no_retval
+    mov rax, [rdi + PyObject.ob_type]
+    cmp qword [rax + PyTypeObject.tp_basicsize], 56
+    jle .send_no_retval
     mov rax, [rdi + PyGenObject.gi_return_value]
     mov rdx, [rdi + PyGenObject.gi_return_tag]
     test edx, edx
     jnz .send_have_retval
+.send_no_retval:
     ; No return value — push None
     lea rax, [rel none_singleton]
     INCREF rax
@@ -2255,9 +2309,7 @@ extern obj_decref
     ; Create tuple of same size
     mov rdi, rcx
     call tuple_new
-    mov rbx, rax               ; CAREFUL: clobbers rbx! Save and restore
-    ; Actually rbx is the bytecode IP, don't clobber it
-    ; Use stack instead
+    ; (tuple in rax — use stack, do NOT clobber rbx which is the bytecode IP)
     pop r11                    ; tags ptr
     pop rsi                    ; payloads ptr
     pop rcx                    ; count

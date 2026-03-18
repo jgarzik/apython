@@ -161,3 +161,56 @@ global notimpl_singleton
 notimpl_singleton:
     dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
     dq notimpl_type         ; ob_type
+
+; ============================================================================
+; EllipsisType and Ellipsis singleton
+; ============================================================================
+
+section .text
+; ellipsis_repr(PyObject *self) -> PyObject*
+DEF_FUNC_BARE ellipsis_repr
+    lea rdi, [rel ellipsis_repr_str]
+    jmp str_from_cstr
+END_FUNC ellipsis_repr
+
+section .data
+ellipsis_name_str: db "ellipsis", 0
+ellipsis_repr_str: db "Ellipsis", 0
+
+; EllipsisType type object
+align 8
+global ellipsis_type
+ellipsis_type:
+    dq 1                    ; ob_refcnt (immortal)
+    dq type_type            ; ob_type
+    dq ellipsis_name_str    ; tp_name
+    dq PyObject_size        ; tp_basicsize
+    dq 0                    ; tp_dealloc (never deallocated)
+    dq ellipsis_repr        ; tp_repr
+    dq ellipsis_repr        ; tp_str
+    dq 0                    ; tp_hash
+    dq 0                    ; tp_call
+    dq 0                    ; tp_getattr
+    dq 0                    ; tp_setattr
+    dq 0                    ; tp_richcompare
+    dq 0                    ; tp_iter
+    dq 0                    ; tp_iternext
+    dq 0                    ; tp_init
+    dq 0                    ; tp_new
+    dq 0                    ; tp_as_number
+    dq 0                    ; tp_as_sequence
+    dq 0                    ; tp_as_mapping
+    dq 0                    ; tp_base
+    dq 0                    ; tp_dict
+    dq 0                    ; tp_mro
+    dq 0                    ; tp_flags
+    dq 0                    ; tp_bases
+    dq 0                    ; tp_traverse
+    dq 0                    ; tp_clear
+
+; Ellipsis singleton - immortal object, never freed
+align 8
+global ellipsis_singleton
+ellipsis_singleton:
+    dq 0x7FFFFFFFFFFFFFFF   ; ob_refcnt (max value, never reaches zero)
+    dq ellipsis_type        ; ob_type

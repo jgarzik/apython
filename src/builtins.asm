@@ -97,6 +97,7 @@ extern builtin_chain
 extern builtin_globals
 extern builtin_locals
 extern builtin_dir
+extern builtin_breakpoint
 
 ; Exception types
 extern exc_BaseException_type
@@ -107,6 +108,7 @@ extern exc_KeyError_type
 extern exc_IndexError_type
 extern exc_AttributeError_type
 extern exc_NameError_type
+extern exc_UnboundLocalError_type
 extern exc_RuntimeError_type
 extern exc_StopIteration_type
 extern exc_ZeroDivisionError_type
@@ -914,14 +916,26 @@ DEF_FUNC builtin_isinstance
 
 .isinstance_got_type:
     ; rdx = obj's type, rcx = type_to_check (may be tuple)
-    ; Check if type_to_check is a tuple (must be TAG_PTR)
+    ; Second arg must be TAG_PTR (type or tuple)
     cmp r9d, TAG_PTR
-    jne .isinstance_check      ; non-pointer → single type (False result)
+    jne .isinstance_type_error
     mov rax, [rcx + PyObject.ob_type]
     extern tuple_type
     lea r8, [rel tuple_type]
     cmp rax, r8
     je .isinstance_tuple
+    ; Validate it's a type (ob_type == type_type, user_type_metatype, or exc_metatype)
+    lea r8, [rel type_type]
+    cmp rax, r8
+    je .isinstance_check
+    extern user_type_metatype
+    lea r8, [rel user_type_metatype]
+    cmp rax, r8
+    je .isinstance_check
+    extern exc_metatype
+    lea r8, [rel exc_metatype]
+    cmp rax, r8
+    jne .isinstance_type_error
 
 .isinstance_check:
     ; Walk the full type chain: rdx = current type, rcx = target type
@@ -981,6 +995,11 @@ DEF_FUNC builtin_isinstance
     leave
     ret
 
+.isinstance_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "isinstance() arg 2 must be a type, a tuple of types, or a union"
+    call raise_exception
+
 .isinstance_error:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "isinstance() takes 2 arguments"
@@ -991,24 +1010,100 @@ END_FUNC builtin_isinstance
 ;; builtin_issubclass(PyObject **args, int64_t nargs) -> PyObject*
 ;; issubclass(cls, parent) -> True/False
 ;; Walks the full tp_base chain for inheritance.
+;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
 ;; ============================================================================
 DEF_FUNC builtin_issubclass
+    push rbx
+    push r12
+    push r13
 
     cmp rsi, 2
     jne .issubclass_error
 
-    mov rdx, [rdi]             ; rdx = args[0] = cls (child type)
-    mov rcx, [rdi + 16]       ; rcx = args[1] = parent type
+    mov rdx, [rdi]             ; rdx = args[0] = cls payload
+    mov r8d, [rdi + 8]        ; r8d = args[0] tag
+    mov rcx, [rdi + 16]       ; rcx = args[1] = parent payload
+    mov r9d, [rdi + 24]       ; r9d = args[1] tag
 
-.issubclass_check:
+    ; Validate first arg is a type (TAG_PTR with recognized metatype)
+    cmp r8d, TAG_PTR
+    jne .issubclass_arg1_error
+    mov rax, [rdx + PyObject.ob_type]
+    lea r10, [rel type_type]
+    cmp rax, r10
+    je .issubclass_arg1_ok
+    extern user_type_metatype
+    lea r10, [rel user_type_metatype]
+    cmp rax, r10
+    je .issubclass_arg1_ok
+    extern exc_metatype
+    lea r10, [rel exc_metatype]
+    cmp rax, r10
+    jne .issubclass_arg1_error
+.issubclass_arg1_ok:
+
+    ; Check if second arg is a tuple
+    cmp r9d, TAG_PTR
+    jne .issubclass_arg2_error
+    mov rax, [rcx + PyObject.ob_type]
+    lea r10, [rel tuple_type]
+    cmp rax, r10
+    je .issubclass_tuple
+    ; Validate second arg is a type (recognized metatype)
+    lea r10, [rel type_type]
+    cmp rax, r10
+    je .issubclass_walk
+    lea r10, [rel user_type_metatype]
+    cmp rax, r10
+    je .issubclass_walk
+    lea r10, [rel exc_metatype]
+    cmp rax, r10
+    jne .issubclass_arg2_error
+
+    ; Single type check: walk rdx -> tp_base chain looking for rcx
+.issubclass_walk:
     cmp rdx, rcx
     je .issubclass_true
     mov rdx, [rdx + PyTypeObject.tp_base]
     test rdx, rdx
-    jnz .issubclass_check
+    jnz .issubclass_walk
+    jmp .issubclass_false
 
+.issubclass_tuple:
+    ; rcx = tuple of types. Check cls against each.
+    mov rbx, rcx               ; rbx = tuple
+    mov r12, rdx               ; r12 = cls (saved)
+    mov rsi, [rbx + PyTupleObject.ob_item]  ; payloads array
+    mov r13, [rbx + PyTupleObject.ob_size]  ; count
+    xor r8d, r8d               ; index
+.issubclass_tuple_loop:
+    cmp r8, r13
+    jge .issubclass_false
+    mov rdx, r12               ; reset to cls
+    mov rcx, [rsi + r8*8]     ; type from tuple
+    push rsi
+    push r8
+.issubclass_tuple_walk:
+    cmp rdx, rcx
+    je .issubclass_tuple_match
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jnz .issubclass_tuple_walk
+    pop r8
+    pop rsi
+    inc r8
+    jmp .issubclass_tuple_loop
+
+.issubclass_tuple_match:
+    add rsp, 16               ; pop saved r8, rsi
+    jmp .issubclass_true
+
+.issubclass_false:
     lea rax, [rel bool_false]
     inc qword [rax + PyObject.ob_refcnt]
+    pop r13
+    pop r12
+    pop rbx
     mov edx, TAG_PTR
     leave
     ret
@@ -1016,9 +1111,22 @@ DEF_FUNC builtin_issubclass
 .issubclass_true:
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
+    pop r13
+    pop r12
+    pop rbx
     mov edx, TAG_PTR
     leave
     ret
+
+.issubclass_arg1_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issubclass() arg 1 must be a class"
+    call raise_exception
+
+.issubclass_arg2_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
+    call raise_exception
 
 .issubclass_error:
     lea rdi, [rel exc_TypeError_type]
@@ -1457,10 +1565,13 @@ DEF_FUNC builtin___build_class__
     ; Store tp_init (func ptr or 0)
     mov [r12 + PyTypeObject.tp_init], rbx
 
-    ; Set tp_base if we have a base class
+    ; Set tp_base: use explicit base class, or default to object_type
     mov rax, [rbp-48]
     test rax, rax
-    jz .bc_no_set_base
+    jnz .bc_have_base
+    lea rax, [rel object_type]
+    mov [rbp-48], rax           ; update saved base for later use
+.bc_have_base:
     mov [r12 + PyTypeObject.tp_base], rax
     mov rdi, rax
     call obj_incref
@@ -1488,9 +1599,13 @@ DEF_FUNC builtin___build_class__
     mov [r12 + PyTypeObject.tp_repr], rax
     lea rax, [rel exc_str]
     mov [r12 + PyTypeObject.tp_str], rax
-    ; No getattr/setattr for exceptions (they're not instances)
-    mov qword [r12 + PyTypeObject.tp_getattr], 0
-    mov qword [r12 + PyTypeObject.tp_setattr], 0
+    ; Exception getattr/setattr for custom attributes via exc_dict
+    extern exc_getattr
+    extern exc_setattr
+    lea rax, [rel exc_getattr]
+    mov [r12 + PyTypeObject.tp_getattr], rax
+    lea rax, [rel exc_setattr]
+    mov [r12 + PyTypeObject.tp_setattr], rax
     ; Wire exc traverse/clear for exception subclasses
     extern exc_traverse
     extern exc_clear_gc
@@ -1967,6 +2082,11 @@ DEF_FUNC builtins_init
     lea rdx, [rel builtin_dir]
     call add_builtin
 
+    mov rdi, rbx
+    lea rsi, [rel bi_name_breakpoint]
+    lea rdx, [rel builtin_breakpoint]
+    call add_builtin
+
     ; Register super type as builtin (LOAD_SUPER_ATTR needs it loadable)
     mov rdi, rbx
     lea rsi, [rel bi_name_super]
@@ -1994,6 +2114,13 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_NotImplemented]
     lea rdx, [rel notimpl_singleton]
+    call add_exc_type_builtin
+
+    ; Register Ellipsis singleton as builtin constant
+    extern ellipsis_singleton
+    mov rdi, rbx
+    lea rsi, [rel bi_name_Ellipsis]
+    lea rdx, [rel ellipsis_singleton]
     call add_exc_type_builtin
 
     ; Register exception types as builtins
@@ -2035,6 +2162,11 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_NameError]
     lea rdx, [rel exc_NameError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnboundLocalError]
+    lea rdx, [rel exc_UnboundLocalError_type]
     call add_exc_type_builtin
 
     mov rdi, rbx
@@ -2150,6 +2282,192 @@ DEF_FUNC builtins_init
     mov rdi, rbx
     lea rsi, [rel bi_name_TimeoutError]
     lea rdx, [rel exc_TimeoutError_type]
+    call add_exc_type_builtin
+
+    extern exc_GeneratorExit_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_GeneratorExit]
+    lea rdx, [rel exc_GeneratorExit_type]
+    call add_exc_type_builtin
+
+    extern exc_ModuleNotFoundError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ModuleNotFoundError]
+    lea rdx, [rel exc_ModuleNotFoundError_type]
+    call add_exc_type_builtin
+
+    extern exc_SyntaxError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SyntaxError]
+    lea rdx, [rel exc_SyntaxError_type]
+    call add_exc_type_builtin
+
+    extern exc_EOFError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_EOFError]
+    lea rdx, [rel exc_EOFError_type]
+    call add_exc_type_builtin
+
+    extern exc_UnicodeDecodeError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeDecodeError]
+    lea rdx, [rel exc_UnicodeDecodeError_type]
+    call add_exc_type_builtin
+
+    extern exc_UnicodeEncodeError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeEncodeError]
+    lea rdx, [rel exc_UnicodeEncodeError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionError]
+    lea rdx, [rel exc_ConnectionError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionResetError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionResetError]
+    lea rdx, [rel exc_ConnectionResetError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionRefusedError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionRefusedError]
+    lea rdx, [rel exc_ConnectionRefusedError_type]
+    call add_exc_type_builtin
+
+    extern exc_ConnectionAbortedError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ConnectionAbortedError]
+    lea rdx, [rel exc_ConnectionAbortedError_type]
+    call add_exc_type_builtin
+
+    extern exc_BrokenPipeError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BrokenPipeError]
+    lea rdx, [rel exc_BrokenPipeError_type]
+    call add_exc_type_builtin
+
+    extern exc_PermissionError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_PermissionError]
+    lea rdx, [rel exc_PermissionError_type]
+    call add_exc_type_builtin
+
+    extern exc_IsADirectoryError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_IsADirectoryError]
+    lea rdx, [rel exc_IsADirectoryError_type]
+    call add_exc_type_builtin
+
+    extern exc_NotADirectoryError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_NotADirectoryError]
+    lea rdx, [rel exc_NotADirectoryError_type]
+    call add_exc_type_builtin
+
+    extern exc_ProcessLookupError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ProcessLookupError]
+    lea rdx, [rel exc_ProcessLookupError_type]
+    call add_exc_type_builtin
+
+    extern exc_ChildProcessError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ChildProcessError]
+    lea rdx, [rel exc_ChildProcessError_type]
+    call add_exc_type_builtin
+
+    extern exc_BlockingIOError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BlockingIOError]
+    lea rdx, [rel exc_BlockingIOError_type]
+    call add_exc_type_builtin
+
+    extern exc_InterruptedError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_InterruptedError]
+    lea rdx, [rel exc_InterruptedError_type]
+    call add_exc_type_builtin
+
+    extern exc_FloatingPointError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FloatingPointError]
+    lea rdx, [rel exc_FloatingPointError_type]
+    call add_exc_type_builtin
+
+    extern exc_BufferError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BufferError]
+    lea rdx, [rel exc_BufferError_type]
+    call add_exc_type_builtin
+
+    extern exc_ReferenceError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ReferenceError]
+    lea rdx, [rel exc_ReferenceError_type]
+    call add_exc_type_builtin
+
+    extern exc_SystemError_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SystemError]
+    lea rdx, [rel exc_SystemError_type]
+    call add_exc_type_builtin
+
+    extern exc_RuntimeWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_RuntimeWarning]
+    lea rdx, [rel exc_RuntimeWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_FutureWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_FutureWarning]
+    lea rdx, [rel exc_FutureWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_ImportWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ImportWarning]
+    lea rdx, [rel exc_ImportWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_UnicodeWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_UnicodeWarning]
+    lea rdx, [rel exc_UnicodeWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_ResourceWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_ResourceWarning]
+    lea rdx, [rel exc_ResourceWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_BytesWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_BytesWarning]
+    lea rdx, [rel exc_BytesWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_PendingDeprecationWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_PendingDeprecationWarning]
+    lea rdx, [rel exc_PendingDeprecationWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_SyntaxWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_SyntaxWarning]
+    lea rdx, [rel exc_SyntaxWarning_type]
+    call add_exc_type_builtin
+
+    extern exc_EncodingWarning_type
+    mov rdi, rbx
+    lea rsi, [rel bi_name_EncodingWarning]
+    lea rdx, [rel exc_EncodingWarning_type]
     call add_exc_type_builtin
 
     ; Register data types as builtins
@@ -2358,6 +2676,7 @@ END_FUNC add_exc_type_builtin
 ;; ============================================================================
 section .rodata
 
+bi_name_breakpoint:   db "breakpoint", 0
 bi_name_print:        db "print", 0
 bi_name_len:          db "len", 0
 bi_name_range:        db "range", 0
@@ -2409,6 +2728,7 @@ bi_name_staticmethod: db "staticmethod", 0
 bi_name_classmethod:  db "classmethod", 0
 bi_name_property:     db "property", 0
 bi_name_NotImplemented: db "NotImplemented", 0
+bi_name_Ellipsis:      db "Ellipsis", 0
 
 ; Exception type names
 bi_name_BaseException:     db "BaseException", 0
@@ -2419,6 +2739,7 @@ bi_name_KeyError:          db "KeyError", 0
 bi_name_IndexError:        db "IndexError", 0
 bi_name_AttributeError:    db "AttributeError", 0
 bi_name_NameError:         db "NameError", 0
+bi_name_UnboundLocalError: db "UnboundLocalError", 0
 bi_name_RuntimeError:      db "RuntimeError", 0
 bi_name_StopIteration:     db "StopIteration", 0
 bi_name_ZeroDivisionError: db "ZeroDivisionError", 0
@@ -2442,6 +2763,37 @@ bi_name_ExceptionGroup:    db "ExceptionGroup", 0
 bi_name_CancelledError:    db "CancelledError", 0
 bi_name_StopAsyncIteration: db "StopAsyncIteration", 0
 bi_name_TimeoutError:      db "TimeoutError", 0
+bi_name_GeneratorExit:     db "GeneratorExit", 0
+bi_name_ModuleNotFoundError: db "ModuleNotFoundError", 0
+bi_name_SyntaxError:       db "SyntaxError", 0
+bi_name_EOFError:          db "EOFError", 0
+bi_name_UnicodeDecodeError: db "UnicodeDecodeError", 0
+bi_name_UnicodeEncodeError: db "UnicodeEncodeError", 0
+bi_name_ConnectionError:   db "ConnectionError", 0
+bi_name_ConnectionResetError: db "ConnectionResetError", 0
+bi_name_ConnectionRefusedError: db "ConnectionRefusedError", 0
+bi_name_ConnectionAbortedError: db "ConnectionAbortedError", 0
+bi_name_BrokenPipeError:   db "BrokenPipeError", 0
+bi_name_PermissionError:   db "PermissionError", 0
+bi_name_IsADirectoryError: db "IsADirectoryError", 0
+bi_name_NotADirectoryError: db "NotADirectoryError", 0
+bi_name_ProcessLookupError: db "ProcessLookupError", 0
+bi_name_ChildProcessError: db "ChildProcessError", 0
+bi_name_BlockingIOError:   db "BlockingIOError", 0
+bi_name_InterruptedError:  db "InterruptedError", 0
+bi_name_FloatingPointError: db "FloatingPointError", 0
+bi_name_BufferError:       db "BufferError", 0
+bi_name_ReferenceError:    db "ReferenceError", 0
+bi_name_SystemError:       db "SystemError", 0
+bi_name_RuntimeWarning:    db "RuntimeWarning", 0
+bi_name_FutureWarning:     db "FutureWarning", 0
+bi_name_ImportWarning:     db "ImportWarning", 0
+bi_name_UnicodeWarning:    db "UnicodeWarning", 0
+bi_name_ResourceWarning:   db "ResourceWarning", 0
+bi_name_BytesWarning:      db "BytesWarning", 0
+bi_name_PendingDeprecationWarning: db "PendingDeprecationWarning", 0
+bi_name_SyntaxWarning:     db "SyntaxWarning", 0
+bi_name_EncodingWarning:   db "EncodingWarning", 0
 bi_name_list:              db "list", 0
 bi_name_dict:              db "dict", 0
 bi_name_tuple:             db "tuple", 0

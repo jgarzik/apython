@@ -291,7 +291,7 @@ DEF_FUNC marshal_read_object
     cmp ebx, MARSHAL_TYPE_STOPITER
     je mdo_none                 ; stub: return None
     cmp ebx, MARSHAL_TYPE_ELLIPSIS
-    je mdo_none                 ; stub: return None
+    je mdo_ellipsis
     cmp ebx, MARSHAL_TYPE_NULL
     je mdo_null
     cmp ebx, MARSHAL_TYPE_FROZENSET
@@ -330,6 +330,16 @@ mfinish:
 mdo_none:
     xor eax, eax
     mov edx, TAG_NONE
+    jmp mfinish
+
+;--------------------------------------------------------------------------
+; TYPE_ELLIPSIS handler
+;--------------------------------------------------------------------------
+mdo_ellipsis:
+    extern ellipsis_singleton
+    lea rax, [rel ellipsis_singleton]
+    inc qword [rax + PyObject.ob_refcnt]
+    mov edx, TAG_PTR
     jmp mfinish
 
 ;--------------------------------------------------------------------------

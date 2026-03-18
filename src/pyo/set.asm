@@ -478,11 +478,18 @@ DEF_FUNC set_richcompare, SRC_FRAME
     jmp .src_not_impl
 
 .src_is_set:
-    ; Only support PY_EQ (2) and PY_NE (3)
     cmp edx, PY_EQ
     je .src_eq
     cmp edx, PY_NE
     je .src_ne
+    cmp edx, PY_LE
+    je .src_le
+    cmp edx, PY_GE
+    je .src_ge
+    cmp edx, PY_LT
+    je .src_lt
+    cmp edx, PY_GT
+    je .src_gt
     jmp .src_not_impl
 
 .src_eq:
@@ -523,6 +530,76 @@ DEF_FUNC set_richcompare, SRC_FRAME
 .src_eq_next:
     inc rcx
     jmp .src_eq_loop
+
+.src_le:
+    ; self <= other: self is subset of other (every elem of self in other)
+    mov rbx, rdi               ; self
+    mov r12, rsi               ; other
+    mov r13, [rbx + PyDictObject.capacity]
+    xor ecx, ecx
+.src_le_loop:
+    cmp rcx, r13
+    jge .src_true
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, [rbx + PyDictObject.entries]
+    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    test edx, edx
+    jz .src_le_next
+    cmp edx, SET_TOMBSTONE
+    je .src_le_next
+    push rcx
+    mov rdi, r12
+    mov rsi, [rax + SET_ENTRY_KEY]
+    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx
+    test eax, eax
+    jz .src_false
+.src_le_next:
+    inc rcx
+    jmp .src_le_loop
+
+.src_ge:
+    ; self >= other: other is subset of self → swap and do <=
+    mov rbx, rsi               ; other (check all of other in self)
+    mov r12, rdi               ; self
+    mov r13, [rbx + PyDictObject.capacity]
+    xor ecx, ecx
+.src_ge_loop:
+    cmp rcx, r13
+    jge .src_true
+    imul rax, rcx, SET_ENTRY_SIZE
+    add rax, [rbx + PyDictObject.entries]
+    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    test edx, edx
+    jz .src_ge_next
+    cmp edx, SET_TOMBSTONE
+    je .src_ge_next
+    push rcx
+    mov rdi, r12
+    mov rsi, [rax + SET_ENTRY_KEY]
+    movzx edx, word [rax + SET_ENTRY_KEY_TAG]
+    call set_contains
+    pop rcx
+    test eax, eax
+    jz .src_false
+.src_ge_next:
+    inc rcx
+    jmp .src_ge_loop
+
+.src_lt:
+    ; self < other: proper subset (self <= other AND len(self) < len(other))
+    mov rax, [rdi + PyDictObject.ob_size]
+    cmp rax, [rsi + PyDictObject.ob_size]
+    jge .src_false             ; not strictly smaller → false
+    jmp .src_le                ; then check subset
+
+.src_gt:
+    ; self > other: proper superset (self >= other AND len(self) > len(other))
+    mov rax, [rdi + PyDictObject.ob_size]
+    cmp rax, [rsi + PyDictObject.ob_size]
+    jle .src_false             ; not strictly larger → false
+    jmp .src_ge                ; then check superset
 
 .src_ne:
     ; PY_NE = not PY_EQ

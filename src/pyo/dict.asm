@@ -22,6 +22,7 @@ extern exc_KeyError_type
 extern obj_incref
 extern str_from_cstr
 extern type_type
+extern tuple_type
 extern dict_traverse
 extern dict_clear_gc
 
@@ -75,35 +76,54 @@ END_FUNC dict_new
 ;; dict_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyDictObject*
 ;; Constructor: dict() or dict(mapping)
 ;; ============================================================================
+extern kw_names_pending
+extern ap_strcmp
+
 global dict_type_call
 DEF_FUNC dict_type_call
     push rbx
     push r12
+    push r13
+    push r14
+    push r15
     mov rbx, rsi               ; args
     mov r12, rdx               ; nargs
 
-    ; dict() - no args
-    test r12, r12
-    jz .dtc_empty
+    ; Check for keyword arguments
+    mov r14, [rel kw_names_pending]
+    mov qword [rel kw_names_pending], 0  ; clear immediately
 
-    ; dict(arg) - one positional arg
-    cmp r12, 1
+    ; Determine positional arg count
+    xor r13d, r13d             ; r13 = n_pos = nargs
+    mov r13, r12
+    test r14, r14
+    jz .dtc_no_kw
+    mov rax, [r14 + PyTupleObject.ob_size]
+    sub r13, rax               ; r13 = n_pos = nargs - n_kw
+
+.dtc_no_kw:
+    ; dict() with no pos args (may have kwargs)
+    test r13, r13
+    jz .dtc_no_pos
+
+    ; dict(arg) - one positional arg (may also have kwargs)
+    cmp r13, 1
     jne .dtc_error
 
     ; Check if arg is a dict
     mov rdi, [rbx]             ; args[0] payload
     mov eax, [rbx + 8]        ; args[0] tag
     cmp eax, TAG_PTR
-    jne .dtc_error
+    jne .dtc_try_iterable
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel dict_type]
     cmp rax, rcx
-    jne .dtc_error
+    jne .dtc_try_iterable
 
     ; dict(other_dict) → create new dict and copy entries
     push rdi                   ; save source dict
     call dict_new
-    mov rbx, rax               ; rbx = new dict
+    mov r15, rax               ; r15 = new dict
     pop rdi                    ; rdi = source dict
 
     ; Copy all entries from source
@@ -119,7 +139,7 @@ DEF_FUNC dict_type_call
     push rcx
     push r8
     push rdi
-    mov rdi, rbx               ; new dict
+    mov rdi, r15               ; new dict
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
     movzx ecx, byte [rax + DictEntry.value_tag]
@@ -132,16 +152,162 @@ DEF_FUNC dict_type_call
     inc rcx
     jmp .dtc_copy_loop
 .dtc_copy_done:
-    mov rax, rbx
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    ret
+    ; Fall through to add kwargs if present
+    jmp .dtc_add_kwargs
 
-.dtc_empty:
+.dtc_try_iterable:
+    ; Not a dict — try iterating as sequence of (key, value) pairs
+    mov rdi, [rbx]             ; args[0] payload
+    movzx esi, byte [rbx + 8] ; args[0] tag
+    cmp esi, TAG_PTR
+    jne .dtc_error
+    ; Get iterator
+    push rdi
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iter]
+    test rax, rax
+    jz .dtc_error_pop
+    call rax
+    test rax, rax
+    jz .dtc_error_pop
+    add rsp, 8                 ; discard saved iterable
+    mov r13, rax               ; r13 = iterator
+
+    ; Create new dict
     call dict_new
+    mov r15, rax               ; r15 = new dict
+
+    ; Iterate pairs
+.dtc_iter_loop:
+    mov rdi, r13
+    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [rax + PyTypeObject.tp_iternext]
+    call rax
+    test edx, edx
+    jz .dtc_iter_done          ; exhausted
+
+    ; rax = item, edx = tag — must be a tuple of length 2
+    cmp edx, TAG_PTR
+    jne .dtc_iter_type_error
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel tuple_type]
+    cmp rcx, r8
+    jne .dtc_iter_type_error
+    cmp qword [rax + PyTupleObject.ob_size], 2
+    jne .dtc_iter_type_error
+
+    ; Extract key and value from tuple
+    push rax                   ; save tuple for DECREF
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov r8, [rax + PyTupleObject.ob_item_tags]
+    mov rdi, r15               ; dict
+    mov rsi, [rcx]             ; key payload
+    mov rdx, [rcx + 8]        ; value payload
+    movzx eax, byte [r8 + 1]  ; value tag (index 1)
+    push rax                   ; save value tag
+    movzx r8d, byte [r8]      ; key tag (index 0)
+    pop rcx                    ; rcx = value tag
+    call dict_set
+    pop rdi                    ; tuple
+    call obj_decref
+    jmp .dtc_iter_loop
+
+.dtc_iter_done:
+    ; DECREF iterator
+    mov rdi, r13
+    call obj_decref
+    jmp .dtc_add_kwargs
+
+.dtc_iter_type_error:
+    ; DECREF iterator and raise TypeError
+    mov rdi, r13
+    call obj_decref
+    jmp .dtc_error
+
+.dtc_error_pop:
+    add rsp, 8
+    jmp .dtc_error
+
+.dtc_no_pos:
+    ; No positional args — create empty dict (kwargs will be added below)
+    call dict_new
+    mov r15, rax
+
+.dtc_add_kwargs:
+    ; Add keyword arguments if present
+    test r14, r14
+    jz .dtc_return_dict
+
+    ; r14 = kw_names tuple, rbx = args, r13 was n_pos (now reuse)
+    ; kwargs start at args[n_pos] — reload n_pos
+    mov rax, r12               ; total nargs
+    mov rcx, [r14 + PyTupleObject.ob_size]
+    sub rax, rcx               ; rax = n_pos
+    mov r13, rcx               ; r13 = n_kw
+    mov rcx, rax               ; rcx = n_pos (index into args)
+
+    ; kw_names.ob_item has the key strings, args[n_pos + i] has values
+    mov rax, [r14 + PyTupleObject.ob_item]      ; keys payload array
+    mov rdx, [r14 + PyTupleObject.ob_item_tags]  ; keys tag array
+    xor r8d, r8d              ; kw index
+.dtc_kw_loop:
+    cmp r8, r13
+    jge .dtc_return_dict
+
+    ; Calculate arg position: args[(n_pos + r8)]
+    push r8
+    push rcx
+    push rax
+    push rdx
+
+    ; Get key from kw_names
+    mov rsi, [rax + r8*8]         ; key payload (string)
+    movzx r8d, byte [rdx + r8]   ; key tag
+
+    ; Get value from args
+    lea r9, [rcx + r8]            ; wait, need original r8 (kw index)
+    ; Recalculate: value is at args[n_pos + kw_index]
+    pop rdx
+    pop rax
+    pop rcx
+    pop r8
+
+    push r8
+    push rcx
+    push rax
+    push rdx
+
+    ; key from kw_names tuple items
+    mov r9, [r14 + PyTupleObject.ob_item]
+    mov rsi, [r9 + r8*8]         ; key payload
+    mov r9, [r14 + PyTupleObject.ob_item_tags]
+    movzx r10d, byte [r9 + r8]  ; key tag → r10d (save for later)
+
+    ; value from args: index = n_pos + kw_index
+    add rcx, r8                   ; rcx = n_pos + kw_index
+    shl rcx, 4                    ; rcx * 16 (each arg is 16 bytes)
+    mov rdx, [rbx + rcx]         ; value payload
+    movzx eax, byte [rbx + rcx + 8]  ; value tag
+
+    ; dict_set(dict, key, value, value_tag, key_tag)
+    mov rdi, r15
+    mov ecx, eax                  ; value tag
+    mov r8d, r10d                 ; key tag
+    call dict_set
+
+    pop rdx
+    pop rax
+    pop rcx
+    pop r8
+    inc r8
+    jmp .dtc_kw_loop
+
+.dtc_return_dict:
+    mov rax, r15
     mov edx, TAG_PTR
+    pop r15
+    pop r14
+    pop r13
     pop r12
     pop rbx
     leave
@@ -150,7 +316,7 @@ DEF_FUNC dict_type_call
 .dtc_error:
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "dict() argument must be a dict"
+    CSTRING rsi, "dict() argument must be a mapping or iterable"
     call raise_exception
 END_FUNC dict_type_call
 
@@ -1504,7 +1670,9 @@ END_FUNC dict_nb_ior
 DRC_LEFT  equ 8
 DRC_RIGHT equ 16
 DRC_OP    equ 24
-DRC_FRAME equ 32
+DRC_LVAL  equ 32
+DRC_LTAG  equ 40
+DRC_FRAME equ 48
 
 DEF_FUNC dict_richcompare, DRC_FRAME
     ; edx = op (PY_EQ=2, PY_NE=3)
@@ -1547,11 +1715,13 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     cmp byte [rax + DictEntry.value_tag], 0
     je .drc_next
 
-    ; Save entry data for comparison
+    ; Save entry data to stack slots (safe across function calls)
     push r9
     push r10
     mov r11, [rax + DictEntry.value]        ; left value
     movzx r9d, byte [rax + DictEntry.value_tag]    ; left value tag
+    mov [rbp - DRC_LVAL], r11               ; save to stack slot
+    mov [rbp - DRC_LTAG], r9                ; save to stack slot
 
     ; Lookup key in right dict
     mov rdi, [rbp - DRC_RIGHT]
@@ -1559,8 +1729,13 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     movzx edx, byte [rax + DictEntry.key_tag]
     call dict_get
     ; rax = right value, edx = tag (0 = not found)
+    ; NOTE: r11 and r9 are caller-saved and may be clobbered by dict_get
     test edx, edx
     jz .drc_not_equal_pop           ; key not in right
+
+    ; Reload left value and tag from stack slots
+    mov r11, [rbp - DRC_LVAL]
+    mov r9d, [rbp - DRC_LTAG]
 
     ; Quick compare: same payload and same tag → equal
     cmp rax, r11
@@ -1584,28 +1759,24 @@ DEF_FUNC dict_richcompare, DRC_FRAME
     cmp edx, TAG_PTR
     jne .drc_not_equal_pop
     ; Call tp_richcompare(left_val, right_val, PY_EQ, TAG_PTR, TAG_PTR)
-    push r11                        ; save left value
     mov rdi, r11                    ; left value
     mov rsi, rax                    ; right value
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_richcompare]
     test rax, rax
-    jz .drc_not_equal_pop2          ; no tp_richcompare
+    jz .drc_not_equal_pop           ; no tp_richcompare
     mov edx, 2                      ; PY_EQ
     mov ecx, TAG_PTR
     mov r8d, TAG_PTR
     call rax
     ; Result: (rax=payload, edx=tag)
     ; Check if result is True (TAG_BOOL with payload=1)
-    pop r11
     cmp edx, TAG_BOOL
     jne .drc_not_equal_pop
     test eax, eax
     jz .drc_not_equal_pop
     jmp .drc_values_match
 
-.drc_not_equal_pop2:
-    pop r11
 .drc_not_equal_pop:
     pop r10
     pop r9

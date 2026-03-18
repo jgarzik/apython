@@ -408,6 +408,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     lea rcx, [rel slice_type]
     cmp rax, rcx
     je .las_slice
+    ; Validate key is a heap int before converting
+    extern int_type
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .las_key_type_error
 
 .las_int:
     ; Convert key to i64
@@ -1043,6 +1048,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r13
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "attempt to assign sequence of wrong size to extended slice"
+    call raise_exception
+
+.las_key_type_error:
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "list indices must be integers or slices"
     call raise_exception
 
 .las_type_error:

@@ -75,6 +75,7 @@ DEF_FUNC exc_new, EN_FRAME
     mov qword [rax + PyExceptionObject.exc_context], 0
     mov qword [rax + PyExceptionObject.exc_cause], 0
     mov qword [rax + PyExceptionObject.exc_args], 0
+    mov qword [rax + PyExceptionObject.exc_dict], 0
 
     ; INCREF the message (tag-aware)
     INCREF_VAL r12, r13
@@ -181,6 +182,13 @@ DEF_FUNC exc_dealloc
     jz .no_args
     call obj_decref
 .no_args:
+
+    ; XDECREF exc_dict
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .no_dict
+    call obj_decref
+.no_dict:
 
     ; Free the object (GC-aware)
     mov rdi, rbx
@@ -342,15 +350,33 @@ DEF_FUNC exc_getattr
     mov rdi, [rbx + PyObject.ob_type]
     mov rdi, [rdi + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .not_found
+    jz .check_exc_dict
     mov rsi, r12
     mov edx, TAG_PTR
     call dict_get
     test edx, edx
     jnz .found_in_type
 
+.check_exc_dict:
+    ; Check exc_dict for custom instance attributes
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    test rdi, rdi
+    jz .not_found
+    mov rsi, r12
+    mov edx, TAG_PTR
+    call dict_get
+    test edx, edx
+    jnz .found_in_dict
+
 .not_found:
     RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.found_in_dict:
+    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -445,6 +471,42 @@ DEF_FUNC exc_getattr
     leave
     ret
 END_FUNC exc_getattr
+
+; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
+; Store a custom attribute on an exception object using exc_dict.
+; rdi = exc, rsi = name, rdx = value, ecx = value_tag
+global exc_setattr
+DEF_FUNC exc_setattr
+    push rbx
+    mov rbx, rdi            ; exc
+
+    ; Create exc_dict if needed
+    mov rax, [rbx + PyExceptionObject.exc_dict]
+    test rax, rax
+    jnz .esa_have_dict
+    push rsi
+    push rdx
+    push rcx
+    call dict_new
+    mov [rbx + PyExceptionObject.exc_dict], rax
+    pop rcx
+    pop rdx
+    pop rsi
+.esa_have_dict:
+    ; dict_set(dict, key, value, value_tag, key_tag)
+    mov rdi, [rbx + PyExceptionObject.exc_dict]
+    ; rsi = name (key), rdx = value already set
+    ; ecx = value_tag, r8d = key_tag (TAG_PTR for string name)
+    mov r8d, TAG_PTR
+    call dict_set
+
+    xor eax, eax            ; return 0 (success)
+    xor edx, edx
+
+    pop rbx
+    leave
+    ret
+END_FUNC exc_setattr
 
 ; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
 ; Check if exception is an instance of type, walking tp_base chain.
@@ -758,6 +820,7 @@ exc_name_KeyError:          db "KeyError", 0
 exc_name_IndexError:        db "IndexError", 0
 exc_name_AttributeError:    db "AttributeError", 0
 exc_name_NameError:         db "NameError", 0
+exc_name_UnboundLocalError: db "UnboundLocalError", 0
 exc_name_RuntimeError:      db "RuntimeError", 0
 exc_name_StopIteration:     db "StopIteration", 0
 exc_name_ZeroDivisionError: db "ZeroDivisionError", 0
@@ -780,6 +843,37 @@ exc_name_UserWarning:       db "UserWarning", 0
 exc_name_CancelledError:    db "CancelledError", 0
 exc_name_StopAsyncIteration: db "StopAsyncIteration", 0
 exc_name_TimeoutError:      db "TimeoutError", 0
+exc_name_GeneratorExit:     db "GeneratorExit", 0
+exc_name_ModuleNotFoundError: db "ModuleNotFoundError", 0
+exc_name_SyntaxError:       db "SyntaxError", 0
+exc_name_EOFError:          db "EOFError", 0
+exc_name_UnicodeDecodeError: db "UnicodeDecodeError", 0
+exc_name_UnicodeEncodeError: db "UnicodeEncodeError", 0
+exc_name_ConnectionError:   db "ConnectionError", 0
+exc_name_ConnectionResetError: db "ConnectionResetError", 0
+exc_name_ConnectionRefusedError: db "ConnectionRefusedError", 0
+exc_name_ConnectionAbortedError: db "ConnectionAbortedError", 0
+exc_name_BrokenPipeError:   db "BrokenPipeError", 0
+exc_name_PermissionError:   db "PermissionError", 0
+exc_name_IsADirectoryError: db "IsADirectoryError", 0
+exc_name_NotADirectoryError: db "NotADirectoryError", 0
+exc_name_ProcessLookupError: db "ProcessLookupError", 0
+exc_name_ChildProcessError: db "ChildProcessError", 0
+exc_name_BlockingIOError:   db "BlockingIOError", 0
+exc_name_InterruptedError:  db "InterruptedError", 0
+exc_name_FloatingPointError: db "FloatingPointError", 0
+exc_name_BufferError:       db "BufferError", 0
+exc_name_ReferenceError:    db "ReferenceError", 0
+exc_name_SystemError:       db "SystemError", 0
+exc_name_RuntimeWarning:    db "RuntimeWarning", 0
+exc_name_FutureWarning:     db "FutureWarning", 0
+exc_name_ImportWarning:     db "ImportWarning", 0
+exc_name_UnicodeWarning:    db "UnicodeWarning", 0
+exc_name_ResourceWarning:   db "ResourceWarning", 0
+exc_name_BytesWarning:      db "BytesWarning", 0
+exc_name_PendingDeprecationWarning: db "PendingDeprecationWarning", 0
+exc_name_SyntaxWarning:     db "SyntaxWarning", 0
+exc_name_EncodingWarning:   db "EncodingWarning", 0
 
 ; Exception metatype - provides tp_call so exception types can be called
 ; e.g., ValueError("msg") works via CALL opcode
@@ -863,7 +957,7 @@ global %1
     dq 0                    ; tp_hash
     dq 0                    ; tp_call
     dq exc_getattr          ; tp_getattr
-    dq 0                    ; tp_setattr
+    dq exc_setattr          ; tp_setattr
     dq 0                    ; tp_richcompare
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
@@ -882,7 +976,8 @@ global %1
 %endmacro
 
 ; Define all exception types
-DEF_EXC_TYPE exc_BaseException_type, exc_name_BaseException, 0
+extern object_type
+DEF_EXC_TYPE exc_BaseException_type, exc_name_BaseException, object_type
 DEF_EXC_TYPE exc_Exception_type, exc_name_Exception, exc_BaseException_type
 DEF_EXC_TYPE exc_TypeError_type, exc_name_TypeError, exc_Exception_type
 DEF_EXC_TYPE exc_ValueError_type, exc_name_ValueError, exc_Exception_type
@@ -890,6 +985,7 @@ DEF_EXC_TYPE exc_KeyError_type, exc_name_KeyError, exc_LookupError_type
 DEF_EXC_TYPE exc_IndexError_type, exc_name_IndexError, exc_LookupError_type
 DEF_EXC_TYPE exc_AttributeError_type, exc_name_AttributeError, exc_Exception_type
 DEF_EXC_TYPE exc_NameError_type, exc_name_NameError, exc_Exception_type
+DEF_EXC_TYPE exc_UnboundLocalError_type, exc_name_UnboundLocalError, exc_NameError_type
 DEF_EXC_TYPE exc_RuntimeError_type, exc_name_RuntimeError, exc_Exception_type
 DEF_EXC_TYPE exc_StopIteration_type, exc_name_StopIteration, exc_Exception_type
 DEF_EXC_TYPE exc_ZeroDivisionError_type, exc_name_ZeroDivisionError, exc_ArithmeticError_type
@@ -912,6 +1008,37 @@ DEF_EXC_TYPE exc_UserWarning_type, exc_name_UserWarning, exc_Warning_type
 DEF_EXC_TYPE exc_CancelledError_type, exc_name_CancelledError, exc_BaseException_type
 DEF_EXC_TYPE exc_StopAsyncIteration_type, exc_name_StopAsyncIteration, exc_Exception_type
 DEF_EXC_TYPE exc_TimeoutError_type, exc_name_TimeoutError, exc_Exception_type
+DEF_EXC_TYPE exc_GeneratorExit_type, exc_name_GeneratorExit, exc_BaseException_type
+DEF_EXC_TYPE exc_ModuleNotFoundError_type, exc_name_ModuleNotFoundError, exc_ImportError_type
+DEF_EXC_TYPE exc_SyntaxError_type, exc_name_SyntaxError, exc_Exception_type
+DEF_EXC_TYPE exc_EOFError_type, exc_name_EOFError, exc_Exception_type
+DEF_EXC_TYPE exc_UnicodeDecodeError_type, exc_name_UnicodeDecodeError, exc_UnicodeError_type
+DEF_EXC_TYPE exc_UnicodeEncodeError_type, exc_name_UnicodeEncodeError, exc_UnicodeError_type
+DEF_EXC_TYPE exc_ConnectionError_type, exc_name_ConnectionError, exc_OSError_type
+DEF_EXC_TYPE exc_ConnectionResetError_type, exc_name_ConnectionResetError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_ConnectionRefusedError_type, exc_name_ConnectionRefusedError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_ConnectionAbortedError_type, exc_name_ConnectionAbortedError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_BrokenPipeError_type, exc_name_BrokenPipeError, exc_ConnectionError_type
+DEF_EXC_TYPE exc_PermissionError_type, exc_name_PermissionError, exc_OSError_type
+DEF_EXC_TYPE exc_IsADirectoryError_type, exc_name_IsADirectoryError, exc_OSError_type
+DEF_EXC_TYPE exc_NotADirectoryError_type, exc_name_NotADirectoryError, exc_OSError_type
+DEF_EXC_TYPE exc_ProcessLookupError_type, exc_name_ProcessLookupError, exc_OSError_type
+DEF_EXC_TYPE exc_ChildProcessError_type, exc_name_ChildProcessError, exc_OSError_type
+DEF_EXC_TYPE exc_BlockingIOError_type, exc_name_BlockingIOError, exc_OSError_type
+DEF_EXC_TYPE exc_InterruptedError_type, exc_name_InterruptedError, exc_OSError_type
+DEF_EXC_TYPE exc_FloatingPointError_type, exc_name_FloatingPointError, exc_ArithmeticError_type
+DEF_EXC_TYPE exc_BufferError_type, exc_name_BufferError, exc_Exception_type
+DEF_EXC_TYPE exc_ReferenceError_type, exc_name_ReferenceError, exc_Exception_type
+DEF_EXC_TYPE exc_SystemError_type, exc_name_SystemError, exc_Exception_type
+DEF_EXC_TYPE exc_RuntimeWarning_type, exc_name_RuntimeWarning, exc_Warning_type
+DEF_EXC_TYPE exc_FutureWarning_type, exc_name_FutureWarning, exc_Warning_type
+DEF_EXC_TYPE exc_ImportWarning_type, exc_name_ImportWarning, exc_Warning_type
+DEF_EXC_TYPE exc_UnicodeWarning_type, exc_name_UnicodeWarning, exc_Warning_type
+DEF_EXC_TYPE exc_ResourceWarning_type, exc_name_ResourceWarning, exc_Warning_type
+DEF_EXC_TYPE exc_BytesWarning_type, exc_name_BytesWarning, exc_Warning_type
+DEF_EXC_TYPE exc_PendingDeprecationWarning_type, exc_name_PendingDeprecationWarning, exc_Warning_type
+DEF_EXC_TYPE exc_SyntaxWarning_type, exc_name_SyntaxWarning, exc_Warning_type
+DEF_EXC_TYPE exc_EncodingWarning_type, exc_name_EncodingWarning, exc_Warning_type
 
 ; Exception type lookup table indexed by EXC_* constants
 align 8

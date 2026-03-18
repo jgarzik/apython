@@ -158,12 +158,14 @@ DEF_FUNC_BARE op_load_global
     ; Try builtins: dict_get_index(builtins, name) -> slot or -1
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
+    push rsi                   ; save name for error message
     mov edx, TAG_PTR
     call dict_get_index
     cmp rax, -1
     je .not_found
 
     ; Found in builtins — specialize to LOAD_GLOBAL_BUILTIN
+    add rsp, 8                 ; discard saved name
     mov word [rbx + 2], ax     ; CACHE[1] = index
     mov rdi, [r12 + PyFrame.globals]
     mov rdi, [rdi + PyDictObject.dk_version]
@@ -185,9 +187,9 @@ DEF_FUNC_BARE op_load_global
     jmp .lg_push_result
 
 .not_found:
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "name not found"
-    call raise_exception
+    pop rdi                    ; name (PyStrObject*)
+    call raise_name_not_defined
+    ; (does not return)
 
 .lg_push_result:
     INCREF_VAL rax, rdx
@@ -318,15 +320,16 @@ DEF_FUNC_BARE op_load_name
     ; Try builtins: dict_get(builtins, name)
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
+    push rsi                   ; save for error message
     mov edx, TAG_PTR
     call dict_get
     test edx, edx
-    jnz .found_no_pop
+    jnz .found
 
-    ; Not found in any dict - raise NameError
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "name not found"
-    call raise_exception
+    ; Not found in any dict - raise NameError with name
+    pop rdi                    ; name (PyStrObject*)
+    call raise_name_not_defined
+    ; (does not return)
 
 .found:
     add rsp, 8                 ; discard saved name
@@ -952,8 +955,9 @@ DEF_FUNC_BARE op_load_deref
     DISPATCH
 
 .deref_error:
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "free variable referenced before assignment"
+    extern exc_UnboundLocalError_type
+    lea rdi, [rel exc_UnboundLocalError_type]
+    CSTRING rsi, "cannot access variable before assignment"
     call raise_exception
 END_FUNC op_load_deref
 
@@ -973,8 +977,9 @@ DEF_FUNC_BARE op_load_fast_check
     DISPATCH
 
 .lfc_error:
-    lea rdi, [rel exc_NameError_type]
-    CSTRING rsi, "cannot access local variable"
+    extern exc_UnboundLocalError_type
+    lea rdi, [rel exc_UnboundLocalError_type]
+    CSTRING rsi, "cannot access local variable before assignment"
     call raise_exception
 END_FUNC op_load_fast_check
 
@@ -1105,3 +1110,47 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     leave
     DISPATCH
 END_FUNC op_load_super_attr
+
+;; ============================================================================
+;; raise_name_not_defined(PyStrObject *name)
+;; Raise NameError with message "name 'X' is not defined"
+;; rdi = name string object
+;; Does not return.
+;; ============================================================================
+RNND_BUF   equ 256
+RNND_FRAME equ RNND_BUF
+global raise_name_not_defined
+DEF_FUNC raise_name_not_defined, RNND_FRAME
+    ; Build "name 'X' is not defined" in stack buffer
+    lea rcx, [rbp - RNND_BUF]
+    lea rsi, [rdi + PyStrObject.data]   ; name C-string
+
+    ; "name '"
+    mov dword [rcx], "name"
+    mov word [rcx+4], " '"
+    add rcx, 6
+
+    ; Copy name
+.rnnd_copy:
+    mov al, [rsi]
+    test al, al
+    jz .rnnd_name_done
+    mov [rcx], al
+    inc rcx
+    inc rsi
+    jmp .rnnd_copy
+.rnnd_name_done:
+
+    ; "' is not defined"
+    mov dword [rcx], "' is"
+    mov dword [rcx+4], " not"
+    mov dword [rcx+8], " def"
+    mov dword [rcx+12], "ined"
+    mov byte [rcx+16], 0
+    ; Total appended: 16 chars
+
+    extern exc_NameError_type
+    lea rdi, [rel exc_NameError_type]
+    lea rsi, [rbp - RNND_BUF]
+    call raise_exception
+END_FUNC raise_name_not_defined

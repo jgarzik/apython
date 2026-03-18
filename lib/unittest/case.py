@@ -141,6 +141,28 @@ class TestCase:
                 raise AssertionError(msg)
             raise AssertionError("%r == %r" % (first, second))
 
+    def assertAlmostEqual(self, first, second, places=7, msg=None):
+        if first == second:
+            return
+        diff = abs(first - second)
+        if diff <= 10 ** (-places):
+            return
+        if msg:
+            raise AssertionError(msg)
+        raise AssertionError("%r != %r within %d places" % (first, second, places))
+
+    def assertNotAlmostEqual(self, first, second, places=7, msg=None):
+        if first == second:
+            if msg:
+                raise AssertionError(msg)
+            raise AssertionError("%r == %r within %d places" % (first, second, places))
+        diff = abs(first - second)
+        if diff > 10 ** (-places):
+            return
+        if msg:
+            raise AssertionError(msg)
+        raise AssertionError("%r == %r within %d places" % (first, second, places))
+
     def assertTrue(self, expr, msg=None):
         if not expr:
             raise AssertionError(msg or "%r is not true" % (expr,))
@@ -154,6 +176,16 @@ class TestCase:
             if msg:
                 raise AssertionError(msg)
             raise AssertionError("%r is not %r" % (first, second))
+
+    def assertIsNone(self, obj, msg=None):
+        if obj is not None:
+            if msg:
+                raise AssertionError(msg)
+            raise AssertionError("%r is not None" % (obj,))
+
+    def assertIsNotNone(self, obj, msg=None):
+        if obj is None:
+            raise AssertionError(msg or "unexpectedly None")
 
     def assertIsNot(self, first, second, msg=None):
         if first is second:

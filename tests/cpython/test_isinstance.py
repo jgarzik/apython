@@ -56,9 +56,12 @@ class TestIsInstanceIsSubclass(unittest.TestCase):
         self.assertFalse(issubclass(int, str))
         self.assertFalse(issubclass(str, int))
 
-    @unittest.skip("issubclass with tuple arg always returns False")
     def test_subclass_tuple(self):
-        pass
+        self.assertTrue(issubclass(bool, (int, str)))
+        self.assertTrue(issubclass(str, (int, str)))
+        self.assertFalse(issubclass(list, (int, str)))
+        self.assertTrue(issubclass(Child, (Super, int)))
+        self.assertFalse(issubclass(Super, (Child, str)))
 
     def test_isinstance_with_custom_class(self):
         class A:
@@ -89,13 +92,14 @@ class TestIsInstanceIsSubclass(unittest.TestCase):
         self.assertFalse(issubclass(A, B))
         self.assertFalse(issubclass(A, C))
 
-    @unittest.skip("isinstance(1,1) doesn't raise TypeError yet")
     def test_isinstance_errors(self):
-        pass
+        self.assertRaises(TypeError, isinstance, 1, 1)
+        self.assertRaises(TypeError, isinstance, 1, "not_a_type")
 
-    @unittest.skip("issubclass(1,int) segfaults")
     def test_issubclass_errors(self):
-        pass
+        self.assertRaises(TypeError, issubclass, 1, int)
+        self.assertRaises(TypeError, issubclass, int, 1)
+        self.assertRaises(TypeError, issubclass, 1, 1)
 
 
 if __name__ == "__main__":
