@@ -94,6 +94,8 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_unary.py
 	@echo "Compiling tests/cpython/test_pow.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_pow.py
+	@echo "Compiling tests/cpython/test_contains.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_contains.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -135,3 +137,5 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_unary.cpython-312.pyc
 	@echo "Running CPython test_pow.py..."
 	@./apython tests/cpython/__pycache__/test_pow.cpython-312.pyc
+	@echo "Running CPython test_contains.py..."
+	@./apython tests/cpython/__pycache__/test_contains.cpython-312.pyc

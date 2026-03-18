@@ -1073,10 +1073,18 @@ DEF_FUNC str_subscript
 END_FUNC str_subscript
 
 ;; ============================================================================
-;; str_contains(PyObject *self, PyObject *substr) -> int (0/1)
+;; str_contains(PyObject *self, PyObject *substr, int substr_tag) -> int (0/1)
 ;; sq_contains: check if substr is in self using strstr
 ;; ============================================================================
 DEF_FUNC str_contains
+
+    ; Validate substr is a string (TAG_PTR with ob_type == str_type)
+    cmp edx, TAG_PTR
+    jne .str_contains_type_error
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .str_contains_type_error
 
     extern ap_strstr
     lea rdi, [rdi + PyStrObject.data]
@@ -1088,6 +1096,13 @@ DEF_FUNC str_contains
 
     leave
     ret
+
+.str_contains_type_error:
+    extern exc_TypeError_type
+    extern raise_exception
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "'in <string>' requires string as left operand"
+    call raise_exception
 END_FUNC str_contains
 
 ;; ============================================================================
