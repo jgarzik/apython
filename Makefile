@@ -96,6 +96,16 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_pow.py
 	@echo "Compiling tests/cpython/test_contains.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_contains.py
+	@echo "Compiling tests/cpython/test_exception_variations.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_exception_variations.py
+	@echo "Compiling tests/cpython/test_genexps.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_genexps.py
+	@echo "Compiling tests/cpython/test_listcomps.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_listcomps.py
+	@echo "Compiling tests/cpython/test_raise.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_raise.py
+	@echo "Compiling tests/cpython/test_class.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_class.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -139,3 +149,13 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_pow.cpython-312.pyc
 	@echo "Running CPython test_contains.py..."
 	@./apython tests/cpython/__pycache__/test_contains.cpython-312.pyc
+	@echo "Running CPython test_exception_variations.py..."
+	@./apython tests/cpython/__pycache__/test_exception_variations.cpython-312.pyc
+	@echo "Running CPython test_genexps.py..."
+	@./apython tests/cpython/__pycache__/test_genexps.cpython-312.pyc
+	@echo "Running CPython test_listcomps.py..."
+	@./apython tests/cpython/__pycache__/test_listcomps.cpython-312.pyc
+	@echo "Running CPython test_raise.py..."
+	@./apython tests/cpython/__pycache__/test_raise.cpython-312.pyc
+	@echo "Running CPython test_class.py..."
+	@./apython tests/cpython/__pycache__/test_class.cpython-312.pyc
