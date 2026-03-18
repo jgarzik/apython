@@ -67,9 +67,21 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(f5(1), 3)
         self.assertEqual(f5(1, 10), 11)
 
-    @unittest.skip("LOAD_FAST NameError is fatal, not catchable")
     def testUnboundLocal(self):
-        pass
+        def errorInOuter():
+            print(y)
+            def inner():
+                return y
+            y = 1
+
+        def errorInInner():
+            def inner():
+                return y
+            inner()
+            y = 1
+
+        self.assertRaises(UnboundLocalError, errorInOuter)
+        self.assertRaises(NameError, errorInInner)
 
     def testComplexDefinitions(self):
         def makeReturner(*lst):

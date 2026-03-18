@@ -60,7 +60,6 @@ class KeywordOnlyArgTestCase(unittest.TestCase):
         fundef = "def f(*, %s):\n  pass\n" % ', '.join('i%d' % i for i in range(300))
         compile(fundef, "<test>", "single")
 
-    @unittest.skip("requires __qualname__")
     def testTooManyPositionalErrorMessage(self):
         def f(a, b=None, *, c=None):
             pass
@@ -167,7 +166,6 @@ class KeywordOnlyArgTestCase(unittest.TestCase):
                 return __a
         self.assertEqual(X().f(), 42)
 
-    @unittest.skip("error message format differs")
     def test_default_evaluation_order(self):
         # See issue 16967
         a = 42

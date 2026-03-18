@@ -758,6 +758,7 @@ exc_name_KeyError:          db "KeyError", 0
 exc_name_IndexError:        db "IndexError", 0
 exc_name_AttributeError:    db "AttributeError", 0
 exc_name_NameError:         db "NameError", 0
+exc_name_UnboundLocalError: db "UnboundLocalError", 0
 exc_name_RuntimeError:      db "RuntimeError", 0
 exc_name_StopIteration:     db "StopIteration", 0
 exc_name_ZeroDivisionError: db "ZeroDivisionError", 0
@@ -890,6 +891,7 @@ DEF_EXC_TYPE exc_KeyError_type, exc_name_KeyError, exc_LookupError_type
 DEF_EXC_TYPE exc_IndexError_type, exc_name_IndexError, exc_LookupError_type
 DEF_EXC_TYPE exc_AttributeError_type, exc_name_AttributeError, exc_Exception_type
 DEF_EXC_TYPE exc_NameError_type, exc_name_NameError, exc_Exception_type
+DEF_EXC_TYPE exc_UnboundLocalError_type, exc_name_UnboundLocalError, exc_NameError_type
 DEF_EXC_TYPE exc_RuntimeError_type, exc_name_RuntimeError, exc_Exception_type
 DEF_EXC_TYPE exc_StopIteration_type, exc_name_StopIteration, exc_Exception_type
 DEF_EXC_TYPE exc_ZeroDivisionError_type, exc_name_ZeroDivisionError, exc_ArithmeticError_type

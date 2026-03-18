@@ -107,6 +107,7 @@ extern exc_KeyError_type
 extern exc_IndexError_type
 extern exc_AttributeError_type
 extern exc_NameError_type
+extern exc_UnboundLocalError_type
 extern exc_RuntimeError_type
 extern exc_StopIteration_type
 extern exc_ZeroDivisionError_type
@@ -2147,6 +2148,11 @@ DEF_FUNC builtins_init
     call add_exc_type_builtin
 
     mov rdi, rbx
+    lea rsi, [rel bi_name_UnboundLocalError]
+    lea rdx, [rel exc_UnboundLocalError_type]
+    call add_exc_type_builtin
+
+    mov rdi, rbx
     lea rsi, [rel bi_name_RuntimeError]
     lea rdx, [rel exc_RuntimeError_type]
     call add_exc_type_builtin
@@ -2528,6 +2534,7 @@ bi_name_KeyError:          db "KeyError", 0
 bi_name_IndexError:        db "IndexError", 0
 bi_name_AttributeError:    db "AttributeError", 0
 bi_name_NameError:         db "NameError", 0
+bi_name_UnboundLocalError: db "UnboundLocalError", 0
 bi_name_RuntimeError:      db "RuntimeError", 0
 bi_name_StopIteration:     db "StopIteration", 0
 bi_name_ZeroDivisionError: db "ZeroDivisionError", 0

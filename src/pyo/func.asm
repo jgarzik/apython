@@ -150,11 +150,12 @@ DEF_FUNC func_call
     mov edx, [rdi + PyCodeObject.co_flags]
     test edx, CO_VARARGS
     jnz .args_count_ok
-    ; Too many positional args — raise TypeError
-    extern exc_TypeError_type
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "function takes too many positional arguments"
-    call raise_exception
+    ; Too many positional args — raise TypeError with CPython-format message
+    ; ecx = given positional count, rdi = code object, rbx = func
+    mov esi, ecx               ; esi = nargs_given
+    mov rdi, rbx               ; rdi = func
+    call raise_too_many_positional
+    ; (does not return)
 .args_count_ok:
 
     ; Get builtins from global (avoids r12 caller-frame assumption)
@@ -788,6 +789,13 @@ DEF_FUNC func_getattr
     test eax, eax
     jz .return_name
 
+    ; Check for __qualname__
+    lea rdi, [rel fn_attr_qualname]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .return_qualname
+
     ; Check for __kwdefaults__
     lea rdi, [rel fn_attr_kwdefaults]
     lea rsi, [r12 + PyStrObject.data]
@@ -829,6 +837,19 @@ DEF_FUNC func_getattr
 
 .return_name:
     mov rax, [rbx + PyFuncObject.func_name]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.return_qualname:
+    ; Get co_qualname from the code object
+    mov rax, [rbx + PyFuncObject.func_code]
+    mov rax, [rax + PyCodeObject.co_qualname]
+    test rax, rax
+    jz .return_name          ; fall back to __name__ if no qualname
     INCREF rax
     mov edx, TAG_PTR
     pop r12
@@ -898,6 +919,198 @@ DEF_FUNC_BARE func_repr
 END_FUNC func_repr
 
 ; ---------------------------------------------------------------------------
+; raise_too_many_positional(PyFuncObject *func, int nargs_given)
+; Raise TypeError with CPython-format message:
+;   "qualname() takes N positional arguments but M were given"
+;   or "qualname() takes from N to M positional arguments but K were given"
+; rdi = func, esi = nargs_given
+; Does not return.
+; ---------------------------------------------------------------------------
+RTMP_BUF  equ 256
+RTMP_FRAME equ RTMP_BUF + 24
+DEF_FUNC raise_too_many_positional, RTMP_FRAME
+    push rbx
+    push r12
+    mov rbx, rdi               ; func
+    mov r12d, esi              ; nargs_given
+
+    ; Get qualname C-string
+    mov rax, [rbx + PyFuncObject.func_code]
+    mov rdi, [rax + PyCodeObject.co_qualname]
+    test rdi, rdi
+    jnz .rtmp_have_name
+    mov rdi, [rbx + PyFuncObject.func_name]
+.rtmp_have_name:
+    lea rsi, [rdi + PyStrObject.data]   ; rsi = qualname cstr
+
+    ; Get code object stats
+    mov rdi, [rbx + PyFuncObject.func_code]
+    mov eax, [rdi + PyCodeObject.co_argcount]
+    ; eax = max positional args
+
+    ; Compute min_args = co_argcount - len(func_defaults)
+    mov ecx, eax               ; ecx = max_args
+    mov rdi, [rbx + PyFuncObject.func_defaults]
+    test rdi, rdi
+    jz .rtmp_no_defaults
+    mov edx, [rdi + PyTupleObject.ob_size]
+    sub ecx, edx               ; ecx = min_args
+    test ecx, ecx
+    jns .rtmp_have_min
+    xor ecx, ecx              ; clamp to 0
+    jmp .rtmp_have_min
+.rtmp_no_defaults:
+    mov ecx, eax               ; min = max (no defaults)
+.rtmp_have_min:
+    ; ecx = min_args, eax = max_args, r12d = given, rsi = qualname cstr
+
+    ; Build message in stack buffer [rbp - RTMP_BUF]
+    lea rdi, [rbp - RTMP_BUF]
+    push rax                   ; save max_args
+    push rcx                   ; save min_args
+
+    ; Copy qualname
+.rtmp_copy_name:
+    mov al, [rsi]
+    test al, al
+    jz .rtmp_name_done
+    mov [rdi], al
+    inc rdi
+    inc rsi
+    jmp .rtmp_copy_name
+.rtmp_name_done:
+
+    ; Append "() takes "
+    mov dword [rdi], '() t'
+    mov dword [rdi+4], 'akes'
+    mov byte [rdi+8], ' '
+    add rdi, 9
+
+    pop rcx                    ; min_args
+    pop rax                    ; max_args
+
+    cmp ecx, eax
+    je .rtmp_exact_count
+
+    ; "from {min} to {max} "
+    mov dword [rdi], 'from'
+    mov byte [rdi+4], ' '
+    add rdi, 5
+    push rax                   ; save max
+    mov eax, ecx               ; min_args
+    call .rtmp_itoa
+    mov dword [rdi], ' to '
+    add rdi, 4
+    pop rax                    ; max_args
+    call .rtmp_itoa
+    jmp .rtmp_msg_cont
+
+.rtmp_exact_count:
+    ; Just "{max} "
+    call .rtmp_itoa
+
+.rtmp_msg_cont:
+    ; " positional argument(s) but {given} were given"
+    ; Check singular/plural
+    push rdi
+    lea rsi, [rel rtmp_pos_args]
+    call .rtmp_strcpy
+    pop rdi
+    add rdi, rax               ; advance by length
+
+    mov eax, r12d              ; given
+    call .rtmp_itoa
+
+    ; " were given" or " was given"
+    cmp r12d, 1
+    je .rtmp_was
+    push rdi
+    lea rsi, [rel rtmp_were_given]
+    call .rtmp_strcpy
+    pop rdi
+    add rdi, rax
+    jmp .rtmp_finish
+
+.rtmp_was:
+    push rdi
+    lea rsi, [rel rtmp_was_given]
+    call .rtmp_strcpy
+    pop rdi
+    add rdi, rax
+
+.rtmp_finish:
+    mov byte [rdi], 0          ; null terminate
+
+    ; Raise TypeError with buffer
+    extern exc_TypeError_type
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RTMP_BUF]
+    call raise_exception
+
+; Mini itoa: convert eax to decimal at [rdi], advance rdi
+.rtmp_itoa:
+    push rbx
+    push rcx
+    test eax, eax
+    jnz .rtmp_itoa_nonzero
+    mov byte [rdi], '0'
+    inc rdi
+    pop rcx
+    pop rbx
+    ret
+.rtmp_itoa_nonzero:
+    ; Handle negative
+    test eax, eax
+    jns .rtmp_itoa_pos
+    mov byte [rdi], '-'
+    inc rdi
+    neg eax
+.rtmp_itoa_pos:
+    ; Push digits in reverse
+    xor ecx, ecx              ; digit count
+    mov ebx, 10
+.rtmp_itoa_div:
+    xor edx, edx
+    div ebx
+    add dl, '0'
+    push rdx
+    inc ecx
+    test eax, eax
+    jnz .rtmp_itoa_div
+    ; Pop digits in order
+.rtmp_itoa_pop:
+    pop rax
+    mov [rdi], al
+    inc rdi
+    dec ecx
+    jnz .rtmp_itoa_pop
+    pop rcx
+    pop rbx
+    ret
+
+; Mini strcpy: copy rsi to [rdi], return length in rax
+.rtmp_strcpy:
+    xor eax, eax
+.rtmp_strcpy_loop:
+    mov cl, [rsi + rax]
+    test cl, cl
+    jz .rtmp_strcpy_done
+    mov [rdi + rax], cl
+    inc rax
+    jmp .rtmp_strcpy_loop
+.rtmp_strcpy_done:
+    ret
+
+END_FUNC raise_too_many_positional
+
+section .rodata
+rtmp_pos_args:     db " positional arguments but ", 0
+rtmp_were_given:   db " were given", 0
+rtmp_was_given:    db " was given", 0
+
+section .text
+
+; ---------------------------------------------------------------------------
 ; Data section
 ; ---------------------------------------------------------------------------
 section .data
@@ -908,6 +1121,7 @@ fn_attr_name:   db "__name__", 0
 fn_attr_dict:   db "__dict__", 0
 fn_attr_code:   db "__code__", 0
 fn_attr_kwdefaults: db "__kwdefaults__", 0
+fn_attr_qualname: db "__qualname__", 0
 
 ; func_type - Type object for function objects
 align 8
