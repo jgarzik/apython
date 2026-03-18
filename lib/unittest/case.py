@@ -177,6 +177,16 @@ class TestCase:
                 raise AssertionError(msg)
             raise AssertionError("%r is not %r" % (first, second))
 
+    def assertIsNone(self, obj, msg=None):
+        if obj is not None:
+            if msg:
+                raise AssertionError(msg)
+            raise AssertionError("%r is not None" % (obj,))
+
+    def assertIsNotNone(self, obj, msg=None):
+        if obj is None:
+            raise AssertionError(msg or "unexpectedly None")
+
     def assertIsNot(self, first, second, msg=None):
         if first is second:
             if msg:

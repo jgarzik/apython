@@ -130,6 +130,16 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_builtin.py
 	@echo "Compiling tests/cpython/test_types.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_types.py
+	@echo "Compiling tests/cpython/test_closures.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_closures.py
+	@echo "Compiling tests/cpython/test_dict_extra.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_dict_extra.py
+	@echo "Compiling tests/cpython/test_tuple_extra.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_tuple_extra.py
+	@echo "Compiling tests/cpython/test_set_extra.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_set_extra.py
+	@echo "Compiling tests/cpython/test_list_extra.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_list_extra.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -207,3 +217,13 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_builtin.cpython-312.pyc
 	@echo "Running CPython test_types.py..."
 	@./apython tests/cpython/__pycache__/test_types.cpython-312.pyc
+	@echo "Running CPython test_closures.py..."
+	@./apython tests/cpython/__pycache__/test_closures.cpython-312.pyc
+	@echo "Running CPython test_dict_extra.py..."
+	@./apython tests/cpython/__pycache__/test_dict_extra.cpython-312.pyc
+	@echo "Running CPython test_tuple_extra.py..."
+	@./apython tests/cpython/__pycache__/test_tuple_extra.cpython-312.pyc
+	@echo "Running CPython test_set_extra.py..."
+	@./apython tests/cpython/__pycache__/test_set_extra.cpython-312.pyc
+	@echo "Running CPython test_list_extra.py..."
+	@./apython tests/cpython/__pycache__/test_list_extra.cpython-312.pyc
