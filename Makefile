@@ -140,6 +140,16 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_set_extra.py
 	@echo "Compiling tests/cpython/test_list_extra.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_list_extra.py
+	@echo "Compiling tests/cpython/test_controlflow.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_controlflow.py
+	@echo "Compiling tests/cpython/test_math_basic.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_math_basic.py
+	@echo "Compiling tests/cpython/test_global_nonlocal.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_global_nonlocal.py
+	@echo "Compiling tests/cpython/test_unpacking.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_unpacking.py
+	@echo "Compiling tests/cpython/test_inheritance.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_inheritance.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -227,3 +237,13 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_set_extra.cpython-312.pyc
 	@echo "Running CPython test_list_extra.py..."
 	@./apython tests/cpython/__pycache__/test_list_extra.cpython-312.pyc
+	@echo "Running CPython test_controlflow.py..."
+	@./apython tests/cpython/__pycache__/test_controlflow.cpython-312.pyc
+	@echo "Running CPython test_math_basic.py..."
+	@./apython tests/cpython/__pycache__/test_math_basic.cpython-312.pyc
+	@echo "Running CPython test_global_nonlocal.py..."
+	@./apython tests/cpython/__pycache__/test_global_nonlocal.cpython-312.pyc
+	@echo "Running CPython test_unpacking.py..."
+	@./apython tests/cpython/__pycache__/test_unpacking.cpython-312.pyc
+	@echo "Running CPython test_inheritance.py..."
+	@./apython tests/cpython/__pycache__/test_inheritance.cpython-312.pyc
