@@ -124,6 +124,12 @@ gen-cpython-tests:
 	@$(PYTHON) -m py_compile tests/cpython/test_property.py
 	@echo "Compiling tests/cpython/test_string.py..."
 	@$(PYTHON) -m py_compile tests/cpython/test_string.py
+	@echo "Compiling tests/cpython/test_bytes.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_bytes.py
+	@echo "Compiling tests/cpython/test_builtin.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_builtin.py
+	@echo "Compiling tests/cpython/test_types.py..."
+	@$(PYTHON) -m py_compile tests/cpython/test_types.py
 	@echo "Done."
 
 check-cpython: $(TARGET) gen-cpython-tests
@@ -195,3 +201,9 @@ check-cpython: $(TARGET) gen-cpython-tests
 	@./apython tests/cpython/__pycache__/test_property.cpython-312.pyc
 	@echo "Running CPython test_string.py..."
 	@./apython tests/cpython/__pycache__/test_string.cpython-312.pyc
+	@echo "Running CPython test_bytes.py..."
+	@./apython tests/cpython/__pycache__/test_bytes.cpython-312.pyc
+	@echo "Running CPython test_builtin.py..."
+	@./apython tests/cpython/__pycache__/test_builtin.cpython-312.pyc
+	@echo "Running CPython test_types.py..."
+	@./apython tests/cpython/__pycache__/test_types.cpython-312.pyc
