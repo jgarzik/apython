@@ -316,8 +316,16 @@ DEF_FUNC slot_nb_bool
     leave
     ret
 .not_bool:
-    add rsp, 16
-    RAISE exc_TypeError_type, "__bool__ should return bool"
+    ; CPython names what came back -- "returned int" is what tells the author
+    ; which of their returns was the wrong one.  The Value is rebuilt from the
+    ; pair because value_type classifies a Value, and an immediate has no
+    ; ob_type to read; the reference it still holds dies with the unwind.
+    pop rdx
+    pop rsi
+    V_PACK rsi, rdx
+    CSTRING rdi, `__bool__ should return bool, returned \x01`
+    extern raise_type_error_with_name
+    jmp raise_type_error_with_name
 .failed:
     call slot_reraise
 END_FUNC slot_nb_bool

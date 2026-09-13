@@ -270,18 +270,39 @@ END_FUNC dunder_lookup_after
 ;; ============================================================================
 ;; dunder_bind(rdi = what dunder_lookup found, rsi = self)
 ;;   -> rax = the callable to use; edx = 0 when self is prepended to its
-;;      arguments and rax is borrowed, 1 when it is already bound and rax is
-;;      OWNED, 2 when __get__ raised and rax is 0
+;;      arguments and rax is borrowed, 1 when self is NOT an argument and rax
+;;      is OWNED, 2 when __get__ raised and rax is 0
 ;;
-;; CPython's lookup_maybe_method.  A plain function is a METHOD_DESCRIPTOR and
-;; is called unbound, with self as its first argument; anything else goes
-;; through its own __get__ first and is then called WITHOUT self.
+;; CPython's lookup_maybe_method.  It asks one question of what the type's
+;; MRO answered with: is it a DESCRIPTOR?
+;;
+;;   - a plain function is a METHOD_DESCRIPTOR, and is called unbound with
+;;     self as its first argument.  This is the fast path, kept exactly so a
+;;     bound method need not be built per call
+;;   - a descriptor of any other kind goes through its own __get__ first, and
+;;     what that answers is called WITHOUT self
+;;   - anything that is NOT a descriptor at all is called exactly as it
+;;     stands, also WITHOUT self
 ;;
 ;; The three dunder_call_* used to prepend self unconditionally, so a dunder
 ;; that is a DESCRIPTOR was never bound at all -- its __get__ never ran and
 ;; the descriptor OBJECT was called instead.  For one with no __call__ that is
 ;; a jump to a NULL tp_call: unittest.mock installs exactly this shape
 ;; (MagicProxy, one per magic method), and every MagicMock test segfaulted.
+;;
+;; The third arm is the other half of the same mistake, and it stood for
+;; longer.  A dunder that is ALREADY BOUND -- `type("C", (), {"__len__":
+;; L.__len__})` -- is not a descriptor, so self was prepended to a callable
+;; that had one, and every slot reached through the protocol raised TypeError
+;; about arity while the SAME attribute read off the instance worked.  The
+;; worst of them did not raise: a generator's __next__ swallowed the extra
+;; argument and answered the ITERATOR at exhaustion instead of raising
+;; StopIteration, so a `for` over such an object never terminated.  That is
+;; how xml.etree.ElementTree.iterparse builds its iterator.
+;;
+;; The question is asked of the TYPE, not of the name: staticmethod(...) and
+;; a plain callable instance come out right for the same reason a bound
+;; method does.
 ;; ============================================================================
 DB_FOUND equ 8
 DB_SELF  equ 16
@@ -302,12 +323,13 @@ DEF_FUNC dunder_bind, DB_FRAME
     cmp rax, rcx
     je .db_unbound              ; its own convention is args[0] = self
 
-    ; Anything else: bind it if its type says how.
+    ; Anything else: bind it if its type says how, and otherwise take it
+    ; exactly as it stands.
     mov rdi, rax
     lea rsi, [rel dunder_get]
     call dunder_lookup
     V_TEST_PTR rax, rcx
-    ja .db_unbound              ; absent, or not something that can be called
+    ja .db_as_is                ; no __get__: not a descriptor
 
     mov rdi, [rbp - DB_FOUND]
     mov rsi, [rbp - DB_SELF]
@@ -324,6 +346,16 @@ DEF_FUNC dunder_bind, DB_FRAME
 .db_unbound:
     mov rax, [rbp - DB_FOUND]
     xor edx, edx
+    leave
+    ret
+
+.db_as_is:
+    ; Not a descriptor, so there is nothing to bind and nothing to prepend.
+    ; edx = 1 promises the caller an OWNED reference -- it releases what it
+    ; was handed -- and what dunder_lookup found is borrowed from a tp_dict.
+    mov rax, [rbp - DB_FOUND]
+    INCREF rax
+    mov edx, 1
     leave
     ret
 

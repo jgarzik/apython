@@ -418,8 +418,19 @@ DEF_FUNC builtin_next_fn, NX_FRAME
 .next_stop_with_val:
     lea rdi, [rel exc_StopIteration_type]
     call exc_new
+    ; SET the exception and answer NULL rather than RAISE.  A raise tail-jumps
+    ; into eval_exception_unwind, which lands in the nearest PYTHON frame --
+    ; and this is registered as the generator's own __next__, so
+    ; slot_tp_iternext reaches it with no Python frame of its own in between.
+    ; The StopIteration then unwound straight past the wrapper that exists to
+    ; turn it back into exhaustion, and out of the `for` that was calling it:
+    ; `type("C", (), {"__next__": gen().__next__})` never terminated a loop.
+    ; op_call propagates a NULL with an exception pending, so the Python-level
+    ; `next(it)` is unchanged.
     mov rdi, rax
-    call raise_exception_obj
+    extern exc_install
+    call exc_install            ; takes ownership of the reference
+    jmp .next_got_val_null
 
 .next_type_error:
     mov rsi, [rbp - NX_ARG]
