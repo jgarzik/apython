@@ -803,10 +803,19 @@ DEF_DUNDER_LEN str
 ;;
 ;; The exhaustion arm is builtin_next_fn's: a NULL from tp_iternext is a clean
 ;; stop OR a raise, and manufacturing a StopIteration without asking which
-;; would report a dict mutated during iteration as the end of the dict.  A
-;; RAISE here is right where a tp_iternext's would be wrong -- this is called
-;; from a live Python frame, and the slot wrapper is what turns a StopIteration
-;; back into exhaustion.
+;; would report a dict mutated during iteration as the end of the dict.
+;;
+;; It SETS that StopIteration and answers NULL; it does not RAISE.  This said
+;; the opposite, on the reasoning that the thunk is only ever called from a
+;; live Python frame -- and that stopped being true the moment dunder_bind
+;; learned not to prepend self to a bound method, because
+;; `type("C", (), {"__next__": iter([1]).__next__})` then reaches this thunk
+;; from slot_tp_iternext with no Python frame in between.  A RAISE there
+;; unwinds to the nearest enclosing Python frame and straight past the wrapper
+;; whose whole job is to turn a StopIteration back into exhaustion, so a `for`
+;; over such an object never terminated.  Every caller of a builtin already
+;; propagates a NULL with an exception pending, so the ordinary
+;; `it.__next__()` is unchanged.
 ;; ============================================================================
 DN_EXC   equ 8
 DN_FRAME equ 32             ; + 0 pushes = 32, 16-aligned.  It was 24, so
@@ -850,8 +859,8 @@ DEF_FUNC %1_dunder_next, DN_FRAME
     extern exc_new
     call exc_new
     mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj    ; does not return
+    extern exc_install
+    call exc_install            ; takes ownership; falls through to %%failed
 
 %%failed:
     xor eax, eax

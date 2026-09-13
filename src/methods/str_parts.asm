@@ -1747,6 +1747,7 @@ SE_ARGS  equ 56
 SE_NARGS equ 64
 SE_CURSOR equ 72            ; the source cursor, across codec_error_id
 SE_ENC   equ 80             ; the encoding argument, for the Python path
+SE_SCAN  equ 88             ; the surrogate scan cursor, across ap_memchr
 SE_FRAME equ 96             ; + 2 pushes = 112
 DEF_FUNC str_method_encode, SE_FRAME
     push rbx
@@ -1827,7 +1828,48 @@ DEF_FUNC str_method_encode, SE_FRAME
     je .se_latin1
 
 .se_utf8:
-    ; The bytes are already UTF-8.
+    ; The bytes are already UTF-8 -- unless one of them is a lone surrogate,
+    ; which a str holds WTF-8-style and which UTF-8 has no encoding for at
+    ; all.  Handing the buffer out would answer bytes no decoder accepts and,
+    ; worse, would never consult the error handler, so `ignore`, `replace`
+    ; and the rest all answered the raw bytes too.  lib/_codecs does it
+    ; instead, from `.se_python`.
+    ;
+    ; ob_size is the length in bytes and ob_length in code points; they are
+    ; equal exactly when the string is pure ASCII, and an ASCII string cannot
+    ; hold a surrogate.  One compare buys the whole scan for most strings.
+    mov rbx, [rbp - SE_SELF]
+    mov rax, [rbx + PyStrObject.ob_length]
+    cmp rax, r12
+    je .se_utf8_copy
+    lea rax, [rbx + PyStrObject.data]
+    mov [rbp - SE_SCAN], rax
+
+.se_utf8_scan:
+    ; U+D800..U+DFFF is 0xED followed by 0xA0..0xBF, and nothing else is:
+    ; 0xED 0x80..0x9F is U+D000..U+D7FF, an ordinary character.  So find the
+    ; lead byte with the vector scanner and check the one after it.
+    mov rdi, [rbp - SE_SCAN]
+    lea rsi, [rbx + PyStrObject.data]
+    add rsi, r12
+    sub rsi, rdi                ; bytes left to look at
+    jle .se_utf8_copy
+    mov edx, 0xed
+    extern ap_memchr
+    call ap_memchr
+    test rax, rax
+    jz .se_utf8_copy
+    ; data is NUL-terminated, so the byte after a trailing 0xED is readable
+    ; and is 0, which is not a continuation byte.
+    movzx ecx, byte [rax + 1]
+    sub ecx, 0xa0
+    cmp ecx, 0x1f
+    jbe .se_surrogate
+    inc rax
+    mov [rbp - SE_SCAN], rax
+    jmp .se_utf8_scan
+
+.se_utf8_copy:
     mov rdi, r12
     extern bytes_new
     call bytes_new
@@ -1937,6 +1979,14 @@ DEF_FUNC str_method_encode, SE_FRAME
     V_PACK rax, rdx
     ret
 
+.se_surrogate:
+    ; The third direction, and the reason it exists: `_codecs.encode` of a
+    ; utf-8 string ends in this very method, so a surrogate sent through it
+    ; would arrive back here forever.  `_codecs._encode_surrogates` is the
+    ; one entry that does not.
+    mov r8d, 2
+    jmp .se_python_call
+
 .se_python:
     ; Everything this file cannot do itself: an encoding the registry has to
     ; find, and an error handler that is not one of the three built in here.
@@ -1944,10 +1994,12 @@ DEF_FUNC str_method_encode, SE_FRAME
     ; encode, which is also when CPython looks a handler up -- "ab".encode(
     ; "ascii", "bogus") succeeds there and here.  Re-encoding the whole
     ; string from Python is the price of arriving in the middle.
+    xor r8d, r8d
+.se_python_call:
     mov rdi, [rbp - SE_SELF]
     mov rsi, [rbp - SE_ENC]
     mov rdx, [rbp - SE_ERRS]
-    xor ecx, ecx                ; encode
+    mov ecx, r8d                ; 0 = _codecs.encode, 2 = _encode_surrogates
     extern codec_via_python
     call codec_via_python
     pop r12

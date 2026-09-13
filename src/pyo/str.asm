@@ -624,7 +624,8 @@ END_FUNC codec_error_id
 ;; ============================================================================
 ;; codec_via_python(rdi = the object, a Value; rsi = the encoding str or 0;
 ;;                  rdx = the errors argument, a Value, or 0;
-;;                  ecx = 0 to encode, 1 to decode)
+;;                  ecx = 0 to encode, 1 to decode, 2 to encode a str the
+;;                        UTF-8 fast path refused for holding a surrogate)
 ;;   -> rax = payload, rdx = tag; (0, 0) with an exception pending on failure
 ;;
 ;; Everything the interpreter cannot spell itself.  `_codecs` is Python -- it
@@ -633,14 +634,20 @@ END_FUNC codec_error_id
 ;; reaches it: lazily import the module, pull `encode` or `decode` out of its
 ;; dict, cache the callable for the process's life, and call it.
 ;;
+;; Direction 2 is the one that is not symmetric.  `_codecs.encode` of a utf-8
+;; string ends in `str.encode`, which is what sends a surrogate-bearing string
+;; here in the first place, so routing that case through it would recur
+;; forever; it goes to `_codecs._encode_surrogates` instead, which takes the
+;; same three arguments and so needs no second call shape.
+;;
 ;; The pattern is builtin_open_fn's, down to parking kw_names_pending across
 ;; the import: an import runs whole module bodies, and the keyword names of
 ;; the call that got us here are not theirs.  The import cannot happen at
 ;; startup, which is the other half of why it is done here and not there.
 ;;
 ;; A codec written in Python can itself call str.encode, so this has to be
-;; re-entrant; it is, because the only state it keeps is the two cached
-;; callables and neither is mutated after the first call.
+;; re-entrant; it is, because the only state it keeps is the three cached
+;; callables and none is mutated after the first call.
 ;; ============================================================================
 CVP_OBJ    equ 8
 CVP_ENC    equ 16
@@ -658,7 +665,12 @@ DEF_FUNC codec_via_python, CVP_FRAME
 
     test ecx, ecx
     jz .cvp_encode
+    cmp ecx, 2
+    je .cvp_surrogates
     mov rbx, [rel codec_decode_impl]
+    jmp .cvp_have_impl
+.cvp_surrogates:
+    mov rbx, [rel codec_surrogate_impl]
     jmp .cvp_have_impl
 .cvp_encode:
     mov rbx, [rel codec_encode_impl]
@@ -721,12 +733,35 @@ DEF_FUNC codec_via_python, CVP_FRAME
     mov [rel codec_decode_impl], rbx
     pop rbx
 
+    push rbx
+    CSTRING rdi, "_encode_surrogates"
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rbx + PyModuleObject.mod_dict]
+    mov rsi, rax
+    call dict_get
+    mov rbx, rax
+    pop rdi
+    call obj_decref
+    test rbx, rbx
+    jz .cvp_missing
+    mov rdi, rbx
+    call obj_incref
+    mov [rel codec_surrogate_impl], rbx
+    pop rbx
+
     pop rax
     mov [rel kw_names_pending], rax
 
-    cmp qword [rbp - CVP_DIR], 0
-    je .cvp_pick_encode
+    mov rax, [rbp - CVP_DIR]
+    test eax, eax
+    jz .cvp_pick_encode
+    cmp eax, 2
+    je .cvp_pick_surrogates
     mov rbx, [rel codec_decode_impl]
+    jmp .cvp_call
+.cvp_pick_surrogates:
+    mov rbx, [rel codec_surrogate_impl]
     jmp .cvp_call
 .cvp_pick_encode:
     mov rbx, [rel codec_encode_impl]
@@ -2559,4 +2594,5 @@ section .data
 align 8
 codec_encode_impl: dq 0
 codec_decode_impl: dq 0
+codec_surrogate_impl: dq 0
 

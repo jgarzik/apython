@@ -1044,9 +1044,15 @@ DEF_FUNC px_parse, PP_FRAME
     mov [rbp - PP_DATA], rax
 
 .feed:
+    ; isfinal is any object at all -- CPython runs it through the ordinary
+    ; truth test -- and obj_is_true takes a VALUE.  This used to V_UNPACK
+    ; first, which handed it the raw payload: a bool, None and a str are
+    ; pointers and a pointer is its own Value, so those worked, while an int
+    ; immediate's payload is the number and `Parse(data, 0)` dereferenced
+    ; address 0.  Every caller in the stdlib passes a bool, which is why it
+    ; took a hand-written int to find it.
     mov rdi, [rbp - PP_ARGS]
     mov rdi, [rdi + 16]
-    V_UNPACK rdi, rdx
     call obj_is_true
     mov [rbp - PP_FINAL], rax
 

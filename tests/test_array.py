@@ -213,4 +213,21 @@ for _bad in (1.5, "x", None):
     except TypeError as e:
         print("%-6r TypeError: %s" % (_bad, e))
 
+print("--- byteswap reverses each item in place ---")
+for _c in "bBhHiIlLqQfdu":
+    _a = (array.array(_c, "ab") if _c == "u"
+          else array.array(_c, [1.5, 2.5]) if _c in "fd"
+          else array.array(_c, [1, 2]))
+    _before = _a.tobytes()
+    print(_a.byteswap(), _c, _a.itemsize, _before.hex(), _a.tobytes().hex())
+_h = array.array("h", [1, 2])
+_h.byteswap()
+_h.byteswap()
+print("twice is identity:", _h)
+print("empty:", array.array("i").byteswap(), array.array("i"))
+try:
+    array.array("i", [1]).byteswap(1)
+except TypeError as e:
+    print("arity:", e)
+
 print("done")

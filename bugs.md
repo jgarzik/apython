@@ -136,6 +136,20 @@ reasoning that chose them and what changing one would cost.
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
 
+- **A dunder whose value is not callable at all reports the wrong thing, and
+  an immediate reports nothing.**  `type("C", (), {"__len__": 5})` then
+  `len(c)` is `RuntimeError: slot wrapper failed without an exception` where
+  CPython says `TypeError: 'int' object is not callable`, and the same with a
+  float.  A POINTER that is not callable -- `None`, `True`, `"x"` -- is
+  reported correctly, so what differs is only the int and float immediates:
+  the slot wrapper's failure arm asks the value for a type it has no header
+  to answer from, and returns without setting an exception.  `__next__` is
+  the one that answers WRONGLY rather than confusingly:
+  `type("C", (), {"__next__": 5})` makes `next(c)` a clean StopIteration, so
+  a `for` over it is empty where CPython raises.  Found while fixing
+  `dunder_bind`'s third arm and confirmed to pre-date it -- the behaviour is
+  identical on a binary built before that change.
+
 - **A plain builtin function stored in a class body is BOUND.**  CPython has
   three types where this tree has one: `builtin_function_or_method`, which has
   no `tp_descr_get` and therefore does not bind, and `method_descriptor` and
@@ -417,11 +431,9 @@ reasoning that chose them and what changing one would cost.
   reading of this list was wrong: it was what stood between this tree and
   `multiprocessing`, and CPython's own suite imports it from the test modules
   for `struct`, `memoryview`, `io`, `bytes`, `socket`, `re`, `marshal`,
-  `codecs` and the compression family.  `fromfile` and `tofile` are the part
-  left out -- they want the file object's own read and write, and every caller
-  in the suite reaches for `frombytes` and `tobytes` -- and `L` and `Q` hold
-  what an int64 holds rather than a uint64, because `obj_as_index` refuses
-  anything wider.
+  `codecs` and the compression family.  What is left out is that `L` and `Q`
+  hold what an int64 holds rather than a uint64, because `obj_as_index`
+  refuses anything wider.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and
@@ -457,10 +469,6 @@ reasoning that chose them and what changing one would cost.
   of the twenty-odd places that build a string by hand has to initialise the
   new field -- and a missed one is a wrong CHARACTER out of a wide string, in
   a path the suite barely exercises, rather than a crash.
-
-- **`array.fromfile` and `array.tofile` are absent.**  They want the file
-  object's own read and write, and every caller in CPython's suite reaches
-  for `frombytes` and `tobytes` instead.
 
 - **One call inside an opcode handler is made with `rsp` misaligned.**
   Recorded in `tests/align_floor.txt`, which `lint.py` ratchets: a new one
