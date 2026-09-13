@@ -509,6 +509,7 @@ test_pyc_hardening
 test_pyc_staleness
 test_pyexpat_decl
 test_pyexpat_module
+test_pyexpat_parse_isfinal
 test_pyexpat_parse
 test_raise_cause
 test_raise_class_init
@@ -572,6 +573,7 @@ test_slice_assign
 test_slice_compare
 test_slice_indices
 test_slicing
+test_slot_bound_builtin
 test_slot_builtin_dunder_assign
 test_slot_clear_and_none
 test_slot_descr_receiver

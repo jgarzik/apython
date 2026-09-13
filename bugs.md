@@ -136,6 +136,20 @@ reasoning that chose them and what changing one would cost.
   appends; and `float()` reports its ARGUMENT's type rather than
   `C.__float__ returned non-float (type str)`.
 
+- **A dunder whose value is not callable at all reports the wrong thing, and
+  an immediate reports nothing.**  `type("C", (), {"__len__": 5})` then
+  `len(c)` is `RuntimeError: slot wrapper failed without an exception` where
+  CPython says `TypeError: 'int' object is not callable`, and the same with a
+  float.  A POINTER that is not callable -- `None`, `True`, `"x"` -- is
+  reported correctly, so what differs is only the int and float immediates:
+  the slot wrapper's failure arm asks the value for a type it has no header
+  to answer from, and returns without setting an exception.  `__next__` is
+  the one that answers WRONGLY rather than confusingly:
+  `type("C", (), {"__next__": 5})` makes `next(c)` a clean StopIteration, so
+  a `for` over it is empty where CPython raises.  Found while fixing
+  `dunder_bind`'s third arm and confirmed to pre-date it -- the behaviour is
+  identical on a binary built before that change.
+
 - **A plain builtin function stored in a class body is BOUND.**  CPython has
   three types where this tree has one: `builtin_function_or_method`, which has
   no `tp_descr_get` and therefore does not bind, and `method_descriptor` and
