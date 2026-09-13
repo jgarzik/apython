@@ -10,6 +10,7 @@ test_aiter_anext
 test_annotations
 test_argument_messages
 test_arithmetic
+test_array_file
 test_array
 test_asend_methods
 test_ast_mangling
@@ -96,6 +97,7 @@ test_codecs_binding
 test_codecs
 test_codecs_registry_bridge
 test_codecs_registry
+test_codec_surrogates
 test_code_gc
 test_code_localsplus
 test_code_replace

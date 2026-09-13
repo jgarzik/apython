@@ -16,9 +16,14 @@
 ; The buffer can move, so the type takes no __dict__ and no __slots__ at a
 ; fixed offset, the way bytearray and memoryview do not.
 ;
-; What is here is the surface the stdlib actually uses.  fromfile and tofile
-; are not: they want the file object's own read and write, and every caller in
-; the suite reaches for frombytes and tobytes instead.
+; What is here is the surface the stdlib actually uses -- fromfile and tofile
+; included.  They were left out on the claim that "every caller in the suite
+; reaches for frombytes and tobytes instead", and that was measured and found
+; false: CPython's test.datetimetester reads its own data through fromfile on
+; the way into its tests, and the missing method accounted for 840 of the 849
+; errors the module reported.  They are the file object's own read and write
+; seen from the array's side, and what they mostly have to get right is the
+; failures -- a short read keeps what it got AND raises.
 
 %include "macros.inc"
 %include "object.inc"
@@ -1695,6 +1700,393 @@ DEF_FUNC array_m_frombytes, 40
           "bytes length not a multiple of item size"
 END_FUNC array_m_frombytes
 
+;; ============================================================================
+;; The two names fromfile and tofile look up, built once by
+;; array_module_create and kept for the life of the process.
+;;
+;; A missing `read` is reported by raise_no_attribute, which READS the name
+;; str and does not return -- so a str built per call could not be released
+;; before it, and would leak on exactly the path that raises.
+;; ============================================================================
+section .bss
+array_str_read:  resq 1
+array_str_write: resq 1
+section .text
+
+extern obj_getattr_opt
+extern obj_call_n
+extern raise_no_attribute
+extern raise_type_error_counted
+extern type_is_subtype
+extern exc_EOFError_type
+
+;; ============================================================================
+;; array_m_fromfile(args, nargs) -> None, or 0 with an exception pending
+;;
+;; `a.fromfile(f, n)` reads n ITEMS -- n * itemsize bytes -- with ONE call to
+;; the file object's own read(), and APPENDS what came back to what the array
+;; already holds.  A short read keeps what it got and THEN raises EOFError,
+;; which is the half of this that is easy to get wrong: CPython appends first
+;; and raises second, and a caller that reads past the end still sees the
+;; bytes that were there.
+;;
+;; One call, not a loop, because the file object's own position is what makes
+;; two successive fromfile()s continue rather than repeat.
+;;
+;; `read` is fetched as an ordinary attribute, so an object that has none
+;; fails with the AttributeError any other attribute would raise rather than
+;; with a type check of this module's own wording.  The count is converted
+;; first, through obj_as_index, because CPython's argument clinic converts it
+;; before the file is touched at all.
+;;
+;; Both the lookup and the call run arbitrary Python, which may append to this
+;; very array and MOVE its buffer.  Nothing is held across either: ob_data and
+;; ob_size are re-read afterwards, so what arrives is appended to wherever the
+;; array has got to by then.
+;; ============================================================================
+AFF_ARR    equ 8
+AFF_FILE   equ 16
+AFF_NBYTES equ 24           ; how many bytes were asked for
+AFF_FN     equ 32           ; the bound read, owned
+AFF_BUF    equ 40           ; what it answered, owned
+AFF_ARG    equ 48           ; the one-element argument array obj_call_n reads
+AFF_GOT    equ 56           ; how many bytes actually arrived
+AFF_ITEMS  equ 64           ; and how many whole items that is
+AFF_FRAME  equ 64           ; + 0 pushes = 64, 16-aligned
+DEF_FUNC array_m_fromfile, AFF_FRAME
+    cmp rsi, 3
+    jne .aff_arity
+    mov rax, [rdi]
+    mov [rbp - AFF_ARR], rax
+    mov rax, [rdi + 8]
+    mov [rbp - AFF_FILE], rax
+
+    ; The count, before anything is read or even looked up.
+    mov rdi, [rdi + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_index           ; an i64, or it raises and does not return
+    test rax, rax
+    js .aff_negative
+    mov rdi, [rbp - AFF_ARR]
+    imul rax, [rdi + PyArrayObject.ob_isize]
+    jo .aff_nomem
+    mov [rbp - AFF_NBYTES], rax
+
+    mov rdi, [rbp - AFF_FILE]
+    mov rsi, [rel array_str_read]
+    call obj_getattr_opt
+    test rax, rax
+    jz .aff_no_read
+    mov [rbp - AFF_FN], rax
+
+    mov rdi, [rbp - AFF_NBYTES]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov [rbp - AFF_ARG], rax
+    mov rdi, [rbp - AFF_FN]
+    lea rsi, [rbp - AFF_ARG]
+    mov edx, 1
+    call obj_call_n
+    mov [rbp - AFF_BUF], rax
+    mov rdi, [rbp - AFF_ARG]
+    DECREF_V rdi, rcx           ; the count, which may have been a heap int
+    mov rdi, [rbp - AFF_FN]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - AFF_BUF]
+    test rax, rax
+    jz .aff_fail                ; read() raised; its exception is the one
+
+    ; bytes and nothing else -- a text-mode file answers a str, and this is
+    ; the only place that says so.
+    V_TEST_PTR rax, rcx
+    ja .aff_not_bytes
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel bytes_type]
+    call type_is_subtype
+    test eax, eax
+    jz .aff_not_bytes
+
+    mov rax, [rbp - AFF_BUF]
+    mov rax, [rax + PyBytesObject.ob_size]
+    mov [rbp - AFF_GOT], rax
+    mov rdi, [rbp - AFF_ARR]
+    xor edx, edx
+    mov rcx, [rdi + PyArrayObject.ob_isize]
+    div rcx
+    test rdx, rdx
+    jnz .aff_not_multiple       ; a read that stopped mid-item, as frombytes
+    mov [rbp - AFF_ITEMS], rax
+    test rax, rax
+    jz .aff_appended
+
+    ; The same growth frombytes does, and the same refusal when a live view
+    ; would be left pointing at the old buffer.
+    mov rdi, [rbp - AFF_ARR]
+    call array_no_exports
+    test eax, eax
+    jz .aff_fail_buf
+    mov rdi, [rbp - AFF_ARR]
+    mov rsi, [rdi + PyArrayObject.ob_size]
+    add rsi, [rbp - AFF_ITEMS]
+    call array_reserve
+    test eax, eax
+    jz .aff_fail_buf
+
+    ; The destination is read AFTER the reserve: the buffer has just moved.
+    mov rdi, [rbp - AFF_ARR]
+    mov rax, [rdi + PyArrayObject.ob_size]
+    imul rax, [rdi + PyArrayObject.ob_isize]
+    add rax, [rdi + PyArrayObject.ob_data]
+    mov rdi, rax
+    mov rsi, [rbp - AFF_BUF]
+    add rsi, PyBytesObject.data
+    mov rdx, [rbp - AFF_GOT]
+    call ap_memcpy
+    mov rdi, [rbp - AFF_ARR]
+    mov rax, [rbp - AFF_ITEMS]
+    add [rdi + PyArrayObject.ob_size], rax
+
+.aff_appended:
+    mov rdi, [rbp - AFF_BUF]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - AFF_GOT]
+    cmp rax, [rbp - AFF_NBYTES]
+    jne .aff_short              ; everything is already appended
+    LOAD_NONE rax
+    leave
+    ret
+
+.aff_short:
+    ; CPython compares the length it got against the length it asked for, so
+    ; a read() that answers MORE is an EOFError too -- and its bytes are kept.
+    SET_EXC exc_EOFError_type, "read() didn't return enough bytes"
+    xor eax, eax
+    leave
+    ret
+.aff_not_bytes:
+    mov rdi, [rbp - AFF_BUF]
+    DECREF_V rdi, rcx
+    SET_EXC exc_TypeError_type, "read() didn't return bytes"
+    xor eax, eax
+    leave
+    ret
+.aff_not_multiple:
+    mov rdi, [rbp - AFF_BUF]
+    DECREF_V rdi, rcx
+    SET_EXC exc_ValueError_type, "bytes length not a multiple of item size"
+    xor eax, eax
+    leave
+    ret
+.aff_negative:
+    SET_EXC exc_ValueError_type, "negative count"
+    xor eax, eax
+    leave
+    ret
+.aff_nomem:
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
+.aff_fail_buf:
+    mov rdi, [rbp - AFF_BUF]
+    DECREF_V rdi, rcx
+.aff_fail:
+    xor eax, eax
+    leave
+    ret
+.aff_no_read:
+    ; A getter that raised is propagated; absent is the ordinary
+    ; AttributeError, which does not return.
+    cmp qword [rel current_exception], 0
+    jne .aff_fail
+    mov rdi, [rbp - AFF_FILE]
+    mov rsi, [rel array_str_read]
+    xor edx, edx
+    call raise_no_attribute
+.aff_arity:
+    ; CPython counts self in the number it wants and not in the number it
+    ; got: "takes exactly 2 positional arguments (0 given)" for `a.fromfile()`.
+    sub rsi, 1
+    jns .aff_arity_count
+    xor esi, esi
+.aff_arity_count:
+    CSTRING rdi, "fromfile() takes exactly 2 positional arguments ("
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
+END_FUNC array_m_fromfile
+
+;; ============================================================================
+;; array_m_tofile(args, nargs) -> None, or 0 with an exception pending
+;;
+;; tobytes() handed to the file object's own write().  It frames nothing, so
+;; two tofile()s to one stream concatenate and only the reader's own typecode
+;; says where the items are.
+;;
+;; An EMPTY array writes nothing and never touches the argument at all --
+;; CPython's block loop runs zero times, so `array('i').tofile(42)` answers
+;; None rather than raising -- which is why the size is tested before `write`
+;; is even looked up.
+;;
+;; CPython writes in 64K blocks; this writes once.  The difference is visible
+;; only to a write() that counts its calls, and one call is what every file
+;; object here would rather have.
+;;
+;; The bytes are snapshotted AFTER the lookup: fetching `write` can run a
+;; __getattr__ that mutates the array and moves its buffer.
+;; ============================================================================
+ATF_ARR   equ 8
+ATF_FILE  equ 16
+ATF_FN    equ 24             ; the bound write, owned
+ATF_ARG   equ 32             ; the bytes, owned, and the argument array
+ATF_RES   equ 40             ; what write() answered, owned
+ATF_FRAME equ 48             ; + 0 pushes = 48, 16-aligned
+DEF_FUNC array_m_tofile, ATF_FRAME
+    cmp rsi, 2
+    jne .atf_arity
+    mov rax, [rdi]
+    mov [rbp - ATF_ARR], rax
+    mov rcx, [rdi + 8]
+    mov [rbp - ATF_FILE], rcx
+    cmp qword [rax + PyArrayObject.ob_size], 0
+    jle .atf_done
+
+    mov rdi, rcx
+    mov rsi, [rel array_str_write]
+    call obj_getattr_opt
+    test rax, rax
+    jz .atf_no_write
+    mov [rbp - ATF_FN], rax
+
+    mov rdi, [rbp - ATF_ARR]
+    mov rsi, [rdi + PyArrayObject.ob_size]
+    imul rsi, [rdi + PyArrayObject.ob_isize]
+    mov rdi, [rdi + PyArrayObject.ob_data]
+    test rdi, rdi
+    jnz .atf_have_data
+    lea rdi, [rel array_empty_byte]
+.atf_have_data:
+    call bytes_from_data
+    test rax, rax
+    jz .atf_fail_fn
+    mov [rbp - ATF_ARG], rax
+
+    mov rdi, [rbp - ATF_FN]
+    lea rsi, [rbp - ATF_ARG]
+    mov edx, 1
+    call obj_call_n
+    mov [rbp - ATF_RES], rax
+    mov rdi, [rbp - ATF_ARG]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - ATF_FN]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - ATF_RES]
+    test rax, rax
+    jz .atf_fail
+    mov rdi, rax
+    DECREF_V rdi, rcx           ; whatever write() returned is discarded
+.atf_done:
+    LOAD_NONE rax
+    leave
+    ret
+
+.atf_fail_fn:
+    mov rdi, [rbp - ATF_FN]
+    DECREF_V rdi, rcx
+.atf_fail:
+    xor eax, eax
+    leave
+    ret
+.atf_no_write:
+    cmp qword [rel current_exception], 0
+    jne .atf_fail
+    mov rdi, [rbp - ATF_FILE]
+    mov rsi, [rel array_str_write]
+    xor edx, edx
+    call raise_no_attribute     ; does not return
+.atf_arity:
+    sub rsi, 1
+    jns .atf_arity_count
+    xor esi, esi
+.atf_arity_count:
+    CSTRING rdi, "tofile() takes exactly 1 positional argument ("
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
+END_FUNC array_m_tofile
+
+;; ============================================================================
+;; array_m_byteswap(args, nargs) -> None, or 0 with an exception pending
+;;
+;; Reverses the bytes of every item in place.  It is what reads a file written
+;; on the other endianness, and it is the next thing every fromfile() caller
+;; does: test.datetimetester's ZoneInfo reader byteswaps each of the three
+;; arrays it reads out of a TZif file, which is big-endian.
+;;
+;; One byte per item is a no-op and anything but 1, 2, 4 or 8 is a
+;; RuntimeError, which is CPython's own refusal -- no typecode here has such a
+;; size, so it is unreachable until one does.
+;; ============================================================================
+extern exc_RuntimeError_type
+DEF_FUNC array_m_byteswap
+    cmp rsi, 1
+    jne .abs_arity
+    mov rdi, [rdi]
+    mov rcx, [rdi + PyArrayObject.ob_isize]
+    mov rsi, [rdi + PyArrayObject.ob_size]
+    mov rdi, [rdi + PyArrayObject.ob_data]
+    test rsi, rsi
+    jle .abs_done
+    cmp rcx, 1
+    je .abs_done
+    cmp rcx, 2
+    je .abs_two
+    cmp rcx, 4
+    je .abs_four
+    cmp rcx, 8
+    je .abs_eight
+    SET_EXC exc_RuntimeError_type, \
+            "don't know how to byteswap this array type"
+    xor eax, eax
+    leave
+    ret
+
+.abs_two:
+    mov ax, [rdi]
+    rol ax, 8
+    mov [rdi], ax
+    add rdi, 2
+    dec rsi
+    jnz .abs_two
+    jmp .abs_done
+.abs_four:
+    mov eax, [rdi]
+    bswap eax
+    mov [rdi], eax
+    add rdi, 4
+    dec rsi
+    jnz .abs_four
+    jmp .abs_done
+.abs_eight:
+    mov rax, [rdi]
+    bswap rax
+    mov [rdi], rax
+    add rdi, 8
+    dec rsi
+    jnz .abs_eight
+
+.abs_done:
+    LOAD_NONE rax
+    leave
+    ret
+.abs_arity:
+    sub rsi, 1
+    jns .abs_arity_count
+    xor esi, esi
+.abs_arity_count:
+    CSTRING rdi, "array.byteswap() takes no arguments ("
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
+END_FUNC array_m_byteswap
+
 ;; array_m_buffer_info(args, nargs) -> (address, length)
 ABI_TUP   equ 8
 ABI_FRAME equ 16            ; + 1 push = 24 ... padded below
@@ -1849,6 +2241,9 @@ DEF_FUNC array_module_create, AMC_FRAME
     AM_ADD_METHOD array_m_fromlist,    "fromlist"
     AM_ADD_METHOD array_m_tobytes,     "tobytes"
     AM_ADD_METHOD array_m_frombytes,   "frombytes"
+    AM_ADD_METHOD array_m_tofile,      "tofile"
+    AM_ADD_METHOD array_m_fromfile,    "fromfile"
+    AM_ADD_METHOD array_m_byteswap,    "byteswap"
     AM_ADD_METHOD array_m_buffer_info, "buffer_info"
     AM_ADD_METHOD array_m_getitem,     "__getitem__"
     AM_ADD_METHOD array_m_setitem,     "__setitem__"
@@ -1858,6 +2253,19 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, rax
     extern type_stamp_methods
     call type_stamp_methods
+
+    ; The two names fromfile and tofile look up.  Built here rather than per
+    ; call because raise_no_attribute reads the str and never returns.
+    CSTRING rdi, "read"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .amc_out
+    mov [rel array_str_read], rax
+    CSTRING rdi, "write"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .amc_out
+    mov [rel array_str_write], rax
 
     ; ...and the module dict, holding the type and the typecode string.
     call dict_new

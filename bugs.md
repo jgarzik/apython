@@ -417,11 +417,9 @@ reasoning that chose them and what changing one would cost.
   reading of this list was wrong: it was what stood between this tree and
   `multiprocessing`, and CPython's own suite imports it from the test modules
   for `struct`, `memoryview`, `io`, `bytes`, `socket`, `re`, `marshal`,
-  `codecs` and the compression family.  `fromfile` and `tofile` are the part
-  left out -- they want the file object's own read and write, and every caller
-  in the suite reaches for `frombytes` and `tobytes` -- and `L` and `Q` hold
-  what an int64 holds rather than a uint64, because `obj_as_index` refuses
-  anything wider.
+  `codecs` and the compression family.  What is left out is that `L` and `Q`
+  hold what an int64 holds rather than a uint64, because `obj_as_index`
+  refuses anything wider.
 
   `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
   differently from CPython's, which uses its own Lanczos approximation and
@@ -457,10 +455,6 @@ reasoning that chose them and what changing one would cost.
   of the twenty-odd places that build a string by hand has to initialise the
   new field -- and a missed one is a wrong CHARACTER out of a wide string, in
   a path the suite barely exercises, rather than a crash.
-
-- **`array.fromfile` and `array.tofile` are absent.**  They want the file
-  object's own read and write, and every caller in CPython's suite reaches
-  for `frombytes` and `tobytes` instead.
 
 - **One call inside an opcode handler is made with `rsp` misaligned.**
   Recorded in `tests/align_floor.txt`, which `lint.py` ratchets: a new one
