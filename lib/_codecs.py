@@ -192,6 +192,146 @@ def namereplace_errors(exc):
     return backslashreplace_errors(exc)
 
 
+def surrogateescape_errors(exc):
+    """CPython's surrogateescape: a byte that will not decode is parked in the
+    low surrogates, and the same handler on the way out hands it back.
+
+    It is what makes a filename that is not valid UTF-8 survive a decode and
+    an encode unchanged, which is why `sys.getfilesystemencodeerrors()` names
+    it and `os.fsdecode`/`os.fsencode` are written against it.  The two halves
+    have to be exact inverses or a program renames files it only meant to
+    list.
+
+    Only a byte at or above 0x80 can be escaped, and only U+DC80..U+DCFF can
+    be unescaped; anything else re-raises, which is CPython's behaviour and
+    the reason `'\ud800'.encode('utf-8', 'surrogateescape')` still fails.
+    """
+    if isinstance(exc, UnicodeDecodeError):
+        parts = []
+        for b in exc.object[exc.start:exc.end]:
+            if b < 0x80:
+                raise exc
+            parts.append(chr(0xDC00 + b))
+        return ("".join(parts), exc.end)
+    if isinstance(exc, UnicodeEncodeError):
+        # A bytes replacement is legal for an encode handler, and it is the
+        # only way to put back a byte that is not a character.
+        out = bytearray()
+        for ch in exc.object[exc.start:exc.end]:
+            n = ord(ch)
+            if n < 0xDC80 or n > 0xDCFF:
+                raise exc
+            out.append(n & 0xFF)
+        return (bytes(out), exc.end)
+    raise exc
+
+
+def _standard_encoding(encoding):
+    """CPython's get_standard_encoding -> (canonical name, bytes per surrogate).
+
+    surrogatepass is defined only over the UTF families, because it is the
+    encoding that decides what the three bytes of a lone surrogate look like.
+    Anything else answers (None, 0) and the handler re-raises.  The parsing is
+    CPython's, down to accepting `utf8`, `utf-8` and `utf_8` alike.
+    """
+    e = encoding.lower()
+    if not e.startswith("utf"):
+        return (None, 0)
+    e = e[3:]
+    if e[:1] in ("-", "_"):
+        e = e[1:]
+    if e == "8":
+        return ("utf-8", 3)
+    for digits, width, le, be in (("16", 2, "utf-16-le", "utf-16-be"),
+                                  ("32", 4, "utf-32-le", "utf-32-be")):
+        if not e.startswith(digits):
+            continue
+        rest = e[2:]
+        if rest == "":
+            # No suffix means native byte order, and this interpreter is
+            # x86-64 only.
+            return (le, width)
+        if rest[:1] in ("-", "_"):
+            rest = rest[1:]
+        if rest == "le":
+            return (le, width)
+        if rest == "be":
+            return (be, width)
+        return (None, 0)
+    return (None, 0)
+
+
+def surrogatepass_errors(exc):
+    """CPython's surrogatepass: a lone surrogate goes through a UTF codec.
+
+    The point is that the bytes are the ones the codec would have written had
+    the character been allowed -- for utf-8 that is the plain three-byte form,
+    0xED 0xA0..0xBF 0x80..0xBF, which no conforming decoder accepts.  This is
+    what `lib/_io.py` asks for when a caller wants a text stream that does not
+    lose a surrogate.
+    """
+    name, width = _standard_encoding(getattr(exc, "encoding", None) or "")
+    if name is None:
+        raise exc
+
+    if isinstance(exc, UnicodeEncodeError):
+        out = bytearray()
+        for ch in exc.object[exc.start:exc.end]:
+            n = ord(ch)
+            if n < 0xD800 or n > 0xDFFF:
+                raise exc
+            if name == "utf-8":
+                out.append(0xE0 | (n >> 12))
+                out.append(0x80 | ((n >> 6) & 0x3F))
+                out.append(0x80 | (n & 0x3F))
+            elif name == "utf-16-le":
+                out.append(n & 0xFF)
+                out.append(n >> 8)
+            elif name == "utf-16-be":
+                out.append(n >> 8)
+                out.append(n & 0xFF)
+            elif name == "utf-32-le":
+                out.append(n & 0xFF)
+                out.append(n >> 8)
+                out.append(0)
+                out.append(0)
+            else:
+                out.append(0)
+                out.append(0)
+                out.append(n >> 8)
+                out.append(n & 0xFF)
+        return (bytes(out), exc.end)
+
+    if isinstance(exc, UnicodeDecodeError):
+        b = exc.object
+        i = exc.start
+        # `exc.end` is where the STRICT decoder gave up, which for utf-8 is
+        # one byte in; the surrogate is three bytes long whatever it says.
+        if i + width > len(b):
+            raise exc
+        if name == "utf-8":
+            if (b[i] != 0xED or not 0xA0 <= b[i + 1] <= 0xBF
+                    or not 0x80 <= b[i + 2] <= 0xBF):
+                raise exc
+            cp = (((b[i] & 0x0F) << 12) | ((b[i + 1] & 0x3F) << 6)
+                  | (b[i + 2] & 0x3F))
+        elif name == "utf-16-le":
+            cp = b[i] | (b[i + 1] << 8)
+        elif name == "utf-16-be":
+            cp = (b[i] << 8) | b[i + 1]
+        elif name == "utf-32-le":
+            cp = (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16)
+                  | (b[i + 3] << 24))
+        else:
+            cp = ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8)
+                  | b[i + 3])
+        if cp < 0xD800 or cp > 0xDFFF:
+            raise exc
+        return (chr(cp), i + width)
+
+    raise exc
+
+
 def register_error(name, handler):
     if not callable(handler):
         raise TypeError("handler must be callable")
@@ -211,8 +351,8 @@ for _n, _h in (("strict", strict_errors),
                ("xmlcharrefreplace", xmlcharrefreplace_errors),
                ("backslashreplace", backslashreplace_errors),
                ("namereplace", namereplace_errors),
-               ("surrogateescape", ignore_errors),
-               ("surrogatepass", strict_errors)):
+               ("surrogateescape", surrogateescape_errors),
+               ("surrogatepass", surrogatepass_errors)):
     _error_registry[_n] = _h
 del _n, _h
 
@@ -252,7 +392,73 @@ def _as_bytes(data):
 
 
 def utf_8_encode(s, errors=None):
+    # A str holding a lone surrogate cannot be written out as it stands, and
+    # str.encode knows it: the assembly scans for one and, when it finds it,
+    # calls `_encode_surrogates` below rather than coming back here.  That is
+    # what keeps this a one-liner over the fast path for every ordinary
+    # string, and what keeps the two from recurring into each other.
     return (s.encode("utf-8", errors or "strict"), len(s))
+
+
+def _encode_surrogates(obj, encoding="utf-8", errors="strict"):
+    """str.encode's way in when the UTF-8 fast path found a lone surrogate.
+
+    Called from `codec_via_python` with the same three arguments
+    `_codecs.encode` takes, so the assembly needs no second call shape.  It
+    must NOT go through `encode()`: that reaches `utf_8_encode`, which encodes
+    with the very fast path that sent us here.
+    """
+    return _utf_8_encode_handled(obj, errors)
+
+
+def _utf_8_encode_handled(s, errors):
+    """UTF-8 encoding for a str that holds a lone surrogate.
+
+    Our strings hold UTF-8 internally and a lone surrogate is stored
+    WTF-8-style, so handing the buffer straight out would answer bytes no
+    UTF-8 decoder accepts -- and, worse, would never consult an error handler
+    at all.  So the run of surrogates is found here and given to the handler,
+    exactly as CPython's encoder does, while every clean run is encoded by the
+    fast path, which cannot recur because it finds no surrogate in one.
+
+    `strict` arrives here too, and that is the point: the UnicodeEncodeError
+    it raises carries all five fields, which the assembly cannot build.  Same
+    rule as `_encode_charset` below.
+    """
+    errors = errors or "strict"
+    out = bytearray()
+    i = 0
+    n = len(s)
+    handler = None
+    while i < n:
+        j = i
+        while j < n and not 0xD800 <= ord(s[j]) <= 0xDFFF:
+            j += 1
+        if j > i:
+            out.extend(s[i:j].encode("utf-8", "strict"))
+            i = j
+            continue
+        while j < n and 0xD800 <= ord(s[j]) <= 0xDFFF:
+            j += 1
+        if handler is None:
+            # Looked up only once something has actually failed, which is
+            # where CPython looks one up too.
+            handler = lookup_error(errors)
+        exc = UnicodeEncodeError("utf-8", s, i, j, "surrogates not allowed")
+        replacement, resume = handler(exc)
+        if resume < 0:
+            resume += n
+        if resume <= i or resume > n:
+            raise IndexError("position %d from error handler out of bounds"
+                             % resume)
+        if isinstance(replacement, (bytes, bytearray)):
+            out.extend(replacement)
+        else:
+            # A str replacement is encoded in turn, strictly: a handler may
+            # not smuggle a surrogate back in through its own answer.
+            out.extend(replacement.encode("utf-8", "strict"))
+        i = resume
+    return bytes(out)
 
 
 def _utf_8_decode(data, errors=None, final=False):
