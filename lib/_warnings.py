@@ -76,39 +76,55 @@ def _find_action(message, category, module, lineno):
     return _live("defaultaction", _defaultaction)
 
 
-def _caller(stacklevel):
-    """Where the warning is being reported FROM.
+def _is_internal_filename(filename):
+    return 'importlib' in filename and '_bootstrap' in filename
 
-    CPython walks stacklevel frames out and reports that filename, line and
-    module, which is what puts a deprecation on the line that used the
-    deprecated thing rather than on the line that warned.  Passing "" and 0
-    instead, as this did, meant every warning printed as ":0:" and no filter
-    with a module or lineno pattern could ever match.
+
+def _is_filename_to_skip(filename, skip_file_prefixes):
+    return any(filename.startswith(prefix) for prefix in skip_file_prefixes)
+
+
+def _next_external_frame(frame, skip_file_prefixes):
+    """The next frame out that is neither importlib's nor one to skip."""
+    frame = frame.f_back
+    while frame is not None and (
+            _is_internal_filename(filename := frame.f_code.co_filename) or
+            _is_filename_to_skip(filename, skip_file_prefixes)):
+        frame = frame.f_back
+    return frame
+
+
+def _caller(stacklevel, skip_file_prefixes=()):
+    """Where the warning is being reported FROM, as CPython's warn() finds it.
+
+    stacklevel frames out from warn()'s caller -- which is what puts a
+    deprecation on the line that used the deprecated thing -- except that
+    importlib's own frames do not count, nor any under skip_file_prefixes:
+    a module that warns at import time is reporting on the line that
+    imported it, not on _bootstrap's.  Called from warn() itself, so frame 2
+    here is warn()'s caller.
     """
     import sys
-    globals_ = None
-    filename = "<sys>"
-    lineno = 0
     try:
-        frame = sys._getframe(1)
-        depth = max(stacklevel, 1)
-        while depth > 1 and frame is not None:
-            frame = frame.f_back
-            depth -= 1
-        if frame is not None:
-            globals_ = frame.f_globals
-            filename = frame.f_code.co_filename
-            lineno = frame.f_lineno
-    except (ValueError, AttributeError):
-        pass
-    module = filename
-    if globals_ is not None:
-        module = globals_.get("__name__", filename)
-    if module and module.endswith(".py"):
+        if stacklevel <= 1 or _is_internal_filename(
+                sys._getframe(2).f_code.co_filename):
+            frame = sys._getframe(stacklevel + 1)
+        else:
+            frame = sys._getframe(2)
+            for _ in range(stacklevel - 1):
+                frame = _next_external_frame(frame, skip_file_prefixes)
+                if frame is None:
+                    raise ValueError
+    except ValueError:
+        return "sys", 1, "sys", sys.__dict__.setdefault(
+            "__warningregistry__", {})
+    globals_ = frame.f_globals
+    filename = frame.f_code.co_filename
+    lineno = frame.f_lineno
+    module = globals_.get("__name__", filename) or filename
+    if module.endswith(".py"):
         module = module[:-3]
-    registry = None
-    if globals_ is not None:
-        registry = globals_.setdefault("__warningregistry__", {})
+    registry = globals_.setdefault("__warningregistry__", {})
     return filename, lineno, module, registry
 
 
@@ -142,7 +158,13 @@ def warn(message, category=None, stacklevel=1, source=None, *,
     if not (isinstance(category, type) and issubclass(category, Warning)):
         raise TypeError("category must be a Warning subclass, not '%s'"
                         % (type(category).__name__,))
-    filename, lineno, module, registry = _caller(stacklevel + 1)
+    if not isinstance(skip_file_prefixes, tuple):
+        raise TypeError("warn() argument 'skip_file_prefixes' must be tuple, "
+                        "not " + type(skip_file_prefixes).__name__)
+    if skip_file_prefixes:
+        stacklevel = max(2, stacklevel)
+    filename, lineno, module, registry = _caller(stacklevel,
+                                                 skip_file_prefixes)
     warn_explicit(message, category, filename, lineno, module, registry,
                   source=source)
 
