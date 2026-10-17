@@ -37,7 +37,6 @@ extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_IndexError_type
 extern exc_KeyError_type
-extern kw_names_pending
 extern obj_dealloc
 extern str_type
 
@@ -1963,7 +1962,7 @@ DEF_FUNC str_method_format, SF_FRAME
 
     ; Keyword arguments arrive as trailing values with their names in
     ; kw_names_pending; clear it so a nested call cannot see ours.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - SF_KWN], rax
     mov qword [rbp - SF_NKW], 0
     test rax, rax
@@ -1971,7 +1970,7 @@ DEF_FUNC str_method_format, SF_FRAME
     mov rcx, [rax + PyTupleObject.ob_size]
     mov [rbp - SF_NKW], rcx
     sub rsi, rcx
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 .fm_no_kw:
     dec rsi                     ; drop self
     mov [rbp - SF_NPOS], rsi
@@ -2910,9 +2909,13 @@ DEF_FUNC str_method_format_map, FM_FRAME
     ; is ours to raise.  A mapping of its own has already raised -- the
     ; IndexError a match object gives for an unknown group, say -- and that
     ; exception is the answer.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .fmap_key_error
+    ; Reached with the two source-position pushes of .fmap_have_key still on
+    ; the stack, so the pops below would have handed the caller its callee-
+    ; saved registers shifted by two -- r12 among them, which op_call then
+    ; wrote through on its way to the unwinder.  Cut back to the five pushes.
+    lea rsp, [rbp - FM_FRAME - 40]
     mov rdi, [rbp - FM_BUF]
     call ap_free
     xor eax, eax

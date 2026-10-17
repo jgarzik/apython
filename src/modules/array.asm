@@ -68,7 +68,6 @@ extern obj_richcompare_bool
 extern repr_append_cstr
 extern rbt_append_cstr
 extern str_cp_at
-extern current_exception
 extern hash_not_implemented
 extern obj_dealloc
 extern set_exception
@@ -487,7 +486,7 @@ DEF_FUNC array_store_item, ASI_FRAME
     mov rdi, rdx
     V_UNPACK rdi, rsi           ; float_to_f64 takes the pair as well
     call float_to_f64           ; refuses what is not a number
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .asi_fail
     mov rdi, [rbp - ASI_ARR]
     mov rax, [rdi + PyArrayObject.ob_data]
@@ -695,7 +694,7 @@ DEF_FUNC_LOCAL array_int_arg
     ret
 .aia_hand_over:
     call obj_as_index
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .aia_failed
     mov edx, 1
     leave
@@ -975,7 +974,7 @@ DEF_FUNC array_extend_iterable, 40
 .aei_done:
     mov rdi, [rbp - AEI_ITER]
     call obj_decref
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .aei_fail
     mov eax, 1
     pop rbx
@@ -1261,7 +1260,7 @@ DEF_FUNC array_subscript, 8   ; + 1 push = 16, 16-aligned
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .asub_fail
     mov rdi, rbx
     mov rsi, rax
@@ -1291,7 +1290,7 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .aas_fail
     mov rdi, [rbp - AAS_ARR]
     test rax, rax
@@ -1932,7 +1931,7 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
 .aff_no_read:
     ; A getter that raised is propagated; absent is the ordinary
     ; AttributeError, which does not return.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .aff_fail
     mov rdi, [rbp - AFF_FILE]
     mov rsi, [rel array_str_read]
@@ -2032,7 +2031,7 @@ DEF_FUNC array_m_tofile, ATF_FRAME
     leave
     ret
 .atf_no_write:
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .atf_fail
     mov rdi, [rbp - ATF_FILE]
     mov rsi, [rel array_str_write]

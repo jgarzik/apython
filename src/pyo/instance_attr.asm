@@ -29,19 +29,16 @@ extern str_from_cstr
 extern str_from_cstr_heap
 extern ap_strcmp
 extern type_repr
-extern attr_error_pending
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern kw_names_pending
 extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
 extern dunder_lookup
 extern dunder_call_2
 extern builtin_func_type
-extern current_exception
 extern dict_type
 extern tuple_type
 extern int_type
@@ -60,7 +57,6 @@ extern getset_descr_type
 
 ; Kept in class.asm, which also uses them
 extern base_slot
-extern instance_getattr_skip
 extern type_install_slots
 
 section .text
@@ -125,7 +121,7 @@ DEF_FUNC instance_getattr, IGA_FRAME
     mov qword [rbp - IGA_WHERE], 0
     mov qword [rbp - IGA_UNBOUND], 0
 .iga_body:
-    mov qword [rel attr_error_pending], 0
+    CLEAR_ATTR_ERROR_PENDING
     mov [rbp - IGA_SELF], rdi
     mov [rbp - IGA_NAME], rsi
     test rdi, rdi
@@ -138,10 +134,10 @@ DEF_FUNC instance_getattr, IGA_FRAME
     ; it is asking about.  CPython gets this from slot dispatch -- calling
     ; object's slot cannot reach the subclass's -- and this is the same thing
     ; said explicitly.
-    mov rax, [rel instance_getattr_skip]
+    mov rax, [gs:ThreadState.instance_getattr_skip]
     cmp rax, rdi
     jne .iga_hook
-    mov qword [rel instance_getattr_skip], 0
+    mov qword [gs:ThreadState.instance_getattr_skip], 0
     jmp .iga_default
 .iga_hook:
     mov rdi, [rdi + PyObject.ob_type]
@@ -186,9 +182,9 @@ DEF_FUNC instance_getattr, IGA_FRAME
     ; a TypeError.  Returning NULL bare would let raise_no_attribute replace
     ; it with a generic AttributeError; the flag is how instance_getattr
     ; already hands one over.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .iga_raised_bare
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
 .iga_raised_bare:
     xor eax, eax
     leave
@@ -489,7 +485,10 @@ DEF_FUNC type_refresh_attr_flags
     ; `p` straight into the instance dict, so the setter never ran.
     ; The MRO's dicts, scanned for anything a data descriptor could be.  Cold,
     ; and the answer saves the hot path an MRO walk per attribute access.
-    mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR
+    ; TYPE_FLAG_HEAP_DATA_DESCR is the same answer counted over the
+    ; heaptypes alone, so the walk goes on past a static type that set the
+    ; wide bit, and stops at the first heaptype that sets both.
+    mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR | TYPE_FLAG_HEAP_DATA_DESCR
     not rax
     and [rbx + PyTypeObject.tp_flags], rax
     mov r12, rbx                        ; the MRO walker
@@ -503,6 +502,9 @@ DEF_FUNC type_refresh_attr_flags
     test eax, eax
     jz .trg_mro_next
     or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .trg_mro_next
+    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
     jmp .trg_has_del
 .trg_mro_next:
     MRO_NEXT r12, rbx
@@ -598,7 +600,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     push rbx
     push r12
     push r13
-    mov qword [rel attr_error_pending], 0
+    CLEAR_ATTR_ERROR_PENDING
 
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
@@ -901,12 +903,24 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rax, rax               ; a Value; 0 is the miss
     jnz .ig_ask_getattr
 
-    ; CPython names the type and the attribute here as it does everywhere else.
+    ; CPython names the type and the attribute here as it does everywhere
+    ; else.  Installed rather than raised, with attr_error_pending saying so,
+    ; as .getattr_raised does: unwinding from here skipped hasattr()'s and
+    ; getattr()'s native frames, so hasattr(o, "slot") raised instead of
+    ; answering False.  The callers that would otherwise fall back to the type
+    ; dict -- and find the member descriptor there -- check the flag first.
     mov rdi, rbx
     mov rsi, [rbp - IG_NAME]
-    xor edx, edx                ; a get, so .name and .obj are filled in
-    extern raise_no_attribute
-    call raise_no_attribute
+    extern set_no_attribute
+    call set_no_attribute
+    mov qword [gs:ThreadState.attr_error_pending], 1
+    RET_NULL
+    IG_RELEASE_HELD
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .not_found:
     ; __class__ and __dict__ are part of ordinary resolution, not of the hook:
@@ -972,7 +986,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ;
     ; Anything else is a genuine failure in the middle of a lookup and keeps
     ; unwinding, which is what it did before.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .getattr_unwind
     push rax
@@ -983,7 +997,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     pop rcx
     test eax, eax
     jz .getattr_unwind
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
     RET_NULL
     IG_RELEASE_HELD
     pop r13
@@ -1104,7 +1118,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     test rdi, rdi
     jz .agh_no
 
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .agh_no
     mov rdi, [rbx + PyObject.ob_type]
@@ -1122,8 +1136,8 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     jz .agh_no
 
     ; rbx still holds the exception, and the global still holds its reference.
-    mov qword [rel current_exception], 0
-    mov qword [rel attr_error_pending], 0
+    mov qword [gs:ThreadState.current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
     mov rdi, rbx
     call obj_decref
 
@@ -1139,7 +1153,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     ; The hook raised in its turn.  An AttributeError from it is still the
     ; protocol saying "absent", and getattr(o, n, default) has to see that --
     ; the same handover .getattr_raised above makes.
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .agh_zero
     mov rdi, [rbx + PyObject.ob_type]
@@ -1147,7 +1161,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     call type_is_subtype
     test eax, eax
     jz .agh_zero
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
 .agh_zero:
     xor eax, eax
     xor edx, edx
@@ -1238,12 +1252,65 @@ DEF_FUNC instance_setattr
     extern getset_descr_type
     lea rcx, [rel getset_descr_type]
     cmp [r9 + PyObject.ob_type], rcx
-    jne .sa_no_slot
+    jne .sa_check_heap_descr
+    ; The __dict__ and __weakref__ getsets a class body grows are the
+    ; instance LAYOUT, handled below -- reached here only when some other
+    ; data descriptor (any property) set the MRO flag.  Their getset has no
+    ; setter, so `o.__dict__ = d` on an instance of a class with a property
+    ; was "not writable"; rich's Console is that class, and pip uses rich.
+    test qword [r9 + PyGetSetDescrObject.gs_flags], GS_LAYOUT
+    jnz .sa_no_slot
     mov rdi, r9
     mov rsi, rbx
     mov rdx, r13
     extern getset_descr_set
     call getset_descr_set
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_check_heap_descr:
+    ; A data descriptor written in Python -- a class with __set__, or with
+    ; __delete__ for a delete.  op_store_attr calls __set__ before it ever
+    ; gets here, but setattr(), object.__setattr__ and `del obj.x` come
+    ; straight to this store, and they stored into the instance dict past
+    ; it: setattr(struct, "x", 1) on a ctypes Structure, whose fields are
+    ; exactly such descriptors, left the field untouched.
+    mov rcx, [r9 + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .sa_no_slot
+    mov r14, r9                 ; the descriptor, borrowed from the MRO
+    mov rdi, rcx
+    extern dunder_set
+    lea rsi, [rel dunder_set]
+    test r13, r13
+    jnz .sa_heap_lookup
+    lea rsi, [rel ia_dunder_delete]
+.sa_heap_lookup:
+    call dunder_lookup          ; rax = the function, borrowed, or 0
+    test rax, rax
+    jz .sa_no_slot
+    sub rsp, 32                 ; [descriptor, instance, value] + pad
+    mov [rsp], r14
+    mov [rsp + 8], rbx
+    mov [rsp + 16], r13
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 3
+    test r13, r13
+    jnz .sa_heap_call
+    mov edx, 2                  ; __delete__(descriptor, instance)
+.sa_heap_call:
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 32
+    test rax, rax
+    jz .sa_heap_done            ; it raised; the exception is pending
+    DECREF_V rax, rcx
+.sa_heap_done:
     pop r14
     pop r13
     pop r12
@@ -1473,3 +1540,6 @@ trg_del_name:         db "__del__", 0
 
 section .bss
 type_version_counter: resd 1
+
+section .rodata
+ia_dunder_delete: db "__delete__", 0

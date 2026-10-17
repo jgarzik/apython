@@ -92,10 +92,12 @@ test_call_instance
 test_call_kwargs_errors
 test_call_recursion
 test_call_spec
+test_cell_contents
 test_class_annotations
 test_classcell_not_a_cell
 test_class_doc_entry
 test_classes
+test_class_instance_base
 test_class_layout_entries
 test_classmethod_metaclass
 test_class_name_at_module
@@ -103,6 +105,7 @@ test_class_namespace_copy
 test_cli
 test_closures
 test_cmath
+test_cmdline_warnoptions
 test_codec_args
 test_codec_handlers
 test_codecs_binding
@@ -122,6 +125,7 @@ test_compare_reflected_op
 test_comparisons
 test_compile_annotation_scan
 test_compile_annotations
+test_compile_ast_input
 test_compile_async
 test_compile_async_scope
 test_compile_augassign
@@ -188,8 +192,10 @@ test_control_flow
 test_converter_dunders
 test_copyreg
 test_coro_bound_methods
+test_coro_throw_traceback
 test_crash_regressions
 test_csv
+test_ctypes_basic
 test_data_descriptor_precedence
 test_decode_errors
 test_deep_dealloc
@@ -214,6 +220,7 @@ test_descriptor_class_access
 test_descriptor_receiver
 test_descriptors
 test_descriptor_subclass
+test_dict_assign_with_property
 test_dict_bugs
 test_dict_clear_reentrant
 test_dict_compare
@@ -262,6 +269,7 @@ test_exception_args_assign
 test_exception_class_lifetime
 test_exception_context
 test_exception_dunder_str
+test_exception_group_class_getitem
 test_exception_group_deep
 test_exception_group_new
 test_exception_group_notes
@@ -318,6 +326,7 @@ test_frame_lineno
 test_frame_live
 test_frame_object_cycles
 test_frames_and_time
+test_frozen_importlib_names
 test_frozenset_descriptors
 test_frozenset_hash
 test_frozenset
@@ -328,6 +337,8 @@ test_func_attrs
 test_func_defaults_write
 test_func_dunder_get
 test_function_attrs
+test_function_constructor
+test_function_module_assign
 test_functions
 test_future_annotations
 test_future_import
@@ -339,6 +350,7 @@ test_gc_instance_type
 test_gc_module
 test_gc_reentrant_collect
 test_gc_static_types
+test_gc_suspended_generator_consts
 test_gen_adv
 test_generator_close_on_drop
 test_generator_close_throw
@@ -348,11 +360,14 @@ test_generator_introspection
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
+test_genericalias_mro_entries
+test_genericalias_or_subclass
 test_generic_alias_subst
 test_generic_alias_value
 test_gen_exc_info
 test_gen_return2
 test_gen_return
+test_gen_throw_signature
 test_getattr_descriptors
 test_getattr_generic_order
 test_getattribute_hook_flag
@@ -369,7 +384,9 @@ test_identity_values
 test_immediate_args
 test_immediate_operands
 test_imp_module
+test_import_circular_message
 test_import_errors
+test_import_from_module_subclass
 test_import_from_name
 test_import_from
 test_import_kwargs
@@ -421,6 +438,7 @@ test_io_subclass
 test_io_tail
 test_isinstance_hostile
 test_islice_consumes
+test_islice_none_args
 test_iterable_arg_errors
 test_iterable_arguments
 test_iterator_cycles
@@ -432,6 +450,7 @@ test_iter_sentinel
 test_itertools_compress_batched
 test_itertools_gc
 test_itertools
+test_itertools_semantics
 test_itertools_tail
 test_join_iterable_raises
 test_kwargs
@@ -456,6 +475,7 @@ test_lzma
 test_maketrans
 test_map_multi
 test_mappingproxy_call
+test_marshal_dumps_interned
 test_marshal_hostile
 test_marshal_interned
 test_marshal_module
@@ -467,6 +487,7 @@ test_match_mapping_types
 test_match
 test_math_more
 test_math
+test_math_sumprod_prod_types
 test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
@@ -475,6 +496,7 @@ test_memoryview_exports
 test_memoryview_formats
 test_memoryview_released
 test_memoryview_stride
+test_metaclass_data_descriptor
 test_metaclass_lifetime
 test_metaclass_prepare
 test_metaclass
@@ -499,6 +521,7 @@ test_module_file_attr
 test_module_getattr_del
 test_module_getattr
 test_module_repr_and_property_msg
+test_module_repr_long_path
 test_module_type_new
 test_mro_entries
 test_multiple_inheritance
@@ -532,6 +555,7 @@ test_ordereddict
 test_ordering_typeerror
 test_oserror
 test_os_write_buffer
+test_path_arg_refusals
 test_pep646
 test_pep695_classdict
 test_pep695_generic_class
@@ -563,6 +587,7 @@ test_prepare_raises
 test_print_broken_pipe
 test_print_file
 test_printf_precision
+test_print_keywords
 test_print_sink_lifetime
 test_print_tag
 test_print_to_object
@@ -573,6 +598,7 @@ test_property
 test_property_raises
 test_pycache_write
 test_pyc_hardening
+test_pyclass_descriptor_builtins
 test_pyc_staleness
 test_pyexpat_decl
 test_pyexpat_module
@@ -597,11 +623,13 @@ test_reflexive_compare
 test_relative_import
 test_re_module
 test_re_opcodes
+test_re_possessive_groups
 test_repr_depth_unwind
 test_repr_element_raises
 test_repr
 test_repr_str_cycle
 test_re_review
+test_re_sub_mismatched_repl
 test_re_sub_raises
 test_review_regressions
 test_richcompare_bool
@@ -660,6 +688,7 @@ test_slots_mangling
 test_slots
 test_slots_store_cache
 test_slots_suppression
+test_slots_unset_hasattr
 test_smallint_identity
 test_smallstr_builtins
 test_smallstr_classes
@@ -680,6 +709,8 @@ test_sre_groupdict_refcount
 test_sre_position
 test_sre
 test_sre_scanner_and_boundary
+test_ssl_basic
+test_ssl_shapes
 test_static_bases
 test_stdlib_glue
 test_stdlib_shims
@@ -753,6 +784,7 @@ test_sys_exit
 test_sys_is_finalizing
 test_sys_version_platform
 test_termios
+test_throw_handled_context
 test_time_clock_info
 test_time_clocks
 test_time_module
@@ -766,6 +798,7 @@ test_tuples
 test_typealias_scope_name
 test_type_annotations_meta
 test_type_cache
+test_type_call_class_setattr
 test_type_comments
 test_type_constructors
 test_type_delattr
@@ -781,6 +814,8 @@ test_unary
 test_unbound_local
 test_unbound_zero_args
 test_uncallable_bind_lifetime
+test_uncaught_exception_name
+test_unexpected_kwarg_message
 test_unicode_case
 test_unicodedata
 test_unicode_names
@@ -801,16 +836,19 @@ test_utf16_utf32
 test_utf8_validate_boundaries
 test_value_funnel_guards
 test_value_typeconfusion
+test_venv_copies
 test_view_and_slots
 test_warning_registry
 test_warnings_filters
 test_warnings_module
 test_warnings
+test_warn_stacklevel_import
 test_weakref
 test_weakref_slots_dict
 test_weakref_subclass_kwargs
 test_weakref_types
 test_with_exit_raises
+test_with_exit_traceback
 test_wrong_answers
 test_zero_valued_lookup
 test_zip_strict_message

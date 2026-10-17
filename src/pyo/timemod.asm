@@ -812,7 +812,6 @@ TSP_MOD   equ 48            ; the module, and then the function, while looked up
 TSP_KW    equ 56            ; the parked kw_names_pending
 TSP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 extern import_module
-extern kw_names_pending
 extern dict_get
 extern obj_incref
 extern obj_call_n
@@ -826,9 +825,9 @@ DEF_FUNC time_strptime_func, TSP_FRAME
 
     ; The pending keyword names belong to the call in flight, not to the
     ; import about to run a module body.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - TSP_KW], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     lea rdi, [rel tm_strptime_mod]
     call str_from_cstr_heap
@@ -862,7 +861,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov [rel tm_strptime_impl], rax
 
     mov rax, [rbp - TSP_KW]
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 
 .tsp_have:
     ; strptime(string) and strptime(string, format), which is CPython's
@@ -905,7 +904,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
 
 .tsp_no_impl:
     mov rax, [rbp - TSP_KW]
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
     RAISE exc_TypeError_type, "strptime() needs the _strptime module"
 .tsp_fail:
     xor eax, eax

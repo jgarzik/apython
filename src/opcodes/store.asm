@@ -32,7 +32,6 @@ extern dict_get_index
 extern unbound_local_raise
 extern obj_dealloc
 extern opcode_dispatch_table
-extern eval_co_names
 extern opcode_table
 extern func_type
 extern method_type
@@ -48,14 +47,11 @@ extern rbt_append_cstr
 extern attr_may_be_data_descr
 
 extern eval_dispatch
-extern eval_saved_rbx
-extern eval_saved_r13
 extern obj_decref
 extern dict_set
 extern dict_type
 extern raise_exception
 extern eval_exception_unwind
-extern current_exception
 extern obj_incref
 extern exc_AttributeError_type
 extern exc_TypeError_type
@@ -402,9 +398,9 @@ DEF_FUNC op_store_attr, SA_FRAME
 
 .sa_propagate:
     ; Same shape as op_call's .propagate_exc: the unwinder reads the current
-    ; IP from eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    ; IP from PyFrame.disp_ip, which DISPATCH set, so rbx is not advanced.
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .sa_no_setattr:
@@ -636,16 +632,16 @@ DEF_FUNC op_delete_attr, DA_FRAME
 
 .da_propagate:
     ; Same shape as .sa_propagate: the unwinder reads the current IP from
-    ; eval_saved_rbx, which DISPATCH set, so rbx is not advanced.
+    ; PyFrame.disp_ip, which DISPATCH set, so rbx is not advanced.
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .da_error:
     ; The object is NOT released here, and this is the whole shape of the bug
     ; that used to live at this label.  VPOP_VAL only moved r13; the slot
     ; still holds the pointer, and eval_exception_unwind restores r13 from
-    ; eval_saved_r13 -- what DISPATCH published BEFORE the pop -- and releases
+    ; PyFrame.disp_sp -- what DISPATCH published BEFORE the pop -- and releases
     ; everything above the handler's depth.  Decref'ing here as well freed it
     ; while the unwinder was still holding it, and `del range(i).start` in a
     ; loop corrupted the heap.  op_store_attr's .sa_no_setattr, which is the
@@ -715,7 +711,7 @@ DEF_FUNC op_delete_subscr, DS_FRAME
     ; refused `del a[99]` on an array freed the array's own header and printed
     ; `array('[', [1675724320, 32139, 3])`.
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .ds_error:

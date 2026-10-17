@@ -19,6 +19,7 @@ extern str_new_heap
 extern str_type
 extern none_singleton
 extern module_type
+extern obj_call_n
 extern exc_raise_import
 extern str_from_cstr_heap
 extern str_intern_cstr
@@ -26,8 +27,6 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern dict_del
-extern current_exception
-extern attr_error_pending
 extern eval_exception_unwind
 extern list_new
 extern list_append
@@ -245,67 +244,21 @@ DEF_FUNC exe_path               ; + 0 pushes, 16-aligned at the call below
 END_FUNC exe_path
 
 ;; ============================================================================
-IAR_SUFFIX equ 8
-IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
-IAR_FRAME  equ 4144         ; + 2 pushes = 4160
-DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
-    push rbx
-    push r12
-    mov [rbp - IAR_SUFFIX], rdi
-
-    lea rbx, [rbp - IAR_BUF]
-    CSTRING rdi, "/proc/self/exe"
-    mov rsi, rbx
-    mov edx, 4000
-    extern readlink
-    call readlink
-    test rax, rax
-    jle .iar_relative
-    mov r12, rax                ; length of the resolved path
-
-    ; Cut back to the last '/', keeping it, so "…/apython" becomes "…/".
-.iar_trim:
-    test r12, r12
-    jz .iar_relative
-    dec r12
-    cmp byte [rbx + r12], '/'
-    jne .iar_trim
-    inc r12
-
-    ; Append the suffix.
-    mov rsi, [rbp - IAR_SUFFIX]
-.iar_copy:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .iar_done
-    cmp r12, 4090
-    jae .iar_relative
-    mov [rbx + r12], al
-    inc r12
-    inc rsi
-    jmp .iar_copy
-.iar_done:
-    mov rdi, rbx
-    mov rsi, r12
-    call str_new_heap
-    jmp .iar_append
-
-.iar_relative:
-    mov rdi, [rbp - IAR_SUFFIX]
+;; import_add_path_cstr(rdi = C string) -> nothing; appended to sys.path
+;; ============================================================================
+DEF_FUNC_LOCAL import_add_path_cstr
     call str_from_cstr_heap
-
-.iar_append:
     push rax
+    sub rsp, 8
     mov rdi, [rel sys_path_list]
     mov rsi, rax
     call list_append
+    add rsp, 8
     pop rdi
     call obj_decref
-    pop r12
-    pop rbx
     leave
     ret
-END_FUNC import_add_exe_relative_path
+END_FUNC import_add_path_cstr
 
 ;; ============================================================================
 DEF_FUNC import_init
@@ -313,6 +266,10 @@ DEF_FUNC import_init
     push r12
     mov rbx, rdi                ; argc
     mov r12, rsi                ; argv
+
+    ; Where this interpreter's library is, before sys exists to report it.
+    extern pathconfig_init
+    call pathconfig_init
 
     ; Initialize sys module
     mov rdi, rbx
@@ -396,6 +353,10 @@ DEF_FUNC import_init
     ; a failing module body stopped being swallowed, was turn "module not
     ; available" into "module half-imports and then raises from inside
     ; types.py".  A stdlib on the path has to be the caller's decision.
+    ; Under -E or -I the environment is not consulted.
+    extern main_sysflags
+    cmp byte [rel main_sysflags + SF_IGNORE_ENV], 0
+    jne .no_pythonpath
     CSTRING rdi, "PYTHONPATH"
     extern getenv
     call getenv
@@ -439,16 +400,29 @@ DEF_FUNC import_init
     jmp .pp_entry
 .no_pythonpath:
 
-    ; The modules apython ships itself, last.  They are found relative to the
-    ; interpreter binary rather than the working directory -- a relative "lib"
-    ; entry only resolved when apython happened to be run from its own source
-    ; tree, so `import itertools` worked there and nowhere else.  Last, so a
-    ; real stdlib named by PYTHONPATH wins: these stand in for CPython's C
-    ; modules, not for its Python ones.
-    lea rdi, [rel im_lib_path]
-    call import_add_exe_relative_path
-    lea rdi, [rel im_tests_cpython_path]
-    call import_add_exe_relative_path
+    ; The library apython ships, last, and found relative to the interpreter
+    ; binary rather than the working directory -- a relative "lib" entry only
+    ; resolved when apython happened to be run from its own source tree, so
+    ; `import itertools` worked there and nowhere else.
+    ;
+    ; Two directories, in this order.  stdlib/ is CPython's own Lib/,
+    ; unmodified; lib/ is what stands in for CPython's C modules (_io,
+    ; _socket, _thread, ...).  The stand-ins come SECOND so that no name in
+    ; lib/ can shadow a CPython module of the same name: a module that needs
+    ; to differ from CPython's is a bug or a C module, and either way it does
+    ; not belong ahead of the real one.
+    ; Their locations come from pathconfig.asm, which knows the build tree
+    ; from an installation.
+    extern pc_stdlib, pc_dynload, pc_extra
+    lea rdi, [rel pc_stdlib]
+    call import_add_path_cstr
+    lea rdi, [rel pc_dynload]
+    call import_add_path_cstr
+    cmp byte [rel pc_extra], 0
+    je .ii_paths_done
+    lea rdi, [rel pc_extra]
+    call import_add_path_cstr
+.ii_paths_done:
 
     pop r12
     pop rbx
@@ -572,10 +546,10 @@ END_FUNC irnm_cat_n
 ;; ============================================================================
 global import_clear_attr_error
 DEF_FUNC import_clear_attr_error
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .ica_done
-    mov qword [rel attr_error_pending], 0
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    mov qword [gs:ThreadState.current_exception], 0
 .ica_done:
     leave
     ret
@@ -1069,6 +1043,45 @@ global import_submodule_attr
 DEF_FUNC import_submodule_attr, ISA_FRAME
     mov [rbp - ISA_MOD], rdi
     mov [rbp - ISA_ATTR], rsi
+
+    ; With importlib installed, lib/_importlib_bootstrap.py answers, CPython's
+    ; way: sys.modules first, an import only for a package, and only a
+    ; ModuleNotFoundError for exactly that submodule taken as "absent".
+    CSTRING rdi, "_import_submodule"
+    call im_importlib_func
+    test rax, rax
+    jz .isa_own
+    ; (module, name) as an argument array: ISA_T2 is the lower address.
+    mov rcx, [rbp - ISA_MOD]
+    mov [rbp - ISA_T2], rcx
+    mov rcx, [rbp - ISA_ATTR]
+    mov [rbp - ISA_T1], rcx
+    mov rdi, rax
+    lea rsi, [rbp - ISA_T2]
+    mov edx, 2
+    call obj_call_n
+    test rax, rax
+    jz .isa_out_raw                ; it raised: 0 with the exception pending
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .isa_absent
+    ; sys.modules holds the module; the caller takes a borrowed reference.
+    mov [rbp - ISA_T2], rax
+    mov rdi, rax
+    call obj_decref
+    mov rax, [rbp - ISA_T2]
+    leave
+    ret
+.isa_absent:
+    mov rdi, rax
+    call obj_decref
+    xor eax, eax
+.isa_out_raw:
+    leave
+    ret
+.isa_own:
+    mov rdi, [rbp - ISA_MOD]
+    mov rsi, [rbp - ISA_ATTR]
     ; Only a module has a mod_dict.  sys.modules is an ordinary dict and a
     ; program may put anything in it -- importlib's own import_fresh_module
     ; does -- so this used to read a field belonging to some other struct and
@@ -1154,12 +1167,106 @@ isa_dot:         db ".", 0
 section .text
 
 ;; ============================================================================
-;; import_find_and_load(PyObject *name_str) -> PyObject*
-;; Find module on disk and load it.
+;; ifl_get(rdi = a dict, rsi = C string key) -> rax = the Value, BORROWED, or 0
+;; ============================================================================
+IFG_DICT  equ 8
+IFG_KEY   equ 16
+IFG_VAL   equ 24
+IFG_FRAME equ 32
+DEF_FUNC_LOCAL ifl_get, IFG_FRAME
+    mov [rbp - IFG_DICT], rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - IFG_KEY], rax
+    mov rdi, [rbp - IFG_DICT]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - IFG_VAL], rax
+    mov rdi, [rbp - IFG_KEY]
+    call obj_decref
+    mov rax, [rbp - IFG_VAL]
+    leave
+    ret
+END_FUNC ifl_get
+
+;; ============================================================================
+;; im_importlib_func(rdi = C string) -> rax = that function of
+;;   lib/_importlib_bootstrap.py, BORROWED, or 0 while it is not loaded yet
+;;
+;; Looked up each time rather than cached: a process-lifetime pointer to a
+;; module attribute dangles when the module is dropped from sys.modules.
+;; ============================================================================
+IIF_NAME  equ 8
+IIF_FRAME equ 16
+DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
+    mov [rbp - IIF_NAME], rdi
+    mov rdi, [rel sys_modules_dict]
+    CSTRING rsi, "_importlib_bootstrap"
+    call ifl_get
+    test rax, rax
+    jz .iif_none
+    V_TEST_PTR rax, rcx
+    ja .iif_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel module_type]
+    cmp rcx, rdx
+    jne .iif_none
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .iif_none
+    mov rsi, [rbp - IIF_NAME]
+    call ifl_get
+    leave
+    ret
+.iif_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC im_importlib_func
+
+;; ============================================================================
+;; import_find_and_load(PyObject *name_str) -> PyObject*, a new reference,
+;;   or NULL with the exception pending
+;;
+;; What the import statement does on a sys.modules miss: CPython's
+;; _bootstrap._find_and_load, reached through lib/_importlib_bootstrap.py --
+;; meta_path, path hooks, specs, loaders, all CPython's own code.  Until that
+;; module has finished loading there is no importlib to ask, and the
+;; interpreter's own loader below does the job; it is how importlib itself
+;; gets loaded, and what _impcore.create_builtin uses for a builtin.
+;; ============================================================================
+IFL_NAME  equ 8
+IFL_ARG   equ 16
+IFL_FRAME equ 16
+DEF_FUNC import_find_and_load, IFL_FRAME
+    mov [rbp - IFL_NAME], rdi
+    CSTRING rdi, "_find_and_load"
+    call im_importlib_func
+    test rax, rax
+    jz .ifl_own
+    mov rcx, [rbp - IFL_NAME]
+    mov [rbp - IFL_ARG], rcx
+    mov rdi, rax
+    lea rsi, [rbp - IFL_ARG]
+    mov edx, 1
+    call obj_call_n
+    leave
+    ret
+.ifl_own:
+    mov rdi, [rbp - IFL_NAME]
+    call import_find_and_load_asm
+    leave
+    ret
+END_FUNC import_find_and_load
+
+;; ============================================================================
+;; import_find_and_load_asm(PyObject *name_str) -> PyObject*
+;; Find module on disk and load it, without importlib.
 ;; For dotted names (e.g. "unittest.case"), searches parent package's __path__.
 ;; Returns module object or NULL.
 ;; ============================================================================
-DEF_FUNC import_find_and_load, FL_FRAME
+global import_find_and_load_asm
+DEF_FUNC import_find_and_load_asm, FL_FRAME
     push rbx
     push r12
     push r13
@@ -1316,8 +1423,14 @@ DEF_FUNC import_find_and_load, FL_FRAME
 .copy_done:
     mov byte [r12 + rcx], 0    ; null-terminate
 
-    ; Search sys.path
+    ; Search sys.path -- or, for _impcore.create_builtin, only the directory
+    ; the stand-ins for C modules live in: a builtin does not depend on what
+    ; a program has done to sys.path, as CPython's are compiled in.
+    mov rdi, [gs:ThreadState.import_path_override]
+    test rdi, rdi
+    jnz .have_search_list
     mov rdi, [rel sys_path_list]
+.have_search_list:
     mov rsi, [rbp - FL_LEAF]
     mov rdx, [rbp - FL_LEAFLEN]
     mov rcx, r12                ; full path component (with slashes)
@@ -1391,7 +1504,7 @@ DEF_FUNC import_find_and_load, FL_FRAME
     pop rbx
     leave
     ret
-END_FUNC import_find_and_load
+END_FUNC import_find_and_load_asm
 
 ;; ============================================================================
 ;; sd_pyc_ok(rdi = an open fd on a .pyc, rsi = its path) -> rax = the fd when
@@ -3072,8 +3185,6 @@ im_not_pkg_tail:    db "' is not a package", 0
 im_halted_prefix:    db "import of ", 0
 im_halted_suffix:    db " halted; None in sys.modules", 0
 irr_package_key:    db "__package__", 0
-im_lib_path:        db "lib", 0
-im_tests_cpython_path: db "tests/cpython", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0
@@ -3137,3 +3248,7 @@ import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
 ; The PEP 420 portion directories the last search collected, as a list of
 ; str, or 0.  Owned; cleared at the start of every search.
 import_ns_portions: resq 1
+
+; A list searched in place of sys.path by the interpreter's own finder, or 0.
+; _impcore.create_builtin points it at the lib/ directory alone.
+; import_path_override lives in ThreadState (src/include/threadstate.inc).

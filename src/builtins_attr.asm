@@ -16,7 +16,6 @@
 %include "object.inc"
 
 extern str_type
-extern current_exception
 extern obj_getattr_opt
 extern exc_AttributeError_type
 extern type_is_subtype
@@ -33,7 +32,6 @@ extern raise_type_error_with_name
 extern obj_dealloc
 extern str_from_cstr
 extern dict_get
-extern eval_saved_r13
 
 ; The frame slots the two attribute builtins use.  They were defined in
 ; builtins_obj.asm beside the functions and moved with them.
@@ -125,7 +123,7 @@ DEF_FUNC builtin_getattr, 32
     ; the exception the __getattr__ and descriptor protocols use to say so, and
     ; the only one CPython swallows here.  Anything else is a real failure and
     ; returning the default would bury it.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .getattr_absent
     mov rdi, [rax + PyObject.ob_type]
@@ -139,8 +137,8 @@ DEF_FUNC builtin_getattr, 32
     jne .getattr_propagate
     ; Clear it before releasing, so a dealloc that re-enters cannot see a
     ; pointer that is about to go away.
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     jmp .getattr_absent
 
@@ -216,7 +214,7 @@ DEF_FUNC builtin_hasattr, 24
     ret
 .hasattr_check_type:
     ; As getattr: only an AttributeError reads as absent.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .hasattr_false
     mov rdi, [rax + PyObject.ob_type]
@@ -224,8 +222,8 @@ DEF_FUNC builtin_hasattr, 24
     call type_is_subtype
     test eax, eax
     jz .hasattr_propagate
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     jmp .hasattr_false
 

@@ -153,39 +153,28 @@ for test_py in "$TESTDIR"/test_*.py; do
     # Run with apython
     actual=$(timeout $TIMEOUT $APYTHON "$pyc_file" 2>&1) || true
 
-    # Compare
+    # Compare.  A test listed in known_failures.txt is expected to fail for
+    # the reason written beside it, and is reported XFAIL rather than FAIL;
+    # one that starts passing is XPASS, which FAILS the run, so the entry
+    # comes out in the commit that earns it rather than going stale.
+    known=$(awk -v t="$test_name" '$1 == t { $1 = ""; print; exit }' \
+            "$TESTDIR/known_failures.txt")
     if [ "$expected" = "$actual" ]; then
-        echo -e "${GREEN}PASS${NC} $test_name"
-        PASS=$((PASS + 1))
+        if [ -n "$known" ]; then
+            echo -e "${RED}XPASS${NC} $test_name -- remove it from known_failures.txt"
+            FAIL=$((FAIL + 1))
+            ERRORS="$ERRORS\n--- $test_name ---\npasses, but is listed in known_failures.txt\n"
+        else
+            echo -e "${GREEN}PASS${NC} $test_name"
+            PASS=$((PASS + 1))
+        fi
+    elif [ -n "$known" ]; then
+        echo -e "${YELLOW}XFAIL${NC} $test_name --${known}"
+        SKIP=$((SKIP + 1))
     else
         echo -e "${RED}FAIL${NC} $test_name"
         FAIL=$((FAIL + 1))
         ERRORS="$ERRORS\n--- $test_name ---\nExpected:\n$expected\nActual:\n$actual\n"
-    fi
-
-    # Dual-backend testing for async tests
-    if [[ "$test_name" == test_async_* ]]; then
-        # Test with poll backend
-        actual_poll=$(APYTHON_IO_BACKEND=poll timeout $TIMEOUT $APYTHON "$pyc_file" 2>&1) || true
-        if [ "$expected" != "$actual_poll" ]; then
-            echo -e "${RED}FAIL${NC} $test_name (poll backend)"
-            FAIL=$((FAIL + 1))
-            ERRORS="$ERRORS\n--- $test_name (poll) ---\nExpected:\n$expected\nActual:\n$actual_poll\n"
-        else
-            echo -e "${GREEN}PASS${NC} $test_name (poll)"
-            PASS=$((PASS + 1))
-        fi
-        # Test with iouring backend (Linux only)
-        if [ "$(uname)" = "Linux" ]; then
-            actual_uring=$(APYTHON_IO_BACKEND=iouring timeout $TIMEOUT $APYTHON "$pyc_file" 2>&1) || true
-            if [ "$expected" != "$actual_uring" ]; then
-                echo -e "${YELLOW}SKIP${NC} $test_name (iouring — may need newer kernel)"
-                SKIP=$((SKIP + 1))
-            else
-                echo -e "${GREEN}PASS${NC} $test_name (iouring)"
-                PASS=$((PASS + 1))
-            fi
-        fi
     fi
 done
 

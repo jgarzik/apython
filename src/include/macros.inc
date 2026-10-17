@@ -38,6 +38,7 @@
 %define MACROS_INC
 
 %include "value.inc"
+%include "threadstate.inc"
 
 ; Standard global function with RBP frame
 %macro DEF_FUNC 1
@@ -129,14 +130,52 @@
 ; jumps to the real handler.  The cost is a load where there used to be an lea,
 ; and no branch at all -- the previous arrangement tested a flag only inside
 ; eval_dispatch, which nothing reaches, so `-t` printed one opcode per frame.
+;
+; The two words it publishes go into the RUNNING FRAME (r12), not into a
+; global: the unwinder finds that frame through ThreadState.eval_saved_r12 and
+; reads them back from PyFrame.disp_ip / .disp_sp.  A frame belongs to one
+; thread, so this is per-thread state that costs nothing to reach -- where a
+; gs-relative store, measured on a Core Ultra 9 285K, issues at half the rate
+; of a plain one and cost this loop 20% on the core benchmarks.
 %macro DISPATCH 0
-    mov [rel eval_saved_rbx], rbx  ; save bytecode IP for exception unwind
-    mov [rel eval_saved_r13], r13  ; save value stack ptr for exception unwind
+    mov [r12 + PyFrame.disp_ip], rbx  ; save bytecode IP for exception unwind
+    mov [r12 + PyFrame.disp_sp], r13  ; save value stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode
     movzx ecx, byte [rbx+1]      ; load arg into ecx
     add rbx, 2                     ; advance past instruction word
     mov rdx, [rel opcode_dispatch_table]
     jmp [rdx + rax*8]             ; dispatch to handler
+%endmacro
+
+; PUBLISH_SP / PUBLISH_IP -- republish the value stack top (r13) or the
+; bytecode IP (rbx) for the unwinder, from code that cannot be sure r12 is
+; still the running frame: a helper with its own use of r12, or one reached
+; from a handler through a call.  The running frame is found through
+; ThreadState.eval_saved_r12, which is where the unwinder will look.  Every
+; register and the flags' consumers are preserved; rsp moves by 8 and back.
+; A handler that has not touched r12 writes [r12 + PyFrame.disp_sp] directly.
+%macro PUBLISH_SP 0
+    push rax
+    mov rax, [gs:ThreadState.eval_saved_r12]
+    mov [rax + PyFrame.disp_sp], r13
+    pop rax
+%endmacro
+%macro PUBLISH_IP 0
+    push rax
+    mov rax, [gs:ThreadState.eval_saved_r12]
+    mov [rax + PyFrame.disp_ip], rbx
+    pop rax
+%endmacro
+
+; CLEAR_ATTR_ERROR_PENDING -- every ordinary attribute lookup clears
+; ThreadState.attr_error_pending.  It is almost always zero already, and a
+; gs-relative store issues at half the rate of a plain one, so the store is
+; made only when there is something to clear.  Clobbers the flags.
+%macro CLEAR_ATTR_ERROR_PENDING 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je %%clear_done
+    mov qword [gs:ThreadState.attr_error_pending], 0
+%%clear_done:
 %endmacro
 
 ; CHECK_EVAL_SIGNALS -- run any Python signal handler that is waiting.
@@ -163,8 +202,8 @@
     extern signal_any_pending
     cmp qword [rel signal_any_pending], 0
     je %%no_signals
-    mov [rel eval_saved_rbx], rbx
-    mov [rel eval_saved_r13], r13
+    mov [r12 + PyFrame.disp_ip], rbx
+    mov [r12 + PyFrame.disp_sp], r13
     extern signal_run_pending
     call signal_run_pending
     test eax, eax
@@ -305,10 +344,9 @@
 ; Placed at the top of the function, before anything is popped or allocated,
 ; so RAISE has nothing to release.
 %macro NO_KEYWORDS 1            ; %1 = the whole message
-    extern kw_names_pending
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [gs:ThreadState.kw_names_pending], 0
     je %%no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     RAISE exc_TypeError_type, %1
 %%no_kw:
 %endmacro
@@ -323,8 +361,7 @@
 ;
 ; rax must hold the class being constructed.
 %macro NO_KEYWORDS_TP_INIT 2    ; %1 = the owning type, %2 = the whole message
-    extern kw_names_pending
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [gs:ThreadState.kw_names_pending], 0
     je %%no_kw
     lea rcx, [rel %1]
     cmp rax, rcx
@@ -333,7 +370,7 @@
     cmp rdx, [rcx + PyTypeObject.tp_init]
     jne %%no_kw
 %%refuse:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     RAISE exc_TypeError_type, %2
 %%no_kw:
 %endmacro
@@ -370,7 +407,7 @@
 
 ; Load co_names payload pointer (&tuple.ob_item[0]) into a register
 %macro LOAD_CO_NAMES 1          ; %1 = dest reg
-    mov %1, [rel eval_co_names]
+    mov %1, [gs:ThreadState.eval_co_names]
 %endmacro
 
 ; ==========================================================================
@@ -669,14 +706,14 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; %1 is taken when the limit is hit; the counter is reset wholesale by
 ; eval_exception_unwind, since a raise discards these frames.
 %macro C_RECURSION_ENTER 1
-    inc qword [rel c_recursion_depth]
-    mov rax, [rel c_recursion_depth]
+    inc qword [gs:ThreadState.c_recursion_depth]
+    mov rax, [gs:ThreadState.c_recursion_depth]
     cmp rax, [rel recursion_limit]
     jg %1
 %endmacro
 
 %macro C_RECURSION_LEAVE 0
-    dec qword [rel c_recursion_depth]
+    dec qword [gs:ThreadState.c_recursion_depth]
 %endmacro
 
 ; Instance __dict__ access, via the type's tp_dictoffset rather than a fixed
@@ -783,14 +820,14 @@ TP_DICT_AT_TAIL equ -1
 ; look like a failure.  Save it before the call and compare after.
 %macro DUNDER_EXC_SAVE 1        ; %1 = destination slot (register or memory)
     push rax
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov %1, rax
     pop rax
 %endmacro
 
 %macro DUNDER_RAISED 2          ; %1 = the saved slot, %2 = label to take
     push rax
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     cmp rax, %1
     pop rax                     ; pop does not disturb the flags
     jne %2
@@ -805,7 +842,7 @@ TP_DICT_AT_TAIL equ -1
 ; is not the one that was already being handled.
 %macro EXC_RAISED_SINCE 3       ; %1 = saved slot, %2 = scratch, %3 = label
     push %2                     ; the scratch is restored on both paths, so a
-    mov %2, [rel current_exception]  ; caller need not find a dead register
+    mov %2, [gs:ThreadState.current_exception]  ; caller need not find a dead register
     test %2, %2
     jz %%no
     cmp %2, %1
@@ -1185,3 +1222,24 @@ ASM_INIT
     cmp qword [%1 + PyStrObject.ob_hash], -1
     jne %2
 %endmacro
+
+; Indices into main_sysflags (src/main.asm), one byte per field, in the order
+; of sys.flags itself -- sys_module_init copies them across by index.
+SF_DEBUG          equ 0
+SF_INSPECT        equ 1
+SF_INTERACTIVE    equ 2
+SF_OPTIMIZE       equ 3
+SF_DONT_WRITE_BC  equ 4
+SF_NO_USER_SITE   equ 5
+SF_NO_SITE        equ 6
+SF_IGNORE_ENV     equ 7
+SF_VERBOSE        equ 8
+SF_BYTES_WARNING  equ 9
+SF_QUIET          equ 10
+SF_HASH_RANDOM    equ 11
+SF_ISOLATED       equ 12
+SF_DEV_MODE       equ 13
+SF_UTF8_MODE      equ 14
+SF_WARN_DEF_ENC   equ 15
+SF_SAFE_PATH      equ 16
+SYSFLAGS_COUNT    equ 17

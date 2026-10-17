@@ -7,7 +7,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern kw_names_pending
 
 ; A dunder is invoked on behalf of an operation, not as the call the user
 ; wrote, so it must not inherit that call's keyword names.  Without this,
@@ -15,12 +14,12 @@ extern kw_names_pending
 ; pending and raised "unexpected keyword argument".  The leak only became
 ; reachable once heaptypes had real slots to dispatch through.
 %macro DUNDER_KW_SAVE 1
-    mov %1, [rel kw_names_pending]
-    mov qword [rel kw_names_pending], 0
+    mov %1, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
 %endmacro
 
 %macro DUNDER_KW_RESTORE 1
-    mov [rel kw_names_pending], %1
+    mov [gs:ThreadState.kw_names_pending], %1
 %endmacro
 
 extern none_singleton

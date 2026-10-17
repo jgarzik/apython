@@ -12,7 +12,6 @@
 %include "object.inc"
 %include "eventloop.inc"
 
-extern kw_names_pending
 extern ap_strcmp
 extern obj_is_true
 extern task_type
@@ -43,7 +42,6 @@ extern task_new
 extern eventloop_init
 extern eventloop_teardown
 extern eventloop_run
-extern eventloop
 extern ready_enqueue
 extern list_new
 extern list_append
@@ -70,7 +68,7 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     mov rbx, rax               ; rbx = coro
 
     ; Check if loop already running
-    cmp dword [rel eventloop + EventLoop.running], 1
+    cmp dword [gs:ThreadState.eventloop + EventLoop.running], 1
     je .ar_reentrant
 
     ; Initialize event loop
@@ -103,8 +101,7 @@ DEF_FUNC asyncio_run_func, AR_FRAME
 
     ; An exception that reached the root task is re-raised here, once the
     ; loop is down: the run() call is where the caller expects to see it.
-    extern eventloop_root_exception
-    mov rcx, [rel eventloop_root_exception]
+    mov rcx, [gs:ThreadState.eventloop_root_exception]
     test rcx, rcx
     jnz .ar_raise_root
 
@@ -115,7 +112,7 @@ DEF_FUNC asyncio_run_func, AR_FRAME
     ret
 
 .ar_raise_root:
-    mov qword [rel eventloop_root_exception], 0
+    mov qword [gs:ThreadState.eventloop_root_exception], 0
     mov rdi, rcx
     pop r12
     pop rbx
@@ -667,10 +664,10 @@ DEF_FUNC asyncio_gather_func, AGF_FRAME
     mov qword [rbp - AGF_RETEX], 0
 
     ; return_exceptions is the one keyword gather takes.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .ag_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rax + PyTupleObject.ob_size]
     sub [rbp - AGF_NARGS], rcx
     xor edx, edx
@@ -1076,7 +1073,7 @@ END_FUNC gather_awaitable_clear
 ;; asyncio_get_running_loop(args, nargs)
 ;; ============================================================================
 DEF_FUNC asyncio_get_running_loop_func
-    cmp dword [rel eventloop + EventLoop.running], 1
+    cmp dword [gs:ThreadState.eventloop + EventLoop.running], 1
     jne .grl_error
 
     ; Return None as a placeholder for the loop object

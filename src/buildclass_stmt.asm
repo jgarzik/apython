@@ -18,13 +18,10 @@
 extern type_from_parts
 extern bc_call_kw
 extern bc_prepare_name
-extern class_kwnames_pending
-extern class_kwvalues_pending
 
 ; --- the rest of the tree ---
 extern ap_strcmp
 extern builtins_dict_global
-extern current_exception
 extern dict_new
 extern eval_exception_unwind
 extern eval_frame
@@ -33,7 +30,6 @@ extern exc_metatype
 extern frame_free
 extern frame_new
 extern func_type
-extern kw_names_pending
 extern obj_dealloc
 extern obj_decref
 extern obj_getattr_opt
@@ -429,7 +425,7 @@ BCL_ORIG  equ 96
     ; to be ignored: the metatype never got a chance to run.
     mov qword [rbp - BCL_OKWN], 0
     mov qword [rbp - BCL_OKWV], 0
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .bc_no_kwargs
     mov rcx, [rax + PyTupleObject.ob_size]
@@ -448,7 +444,7 @@ BCL_ORIG  equ 96
     mov [rbp - BCL_META], rax
 .bc_no_kwargs:
     ; Consumed: anything we call from here on must not see them again.
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rsi, [rbp - BCL_NPOS]
     ; r12 will be used later for the type object
 
@@ -573,7 +569,24 @@ BCL_ORIG  equ 96
     jz .bc_meta_scan_done
     jmp .bc_meta_have_winner
 .bc_meta_default:
+    ; No metaclass= keyword: CPython starts from type(bases[0]), not from
+    ; type, so a first base whose type is not a metatype at all -- an
+    ; instance of some class -- makes that class the metaclass.
     lea r8, [rel type_type]
+    mov rcx, [rbp - BCL_BASES]
+    test rcx, rcx
+    jz .bc_meta_have_winner
+    cmp qword [rcx + PyTupleObject.ob_size], 0
+    je .bc_meta_have_winner
+    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rdi, [rcx]
+    V_TEST_PTR rdi, rax
+    ja .bc_meta_have_winner
+    test rdi, rdi
+    jz .bc_meta_have_winner
+    mov rdi, [rdi + PyObject.ob_type]
+    call bc_normalize_metatype
+    mov r8, rdi
 .bc_meta_have_winner:
     mov rcx, [rbp - BCL_BASES]
     test rcx, rcx
@@ -702,8 +715,7 @@ BCL_ORIG  equ 96
     ; produced a class *and* an error reported somewhere else entirely.
     test edx, edx
     jnz .bc_body_ok
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bc_body_raised
 .bc_body_ok:
     ; DECREF return value (should be None — TAG_NONE, not a pointer)
@@ -812,15 +824,15 @@ BCL_ORIG  equ 96
     ; pair: type_from_parts calls __init_subclass__ and has no other way to
     ; know them.
     mov rax, [rbp - BCL_OKWN]
-    mov [rel class_kwnames_pending], rax
+    mov [gs:ThreadState.class_kwnames_pending], rax
     mov rax, [rbp - BCL_OKWV]
-    mov [rel class_kwvalues_pending], rax
+    mov [gs:ThreadState.class_kwvalues_pending], rax
     mov rdi, r14
     mov rsi, [rbp - BCL_BASES]
     mov rdx, r15
     call type_from_parts
-    mov qword [rel class_kwnames_pending], 0
-    mov qword [rel class_kwvalues_pending], 0
+    mov qword [gs:ThreadState.class_kwnames_pending], 0
+    mov qword [gs:ThreadState.class_kwvalues_pending], 0
     push rax
     mov rdi, [rbp - BCL_BASES]
     test rdi, rdi
@@ -914,7 +926,8 @@ BRB_OUT   equ 16
 BRB_N     equ 24
 BRB_SCRAT equ 32            ; per-base: the class itself, or its entries tuple
 BRB_TOTAL equ 40            ; how many real bases those add up to
-BRB_FRAME equ 48            ; + 2 pushes = 64, 16-aligned
+BRB_ASKED equ 48            ; 1 once any base's __mro_entries__ has run
+BRB_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
 DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     push rbx
     push r12
@@ -924,6 +937,7 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     mov qword [rbp - BRB_OUT], 0
     mov qword [rbp - BRB_SCRAT], 0
     mov qword [rbp - BRB_TOTAL], 0
+    mov qword [rbp - BRB_ASKED], 0
 
     ; A first pass that only asks: is any of them not a class?  The common
     ; case allocates nothing.
@@ -994,6 +1008,7 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
     call bc_mro_entries
     test rax, rax
     jz .brb_fail_out
+    or [rbp - BRB_ASKED], rdx
     mov rcx, [rbp - BRB_SCRAT]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rcx + rbx*8], rax      ; bc_mro_entries hands over its reference
@@ -1063,6 +1078,22 @@ DEF_FUNC_LOCAL bc_resolve_bases, BRB_FRAME
 .brb_done:
     mov rdi, [rbp - BRB_SCRAT]
     call obj_decref             ; releases the classes and the entries tuples
+    ; Nothing had an __mro_entries__ -- only bases kept as they are -- so the
+    ; bases are the ones written, and the caller must see the same tuple:
+    ; that is what tells it not to record __orig_bases__, which CPython sets
+    ; only when update_bases changed something.
+    cmp qword [rbp - BRB_ASKED], 0
+    jne .brb_changed
+    mov rdi, [rbp - BRB_OUT]
+    call obj_decref
+    mov rdi, [rbp - BRB_ORIG]
+    call obj_incref
+    mov rax, [rbp - BRB_ORIG]
+    pop r12
+    pop rbx
+    leave
+    ret
+.brb_changed:
     mov rax, [rbp - BRB_OUT]
     pop r12
     pop rbx
@@ -1088,7 +1119,8 @@ END_FUNC bc_resolve_bases
 
 ;; ============================================================================
 ;; bc_mro_entries(rdi = a base that is not a class, rsi = the bases tuple)
-;;   -> rax = the tuple of classes it stands for, owned, or 0
+;;   -> rax = its entries tuple, owned, or 0; edx = 1 when an __mro_entries__
+;;      produced it, 0 when the base had none and is kept as written
 ;;
 ;; PEP 560's __mro_entries__.  A base that is not a type is asked what it
 ;; stands for, and answers a TUPLE -- of any length.  `class C[T]` compiles to
@@ -1163,6 +1195,7 @@ DEF_FUNC_LOCAL bc_mro_entries, 40           ; + 1 push = 48, 16-aligned
     cmp [rbx + PyObject.ob_type], rcx
     jne .bme_not_tuple
     mov rax, rbx
+    mov edx, 1                  ; an __mro_entries__ answered
     pop rbx
     leave
     ret
@@ -1176,15 +1209,29 @@ DEF_FUNC_LOCAL bc_mro_entries, 40           ; + 1 push = 48, 16-aligned
     call obj_decref
     jmp .bme_no
 .bme_clear_and_no:
-    ; A missing attribute is not an error here: the caller reports "bases must
-    ; be types", which is what CPython says for an object that has no
-    ; __mro_entries__ either.
-    extern current_exception
-    mov rdi, [rel current_exception]
+    ; No __mro_entries__ is not an error: CPython's update_bases keeps such a
+    ; base as it is, and the metaclass decides what to make of it.
+    ; zope.interface's `class IElement(Interface)`, where Interface is an
+    ; InterfaceClass INSTANCE, is the reason that matters: type(Interface)
+    ; is the metaclass, and it builds another instance.  type.__new__ still
+    ; refuses a non-class base, in type_from_parts, in CPython's words.
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
-    jz .bme_no
-    mov qword [rel current_exception], 0
+    jz .bme_keep
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
+.bme_keep:
+    mov edi, 1
+    call tuple_new
+    test rax, rax
+    jz .bme_no
+    INCREF rbx
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rcx], rbx
+    xor edx, edx                ; kept as written
+    pop rbx
+    leave
+    ret
 .bme_no:
     xor eax, eax
     pop rbx

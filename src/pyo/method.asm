@@ -32,7 +32,6 @@ extern str_new_heap
 extern func_type
 extern builtin_func_type
 extern type_type
-extern kw_names_pending
 extern none_singleton
 extern exc_TypeError_type
 extern raise_exception
@@ -108,7 +107,7 @@ DEF_FUNC method_construct, MTN_FRAME
     ; Keyword values arrive in the same array with their names in
     ; kw_names_pending, so a bare arity check would count them as positional.
     ; CPython's method_new refuses them outright, and so does this.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jnz .mtn_kwargs
 
@@ -142,7 +141,7 @@ DEF_FUNC method_construct, MTN_FRAME
     ret
 
 .mtn_kwargs:
-    mov qword [rel kw_names_pending], 0   ; consumed, however this ends
+    mov qword [gs:ThreadState.kw_names_pending], 0   ; consumed, however this ends
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "method() takes no keyword arguments"
     call raise_exception

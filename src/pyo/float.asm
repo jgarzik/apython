@@ -859,11 +859,34 @@ FB_FRAME  equ 48            ; + 0 pushes = 48
     mov rdi, [rbp - FB_LSAVE]
     mov esi, dword [rbp - FB_LTAG]
     call float_to_f64          ; rdi = left → xmm0
+    FB_INT_OVERFLOW_CHECK FB_LSAVE, FB_LTAG
     movsd [rbp - FB_LEFT], xmm0
     mov rdi, [rbp - FB_RSAVE]
     mov esi, dword [rbp - FB_RTAG]    ; esi = right_tag
     call float_to_f64          ; xmm0 = right as double
+    FB_INT_OVERFLOW_CHECK FB_RSAVE, FB_RTAG
     movsd [rbp - FB_RIGHT], xmm0
+%endmacro
+
+; An int operand too large for a double converts to an infinity, and CPython
+; refuses it there rather than computing with it: `10**400 * 1.0` is
+; OverflowError, not inf -- which is also what math.sumprod's generic path
+; has to see.  A float infinity, or a float subclass holding one, is a value.
+; %1 = the operand's save slot, %2 = its tag slot; xmm0 = the converted double.
+%macro FB_INT_OVERFLOW_CHECK 2
+    cmp dword [rbp - %2], TAG_PTR
+    jne %%ok
+    movapd xmm1, xmm0
+    andpd xmm1, [rel frn_absmask]
+    ucomisd xmm1, [rel pos_inf]
+    jp %%ok
+    jne %%ok
+    mov rax, [rbp - %1]
+    mov rax, [rax + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jnz %%ok
+    RAISE exc_OverflowError_type, "int too large to convert to float"
+%%ok:
 %endmacro
 
 DEF_FUNC float_add, FB_FRAME

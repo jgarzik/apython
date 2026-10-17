@@ -21,9 +21,6 @@ extern exc_TypeError_type
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
-extern eval_saved_r13
-extern eval_co_consts
 extern dict_get
 extern dict_get_index
 extern instance_setattr
@@ -46,7 +43,6 @@ extern dunder_lookup
 extern int_type
 extern float_type
 extern none_type
-extern eval_co_names
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -91,7 +87,7 @@ LSA_FRAME    equ 120        ; + 0 pushes; a handler is entered by jmp, so
 ;; ============================================================================
 DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
-    mov rax, [rel eval_co_consts]
+    mov rax, [gs:ThreadState.eval_co_consts]
     mov rax, [rax + rcx * 8]
     INCREF_V rax, rdx
     VPUSH rax
@@ -264,11 +260,10 @@ DEF_FUNC_BARE op_load_name
     ; CPython clears a KeyError and lets anything else through; clearing
     ; whatever it was keeps the mapping's exception out of a name lookup that
     ; then succeeds in globals or in builtins.
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .try_globals
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .try_globals:
@@ -527,7 +522,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     extern module_getattr
     lea rdx, [rel module_getattr]
     cmp rax, rdx
+    je .la_getattr_as_is
+    ; So does a SUPER's: super_lookup has already run the whole descriptor
+    ; protocol against __self__, and what it answers is final.  Running the
+    ; block below again bound `super(C, C).prop` -- the property itself, as
+    ; CPython answers it -- to the super object and called the getter on it.
+    extern super_getattr_value
+    lea rdx, [rel super_getattr_value]
+    cmp rax, rdx
     jne .la_getattr_go
+.la_getattr_as_is:
     mov qword [rbp - LA_FROMINST], 1
 .la_getattr_go:
     call rax
@@ -538,9 +542,18 @@ DEF_FUNC op_load_attr, LA_FRAME
 
 .la_getattr_done_v:
     ; instance_getattr_where hands back a Value, and a NULL one means it found
-    ; nothing -- 0 is the only NULL encoding.
+    ; nothing -- 0 is the only NULL encoding.  Unless attr_error_pending says
+    ; it installed an AttributeError on the way: an unassigned __slots__ slot,
+    ; or a __getattr__ that said "absent".  The class dict was already asked,
+    ; and asking again finds the slot's member descriptor and hands THAT back.
     test rax, rax
-    jz .la_try_dict
+    jnz .la_gdv_found
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .la_try_dict
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .la_try_dict
+    jmp .la_no_such_attr
+.la_gdv_found:
     V_UNPACK rax, rdx
     cmp qword [rbp - LA_FROMINST], 2
     je .la_getattr_unbound
@@ -1337,7 +1350,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; The exception is already pending; hand it to the frame's own handler.
     extern eval_exception_unwind
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .la_done:
@@ -1837,7 +1850,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rsi, [rbp - LSA_CLASSTAG]
     DECREF_VAL rdi, rsi
     ; DISPATCH saved the stack top from before the three operands were popped.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     lea rdi, [rel exc_TypeError_type]
     mov rsi, [rbp - LSA_ORIGIN]
     extern raise_exception
@@ -1851,7 +1864,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_CLASS]
     call obj_decref
     ; DISPATCH saved the stack top from before the three operands were popped.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     RAISE exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
 
 .lsa_not_found:
@@ -1871,7 +1884,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; DISPATCH saved the stack top as it was BEFORE this handler popped its
     ; three operands, and the unwinder cleans up from there -- so raising
     ; without republishing r13 releases those three a second time.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     jmp eval_exception_unwind
 
@@ -2016,9 +2029,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp .lsa_done
 
 .lsa_propagate:
-    ; As at .lsa_not_found: the unwinder starts from eval_saved_r13, which is
+    ; As at .lsa_not_found: the unwinder starts from PyFrame.disp_sp, which is
     ; where the stack was before the three operands came off it.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     extern eval_exception_unwind
     jmp eval_exception_unwind
@@ -2254,7 +2267,18 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     xor ecx, ecx                ; getattr() wants the bound method itself
     call instance_getattr_where
     test rax, rax
-    jz .ga_type_dict
+    jnz .ga_where_found
+    ; As op_load_attr: an AttributeError installed on the way is the answer.
+    ; getattr() and hasattr() see it pending and decide what it means.
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .ga_type_dict
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .ga_type_dict
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ga_where_found:
     V_UNPACK rax, rdx
     jmp .ga_getattr_done
 .ga_call_type_getattr:
@@ -2278,7 +2302,12 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     ; it, which is exactly what Lib/selectors.py does with it.
     lea rdx, [rel module_getattr]
     cmp rcx, rdx
+    je .ga_getattr_as_is
+    ; And a super's, as in op_load_attr: its answer is already final.
+    lea rdx, [rel super_getattr_value]
+    cmp rcx, rdx
     jne .ga_getattr_go
+.ga_getattr_as_is:
     mov qword [rbp - GA_FROMINST], 1
 .ga_getattr_go:
     call rcx
@@ -2376,8 +2405,20 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .ga_plain
     mov rdi, [rbp - GA_ATTR]
+    ; Found in a CLASS's own MRO, it is read through the class: __get__(None,
+    ; cls), as `cls.name` does.  Passing the class as the instance and its
+    ; metatype as the owner made getattr(cls, name) disagree with cls.name for
+    ; every Python-written data descriptor -- ctypes' Structure fields among
+    ; them, whose __get__ then refused the class as "not a ctype instance".
+    cmp qword [rbp - GA_OWNMRO], 0
+    jne .ga_user_own
     mov rsi, [rbp - GA_OBJ]
     mov rdx, [rbp - GA_TYPE]
+    jmp .ga_user_call
+.ga_user_own:
+    lea rsi, [rel none_singleton]
+    mov rdx, [rbp - GA_OBJ]
+.ga_user_call:
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR
     call dunder_call_3

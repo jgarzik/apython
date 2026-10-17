@@ -34,7 +34,6 @@ extern str_new_heap
 extern ast_at
 extern ast_span_at
 extern none_singleton
-extern current_exception
 extern rbt_append_cstr
 extern msg_append_i64
 extern type_is_subtype
@@ -589,11 +588,10 @@ DEF_FUNC comp_emit_warnings, CEW_FRAME
     ; The warning could not be emitted, which is not the program's fault:
     ; drop it and let the compile succeed.  Anything the import left pending
     ; goes with it.
-    extern current_exception
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .cew_none
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rax
     call obj_decref
     jmp .cew_none
@@ -605,7 +603,7 @@ DEF_FUNC comp_emit_warnings, CEW_FRAME
     ; escaping from compile().
     mov rdi, [rbp - CEW_C]
     mov dword [rdi + Comp.warn_n], 0
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .cew_raised_done
     mov rdi, rax
@@ -618,8 +616,8 @@ DEF_FUNC comp_emit_warnings, CEW_FRAME
     call type_is_subtype
     test eax, eax
     jz .cew_raised_done
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     ; The record ebx stopped at is the one that raised.
     mov rdi, [rbp - CEW_C]
@@ -815,10 +813,10 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
 .clw_none:
     ; Nothing could be imported.  Clear whatever the attempt left pending:
     ; a warning that cannot be emitted is not the program's error.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .clw_zero
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rax
     call obj_decref
 .clw_zero:

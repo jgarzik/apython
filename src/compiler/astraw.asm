@@ -452,6 +452,7 @@ END_FUNC ar_node
 
 section .rodata
 align 4
+global ar_fieldkinds          ; astload.asm writes a node by the same rows
 ;; One row per AST kind: how to read .a, .b, .c and the child list.
 ;;
 ;; This is the only place that knows a node index from an object index -- the

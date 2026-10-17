@@ -31,13 +31,9 @@ extern str_type
 ; without complaint.  The bound that belongs here is sys.setrecursionlimit's,
 ; which is the one the repr's own C recursion is measured against; the array
 ; grows to meet it.
-section .data
-align 8
-global repr_depth           ; eval_exception_unwind resets this: a raise from
-                            ; inside a nested __repr__ skips repr_pop
-repr_depth: dq 0                  ; current depth (number of entries)
-repr_stack: dq 0                  ; the entries, on the heap
-repr_stack_cap: dq 0              ; how many it has room for
+; repr_depth, repr_stack and repr_stack_cap lives in ThreadState (src/include/threadstate.inc).
+; eval_exception_unwind resets repr_depth: a raise from inside a nested
+; __repr__ skips repr_pop.
 
 section .text
 extern ap_realloc
@@ -47,7 +43,7 @@ extern recursion_limit
 ; raised".  A container propagating that NULL must have an exception pending,
 ; or the caller sees a bare NULL Value and pushes it.
 %macro REPR_ENSURE_EXC 0
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne %%have_exc
     RAISE exc_TypeError_type, "object has no repr"
 %%have_exc:
@@ -60,10 +56,10 @@ extern recursion_limit
 ; file: dict's views live with dict, and a view can reach itself.
 global repr_check_active
 repr_check_active:
-    mov rcx, [rel repr_depth]
+    mov rcx, [gs:ThreadState.repr_depth]
     test rcx, rcx
     jz .rca_not_found
-    mov rax, [rel repr_stack]
+    mov rax, [gs:ThreadState.repr_stack]
 .rca_loop:
     dec rcx
     cmp [rax + rcx*8], rdi
@@ -82,16 +78,16 @@ repr_check_active:
 ; needs.
 global repr_push
 repr_push:
-    mov rax, [rel repr_depth]
+    mov rax, [gs:ThreadState.repr_depth]
     cmp rax, [rel recursion_limit]
     jge .rp_overflow
-    cmp rax, [rel repr_stack_cap]
+    cmp rax, [gs:ThreadState.repr_stack_cap]
     jl .rp_have_room
 
     ; Double it, starting at the 64 the fixed array used to be.
     push rdi
     push rsi
-    mov rsi, [rel repr_stack_cap]
+    mov rsi, [gs:ThreadState.repr_stack_cap]
     test rsi, rsi
     jnz .rp_double
     mov esi, 64
@@ -99,25 +95,24 @@ repr_push:
 .rp_double:
     shl rsi, 1
 .rp_sized:
-    mov [rel repr_stack_cap], rsi
+    mov [gs:ThreadState.repr_stack_cap], rsi
     shl rsi, 3
-    mov rdi, [rel repr_stack]
+    mov rdi, [gs:ThreadState.repr_stack]
     call ap_realloc
-    mov [rel repr_stack], rax
+    mov [gs:ThreadState.repr_stack], rax
     pop rsi
     pop rdi
-    mov rax, [rel repr_depth]
+    mov rax, [gs:ThreadState.repr_depth]
 
 .rp_have_room:
-    mov rcx, [rel repr_stack]
+    mov rcx, [gs:ThreadState.repr_stack]
     mov [rcx + rax*8], rdi
-    inc qword [rel repr_depth]
+    inc qword [gs:ThreadState.repr_depth]
     ret
 .rp_overflow:
     extern exc_RecursionError_type
     extern raise_exception
 extern exc_TypeError_type
-extern current_exception
     RAISE exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
 
 ; Pop from repr_stack, with a floor at zero.
@@ -142,9 +137,9 @@ extern current_exception
 ; is what that looked like.
 global repr_pop
 repr_pop:
-    cmp qword [rel repr_depth], 0
+    cmp qword [gs:ThreadState.repr_depth], 0
     je .rp_floor
-    dec qword [rel repr_depth]
+    dec qword [gs:ThreadState.repr_depth]
 .rp_floor:
     ret
 

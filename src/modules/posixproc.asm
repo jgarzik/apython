@@ -40,7 +40,6 @@ extern tuple_type
 extern str_type
 extern ap_strcmp
 extern environ
-extern kw_names_pending
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern raise_exception
@@ -207,10 +206,9 @@ DEF_FUNC posix_register_at_fork, PRF_FRAME
     push r12
     ; Everything arrives as a keyword: the positional count must be zero, and
     ; kw_names_pending names each one.
-    extern kw_names_pending
     mov rbx, rdi
-    mov r12, [rel kw_names_pending]
-    mov qword [rel kw_names_pending], 0
+    mov r12, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
     test r12, r12
     jz .prf_none
     cmp rsi, [r12 + PyTupleObject.ob_size]

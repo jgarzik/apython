@@ -29,8 +29,6 @@ extern bool_type
 extern gc_alloc
 extern gc_track
 extern raise_exception
-extern build_class_pending
-extern current_exception
 extern eval_frame
 extern frame_new
 extern ap_malloc
@@ -53,7 +51,6 @@ extern list_type
 extern tuple_type
 extern bytes_type
 extern ap_strcmp
-extern kw_names_pending
 extern object_type
 extern obj_dealloc
 
@@ -105,9 +102,9 @@ DEF_FUNC type_method_new
     ; The metatype is whatever __new__ was handed, not the default, and it has
     ; to be on the class before its descriptors' __set_name__ run -- which is
     ; inside type_from_parts.
-    mov [rel class_metatype_pending], r12
+    mov [gs:ThreadState.class_metatype_pending], r12
     call type_from_parts
-    mov qword [rel class_metatype_pending], 0
+    mov qword [gs:ThreadState.class_metatype_pending], 0
     test rax, rax
     jz .tmn_failed                  ; a __set_name__ raised, and it is pending
 
@@ -651,24 +648,17 @@ END_FUNC bc_fill_cell
 ; called from inside type_from_parts, which never saw them -- so a base that
 ; declares `def __init_subclass__(cls, **kw)` was handed an empty kw.  Set
 ; around the call and cleared by it, the same convention kw_names_pending uses.
-section .data
-align 8
-global class_kwnames_pending
-class_kwnames_pending: dq 0
-global class_kwvalues_pending
-class_kwvalues_pending: dq 0
-
+; class_kwnames_pending / class_kwvalues_pending, which lives in ThreadState (src/include/threadstate.inc).
+;
 ; The metatype `type.__new__(mcls, ...)` was handed.  It used to be stamped on
 ; the finished class by type_method_new, AFTER type_from_parts had already run
 ; every descriptor's __set_name__ -- so a __set_name__ saw an owner whose type
 ; was the default metatype, and `cls.__members__` inside one was an
 ; AttributeError.  enum.py is written exactly that way, so fourteen stdlib
 ; modules stopped there.  Set around the call and cleared by it, the same
-; convention class_kwnames_pending uses.
-global class_metatype_pending
-class_metatype_pending: dq 0
+; convention class_kwnames_pending uses.  class_metatype_pending, also in
+; ThreadState.
 
-section .text
 
 ;; ============================================================================
 ;; bc_solid_base(rdi = type) -> rax = the type its instance layout belongs to
@@ -1025,6 +1015,23 @@ TFP_ADDWEAK equ 112
     jz .tfp_base_next           ; the incumbent is already a builtin
     test qword [r11 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .tfp_base_next
+    ; ...and only when the heaptype's own layout is object's.  One that
+    ; descends from a builtin of the same width already IS that layout:
+    ; `class G(F, ValueError)` with F an OSError subclass has to stay an
+    ; OSError -- picking ValueError lost OSError's constructor, and with it
+    ; .errno and .strerror (ssl.SSLCertVerificationError is that shape).
+    mov rdx, rax
+.tfp_base_static_of:
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jz .tfp_base_tie_take
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .tfp_base_static_of
+    lea rdi, [rel object_type]
+    cmp rdx, rdi
+    jne .tfp_base_next          ; a real layout of its own: keep it
+.tfp_base_tie_take:
+    mov rdx, r10                ; the widths are equal
 .tfp_base_take:
     mov r10, rdx
     mov rax, r11
@@ -1180,7 +1187,7 @@ TFP_ADDWEAK equ 112
     lea rsi, [rel user_type_metatype]
     call gc_alloc
     mov r12, rax            ; r12 = new type object (ob_refcnt=1, ob_type set)
-    mov [rel build_class_pending], rax  ; register for exception cleanup
+    mov [gs:ThreadState.build_class_pending], rax  ; register for exception cleanup
 
     ; The class holds a REFERENCE to its metatype, not a borrowed pointer.
     ;
@@ -1404,8 +1411,7 @@ TFP_ADDWEAK equ 112
     call dict_get
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .bc_have_module
-    extern eval_saved_r12
-    mov rcx, [rel eval_saved_r12]
+    mov rcx, [gs:ThreadState.eval_saved_r12]
     test rcx, rcx
     jz .bc_have_module
     mov rcx, [rcx + PyFrame.globals]
@@ -1414,7 +1420,7 @@ TFP_ADDWEAK equ 112
     lea rdi, [rel bc_dunder_name_name]
     call str_from_cstr_heap
     push rax
-    mov rdi, [rel eval_saved_r12]
+    mov rdi, [gs:ThreadState.eval_saved_r12]
     mov rdi, [rdi + PyFrame.globals]
     mov rsi, rax
     call dict_get
@@ -2134,14 +2140,14 @@ TFP_ADDWEAK equ 112
     ; put down before anything that might build a class of its own picks it
     ; up.  It used to be stamped after __init_subclass__, and a class defined
     ; inside one came out with the outer class's metaclass.
-    mov rax, [rel class_metatype_pending]
+    mov rax, [gs:ThreadState.class_metatype_pending]
     test rax, rax
     jz .tfp_default_metatype
     ; Swap the reference the allocation took: the explicit metatype gains one
     ; and user_type_metatype, which gc_alloc installed and which is what
     ; ob_type still holds here, gives its up.
     mov [r12 + PyObject.ob_type], rax
-    mov qword [rel class_metatype_pending], 0
+    mov qword [gs:ThreadState.class_metatype_pending], 0
     mov rdi, rax
     call obj_incref
     lea rdi, [rel user_type_metatype]
@@ -2261,8 +2267,8 @@ TFP_ADDWEAK equ 112
     mov rdi, rax               ; callable
     mov rsi, rsp               ; args
     mov edx, 1                 ; nargs
-    mov rcx, [rel class_kwnames_pending]
-    mov r8, [rel class_kwvalues_pending]
+    mov rcx, [gs:ThreadState.class_kwnames_pending]
+    mov r8, [gs:ThreadState.class_kwvalues_pending]
     call bc_call_kw
     add rsp, 16                ; pop fat args
     test rax, rax
@@ -2307,7 +2313,7 @@ TFP_ADDWEAK equ 112
     jz .tfp_set_name_failed
 
     ; Return the new type object - clear pending flag first
-    mov qword [rel build_class_pending], 0
+    mov qword [gs:ThreadState.build_class_pending], 0
     mov rax, r12
 
     add rsp, 88                 ; must match the sub in the prologue
@@ -2322,7 +2328,7 @@ TFP_ADDWEAK equ 112
 .tfp_set_name_failed:
     ; A __set_name__ raised.  The class is discarded and the exception carried
     ; out as a NULL return, which is what every builtin does.
-    mov qword [rel build_class_pending], 0
+    mov qword [gs:ThreadState.build_class_pending], 0
     mov rdi, r12
     call obj_decref
     xor eax, eax
@@ -2840,13 +2846,13 @@ DEF_FUNC bc_call_kw, BCK_FRAME
     jmp .copy_kw_loop
 .kw_copied:
     mov rax, [rbp - BCK_NAMES]
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 .no_kw:
     mov rdi, [rbp - BCK_FN]
     lea rsi, [rbp - BCK_ARGS]
     mov rdx, r12
     call obj_call_n
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     pop r13
     pop r12
     pop rbx

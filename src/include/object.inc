@@ -324,6 +324,9 @@ struc PyFuncObject
     ; empty dict -- which CPython also stores, since `f.__annotations__['x']
     ; = int` has to stick.
     .func_annotations: resq 1
+    .func_module:   resq 1  ; +96: __module__ once assigned, or NULL for the
+                            ;      globals' __name__ -- a field, like __doc__,
+                            ;      so functools.wraps and friends can set it
 endstruc
 
 ; Code object
@@ -1347,8 +1350,20 @@ TYPE_FLAG_DECLARED_SLOTS equ 0x800000
 ; without widening the gate to every static type.
 TYPE_FLAG_DESCRIPTOR     equ 0x1000000
 
+; TYPE_FLAG_MRO_HAS_DATA_DESCR narrowed to the HEAPTYPES of the MRO: some class
+; written in Python, in this type's MRO, keeps something that may be a data
+; descriptor in its dict.  The same over-approximation, from the same scan.
+;
+; Read on a METATYPE.  A data descriptor on a class's metaclass outranks the
+; class's own dict, but `type`'s getsets -- in every metaclass's MRO, so the
+; wide flag is set on all of them -- are answered by type_getattr_meta's
+; ladder already.  What is left to look for is only ever in a metaclass the
+; user wrote, and this bit says whether there is one, so a class made by
+; ABCMeta or EnumType pays nothing for the check either.
+TYPE_FLAG_HEAP_DATA_DESCR equ 0x2000000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
-; above leave free -- they stop at bit 20.  It is a stamp from one global
+; above leave free -- they stop at bit 25.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of
 ; its dict, and comparing one is both "the same class" and "nothing has been
 ; added to it or to anything in its MRO since".
@@ -1397,12 +1412,17 @@ struc PyFrame
     .exc_depth:     resd 1  ; +64: unpopped PUSH_EXC_INFO count
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
     .func_obj:      resq 1  ; +72: ptr to function object (for closures)
-    .call_ip:       resq 1  ; +80: where this frame was when it called into
-                            ;      the next one -- what f_lineno reads for a
-                            ;      frame that is not the innermost.  instr_ptr
-                            ;      cannot carry it: non-zero there means the
-                            ;      frame is SUSPENDED, and func_call reads it
-                            ;      to decide whether to free the frame.
+    .disp_ip:       resq 1  ; +80: the bytecode IP of the instruction this
+                            ;      frame last dispatched (before the advance),
+                            ;      published by DISPATCH on every instruction.
+                            ;      For the running frame it is where the
+                            ;      unwinder resumes and what f_lineno reads; for
+                            ;      an outer frame it is the call it is waiting
+                            ;      in.  Zeroed at frame creation, so a frame that
+                            ;      has never run reads 0.  instr_ptr cannot
+                            ;      carry it: non-zero there means the frame is
+                            ;      SUSPENDED, and func_call reads it to decide
+                            ;      whether to free the frame.
     .exc_state:     resq 1  ; +88: the exception this frame is HANDLING while
                             ;      it is suspended, owned, or 0.  Only a
                             ;      generator or coroutine ever has one: an
@@ -1437,7 +1457,11 @@ struc PyFrame
     ; consumed, and it has to be read out of the frame before it is freed.
     .entry_kind:    resd 1  ; +112: FRAME_ENTRY_*
     .entry_slots:   resd 1  ; +116: inline only
-    .localsplus:            ; +120: Value array (variable size)
+    .disp_sp:       resq 1  ; +120: the value stack top DISPATCH published
+                            ;      with .disp_ip -- what the unwinder restores
+                            ;      r13 from.  Written before it is read: the
+                            ;      frame's first eval_frame entry stores it.
+    .localsplus:            ; +128: Value array (variable size)
 endstruc
 
 FRAME_ENTRY_CALL   equ 0    ; entered by `call eval_frame`; left by `ret`

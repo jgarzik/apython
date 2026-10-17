@@ -39,7 +39,6 @@ extern obj_dealloc
 extern type_type
 extern obj_incref
 extern eval_exception_unwind
-extern current_exception
 extern get_iterator
 extern call_iternext
 extern gc_alloc
@@ -552,7 +551,6 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     DUNDER_EXC_SAVE [rbp - DAC_EXC]
 
     mov esi, TAG_PTR            ; a is always a set or a view, so a pointer
-    extern current_exception
     extern get_iterator
     call get_iterator
     test rax, rax
@@ -962,7 +960,7 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     ; sq_contains has no error channel -- an unhashable probe answers 0 with
     ; the exception already pending -- so the pending one is what says whether
     ; the 0 meant "no" or "it raised".
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .dvj_raised_iter
     jmp .dvj_loop
 
@@ -974,7 +972,7 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
 .dvj_exhausted:
     ; call_iternext answers 0 both for exhaustion and for a raise; the
     ; pending exception is what tells them apart.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .dvj_raised_iter
     mov rdi, [rbp - DVJ_ITER]
     DECREF_V rdi, rcx

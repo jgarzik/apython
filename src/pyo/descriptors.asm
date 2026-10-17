@@ -9,8 +9,6 @@
 extern str_type
 extern generic_alias_dealloc
 
-extern current_exception
-extern kw_names_pending
 extern descr_alloc
 extern prop_new_of
 extern ap_strcmp
@@ -270,7 +268,7 @@ DEF_FUNC property_construct, PC_FRAME
     cmp rax, rcx
     jne .pc_pos_done
 
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .pc_positional
     mov r13, [rax + PyTupleObject.ob_size]      ; n_kw
@@ -337,7 +335,7 @@ DEF_FUNC property_construct, PC_FRAME
     jmp .pc_kw_error
 .pc_kw_done:
     mov r12, r14                                ; only the positionals remain
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
 .pc_positional:
     cmp r12, 4

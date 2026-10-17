@@ -1554,11 +1554,10 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; slot declines" -- a number slot has no other way to say NULL -- and the
     ; interpreter would report "unsupported operand type(s) for %" over the
     ; top of the real message.
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .bm_failed_no_exc
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     pop r12
     pop rbx
     leave
@@ -2146,8 +2145,39 @@ extern str_set_length
     ; memoryview; this is everything else that can hand over a run of bytes.
     mov rax, [rax + PyTypeObject.tp_as_buffer]
     test rax, rax
-    jz .bls_iterable
+    jz .bls_dunder_buffer
     jmp .bls_copy_buffer
+
+.bls_dunder_buffer:
+    ; ...and a class written in Python exports through __buffer__ (PEP 688);
+    ; its view is then laid out end to end like any other memoryview.
+    extern memoryview_from_dunder_buffer
+    call memoryview_from_dunder_buffer
+    test rax, rax
+    jnz .bls_dunder_view
+    test ecx, ecx
+    jnz .bls_propagate          ; __buffer__ raised
+    mov rdi, [rbp - BLS_ARGS]
+    mov rdi, [rdi]
+    jmp .bls_iterable
+.bls_dunder_view:
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call memoryview_as_bytes
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref             ; the view; its bytes are copied out
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bls_empty
+    mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
+    mov rbx, [rax + PyBytesObject.ob_size]
+    lea r12, [rax + PyBytesObject.data]
+    jmp .bls_copy
 
 .bls_copy_buffer:
     ; bytes_like_ptr_len asks the slot and hands back (data, length); the copy
@@ -2480,8 +2510,7 @@ extern str_set_length
     ; convert 'map' object to bytes" over a pending exception threw the real
     ; one away: a generator or a map that raises part way through reported a
     ; type error, which is exactly the shape str.join was fixed for.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bls_propagate
     mov rdi, [rbp - BLS_ARGS]
     mov rsi, [rdi]
@@ -2584,7 +2613,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     extern raise_typed_message
     call raise_typed_message
 .btc_dunder_absent:
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .btc_propagate                  ; it raised: that is the answer
     mov rsi, [rbp - BTC_BUF]
     mov rdx, [rbp - BTC_LEN]
@@ -2657,8 +2686,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     leave
     ret
 .btc_propagate:
-    extern eval_saved_r13
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     pop rbx
     leave
     extern eval_exception_unwind

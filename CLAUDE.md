@@ -8,6 +8,12 @@ Python 3.12 implementation in x86-64 NASM assembly: a bytecode interpreter, and
 a compiler for the source language written in the same assembly.  Reads `.py`
 through `src/compiler/`, or `.pyc` through the marshal reader.
 
+The standard library is CPython's own: `stdlib/` is CPython 3.12's `Lib/`,
+unmodified, copied by `tools/vendor_stdlib.sh` (the tag is in
+`stdlib/VENDORED`).  What CPython writes in C is assembly here, or Python in
+`lib/`, which comes AFTER `stdlib/` on `sys.path` so nothing in it can shadow
+a CPython module.  Never edit `stdlib/`; re-vendor it.
+
 ## Build & Test
 
 ```bash
@@ -36,9 +42,11 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
 `make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh` and
-`tests/arity_probe.sh`; it reports more results than there are files because
-the async tests run against the default, poll and io_uring backends; `make check-cpython` runs everything under `tests/cpython/`, none of
-it tolerated as failing.
+`tests/arity_probe.sh`.  A test listed in `tests/known_failures.txt` is
+reported XFAIL, with the reason and the phase that fixes it written beside
+it, and FAILS the run if it starts passing -- so the entry leaves in the
+commit that earns it.  `make check-cpython` runs everything under
+`tests/cpython/`, none of it tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`
 instead of the `.pyc`, so our own compiler produces the bytecode.  They are the
@@ -52,7 +60,7 @@ opcode.
 They use different oracles, because their corpora differ.  `check-source` diffs
 against `python3`: those tests print, and CPython is the reference.
 `check-cpython-source` diffs against **the same file run from its `.pyc`** --
-same interpreter, same `lib/unittest.py`, and the only difference is which
+same interpreter, same `unittest`, and the only difference is which
 compiler produced the bytecode.  It cannot use `python3`: this corpus drives our
 own `unittest`, whose progress output differs by design, and two of its files
 import `test.seq_tests` / `test.test_grammar`, which ship in `lib/` and which a
@@ -104,7 +112,7 @@ diff /tmp/expected.txt /tmp/actual.txt
 ```
 
 **Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
-liblzma-dev, libssl-dev, libexpat1-dev, python3.12
+liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, python3.12
 
 ## Register Convention (eval loop)
 
@@ -119,7 +127,30 @@ Callee-saved registers hold global interpreter state:
 | `r15` | Free — scratch for handlers |
 | `ecx` | Opcode arg on handler entry |
 
-co_names is accessed via the `LOAD_CO_NAMES reg` macro (reads the `eval_co_names` global), not a dedicated register.
+co_names is accessed via the `LOAD_CO_NAMES reg` macro (reads `ThreadState.eval_co_names` through gs), not a dedicated register.
+
+## Per-thread state (gs)
+
+Everything the interpreter keeps per thread -- `current_exception`,
+`handled_exception`, `eval_saved_r12` (the running frame), `eval_base_rsp`, the `*_pending` words, the recursion
+counters, the frame data stack, the repr/traceback cycle guards, the trace
+hooks and the asyncio loop -- is a field of `struc ThreadState` in
+`src/include/threadstate.inc`, reached through the gs segment base:
+`mov rax, [gs:ThreadState.current_exception]`.  `main` points gs at
+`main_tstate` (`tstate_install`, src/eval.asm) before anything else runs.
+`lea` does NOT apply the segment base: a field whose address is wanted is
+`[gs:ThreadState.ts_self]` plus the field offset, and an array field is
+indexed in place (`[gs:ThreadState.tb_seen + rdx*8]`).  Shared state --
+allocator, freelists, the collector, caches, interned strings -- stays an
+ordinary `[rel ...]` global.
+
+DISPATCH does NOT go through gs: it publishes the IP and value stack top into
+the running frame, `[r12 + PyFrame.disp_ip]` / `[r12 + PyFrame.disp_sp]`, and
+the unwinder reads them back from the frame `ThreadState.eval_saved_r12`
+names.  Code that republishes r13 for the unwinder and cannot be sure r12 is
+still the frame uses `PUBLISH_SP` (macros.inc).  A gs-relative access has about
+twice the load latency and half the store rate of a plain one on the machine
+this was measured on, so gs is for cold paths and for loading `ts_self` once.
 
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
@@ -258,7 +289,16 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `pyc_write_cache`, which is what puts a `__pycache__` entry beside a `.py`
   the first time it is imported
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
-- `src/import.asm` — the import system: finders, `sys.modules`, packages
+- `src/import.asm` — the C half of `import`, as CPython splits it: name
+  resolution, the `sys.modules` fast path, the dotted walk and IMPORT_FROM's
+  fallback.  A miss goes to CPython's own importlib
+  (`importlib._bootstrap._find_and_load`) through `lib/_importlib_bootstrap.py`,
+  which `main` runs before `site` -- so meta_path, path hooks, specs, loaders,
+  zipimport and importlib.metadata are CPython's code.  The assembly finders
+  remain only for what loads before importlib exists, and for builtins:
+  `src/modules/impcore.asm` is `_impcore`, whose `create_builtin` is where
+  BuiltinImporter ends up.  Bytecode is cached under the `apython-312` tag
+  only, and `make` precompiles `stdlib/` and `lib/` with apython itself
 - `src/modules/io.asm` — the `_iocore` module: the four `_IOBase` types the rest
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves
@@ -306,6 +346,17 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   as the dicts a caller writes: the option names, the defaults and the
   per-filter error wordings are Python's business, the struct layout is the
   assembly's
+- `src/modules/ctypes.asm` — the `_ctypescore` module: dlopen/dlsym, reading
+  and writing memory at an address, libffi's `prep_cif` and `call`, and one
+  closure trampoline every CFUNCTYPE callback enters through (it calls back
+  into Python the way `pyexpat_cb.asm` does).  A shim over `-lffi`, and its
+  arguments ARE raw addresses: that is ctypes.  `lib/_ctypes.py` is the whole
+  object model CPython's unmodified `Lib/ctypes` is written against -- the
+  metatypes, layout and bitfields, the `_objects` keep-alive tree, argument
+  conversion, callbacks -- with each instance's memory a bytearray it owns or
+  an address it borrows.  `tests/ctypes/` is CPython's `_ctypes_test.c` over a
+  stand-in `Python.h`, built to `build/_ctypes_test.so` for CPython's ctypes
+  tests, which only ever reach it through `CDLL(_ctypes_test.__file__)`
 - `src/modules/hashlib.asm` — the `_hashlibcore` module: OpenSSL's
   EVP_MD_CTX and HMAC_CTX, PBKDF2, scrypt and a constant-time compare, behind
   a handle table.  A shim over `-lcrypto`, the same split again:
@@ -314,18 +365,31 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   written against.  What it buys over `lib/_sha2.py` and its siblings is
   `pbkdf2_hmac` and `scrypt`, which have no honest Python form at the
   iteration counts anyone uses, and the speed to hash gigabytes.
-  `lib/hashlib.py` decides the routing: OpenSSL for twelve of the fourteen,
-  and `lib/_blake2.py` for blake2b and blake2s always, because OpenSSL's
-  BLAKE2 supports neither keying nor the tree parameters
+  CPython's own `hashlib.py` decides the routing: OpenSSL for twelve of the
+  fourteen, and `lib/_blake2.py` for blake2b and blake2s always, because
+  OpenSSL's BLAKE2 supports neither keying nor the tree parameters
+- `src/modules/ssl.asm` — the `_sslcore` module: libssl behind a handle
+  table, the same split again with `lib/_ssl.py` as the `_ssl` surface
+  CPython's `ssl.py` imports (`_SSLContext`, `_SSLSocket`, `MemoryBIO`,
+  `SSLSession`, `Certificate`, the exception family and the constants).
+  What is peculiar to libssl is its width, so the core is not a wrapper per
+  call: each OpenSSL function is one `SSLFN` row -- symbol, result letter,
+  argument letters -- and one engine, `ssl_call`, converts and calls.  The
+  letters are documented at the top of the file; adding a call is adding a
+  row.  OpenSSL never calls Python: a password is evaluated first and parked,
+  an SNI callback runs while the client-hello callback holds the handshake
+  paused, keylog lines are queued and drained, and a certificate is decoded
+  from its DER by the ASN.1 reader at the bottom of `lib/_ssl.py`
 - `src/modules/socket.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and
   `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
 - `src/pyo/asyncmod.asm` — the `_asynciocore` module: the task type, the
   event loop, `run`, `sleep`, `gather`, `wait_for`, `create_task`, and
-  `wait_fd`, the one primitive the stream layer needs.  `lib/asyncio.py` is
-  the other half, and the streams are Python over `lib/_socket.py` -- the
-  same split as `_iocore`/`lib/_io.py`
+  `wait_fd`.  Nothing reaches it any more: `asyncio` is CPython's package,
+  over `selectors`, since the standard library became CPython's own.  It is
+  kept for a fast event loop to offer through the loop-policy API later, and
+  is otherwise dead weight
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`
@@ -376,7 +440,7 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   whole corpus runs on a mixed pool/libc heap
 - `src/compiler/` — The Python **source** compiler (see below)
 - `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
-  `value.inc`, `opcodes.inc`, and the three private ABIs `sre.inc`,
+  `value.inc`, `threadstate.inc` (the per-thread state, see above), `opcodes.inc`, and the three private ABIs `sre.inc`,
   `eventloop.inc` and `listsort.inc`
 
 ## Source Compiler (`src/compiler/`)
@@ -480,7 +544,7 @@ These cost real time; the shapes recur.
 Defined in `src/include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
 - **PyTypeObject** (object.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
-- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
+- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, disp_ip +80, disp_sp +120 (both written by DISPATCH), localsplus +128 (variable-size Value[])
 - **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
 - **PyCodeObject** (object.inc): co_consts, co_names, co_firstlineno +112, co_linetable +120, co_code starts at +128

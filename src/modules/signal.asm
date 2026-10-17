@@ -1,4 +1,4 @@
-; signalmod.asm - the `_signal` module, and delivering a signal to Python code
+; signalmod.asm - the `_signalcore` module (lib/_signal.py is the rest of `_signal`), and delivering a signal to Python code
 ;
 ; A signal arrives at a moment the interpreter cannot run Python in: the
 ; handler is a C frame on some other stack, with no frame, no value stack and
@@ -42,8 +42,6 @@ extern raise_oserror
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_KeyboardInterrupt_type
-extern current_exception
-extern eval_saved_r12
 extern sigaction
 extern sys_alarm
 extern sys_pause
@@ -190,7 +188,7 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     ; sigint_handler stores it, and traceback.print_stack(frame) walks it.
     ; It is the frame this loop is running in, which is what eval_saved_r12
     ; holds -- the same one sys._getframe() answers with.
-    mov rdi, [rel eval_saved_r12]
+    mov rdi, [gs:ThreadState.eval_saved_r12]
     test rdi, rdi
     jz .srp_no_frame
     extern frameobj_for
@@ -873,7 +871,7 @@ DEF_FUNC_LOCAL sm_add_int_named, SAN_FRAME
 END_FUNC sm_add_int_named
 
 section .rodata
-signal_s_name:      db "_signal", 0
+signal_s_name:      db "_signalcore", 0
 signal_s_signal:    db "signal", 0
 signal_s_getsignal: db "getsignal", 0
 signal_s_default_int_handler: db "default_int_handler", 0

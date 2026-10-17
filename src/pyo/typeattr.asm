@@ -40,6 +40,8 @@ extern type_type
 extern object_type
 extern str_from_cstr
 extern user_type_metatype
+extern obj_dealloc
+extern property_type
 extern func_type
 extern builtin_func_type
 extern method_new
@@ -445,6 +447,16 @@ DEF_FUNC type_setattr
     test rax, TYPE_FLAG_HEAPTYPE
     jz .ts_immutable
 
+    ; --- a data descriptor on the metatype takes the write ---
+    ; CPython stores into a class through the GENERIC setattr, so a metaclass
+    ; property with a setter runs it and the class dict is never touched.
+    ; op_store_attr already asked; setattr(), delattr() and `del C.x` come
+    ; straight here.  The gate is the one type_getattr_meta uses.
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
+    jnz .ts_meta_data
+.ts_no_meta_data:
+
     ; --- __name__ renames the class ---
     ; A class's name is tp_name, not a dict entry, so `C.__name__ = "x"` set a
     ; key nothing ever read and the class kept its old name.  typing.py
@@ -519,6 +531,24 @@ DEF_FUNC type_setattr
     pop rcx
     call dict_set
     jmp .ts_wrote
+
+.ts_meta_data:
+    push rdi
+    push rsi
+    push rdx
+    push rdx                    ; the pad: four pushes keep the call aligned
+    call ts_meta_descr_set
+    pop rdx
+    pop rdx
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .ts_no_meta_data
+    xor eax, eax                ; a raise inside it is left pending
+    pop rcx
+    pop rbx
+    leave
+    ret
 
 .ts_dict_del:
     ; The alignment push is still on the stack here, so this call is aligned
@@ -787,6 +817,20 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov r12, rdi                ; r12 = type (walks)
     mov [rbp - TGA_ORIGIN], rdi
     mov qword [rbp - TGA_FALLBACK], 0
+
+    ; A DATA descriptor on the metatype outranks everything below -- the
+    ; ladder and the class's own MRO both -- because that is the first thing
+    ; CPython's type_getattro asks.  The class dict used to win, so a
+    ; metaclass property named __module__ (zope.interface's) answered with the
+    ; descriptor the class body stored under the same name.  Only a metaclass
+    ; of the user's own can hold one this ladder does not already answer:
+    ; type's getsets ARE the ladder, and the builtin metatypes are not
+    ; heaptypes, so TYPE_FLAG_HEAP_DATA_DESCR is the gate and an ordinary
+    ; class -- or one made by ABCMeta -- pays one load and one test here.
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
+    jnz .tga_meta_data
+.tga_ladder:
 
     ; Every name the ladder below can match begins with "__", and there are
     ; twelve of them, each an ap_strcmp CALL made before any dict is touched.
@@ -1331,6 +1375,20 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jnz .tga_meta_walk
     jmp .tga_really_not_found
 
+.tga_meta_data:
+    mov rdi, rax
+    mov rsi, rbx
+    call type_meta_data_descr   ; a borrowed descriptor, or 0
+    test rax, rax
+    jz .tga_ladder
+    mov rcx, [rbp - TGA_FROMMETA]
+    test rcx, rcx
+    jz .tga_meta_data_found
+    mov qword [rcx], 1          ; the caller runs its __get__
+.tga_meta_data_found:
+    mov [rbp - TGA_META], rax   ; just a place to keep it; nothing walks on
+    mov edx, TAG_PTR
+    ; fall into the metatype answer: bound or handed over, as any other
 .tga_meta_found:
     cmp edx, TAG_PTR
     jne .tga_meta_plain
@@ -1394,6 +1452,115 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     V_PACK rax, rdx             ; return one Value
     ret
 END_FUNC type_getattr_meta
+
+;; ============================================================================
+;; ts_meta_descr_set(rdi = a class, rsi = the name, rdx = the value Value, or
+;;   0 to delete) -> eax = 1 when a data descriptor on the metatype took it
+;;
+;; A property's setter or deleter, or a descriptor's __set__ / __delete__,
+;; called with the CLASS as the instance.  What either raises is left pending
+;; for the caller's own check, as op_store_attr's property arm leaves it.
+;; ============================================================================
+TSM_CLS   equ 8
+TSM_VAL   equ 16
+TSM_DESC  equ 24
+TSM_FRAME equ 32
+DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
+    mov [rbp - TSM_CLS], rdi
+    mov [rbp - TSM_VAL], rdx
+    mov rdi, [rdi + PyObject.ob_type]
+    call type_meta_data_descr
+    test rax, rax
+    jz .tsm_no
+    mov [rbp - TSM_DESC], rax
+    mov rcx, [rax + PyObject.ob_type]
+    lea r8, [rel property_type]
+    cmp rcx, r8
+    jne .tsm_general
+    mov rdi, rax
+    mov rsi, [rbp - TSM_CLS]
+    mov rdx, [rbp - TSM_VAL]    ; 0 is the deleter's
+    extern property_descr_set
+    call property_descr_set
+    jmp .tsm_yes
+.tsm_general:
+    cmp qword [rbp - TSM_VAL], 0
+    je .tsm_delete
+    mov rax, [rbp - TSM_VAL]
+    V_UNPACK rax, rdx           ; dunder_call_3 takes a (payload, tag) arg2
+    mov r8d, edx
+    mov rdx, rax
+    mov rdi, [rbp - TSM_DESC]
+    mov rsi, [rbp - TSM_CLS]
+    extern dunder_set
+    lea rcx, [rel dunder_set]
+    extern dunder_call_3
+    call dunder_call_3
+    jmp .tsm_result
+.tsm_delete:
+    mov rdi, [rbp - TSM_DESC]
+    mov rsi, [rbp - TSM_CLS]
+    CSTRING rdx, "__delete__"
+    mov ecx, TAG_PTR
+    extern dunder_call_2
+    call dunder_call_2
+.tsm_result:
+    DECREF_V rax, rcx           ; the answer is None, or 0 when it raised
+.tsm_yes:
+    mov eax, 1
+    leave
+    ret
+.tsm_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC ts_meta_descr_set
+
+;; ============================================================================
+;; type_meta_data_descr(rdi = a metatype, rsi = a name) -> rax = a BORROWED
+;;   data descriptor the metatype's MRO defines under that name, or 0
+;;
+;; Step one of CPython's type_getattro and of its generic setattr on a type.
+;; Only an entry a HEAPTYPE in the metatype's MRO owns counts: `type`'s own
+;; getsets (__name__, __module__, __dict__ ...) are answered by
+;; type_getattr_meta's ladder and by type_setattr's renames, and reporting
+;; them here would hand out the getset instead.  Of what a heaptype holds,
+;; a property and an instance of a class with __set__ or __delete__ qualify --
+;; the GS_LAYOUT getsets a class body grows are not the class's to offer.
+;;
+;; Answered through the type cache, so a class whose metaclass defines nothing
+;; under the name pays one hashed compare per lookup.
+;; ============================================================================
+TMD_DESCR equ 8
+TMD_FRAME equ 16
+DEF_FUNC type_meta_data_descr, TMD_FRAME
+    extern type_lookup_cached
+    call type_lookup_cached     ; rax = payload, edx = tag, rcx = the owner
+    cmp edx, TAG_PTR
+    jne .tmd_no
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .tmd_no
+    mov rdx, [rax + PyObject.ob_type]
+    lea r8, [rel property_type]
+    cmp rdx, r8
+    je .tmd_yes
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .tmd_no
+    mov [rbp - TMD_DESCR], rax
+    mov rdi, rax
+    extern attr_is_data_descr
+    call attr_is_data_descr
+    test eax, eax
+    jz .tmd_no
+    mov rax, [rbp - TMD_DESCR]
+.tmd_yes:
+    leave
+    ret
+.tmd_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC type_meta_data_descr
 
 section .rodata
 tga_name_str:       db "__name__", 0

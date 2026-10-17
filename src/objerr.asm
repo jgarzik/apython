@@ -1005,9 +1005,6 @@ END_FUNC raise_missing_arguments
 ;; exactly: a message built into a buffer and handed to a raise that does not
 ;; return.
 ;; ============================================================================
-extern attr_error_pending
-extern current_exception
-extern eval_saved_r13
 extern eval_exception_unwind
 extern value_type
 extern module_type
@@ -1035,6 +1032,7 @@ extern none_singleton
 RNA_OBJ   equ 8
 RNA_NAME  equ 16
 RNA_ISSET equ 24            ; 1 for a store or a delete, 0 for a read
+RNA_NORET equ 32            ; 1 from set_no_attribute: install, then RETURN
 ; The message is built in the frame rather than in object.asm's shared rtn_buf:
 ; that buffer stayed behind, and a raiser that never returns has no reason to
 ; want a static one.
@@ -1057,10 +1055,11 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov [rbp - RNA_ISSET], rdx
-    cmp qword [rel attr_error_pending], 0
+    mov qword [rbp - RNA_NORET], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .rna_fresh
-    mov qword [rel attr_error_pending], 0
-    cmp qword [rel current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .rna_fresh
 
     ; CPython's set_attribute_error_context runs after the hook as well, so a
@@ -1069,7 +1068,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     ; itself, which is what the probe below leaves alone.
     cmp qword [rbp - RNA_ISSET], 0
     jne .rna_pending_raise
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     mov rdi, rbx
     extern exc_AttributeError_type
     lea rsi, [rel exc_AttributeError_type]
@@ -1116,7 +1115,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     pop r12
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 .rna_fresh:
     push rdi
@@ -1296,7 +1295,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov rdi, rax
     extern exc_install
     call exc_install
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .rna_installed
 
@@ -1308,7 +1307,9 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call .rna_set_attr
 
 .rna_installed:
-    ; The tail raise_exception has: it does not republish eval_saved_r13
+    cmp qword [rbp - RNA_NORET], 0
+    jne .rna_return
+    ; The tail raise_exception has: it does not republish PyFrame.disp_sp
     ; either, because every caller here is inside a helper the opcode called
     ; rather than an opcode that has popped operands of its own.
     leave
@@ -1316,6 +1317,8 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
 
 .rna_bare:
     ; A store, a delete, or an exc_from_cstr that could not allocate.
+    cmp qword [rbp - RNA_NORET], 0
+    jne .rna_return
     lea rdi, [rel exc_AttributeError_type]
     mov rsi, rbx
     call raise_exception
@@ -1348,4 +1351,95 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
 .rsa_done:
     leave
     ret
+
+.rna_return:
+    ; set_no_attribute's exit: the exception is installed and pending, and
+    ; the caller hands back NULL itself.
+    lea rsp, [rbp - RNA_FRAME - 16]
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC raise_no_attribute
+
+;; ============================================================================
+;; set_no_attribute(rdi = the object as a Value, rsi = the attribute name)
+;;   -> returns, with that same AttributeError installed in current_exception
+;;
+;; raise_no_attribute's read form, for a lookup that has to say "absent" to a
+;; caller that may swallow it.  A __slots__ slot never assigned is one:
+;; unwinding from inside instance_getattr skipped hasattr()'s and getattr()'s
+;; own native frames, so `hasattr(o, "slot")` RAISED instead of answering
+;; False.  The prologue is raise_no_attribute's, so its body can be shared.
+;; ============================================================================
+DEF_FUNC set_no_attribute, RNA_FRAME
+    push rbx
+    push r12
+    mov [rbp - RNA_NAME], rsi
+    mov [rbp - RNA_OBJ], rdi
+    mov qword [rbp - RNA_ISSET], 0
+    mov qword [rbp - RNA_NORET], 1
+    xor edx, edx
+    jmp raise_no_attribute.rna_fresh
+END_FUNC set_no_attribute
+
+;; ============================================================================
+;; raise_unexpected_keyword(rdi = the function, rsi = its frame,
+;;                          rdx = the keyword's name, a str)
+;;   -> does not return: "h() got an unexpected keyword argument 'nosuch'"
+;;
+;; CPython names the function by its __qualname__ and quotes the keyword; the
+;; bare "got an unexpected keyword argument" said neither.  The frame is freed
+;; here, as raise_missing_arguments frees it: the caller was part-way through
+;; filling it and never gets control back.
+;; ============================================================================
+RUK_FUNC    equ 8
+RUK_FRAME_P equ 16
+RUK_NAME    equ 24
+RUK_SLOTS   equ 32
+; Each append is bounded at 80 bytes by rbt_append_cstr, so two names, the
+; fixed text and the quotes fit with room to spare.
+RUK_BUFLEN  equ 256
+RUK_BUF     equ RUK_SLOTS + RUK_BUFLEN
+RUK_FRAME   equ RUK_BUF                 ; 288, 16-aligned with no pushes
+
+global raise_unexpected_keyword
+DEF_FUNC raise_unexpected_keyword, RUK_FRAME
+    mov [rbp - RUK_FUNC], rdi
+    mov [rbp - RUK_FRAME_P], rsi
+    mov [rbp - RUK_NAME], rdx
+
+    lea rdi, [rbp - RUK_BUF]
+    mov byte [rdi], 0
+    mov rax, [rbp - RUK_FUNC]
+    mov rcx, [rax + PyFuncObject.func_code]
+    mov rsi, [rcx + PyCodeObject.co_qualname]
+    test rsi, rsi
+    jnz .ruk_have_qualname
+    mov rsi, [rax + PyFuncObject.func_name]
+    test rsi, rsi
+    jz .ruk_no_name
+.ruk_have_qualname:
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() "
+    call rbt_append_cstr
+    mov rdi, rax
+.ruk_no_name:
+    CSTRING rsi, "got an unexpected keyword argument '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RUK_NAME]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+
+    mov rdi, [rbp - RUK_FRAME_P]
+    call frame_free
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RUK_BUF]
+    call raise_exception
+END_FUNC raise_unexpected_keyword

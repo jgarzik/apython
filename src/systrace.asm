@@ -60,9 +60,6 @@ extern obj_decref
 extern none_singleton
 extern bool_true
 extern bool_false
-extern eval_saved_r12
-extern eval_saved_rbx
-extern current_exception
 extern frameobj_for
 extern frameobj_refresh_pos
 extern code_addr2line
@@ -70,23 +67,22 @@ extern opcode_dispatch_table
 extern opcode_trace_table
 extern opcode_table
 
+; Per thread, as CPython's are, so in ThreadState (src/include/threadstate.inc):
+;   sys_tracefunc, sys_profilefunc  the trace and profile functions, as
+;                                   Values, or 0 for "not set"
+;   tracing_depth                   non-zero while a callback is running:
+;                                   nothing inside one is traced
+;   systrace_any                    non-zero when either hook is installed.
+;                                   eval_frame and eval_return test this one
+;                                   word rather than two, so the cost of
+;                                   tracing being off is a single
+;                                   predictable, never-taken branch
+;
+; eval_hook_mask and the dispatch table it selects stay global: DISPATCH reads
+; one table for every thread.
+
 section .data
 align 8
-; The global trace and profile functions, as Values, or 0 for "not set".
-global sys_tracefunc
-sys_tracefunc:   dq 0
-global sys_profilefunc
-sys_profilefunc: dq 0
-
-; Non-zero while a callback is running: nothing inside one is traced.
-global tracing_depth
-tracing_depth:   dq 0
-
-; Non-zero when either hook is installed.  eval_frame and eval_return test
-; this one word rather than two, so the cost of tracing being off is a single
-; predictable, never-taken branch on the call and return paths.
-global systrace_any
-systrace_any:    dq 0
 
 ; bit 0 = the -t opcode printer, bit 1 = sys.settrace.  Two independent
 ; reasons to want the same table, so they cannot simply overwrite each other.
@@ -140,14 +136,14 @@ END_FUNC eval_hooks_set
 ;; ============================================================================
 DEF_FUNC_BARE systrace_recount
     xor eax, eax
-    cmp qword [rel sys_tracefunc], 0
+    cmp qword [gs:ThreadState.sys_tracefunc], 0
     jne .src_on
-    cmp qword [rel sys_profilefunc], 0
+    cmp qword [gs:ThreadState.sys_profilefunc], 0
     je .src_store
 .src_on:
     mov eax, 1
 .src_store:
-    mov [rel systrace_any], rax
+    mov [gs:ThreadState.systrace_any], rax
     ret
 END_FUNC systrace_recount
 
@@ -159,9 +155,9 @@ END_FUNC systrace_recount
 ;; ============================================================================
 DEF_FUNC_BARE systrace_active
     xor eax, eax
-    cmp qword [rel tracing_depth], 0
+    cmp qword [gs:ThreadState.tracing_depth], 0
     jne .sta_no
-    cmp qword [rel sys_tracefunc], 0
+    cmp qword [gs:ThreadState.sys_tracefunc], 0
     je .sta_no
     mov eax, 1
 .sta_no:
@@ -199,12 +195,12 @@ DEF_FUNC_LOCAL systrace_invoke, 80
     jz .si_fail
     mov [rbp - SI_ARGS + 8], rax
 
-    inc qword [rel tracing_depth]
+    inc qword [gs:ThreadState.tracing_depth]
     mov rdi, [rbp - SI_FN]
     lea rsi, [rbp - SI_ARGS]
     mov edx, 3
     call obj_call_n
-    dec qword [rel tracing_depth]
+    dec qword [gs:ThreadState.tracing_depth]
 
     push rax
     mov rdi, [rbp - SI_ARGS + 8]
@@ -265,8 +261,8 @@ DEF_FUNC_LOCAL systrace_result, 8            ; 1 push, so rsp is 16-aligned
     jz .sr_off
     call obj_decref
 .sr_off:
-    mov rdi, [rel sys_tracefunc]
-    mov qword [rel sys_tracefunc], 0
+    mov rdi, [gs:ThreadState.sys_tracefunc]
+    mov qword [gs:ThreadState.sys_tracefunc], 0
     test rdi, rdi
     jz .sr_off_done
     call obj_decref
@@ -297,11 +293,11 @@ global systrace_profile
 DEF_FUNC systrace_profile, 48
     mov [rbp - SPR_EVENT], rdi
     mov [rbp - SPR_ARG], rsi
-    cmp qword [rel tracing_depth], 0
+    cmp qword [gs:ThreadState.tracing_depth], 0
     jne .spr_none
-    cmp qword [rel sys_profilefunc], 0
+    cmp qword [gs:ThreadState.sys_profilefunc], 0
     je .spr_none
-    mov rdi, [rel eval_saved_r12]
+    mov rdi, [gs:ThreadState.eval_saved_r12]
     test rdi, rdi
     jz .spr_none
     call frameobj_for
@@ -309,7 +305,7 @@ DEF_FUNC systrace_profile, 48
     jz .spr_none
     mov [rbp - SPR_OBJ], rax
 
-    mov rdi, [rel sys_profilefunc]
+    mov rdi, [gs:ThreadState.sys_profilefunc]
     mov rsi, rax
     mov rdx, [rbp - SPR_EVENT]
     mov rcx, [rbp - SPR_ARG]
@@ -326,8 +322,8 @@ DEF_FUNC systrace_profile, 48
 .spr_raised:
     ; A profile function that raised turns profiling off, the way a trace
     ; function that raised turns tracing off.
-    mov rdi, [rel sys_profilefunc]
-    mov qword [rel sys_profilefunc], 0
+    mov rdi, [gs:ThreadState.sys_profilefunc]
+    mov qword [gs:ThreadState.sys_profilefunc], 0
     test rdi, rdi
     jz .spr_off
     call obj_decref
@@ -355,9 +351,9 @@ END_FUNC systrace_profile
 global systrace_c_callable
 DEF_FUNC_BARE systrace_c_callable
     xor eax, eax
-    cmp qword [rel sys_profilefunc], 0
+    cmp qword [gs:ThreadState.sys_profilefunc], 0
     je .scc_no
-    cmp qword [rel tracing_depth], 0
+    cmp qword [gs:ThreadState.tracing_depth], 0
     jne .scc_no
     V_TEST_PTR rdi, rcx
     ja .scc_no
@@ -425,7 +421,10 @@ DEF_FUNC systrace_call, 32
     ; RETURN_GENERATOR and hand back the generator object; CPython reports
     ; nothing for it, and the 'call' its caller sees comes from the first
     ; send().  The instruction about to run is what says which pass this is.
-    mov rax, [rel eval_saved_rbx]
+    mov rax, [gs:ThreadState.eval_saved_r12]   ; the running frame
+    test rax, rax
+    jz .stc_not_birth
+    mov rax, [rax + PyFrame.disp_ip]
     test rax, rax
     jz .stc_not_birth
     cmp byte [rax], OP_RETURN_GENERATOR
@@ -442,7 +441,7 @@ DEF_FUNC systrace_call, 32
     test eax, eax
     jz .stc_none
 
-    mov rdi, [rel eval_saved_r12]
+    mov rdi, [gs:ThreadState.eval_saved_r12]
     test rdi, rdi
     jz .stc_none
     call frameobj_for
@@ -478,7 +477,7 @@ DEF_FUNC systrace_call, 32
     mov [rax + PyFrameObject.ft_line], rcx
 .stc_seeded:
 
-    mov rdi, [rel sys_tracefunc]
+    mov rdi, [gs:ThreadState.sys_tracefunc]
     mov rsi, rax
     lea rdx, [rel ev_call]
     lea rcx, [rel none_singleton]   ; the arg is borrowed; invoke never drops it
@@ -521,7 +520,7 @@ DEF_FUNC systrace_local, 48
     test eax, eax
     jz .stl_none
 
-    mov rdi, [rel eval_saved_r12]
+    mov rdi, [gs:ThreadState.eval_saved_r12]
     test rdi, rdi
     jz .stl_none
     ; frameobj_for, not frame_obj directly: a frame the tracer never asked
@@ -576,7 +575,7 @@ DEF_FUNC systrace_return, STR_FRAME
     ; The position the frame reached, while its IP is still readable: after
     ; this the frame goes back on the pool and f_lineno can only be whatever
     ; was copied out.
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .str_go
     mov rax, [rax + PyFrame.frame_obj]
@@ -605,7 +604,7 @@ STLN_OFF  equ 16
 STLN_FRAME equ 32           ; + 0 pushes = 32
 global systrace_line
 DEF_FUNC systrace_line, STLN_FRAME
-    mov r10, [rel eval_saved_r12]
+    mov r10, [gs:ThreadState.eval_saved_r12]
     test r10, r10
     jz .sln_none
     mov rax, [r10 + PyFrame.frame_obj]
@@ -638,9 +637,12 @@ DEF_FUNC systrace_line, STLN_FRAME
     ; what makes a module's first statement report -- CPython gives a module's
     ; RESUME line 0 and this compiler gives it line 1, so recording it would
     ; swallow line 1 exactly where trace.py counts it.
-    ; DISPATCH stores rbx BEFORE advancing it, so eval_saved_rbx points AT the
+    ; DISPATCH stores rbx BEFORE advancing it, so PyFrame.disp_ip points AT the
     ; instruction about to run and its first byte is the opcode.
-    mov rcx, [rel eval_saved_rbx]
+    mov rcx, [gs:ThreadState.eval_saved_r12]   ; the running frame
+    test rcx, rcx
+    jz .sln_not_resume
+    mov rcx, [rcx + PyFrame.disp_ip]
     test rcx, rcx
     jz .sln_not_resume
     cmp byte [rcx], OP_RESUME
@@ -717,7 +719,7 @@ DEF_FUNC systrace_exception, STE_FRAME
     test eax, eax
     jz .ste_done
 
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .ste_done
     mov rax, [rax + PyFrame.frame_obj]
@@ -726,7 +728,7 @@ DEF_FUNC systrace_exception, STE_FRAME
     cmp qword [rax + PyFrameObject.f_trace], 0
     je .ste_done
 
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .ste_done
     mov [rbp - STE_EXC], rbx
@@ -764,7 +766,7 @@ DEF_FUNC systrace_exception, STE_FRAME
     ; Whatever the callback did to current_exception, the unwind that was
     ; already running is the one that continues.
     mov rax, [rbp - STE_EXC]
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     mov rdi, rax
     call obj_decref
 .ste_done:
@@ -796,8 +798,8 @@ DEF_FUNC sys_settrace_func, 8            ; 1 push, so rsp is 16-aligned
 .sst_keep:
     INCREF rbx
 .sst_have:
-    mov rdi, [rel sys_tracefunc]
-    mov [rel sys_tracefunc], rbx
+    mov rdi, [gs:ThreadState.sys_tracefunc]
+    mov [gs:ThreadState.sys_tracefunc], rbx
     test rdi, rdi
     jz .sst_set
     call obj_decref
@@ -825,7 +827,7 @@ END_FUNC sys_settrace_func
 ;; ============================================================================
 global sys_gettrace_func
 DEF_FUNC sys_gettrace_func
-    mov rax, [rel sys_tracefunc]
+    mov rax, [gs:ThreadState.sys_tracefunc]
     test rax, rax
     jnz .sgt_have
     lea rax, [rel none_singleton]
@@ -860,8 +862,8 @@ DEF_FUNC sys_setprofile_func, 8            ; 1 push, so rsp is 16-aligned
 .ssp_keep:
     INCREF rbx
 .ssp_have:
-    mov rdi, [rel sys_profilefunc]
-    mov [rel sys_profilefunc], rbx
+    mov rdi, [gs:ThreadState.sys_profilefunc]
+    mov [gs:ThreadState.sys_profilefunc], rbx
     test rdi, rdi
     jz .ssp_done
     call obj_decref
@@ -882,7 +884,7 @@ END_FUNC sys_setprofile_func
 ;; ============================================================================
 global sys_getprofile_func
 DEF_FUNC sys_getprofile_func
-    mov rax, [rel sys_profilefunc]
+    mov rax, [gs:ThreadState.sys_profilefunc]
     test rax, rax
     jnz .sgp_have
     lea rax, [rel none_singleton]
@@ -925,15 +927,15 @@ DEF_FUNC sys_call_tracing_func, SCT_FRAME
     cmp rcx, rax
     jne .sct_not_tuple
 
-    mov rax, [rel tracing_depth]
+    mov rax, [gs:ThreadState.tracing_depth]
     mov [rbp - SCT_SAVED], rax
-    mov qword [rel tracing_depth], 0
+    mov qword [gs:ThreadState.tracing_depth], 0
     mov rsi, [rdx + PyTupleObject.ob_item]
     mov rdx, [rdx + PyTupleObject.ob_size]
     call obj_call_n
     push rax
     mov rcx, [rbp - SCT_SAVED]
-    mov [rel tracing_depth], rcx
+    mov [gs:ThreadState.tracing_depth], rcx
     pop rax
     leave
     ret

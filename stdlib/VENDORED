@@ -1,0 +1,3 @@
+CPython v3.12.9
+commit fdb81425a9ad683f8c24bf5cbedc9b96baf00cd2
+Copied from Lib/ by tools/vendor_stdlib.sh, minus Lib/test.

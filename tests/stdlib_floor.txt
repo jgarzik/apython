@@ -35,6 +35,7 @@ ok copy
 ok copyreg
 ok cProfile
 ok csv
+ok ctypes
 ok dataclasses
 ok datetime
 ok dbm
@@ -53,6 +54,7 @@ ok fractions
 ok ftplib
 ok functools
 ok __future__
+ok genericpath
 ok getopt
 ok getpass
 ok gettext
@@ -142,6 +144,7 @@ ok socketserver
 ok sre_compile
 ok sre_constants
 ok sre_parse
+ok ssl
 ok stat
 ok statistics
 ok string

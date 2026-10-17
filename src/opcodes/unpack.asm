@@ -20,14 +20,11 @@
 
 section .text
 
-extern current_exception
-extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_dispatch_table
 extern dict_type
 extern eval_dispatch
 extern eval_exception_unwind
-extern eval_saved_r13
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern get_iterator_opt
@@ -172,7 +169,7 @@ DEF_FUNC_BARE op_unpack_sequence
     ; exception G raised.
     ;
     ; The sequence is NOT released here.  The unwinder restores r13 from
-    ; eval_saved_r13, which is the value stack as it stood before this
+    ; PyFrame.disp_sp, which is the value stack as it stood before this
     ; instruction ran -- so the sequence VPOP_VAL took off the top is back on
     ; it, and the unwind releases it.  Decref'ing it here as well frees it
     ; while the unwinder is still holding it, which valgrind reports as an
@@ -245,7 +242,7 @@ DEF_FUNC_BARE op_unpack_sequence
     ; different messages, and both carry the counts.
     ;
     ; The sequence is NOT released here, for the reason .unpack_iter_raised
-    ; gives above: the unwinder restores r13 from eval_saved_r13, the value
+    ; gives above: the unwinder restores r13 from PyFrame.disp_sp, the value
     ; the stack pointer had before this instruction, so the slot VPOP_VAL took
     ; the sequence out of is inside the range the unwind releases.  Releasing
     ; it here as well drove a live sequence's refcount to zero -- `print(xs)`
@@ -706,7 +703,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, rcx
     mov rsi, rax
     mov edx, 1                  ; the target list has a star in it
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     extern raise_unpack_count
     call raise_unpack_count
     ud2

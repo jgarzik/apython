@@ -24,7 +24,6 @@
 extern ap_free
 extern ap_strcmp
 extern dict_get
-extern kw_names_pending
 extern obj_as_index
 extern obj_call_n
 extern str_from_cstr_heap
@@ -66,7 +65,6 @@ extern none_singleton
 extern cg_expr
 extern cg_unit_free
 extern cg_unit_init
-extern current_exception
 extern exc_from_cstr
 extern exc_set_context
 extern obj_decref
@@ -514,17 +512,17 @@ DEF_FUNC comp_set_pending, 8
     pop rax
 
     ; Chain onto whatever was already being handled, as a raise would.
-    mov rsi, [rel current_exception]
+    mov rsi, [gs:ThreadState.current_exception]
     test rsi, rsi
     jz .no_prev
     push rax
     mov rdi, rax
     call exc_set_context
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
     pop rax
 .no_prev:
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
 .none:
     pop rbx
     leave
@@ -948,7 +946,6 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     jmp .car_cleanup
 END_FUNC compile_ast_raw
 
-section .bss
 ;; PEP 563: whether the code that called compile(), exec() or eval() was
 ;; itself compiled under `from __future__ import annotations`.  CPython
 ;; inherits the future flags of the calling frame into a nested compile
@@ -957,14 +954,16 @@ section .bss
 ;; parameter because compile_source has four callers that are not builtins --
 ;; `./apython foo.py` among them -- and none of them has a frame to inherit
 ;; from.  CONSUMED by the next compile, so it can never leak into one that
-;; did not ask.
-global comp_inherit_future
-comp_inherit_future: resq 1
+;; did not ask.  comp_inherit_future lives in ThreadState (src/include/threadstate.inc).
 section .text
 
 
 ;; compile_source(const char *src, int64_t len, PyStrObject *filename, int mode)
 ;;   -> rax = PyCodeObject*, or 0 with the exception already pending
+;; compile_source_ex(..., Value raw)
+;;   -- the same, with r8 a raw tree from lib/_ast_load.py to build the arena
+;;      from in place of lexing and parsing `src`: compile() of an AST object.
+;;      See astload.asm.  0 is compile_source.
 ;;
 ;; The whole pipeline, and the only place that disposes of it.  Every pass
 ;; below returns a failure rather than raising, so there is exactly one exit
@@ -983,11 +982,26 @@ CS_CODE  equ 48
 ; field reading as garbage rather than anything that looks like a layout bug.
 CS_UNIT  equ 48 + CompUnit_size
 CS_COMP  equ CS_UNIT + 8
-CS_FRAME equ ((CS_COMP + 15) / 16) * 16 + 8      ; + 3 pushes = 16-aligned
-DEF_FUNC compile_source, CS_FRAME
+CS_RAW   equ CS_COMP + 8
+CS_FRAME equ ((CS_RAW + 15) / 16) * 16 + 8       ; + 3 pushes = 16-aligned
+DEF_FUNC_BARE compile_source
+    xor r8d, r8d
+    jmp compile_source_ex
+END_FUNC compile_source
+
+;; ============================================================================
+;; compile_source_ex(src, len, filename, mode, Value raw) -> rax = PyCodeObject*,
+;;   or 0 with the exception already pending
+;;
+;; The body of compile_source.  `raw` is 0 for source text, or the raw tree
+;; astload.asm's al_root builds the arena from in place of the lexer and the
+;; parser.
+;; ============================================================================
+DEF_FUNC compile_source_ex, CS_FRAME
     push rbx
     push r12
     push r13
+    mov [rbp - CS_RAW], r8
     mov [rbp - CS_SRC], rdi
     mov [rbp - CS_LEN], rsi
     mov [rbp - CS_FILE], rdx
@@ -1009,8 +1023,8 @@ DEF_FUNC compile_source, CS_FRAME
     ; PEP 563 is inherited from the code that called compile()/exec()/eval(),
     ; which is CPython's rule.  Consumed here, so it cannot leak into a
     ; compile that did not ask.
-    mov rax, [rel comp_inherit_future]
-    mov qword [rel comp_inherit_future], 0
+    mov rax, [gs:ThreadState.comp_inherit_future]
+    mov qword [gs:ThreadState.comp_inherit_future], 0
     test rax, rax
     jz .cs_no_inherit
     mov dword [rbx + Comp.future_anno], 1
@@ -1022,6 +1036,15 @@ DEF_FUNC compile_source, CS_FRAME
     lea rdx, [rel cs_module_name]
     call cs_unit_setup
 
+    ; An AST object's tree stands in for the lexer and the parser both.
+    cmp qword [rbp - CS_RAW], 0
+    je .cs_lex
+    mov rdi, rbx
+    mov rsi, [rbp - CS_RAW]
+    extern al_root
+    call al_root
+    jmp .parsed
+.cs_lex:
     mov rdi, rbx
     xor esi, esi                        ; the whole source
     xor edx, edx
@@ -1215,7 +1238,7 @@ DEF_FUNC compile_source, CS_FRAME
     call comp_set_pending
     mov qword [rbp - CS_CODE], 0
     jmp .cleanup
-END_FUNC compile_source
+END_FUNC compile_source_ex
 
 ;; ============================================================================
 ;; cs_unit_setup(CompUnit *u, PyStrObject *filename, const char *name)
@@ -1766,6 +1789,7 @@ global path_is_source
 global src_read_file
 
 STAT_SIZE    equ 144
+PYC_MAGIC    equ 0x0a0d0dcb     ; 3531 and \r\n, as marshal.asm checks it
 STAT_ST_SIZE equ 48
 
 section .text
@@ -1887,6 +1911,53 @@ DEF_FUNC src_read_file, SR_FRAME
 END_FUNC src_read_file
 
 ;; ============================================================================
+;; path_is_pyc(const char *path) -> eax = 1 when it is marshalled bytecode
+;;
+;; CPython's maybe_pyc_file: a ".pyc" name, or a file that opens with the
+;; 3.12 magic number.  Anything else is source, whatever it is called -- a
+;; script with no extension, like the bin/pip a venv installs, used to be
+;; read as a .pyc and refused for its magic number.
+;; ============================================================================
+PIP_PATH  equ 8
+PIP_FD    equ 16
+PIP_BUF   equ 24
+PIP_FRAME equ 32
+DEF_FUNC path_is_pyc, PIP_FRAME
+    mov [rbp - PIP_PATH], rdi
+    call ap_strlen
+    mov rcx, [rbp - PIP_PATH]
+    cmp rax, 4
+    jb .pip_probe
+    cmp dword [rcx + rax - 4], '.pyc'
+    je .pip_yes
+.pip_probe:
+    mov rdi, [rbp - PIP_PATH]
+    xor esi, esi                    ; O_RDONLY
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js .pip_yes                     ; unopenable: pyc_read_file says so
+    mov [rbp - PIP_FD], rax
+    mov dword [rbp - PIP_BUF], 0
+    mov rdi, rax
+    lea rsi, [rbp - PIP_BUF]
+    mov edx, 4
+    call sys_read
+    mov rdi, [rbp - PIP_FD]
+    call sys_close
+    cmp dword [rbp - PIP_BUF], PYC_MAGIC
+    jne .pip_no
+.pip_yes:
+    mov eax, 1
+    leave
+    ret
+.pip_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC path_is_pyc
+
+;; ============================================================================
 ;; code_from_path(const char *path) -> rax = PyCodeObject*, or 0
 ;; A .py is compiled; anything else is read as marshalled bytecode.  A failed
 ;; compile leaves its exception pending, exactly as pyc_read_file's callers
@@ -1902,6 +1973,10 @@ DEF_FUNC code_from_path, CP_FRAME
     call path_is_source
     test eax, eax
     jnz .source
+    mov rdi, rbx
+    call path_is_pyc
+    test eax, eax
+    jz .source
     mov rdi, rbx
     call pyc_read_file
     pop rbx
@@ -1955,12 +2030,10 @@ section .text
 
 extern builtins_dict_global
 extern type_is_subtype
-extern current_exception
 extern dict_get
 extern dict_set
 extern dict_type
 extern eval_frame
-extern eval_saved_r12
 extern frame_free
 extern frame_new
 extern obj_dealloc
@@ -2039,7 +2112,7 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     jne .have_globals
     ; Nothing supplied: fall back to the calling frame, the same source
     ; globals() and locals() use.
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .no_frame
     mov rdx, [rax + PyFrame.globals]
@@ -2201,8 +2274,8 @@ END_FUNC ev_run_code
 ;; two halves of one file disagreed about what an annotation is.
 ;; ============================================================================
 DEF_FUNC_LOCAL comp_note_caller_future
-    mov qword [rel comp_inherit_future], 0
-    mov rax, [rel eval_saved_r12]
+    mov qword [gs:ThreadState.comp_inherit_future], 0
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .cncf_done
     mov rax, [rax + PyFrame.code]
@@ -2210,7 +2283,7 @@ DEF_FUNC_LOCAL comp_note_caller_future
     jz .cncf_done
     test dword [rax + PyCodeObject.co_flags], CO_FUTURE_ANNOTATIONS
     jz .cncf_done
-    mov qword [rel comp_inherit_future], 1
+    mov qword [gs:ThreadState.comp_inherit_future], 1
 .cncf_done:
     leave
     ret
@@ -2432,6 +2505,22 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     ret
 END_FUNC co_ast_builder
 
+; compile()'s parameter names, in signature order: builtin_compile_fn
+; gathers its keywords against these.
+section .rodata
+co_kw_source:   db "source", 0
+co_kw_filename: db "filename", 0
+co_kw_mode:     db "mode", 0
+co_kw_flags:    db "flags", 0
+co_kw_inherit:  db "dont_inherit", 0
+co_kw_optimize: db "optimize", 0
+align 8
+co_kw_names:
+    dq co_kw_source, co_kw_filename, co_kw_mode, co_kw_flags, co_kw_inherit
+    dq co_kw_optimize
+CO_NSLOTS equ 6
+section .text
+
 ;; ============================================================================
 ;; builtin_compile_fn(args, nargs) -> Value
 ;;   compile(source, filename, mode[, flags[, dont_inherit[, optimize]]])
@@ -2441,12 +2530,18 @@ END_FUNC co_ast_builder
 ;; read for one bit, PyCF_ONLY_AST, which is what ast.parse passes: with it
 ;; set the answer is the parse tree rather than a code object.
 ;;
-;; Which argument is `flags` depends on the keywords: ast.parse calls
-;; compile(src, fn, mode, flags, _feature_version=n), so a builtin that reads
-;; position 4 without consulting kw_names_pending takes _feature_version for
-;; dont_inherit -- and, worse, leaves the pending names set for whatever call
-;; runs next.
+;; A source that is neither str nor bytes may be an AST object, and
+;; compile_ast_input in astload.asm is what compiles one.
+;;
+;; Every parameter may be passed by name, as CPython's are: ast.parse calls
+;; compile(src, fn, mode, flags, _feature_version=n), and pytest's mark
+;; expressions compile(tree, filename=..., mode="eval").  So the positional
+;; arguments and the keywords are gathered into one six-slot array first, in
+;; signature order, and everything below reads that.  A keyword not in the
+;; signature -- _feature_version -- is ignored.  kw_names_pending is consumed
+;; however this call ends, or it would name the next call's arguments.
 ;; ============================================================================
+
 CO_ARGS  equ 8
 CO_NARGS equ 16
 CO_MODE  equ 24
@@ -2457,7 +2552,9 @@ CO_KWNAMES equ 56        ; the pending keyword names, while they are scanned
 CO_KWI   equ 64
 CO_SRC   equ 72          ; the source bytes, str or bytes: only the two
 CO_SRCLEN equ 80         ;   fields differ, and the offsets differ with them
-CO_FRAME equ 88          ; + 3 pushes = 112, 16-byte aligned
+CO_KWJ   equ 88          ; which signature name a keyword is being tried at
+CO_SLOTS equ 144         ; the six arguments, at -144 .. -104
+CO_FRAME equ 152         ; + 3 pushes = 176, 16-byte aligned
 DEF_FUNC builtin_compile_fn, CO_FRAME
     push rbx
     push r12
@@ -2465,67 +2562,100 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov [rbp - CO_ARGS], rdi
     mov [rbp - CO_NARGS], rsi
     mov qword [rbp - CO_FLAGS], 0
+    xor eax, eax
+.co_clear:
+    mov qword [rbp - CO_SLOTS + rax*8], 0
+    inc eax
+    cmp eax, CO_NSLOTS
+    jb .co_clear
 
     ; The keywords sit after the positional arguments and are named in order
-    ; by kw_names_pending.  Consume it however this call ends.
+    ; by kw_names_pending.
     mov [rbp - CO_NPOS], rsi
-    mov rax, [rel kw_names_pending]
+    mov qword [rbp - CO_KWNAMES], 0
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
-    jz .co_no_kw
-    mov qword [rel kw_names_pending], 0
+    jz .co_positional
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    mov [rbp - CO_KWNAMES], rax
     mov rcx, [rax + PyTupleObject.ob_size]
     sub [rbp - CO_NPOS], rcx
-    ; `flags=` by name is the only keyword worth reading; every other one
-    ; compile() takes is ignored anyway.  The tuple and the index live in the
-    ; frame rather than in registers: obj_as_index below can reach a heap
-    ; integer and clobber every caller-saved one, which under INT_STRESS=1 is
-    ; every value of eight or more.
-    mov [rbp - CO_KWNAMES], rax
+
+.co_positional:
+    mov rcx, [rbp - CO_NPOS]
+    cmp rcx, CO_NSLOTS
+    ja .bad_nargs
+    mov rdx, [rbp - CO_ARGS]
+    xor eax, eax
+.co_copy_pos:
+    cmp rax, rcx
+    jae .co_keywords
+    mov r8, [rdx + rax*8]
+    mov [rbp - CO_SLOTS + rax*8], r8
+    inc rax
+    jmp .co_copy_pos
+
+.co_keywords:
+    ; Each keyword against each signature name.  The index lives in the frame
+    ; because ap_strcmp is a call.
+    cmp qword [rbp - CO_KWNAMES], 0
+    je .co_have_args
     mov qword [rbp - CO_KWI], 0
 .co_kw_loop:
     mov rax, [rbp - CO_KWNAMES]
     mov rcx, [rbp - CO_KWI]
     cmp rcx, [rax + PyTupleObject.ob_size]
-    jge .co_no_kw
+    jge .co_have_args
+    mov qword [rbp - CO_KWJ], 0
+.co_kw_name:
+    mov rax, [rbp - CO_KWNAMES]
+    mov rcx, [rbp - CO_KWI]
     mov rax, [rax + PyTupleObject.ob_item]
     mov rdx, [rax + rcx*8]
     lea rdi, [rdx + PyStrObject.data]
-    CSTRING rsi, "flags"
+    lea rax, [rel co_kw_names]
+    mov rcx, [rbp - CO_KWJ]
+    mov rsi, [rax + rcx*8]
     call ap_strcmp
     test eax, eax
-    jnz .co_kw_next
+    jz .co_kw_match
+    inc qword [rbp - CO_KWJ]
+    cmp qword [rbp - CO_KWJ], CO_NSLOTS
+    jb .co_kw_name
+    jmp .co_kw_next                     ; not compile()'s: ignored
+.co_kw_match:
     mov rax, [rbp - CO_NPOS]
     add rax, [rbp - CO_KWI]
     mov rdx, [rbp - CO_ARGS]
-    mov rdi, [rdx + rax*8]
-    V_UNPACK rdi, rdx
-    call obj_as_index
-    mov [rbp - CO_FLAGS], rax
+    mov rax, [rdx + rax*8]
+    mov rcx, [rbp - CO_KWJ]
+    mov [rbp - CO_SLOTS + rcx*8], rax
 .co_kw_next:
     inc qword [rbp - CO_KWI]
     jmp .co_kw_loop
-.co_no_kw:
 
-    mov rsi, [rbp - CO_NPOS]
-    cmp rsi, 3
-    jb .bad_nargs
-    cmp rsi, 6
-    ja .bad_nargs
+.co_have_args:
+    ; source, filename and mode are required.
+    cmp qword [rbp - CO_SLOTS], 0
+    je .bad_nargs
+    cmp qword [rbp - CO_SLOTS + 8], 0
+    je .bad_nargs
+    cmp qword [rbp - CO_SLOTS + 16], 0
+    je .bad_nargs
 
-    ; Positional flags, when there are four or more.
-    cmp rsi, 4
-    jb .co_have_flags
-    mov rdi, [rbp - CO_ARGS]
-    mov rdi, [rdi + 24]
+    ; flags, by position or by name.  obj_as_index can reach a heap integer
+    ; and clobber every caller-saved register, which under INT_STRESS=1 is
+    ; every value of eight or more -- so nothing is held in one across it.
+    mov rdi, [rbp - CO_SLOTS + 24]
+    test rdi, rdi
+    jz .co_have_flags
     V_UNPACK rdi, rdx
     call obj_as_index
     mov [rbp - CO_FLAGS], rax
 .co_have_flags:
-    mov rdi, [rbp - CO_ARGS]
-
-    mov rbx, [rdi]                      ; source
-    mov r12, [rdi + 8]                  ; filename
-    mov r13, [rdi + 16]                 ; mode
+    mov rbx, [rbp - CO_SLOTS]           ; source
+    mov r12, [rbp - CO_SLOTS + 8]       ; filename
+    mov r13, [rbp - CO_SLOTS + 16]      ; mode
 
     ; All three are Values, and an int or float immediate has no ob_type to
     ; read -- compile(1, "a", "exec") dereferenced the number.  V_TEST_PTR
@@ -2538,7 +2668,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     je .co_bytes_src
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .bad_source
+    jne .co_not_text
     lea rax, [rbx + PyStrObject.data]
     mov [rbp - CO_SRC], rax
     mov rax, [rbx + PyStrObject.ob_size]
@@ -2549,6 +2679,12 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov [rbp - CO_SRC], rax
     mov rax, [rbx + PyBytesObject.ob_size]
     mov [rbp - CO_SRCLEN], rax
+    jmp .co_have_src
+.co_not_text:
+    ; Perhaps an AST object; compile_ast_input decides, once the filename and
+    ; the mode have been checked as they are for text.  A str's or bytes'
+    ; data pointer is never 0, so 0 marks this case.
+    mov qword [rbp - CO_SRC], 0
 .co_have_src:
     lea rcx, [rel str_type]
     V_TEST_PTR r12, rax
@@ -2602,6 +2738,23 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
 .have_mode:
     mov [rbp - CO_MODE], rcx
     call comp_note_caller_future        ; PEP 563 is inherited; see the helper
+    cmp qword [rbp - CO_SRC], 0
+    jne .co_text
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    mov rcx, [rbp - CO_MODE]
+    mov r8, [rbp - CO_FLAGS]
+    extern compile_ast_input
+    call compile_ast_input
+    test rax, rax
+    jz .propagate
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.co_text:
     mov rdi, [rbp - CO_SRC]
     mov rsi, [rbp - CO_SRCLEN]
     mov rdx, r12

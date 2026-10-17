@@ -29,6 +29,7 @@ extern ap_free
 extern obj_decref
 extern sre_new_slice
 extern str_type
+extern bytes_type
 extern list_new
 extern list_append
 extern dict_get
@@ -258,11 +259,12 @@ END_FUNC tp_error
 ;; ============================================================================
 ;; sre_template_parse(rdi = the template, rsi = pattern) -> rax = a list
 ;;
-;; Literal runs become str -- or bytes, for a bytes pattern -- elements, and
-;; group references become int elements.  Which kind the pieces are is the
-;; pattern's, and it is the only difference between the two: the escape
-;; syntax is identical, and a bytes template is scanned as bytes because that
-;; is what it already does.
+;; Literal runs become str -- or bytes, for a bytes template -- elements, and
+;; group references become int elements; element 0 is always a literal.
+;; Which kind the pieces are is the template's own, and it is the only
+;; difference between the two: the escape syntax is identical, and a bytes
+;; template is scanned as bytes because that is what it already does.  Group
+;; references are checked against the pattern whatever the kinds.
 ;; Raises rather than answering NULL: every caller is a builtin method with a
 ;; live frame above it.
 ;; ============================================================================
@@ -276,7 +278,7 @@ TP_LIST   equ 56
 TP_POS    equ 64
 TP_NGROUP equ 72
 TP_SCRATCH equ 80
-TP_ISBYTES equ 88           ; the pattern's kind, which the pieces take
+TP_ISBYTES equ 88           ; the template's kind, which the pieces take
 TP_ERRPOS equ 96            ; where an error message says it went wrong
 TP_NAMEP  equ 104           ; a group name's bytes, for the message
 TP_NAMEL  equ 112
@@ -291,9 +293,23 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov eax, [rsi + SRE_PatternObject.groups]
     mov [rbp - TP_NGROUP], rax
 
+    ; The pieces take the TEMPLATE's kind, not the pattern's: CPython's
+    ; parse_template builds its literals from the replacement it scans, so a
+    ; str replacement for a bytes pattern parses to str pieces, and the
+    ; mismatch surfaces only when a substitution joins them.  The caller has
+    ; already refused anything that is neither a str nor a bytes.
     ; bytes keeps its data at +24 and str at +40; the length is at +16 in
     ; both.
-    mov rcx, [rsi + SRE_PatternObject.is_bytes]
+    xor ecx, ecx
+    mov rax, [rdi + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rax, rdx
+    je .tp_kind_bytes
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
+    jz .tp_kind_have
+.tp_kind_bytes:
+    mov ecx, 1
+.tp_kind_have:
     mov [rbp - TP_ISBYTES], rcx
     test rcx, rcx
     jz .tp_str_data
@@ -688,12 +704,20 @@ DEF_FUNC sre_template_parse, TP_FRAME
     jmp .tp_emit
 
 ;; .tp_flush -- the pending literal, if any, becomes the next list element.
+;; The FIRST element is always a literal, even an empty one: it is CPython's
+;; template literal, whose kind is the kind the expansion joins in, and which
+;; is always the expansion's item 0 -- the index a mismatch is reported at
+;; counts it.
 ;; Reached by `call`, so rsp arrives 8 below alignment; the sub/add pair is
 ;; what keeps every call below it on a 16-byte boundary.
 .tp_flush:
     sub rsp, 8
     cmp qword [rbp - TP_BLEN], 0
-    je .tp_flush_none
+    jne .tp_flush_some
+    mov rax, [rbp - TP_LIST]
+    cmp qword [rax + PyListObject.ob_size], 0
+    jne .tp_flush_none
+.tp_flush_some:
     mov rdi, [rbp - TP_BUF]
     mov rsi, [rbp - TP_BLEN]
     mov edx, [rbp - TP_ISBYTES]
@@ -850,15 +874,18 @@ END_FUNC sre_template_parse
 ;; ============================================================================
 ;; sre_template_expand(rdi = a parsed template, rsi = a match) -> rax = str
 ;;
-;; A group that did not match contributes the empty string, which is
-;; expand_template's `g(group) or empty`.
+;; A group that did not match contributes nothing, as in expand_template.
+;; The pieces are joined in the TEMPLATE's kind -- that of its element 0,
+;; always a literal -- which is CPython's: a str template over a bytes match
+;; fails in the join, "sequence item 1: expected str instance, bytes found",
+;; at the first group that matched, and comes back a str when none did.
 ;; ============================================================================
 TE_TMPL   equ 8
 TE_MATCH  equ 16
 TE_OUT    equ 24
 TE_SEP    equ 32
 TE_IDX    equ 40
-TE_ISBYTES equ 48           ; the match's pattern kind: the pieces take it
+TE_ISBYTES equ 48           ; the template's kind: the join takes it
 TE_FRAME  equ 64            ; + 0 pushes = 64
 
 DEF_FUNC sre_template_expand, TE_FRAME
@@ -866,9 +893,14 @@ DEF_FUNC sre_template_expand, TE_FRAME
     mov [rbp - TE_MATCH], rsi
     mov qword [rbp - TE_OUT], 0
     mov qword [rbp - TE_SEP], 0
-    ; Which kind the pieces are is the match's pattern's.
-    mov rax, [rsi + SRE_MatchObject.pattern]
-    mov rax, [rax + SRE_PatternObject.is_bytes]
+    ; The join's kind is the template's: its element 0 is always a literal.
+    xor eax, eax
+    mov rcx, [rdi + PyListObject.ob_item]
+    mov rcx, [rcx]
+    mov rcx, [rcx + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    sete al
     mov [rbp - TE_ISBYTES], rax
 
     xor edi, edi
@@ -896,7 +928,6 @@ DEF_FUNC sre_template_expand, TE_FRAME
     lea rdx, [rel str_type]
     cmp rcx, rdx
     je .te_literal
-    extern bytes_type
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     jne .te_group
@@ -921,13 +952,8 @@ DEF_FUNC sre_template_expand, TE_FRAME
     jne .te_group_have
     mov rdi, rax
     call obj_decref             ; the reference get_group_str just took
-    ; Unmatched: the empty string.
-    lea rdi, [rel te_nothing]
-    xor esi, esi
-    mov edx, [rbp - TE_ISBYTES]
-    call sre_new_slice
-    test rax, rax
-    jz .te_oom
+    ; Unmatched: no piece at all, so the join's item numbers stay CPython's.
+    jmp .te_next
 .te_group_have:
     mov [rbp - TE_SEP], rax     ; borrow the slot: it is free until the join
     mov rdi, [rbp - TE_OUT]

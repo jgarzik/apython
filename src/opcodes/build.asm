@@ -17,13 +17,10 @@ section .text
 extern get_iterator_opt
 extern raise_unpack_count
 extern eval_dispatch
-extern eval_saved_r13
-extern eval_co_consts
 extern obj_decref
 extern obj_is_true
 extern raise_exception
 extern exc_TypeError_type
-extern current_exception
 extern eval_exception_unwind
 extern exc_ValueError_type
 extern int_to_i64
@@ -44,7 +41,6 @@ extern list_iter_type
 extern dict_type
 extern list_type
 extern tuple_type
-extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -377,7 +373,7 @@ DEF_FUNC_BARE op_binary_subscr
     ; sequence iterator has to be able to CATCH the IndexError it raises and
     ; read it as exhaustion, which a tail-jump takes straight past.
     add rsp, BSUB_SIZE
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .bs_no_exception
     ; No `leave`: this handler is DEF_FUNC_BARE and carves its own space,
     ; which the add above has already given back.
@@ -547,7 +543,7 @@ DEF_FUNC_BARE op_store_subscr
 
 .ss_slot_failed:
     add rsp, SSUB_SIZE
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .ss_no_exception
     jmp eval_exception_unwind
 .ss_no_exception:
@@ -904,8 +900,7 @@ DEF_FUNC_BARE op_for_iter
     ; as "the exception being handled", so inside an `except` block it is
     ; non-NULL for reasons that have nothing to do with this iterator; only
     ; a *change* across the call means the iterator raised.
-    extern current_exception
-    push qword [rel current_exception]
+    push qword [gs:ThreadState.current_exception]
 
     ; Peek at iterator (don't pop yet)
     VPEEK rdi
@@ -963,7 +958,7 @@ DEF_FUNC_BARE op_for_iter
     ; This check used to guard the __next__ path alone, so an exception
     ; raised inside a *generator* -- which has a real tp_iternext -- ended
     ; the loop silently and surfaced only at interpreter exit.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     cmp rax, [rsp]             ; unchanged from before the step?
     je .exhausted
     test rax, rax
@@ -980,12 +975,12 @@ DEF_FUNC_BARE op_for_iter
     mov rdi, rax
     call obj_decref
     mov rax, [rsp]
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     jmp .exhausted
 
 .next_propagate:
     add rsp, 16                ; discard the saved exception and jump offset
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     extern eval_exception_unwind
     jmp eval_exception_unwind
 
@@ -1470,7 +1465,7 @@ DEF_FUNC_BARE op_contains_op
     call rax                     ; tp_iter(container) → iterator
     test rax, rax
     jz .contains_getitem_fallback
-    mov rcx, [rel current_exception]
+    mov rcx, [gs:ThreadState.current_exception]
     push rcx                     ; what was in flight before the loop, so a
                                  ; NULL below can be told from an exhaustion
     push rax                     ; save iterator (+16 shift now)
@@ -1580,7 +1575,7 @@ DEF_FUNC_BARE op_contains_op
     ; unrelated instruction.  The comparison is against what was in flight
     ; before the loop, not against 0 -- inside an `except` block
     ; current_exception already holds the exception being handled.
-    mov rcx, [rel current_exception]
+    mov rcx, [gs:ThreadState.current_exception]
     test rcx, rcx
     jz .contains_iter_nf_done
     cmp rcx, [rsp]
@@ -1637,7 +1632,6 @@ DEF_FUNC_BARE op_contains_op
     test edx, edx
     jz .contains_gi_null_result
     ; Check for exception (IndexError = stop)
-    extern current_exception
     EXC_RAISED_SINCE r15, rcx, .contains_gi_check_exc
     jmp .contains_gi_got_elem
 
@@ -1740,14 +1734,14 @@ DEF_FUNC_BARE op_contains_op
     ; Exception raised. If IndexError → not found. Otherwise re-raise.
     ; DECREF the NULL result if any
     extern exc_IndexError_type
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel exc_IndexError_type]
     cmp rcx, rdx
     jne .contains_gi_reraise
     ; IndexError: clear exception and return not found
     mov rdi, rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     add rsp, 8                         ; pop index counter
     xor eax, eax
@@ -2236,14 +2230,13 @@ DEF_FUNC op_dict_update
     ; kw_names_pending belongs to whatever CALL is in flight; dict.update
     ; consumes it, so park it across the call rather than letting the callee
     ; eat a keyword tuple that is not its own.
-    extern kw_names_pending
-    mov rbx, [rel kw_names_pending]
-    mov qword [rel kw_names_pending], 0
+    mov rbx, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rdi, rsp
     mov esi, 2
     extern dict_method_update
     call dict_method_update
-    mov [rel kw_names_pending], rbx
+    mov [gs:ThreadState.kw_names_pending], rbx
     add rsp, 16
     test rax, rax
     jz .du_propagate
@@ -2265,8 +2258,7 @@ DEF_FUNC op_dict_update
     ; obj_getattr_opt answers 0 both for "there is no keys" and for "looking
     ; for it raised", so the two have to be told apart here: a `keys` property
     ; that raises is not a report that the object is not a mapping.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .du_propagate
     jmp .du_not_mapping
 
@@ -2485,7 +2477,7 @@ DEF_FUNC op_dict_merge
     jmp .dm_have_dict
 
 .dm_propagate:
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     add rsp, 96
     pop r14
     pop rbx
@@ -2557,13 +2549,12 @@ END_FUNC op_dict_merge
 ;; KW_NAMES (172): Store co_consts[arg] as pending kw_names tuple.
 ;; The next CALL opcode will use this tuple.
 ;; ============================================================================
-extern kw_names_pending
 
 DEF_FUNC_BARE op_kw_names
     ; ecx = arg (index into co_consts)
-    mov rax, [rel eval_co_consts]
+    mov rax, [gs:ThreadState.eval_co_consts]
     mov rax, [rax + rcx * 8]   ; payload (tuple ptr for kw_names)
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
     DISPATCH
 END_FUNC op_kw_names
 

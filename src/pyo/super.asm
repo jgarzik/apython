@@ -42,7 +42,6 @@ extern obj_incref
 extern obj_decref
 extern set_exception
 extern str_from_cstr_heap
-extern eval_saved_r12
 extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern none_singleton
@@ -451,8 +450,17 @@ DEF_FUNC super_lookup, SL_FRAME
 
 ;; --- a property, run --------------------------------------------------------
 .sl_property:
-    mov rdi, rax
+    ; With no instance -- super(B) unbound, or super(B, B) whose __self__ IS
+    ; the class -- CPython calls __get__(None, type), and a property answers
+    ; that with itself.  Lib/ssl.py depends on it:
+    ; `super(SSLContext, SSLContext).options.__set__(self, value)` reaches
+    ; the base class's property to run its setter.
     mov rsi, [rbp - SL_OBJ]
+    test rsi, rsi
+    jz .sl_plain
+    cmp rsi, [rbp - SL_OBJTYPE]
+    je .sl_plain
+    mov rdi, rax
     call property_descr_get     ; -> (rax, rdx), owned
     mov [rbp - SL_BIND], rax
     mov [rbp - SL_TYPE], rdx    ; SL_TYPE is spent; reuse it for the tag
@@ -493,7 +501,7 @@ SFC_FRAME   equ 32              ; 16 used + 16 pad = 32, 16-aligned
 DEF_FUNC_LOCAL super_frame_class, SFC_FRAME
     push rbx
     push r12
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .sfc_no_args
     mov [rbp - SFC_FRAME_P], rax

@@ -26,12 +26,10 @@ extern type_lookup_cached
 extern dunder_name_obj
 extern ap_strcmp
 extern type_repr
-extern attr_error_pending
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern kw_names_pending
 extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
@@ -40,7 +38,6 @@ extern dunder_call_3
 extern dunder_lookup
 extern dunder_call_2
 extern builtin_func_type
-extern current_exception
 extern dict_type
 extern tuple_type
 extern int_type
@@ -152,10 +149,10 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     ; was.  The reference taken above is what the global gets; anything else
     ; sitting there is released.
     mov rax, [rbp - OCF_EXC]
-    cmp [rel current_exception], rax
+    cmp [gs:ThreadState.current_exception], rax
     je .del_drop_saved
-    mov rdi, [rel current_exception]
-    mov [rel current_exception], rax    ; the saved reference moves in here
+    mov rdi, [gs:ThreadState.current_exception]
+    mov [gs:ThreadState.current_exception], rax    ; the saved reference moves in here
     test rdi, rdi
     jz .del_cleared
     call obj_decref
@@ -197,7 +194,7 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     xor eax, eax
 .del_report_have_fn:
     mov rsi, rax
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     extern traceback_print_unraisable
     call traceback_print_unraisable
     jmp .del_restore
@@ -524,7 +521,6 @@ IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 ;; list_richcompare is.  A NULL rather than a raise, so the container reprs
 ;; still get to free their buffers on the way out.
 ;; ============================================================================
-extern c_recursion_depth
 extern recursion_limit
 extern exc_RecursionError_type
 extern set_exception
@@ -1065,6 +1061,15 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     lea rdx, [rel user_type_metatype]
     cmp rcx, rdx
     je .twm_next
+    ; exc_metatype is the same stand-in for an exception base: it exists to
+    ; give a builtin exception class its own tp_call, and it has no tp_setattr
+    ; because those classes are immutable.  Electing it here made
+    ; `type("T", (Exception,), {})` a class OF exc_metatype, so every store on
+    ; it -- `T.__module__ = ...` -- was "cannot set attribute".
+    extern exc_metatype
+    lea rdx, [rel exc_metatype]
+    cmp rcx, rdx
+    je .twm_next
     mov [rbp - TWM_ITEM], rcx
     mov rdx, [rbp - TWM_WIN]
     test rdx, rdx
@@ -1117,9 +1122,16 @@ DEF_FUNC type_call
     mov rax, [rax + PyObject.ob_type]
     ; The heaptype metatype is an implementation split, not a language type:
     ; CPython has one `type`, and `type(C) is type` for an ordinary class.
+    ; exc_metatype is the same split for the builtin exception classes, and
+    ; answering it here sent types.new_class("E", (KeyError,)) -- which asks
+    ; type(base) for the metaclass -- to build E with exc_metatype.
     lea rcx, [rel user_type_metatype]
     cmp rax, rcx
+    je .type_of_is_type
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
     jne .type_of_have_type
+.type_of_is_type:
     lea rax, [rel type_type]
 .type_of_have_type:
     inc qword [rax + PyObject.ob_refcnt]
@@ -1300,7 +1312,7 @@ DEF_FUNC type_call
     push r14
     push r15
     sub rsp, 56                 ; locals + align (5 pushes + rbp = 48, +56 = 104)
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - TC_KWNAMES], rax
     mov qword [rbp - TC_NEW_TAG], TAG_PTR  ; default return tag
     mov qword [rbp - TC_PLAIN], 0
@@ -1739,7 +1751,7 @@ DEF_FUNC type_call
     ; is what the slot is for, and it keeps `L(sequence=())` a TypeError --
     ; list's constructor is still the one that refuses it.
     mov rcx, [rbp - TC_KWNAMES]
-    mov [rel kw_names_pending], rcx     ; func_call clears it again
+    mov [gs:ThreadState.kw_names_pending], rcx     ; func_call clears it again
     mov rdi, rbx                ; callable = __init__ func
     mov rsi, r15                ; args ptr
     lea rdx, [r13 + 1]          ; nargs + 1, self included
@@ -1783,7 +1795,7 @@ DEF_FUNC type_call
     ; eval_exception_unwind reloads rsp from eval_base_rsp, so there is nothing
     ; to unwind here.
     ;
-    ; And eval_saved_r13 is NOT republished: r13 is the argument count in this
+    ; And PyFrame.disp_sp is NOT republished: r13 is the argument count in this
     ; function, not the value stack, and handing the unwinder that made it
     ; zero words from an arbitrary address.  The caller published the right
     ; one before it got here, which is why the other raises in this function
@@ -2172,12 +2184,9 @@ END_FUNC user_type_dealloc
 ;; ============================================================================
 section .rodata
 
-section .data
-align 8
-;; The object object.__getattribute__ is currently resolving for, or 0.  Set
-;; around its call and consumed by the first instance_getattr that sees it.
-global instance_getattr_skip
-instance_getattr_skip: dq 0
+;; instance_getattr_skip -- the object object.__getattribute__ is currently
+;; resolving for, or 0 -- is set around its call and consumed by the first
+;; instance_getattr that sees it.  It lives in ThreadState (src/include/threadstate.inc).
 section .rodata
 id_del_ignored_msg: db "Exception ignored in __del__", 10
 id_del_ignored_len equ $ - id_del_ignored_msg

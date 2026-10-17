@@ -889,7 +889,6 @@ extern list_type
 extern tuple_type
 extern type_is_subtype
 extern dict_type
-extern current_exception
 extern dunder_call_2
 extern obj_dealloc
 extern raise_type_error_with_name
@@ -1084,13 +1083,13 @@ DEF_FUNC str_method_translate, TRN_FRAME
 .trn_sub_raised:
     extern exc_LookupError_type
     extern exc_isinstance
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     lea rsi, [rel exc_LookupError_type]
     call exc_isinstance
     test eax, eax
     jz .trn_fail                    ; not a lookup miss: let it out
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     jmp .trn_keep
 

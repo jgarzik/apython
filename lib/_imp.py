@@ -8,8 +8,8 @@ for extension modules, and source_hash for a hash-based .pyc.
 
 None of that needs to be C here.  This interpreter is single-threaded, so the
 lock is a counter; there are no frozen modules and no extension modules, so
-those answer "no" honestly rather than raising; and a builtin is imported by
-asking the interpreter for it, which is what __import__ does.
+those answer "no" honestly rather than raising; and a builtin is made by the
+interpreter's own loader, through _impcore.
 
 The reason to have it at all is that importlib will not load without it, and
 importlib is what twenty-one modules of CPython's Lib/ reach for -- usually a
@@ -17,6 +17,7 @@ few lines after some other import that appeared to be the blocker.
 """
 
 import sys
+import _impcore
 
 # The GIL is not a thing here: there is one thread, so the lock is a counter
 # that records the nesting importlib expects to see balanced.
@@ -61,14 +62,15 @@ def is_builtin(name):
 def create_builtin(spec):
     """The module object for a builtin, already initialised.
 
-    The interpreter builds these itself and keeps them in sys.modules; asking
-    it for one twice gives the same object, which is what CPython's does too.
+    Made by the interpreter's own loader, never by importlib: this is where
+    importlib's BuiltinImporter ends up, so going through `__import__` would
+    come straight back here.  Asking twice gives the same object, which is
+    what CPython's does too.
     """
     name = spec.name
     if name in sys.modules:
         return sys.modules[name]
-    __import__(name)
-    return sys.modules[name]
+    return _impcore.create_builtin(name)
 
 
 def exec_builtin(mod):
@@ -162,13 +164,13 @@ def source_hash(key, source):
 
 
 def _fix_co_filename(code, path):
-    """CPython rewrites co_filename in place for a .pyc whose source moved.
+    """Rewrite co_filename in place, through every nested code object.
 
-    Code objects are immutable here -- there is no writable co_filename --
-    so this does nothing, and the only difference is the filename a traceback
-    shows for such a file.
+    A .pyc records the path it was compiled under; when the source has moved
+    since, or was compiled under a relative name, the loader calls this so
+    that tracebacks name the file where it is.
     """
-    return None
+    _impcore.fix_co_filename(code, path)
 
 
 _MASK = (1 << 64) - 1
@@ -232,84 +234,3 @@ def _siphash13(k0, k1, data):
     for _ in range(3):
         v0, v1, v2, v3 = _sipround(v0, v1, v2, v3)
     return ((v0 ^ v1) ^ (v2 ^ v3)) & _MASK
-
-
-# ---------------------------------------------------------------------------
-# The meta-path finder.
-#
-# importlib asks sys.meta_path and nothing else: _bootstrap._find_spec walks
-# it, and an empty list is a ModuleNotFoundError with an ImportWarning about
-# the emptiness.  CPython fills it from pylifecycle.c at startup, with the
-# three finders its own bootstrap defines; nothing here runs at that point,
-# and the finders here are the interpreter's own -- assembly, reached by the
-# IMPORT_NAME opcode, not by any hook.
-#
-# So one finder stands in front of them.  It does no searching of its own:
-# __import__ is the whole search, and it is the same one an `import` statement
-# takes, which is the point -- there is one answer about where a module comes
-# from rather than two that can disagree.  The loader hands back the module
-# that import already built, and exec_module does nothing, exactly as
-# create_builtin and exec_builtin above do for a builtin.
-#
-# Installed on `import _imp`, which importlib/__init__.py does on its first
-# line, before it imports the bootstrap that will read the list.  A program
-# that never touches importlib never imports this module and pays nothing.
-# ---------------------------------------------------------------------------
-
-class _ApythonLoader:
-    """Hands back the module the interpreter's own importer already made."""
-
-    @staticmethod
-    def create_module(spec):
-        return sys.modules.get(spec.name)
-
-    @staticmethod
-    def exec_module(module):
-        """Nothing left to do: create_module returned a finished module."""
-
-    @staticmethod
-    def is_package(name):
-        return hasattr(sys.modules.get(name), "__path__")
-
-    @staticmethod
-    def get_code(name):
-        return None
-
-    @staticmethod
-    def get_source(name):
-        return None
-
-
-class _ApythonFinder:
-    """sys.meta_path's entry for the interpreter's own import machinery."""
-
-    @classmethod
-    def find_spec(cls, name, path=None, target=None):
-        module = sys.modules.get(name)
-        if module is None:
-            try:
-                __import__(name)
-            except ImportError:
-                return None
-            module = sys.modules.get(name)
-            if module is None:
-                return None
-        spec = getattr(module, "__spec__", None)
-        if spec is not None:
-            return spec
-        from importlib.machinery import ModuleSpec
-        spec = ModuleSpec(name, _ApythonLoader,
-                          origin=getattr(module, "__file__", None),
-                          is_package=hasattr(module, "__path__"))
-        if spec.submodule_search_locations is not None:
-            spec.submodule_search_locations = list(module.__path__)
-        spec.has_location = getattr(module, "__file__", None) is not None
-        return spec
-
-    @classmethod
-    def invalidate_caches(cls):
-        """No cache of its own: __import__ keeps sys.modules."""
-
-
-if _ApythonFinder not in sys.meta_path:
-    sys.meta_path.append(_ApythonFinder)

@@ -43,7 +43,6 @@ extern raise_exception
 extern raise_oserror
 extern raise_oserror_owned
 extern raise_type_error_with_name
-extern current_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OSError_type
@@ -105,7 +104,6 @@ extern sys_getrandom
 extern sys_wait4
 extern obj_as_index
 extern obj_is_true
-extern kw_names_pending
 extern ap_strcmp
 extern sys_uname
 extern sys_ftruncate
@@ -367,10 +365,10 @@ DEF_FUNC posix_stat, PST_FRAME
     ; follow_symlinks=False makes this lstat.  The keyword was accepted and
     ; dropped -- nothing here read kw_names_pending -- so os.stat followed the
     ; link either way, and os.path.islink() could not tell.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .pst_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rax + PyTupleObject.ob_size]
     mov rdx, rsi
     sub rdx, rcx

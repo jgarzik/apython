@@ -83,6 +83,7 @@ DEF_FUNC func_new
     mov qword [r13 + PyFuncObject.func_doc], 0
     ; No annotations until MAKE_FUNCTION hands some over.
     mov qword [r13 + PyFuncObject.func_annotations], 0
+    mov qword [r13 + PyFuncObject.func_module], 0
 
     mov rdi, r13
     call gc_track
@@ -112,7 +113,6 @@ END_FUNC func_new
 ;;   5. Apply positional defaults (func_defaults)
 ;;   6. Apply kw-only defaults (func_kwdefaults)
 ;; ============================================================================
-extern kw_names_pending
 extern dict_new
 extern dict_set
 extern dict_get
@@ -138,9 +138,9 @@ DEF_FUNC func_call
     mov r15d, edx           ; r15d = nargs
 
     ; Read and clear kw_names_pending
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rsp+0], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; Compute positional_count = nargs - len(kw_names) or nargs if no kw
     mov ecx, r15d
@@ -642,8 +642,14 @@ DEF_FUNC func_bind_kwargs
     jmp .kw_next
 
 .kw_unexpected:
-    ; Raise TypeError for unexpected keyword argument
-    RAISE exc_TypeError_type, "got an unexpected keyword argument"
+    ; "h() got an unexpected keyword argument 'nosuch'"; frees the frame
+    mov rax, [rsp+16]
+    mov rdx, [r14 + PyTupleObject.ob_item]
+    mov rdx, [rdx + rax*8]         ; the keyword's name
+    mov rdi, rbx
+    mov rsi, r12
+    extern raise_unexpected_keyword
+    call raise_unexpected_keyword
 
 .kw_next:
     inc qword [rsp+16]
@@ -725,6 +731,11 @@ DEF_FUNC func_dealloc
     jz .no_func_annos
     call obj_decref
 .no_func_annos:
+    mov rdi, [rbx + PyFuncObject.func_module]
+    test rdi, rdi
+    jz .no_func_module
+    DECREF_V rdi, rcx
+.no_func_module:
 
     ; Free the function object itself (GC-aware)
     mov rdi, rbx
@@ -807,6 +818,14 @@ DEF_FUNC func_setattr, SC_FRAME
     call ap_strcmp
     test eax, eax
     jz .set_doc
+
+    ; __module__ too: it was read from the globals every time, so an
+    ; assignment landed in func_dict and was never read back.
+    lea rdi, [rel fn_attr_module]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_module
 
     ; So does __annotations__, and it has to go in the field rather than the
     ; dict: func_getattr answers from the field, so an assignment that landed
@@ -987,6 +1006,23 @@ DEF_FUNC func_setattr, SC_FRAME
     ret
 .sa_type:
     RAISE exc_TypeError_type, "__annotations__ must be set to a dict object"
+
+.set_module:
+    ; Anything, including None, as CPython's func_set_module takes; a delete
+    ; stores None the way CPython's does rather than restoring the default.
+    test r13, r13
+    jnz .smod_have
+    extern none_singleton
+    lea r13, [rel none_singleton]
+.smod_have:
+    INCREF_V r13, rax
+    mov rax, [rbx + PyFuncObject.func_module]
+    mov [rbx + PyFuncObject.func_module], r13
+    test rax, rax
+    jz .sd_done
+    mov rdi, rax
+    DECREF_V rdi, rcx
+    jmp .sd_done
 
 .set_doc:
     ; __doc__ takes anything, including None, as CPython's does.
@@ -1519,7 +1555,17 @@ DEF_FUNC func_getattr
     jmp .return_ptr_attr
 
 .return_module:
-    ; The defining module's __name__, out of the function's globals.
+    ; An assigned __module__ first; else the defining module's __name__, out
+    ; of the function's globals.
+    mov rax, [rbx + PyFuncObject.func_module]
+    test rax, rax
+    jz .module_default
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+.module_default:
     mov rdi, [rbx + PyFuncObject.func_globals]
     test rdi, rdi
     jz .doc_none
@@ -1863,7 +1909,7 @@ func_type:
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext
     dq 0                    ; tp_init
-    dq 0                    ; tp_new
+    dq func_construct        ; tp_new
     dq 0                    ; tp_as_number
     dq 0                    ; tp_as_sequence
     dq 0                    ; tp_as_mapping
@@ -1922,6 +1968,197 @@ DEF_FUNC cell_new
     ret
 END_FUNC cell_new
 
+;; ============================================================================
+;; func_construct(rdi = type, rsi = args, rdx = nargs) -> the new function
+;;
+;; tp_new: types.FunctionType(code, globals, name=None, argdefs=None,
+;; closure=None) -- 3.12's five; kwdefaults arrives in 3.13.  What code that builds a function from a
+;; code object reaches for -- copying one with a new closure or new globals,
+;; cloudpickle, attrs' and dataclasses' relatives -- and it was "cannot create
+;; 'function' instances".  The closure has to match the code's free
+;; variables one for one, as CPython requires, or the first LOAD_DEREF reads
+;; past the tuple.
+;; ============================================================================
+FCN_CODE  equ 48            ; the six slots, in parameter order, lowest first
+FCN_GLOB  equ 40
+FCN_NAME  equ 32
+FCN_DEFS  equ 24
+FCN_CLOS  equ 16
+FCN_SPARE equ 8             ; the binder's sixth slot; 3.13 has kwdefaults
+FCN_ARGS  equ 56
+FCN_NPOS  equ 64
+FCN_FUNC  equ 72
+FCN_FRAME equ 80
+DEF_FUNC func_construct, FCN_FRAME
+    mov [rbp - FCN_ARGS], rsi
+    xor eax, eax
+    mov [rbp - FCN_CODE], rax
+    mov [rbp - FCN_GLOB], rax
+    mov [rbp - FCN_NAME], rax
+    mov [rbp - FCN_DEFS], rax
+    mov [rbp - FCN_CLOS], rax
+    mov [rbp - FCN_SPARE], rax
+    mov rdi, rsi
+    mov rsi, rdx
+    lea rdx, [rel fcn_kwnames]
+    lea rcx, [rbp - FCN_CODE]
+    extern math_bind_kw
+    call math_bind_kw
+    cmp rax, 5
+    ja .fcn_arity
+    mov [rbp - FCN_NPOS], rax
+    xor ecx, ecx
+.fcn_pos:
+    cmp rcx, [rbp - FCN_NPOS]
+    jae .fcn_bound
+    mov rdx, [rbp - FCN_ARGS]
+    mov rdx, [rdx + rcx * 8]
+    lea rax, [rbp - FCN_CODE]
+    mov [rax + rcx * 8], rdx
+    inc rcx
+    jmp .fcn_pos
+.fcn_bound:
+    ; code: a code object.  globals: a dict.
+    mov rax, [rbp - FCN_CODE]
+    test rax, rax
+    jz .fcn_arity
+    V_TEST_PTR rax, rcx
+    ja .fcn_bad_code
+    lea rcx, [rel code_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .fcn_bad_code
+    mov rax, [rbp - FCN_GLOB]
+    test rax, rax
+    jz .fcn_arity
+    V_TEST_PTR rax, rcx
+    ja .fcn_bad_globals
+    lea rcx, [rel dict_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .fcn_bad_globals
+    ; None is "not given" for the four optional ones.
+    lea rcx, [rel none_singleton]
+    lea rdx, [rbp - FCN_NAME]           ; name, argdefs, closure
+    lea rsi, [rbp - FCN_SPARE]
+.fcn_unnone:
+    cmp [rdx], rcx
+    jne .fcn_unnone_next
+    mov qword [rdx], 0
+.fcn_unnone_next:
+    add rdx, 8
+    cmp rdx, rsi
+    jb .fcn_unnone
+    ; name: a str.  argdefs and closure: tuples.  kwdefaults: a dict.
+    mov rax, [rbp - FCN_NAME]
+    test rax, rax
+    jz .fcn_name_ok
+    V_TEST_PTR rax, rcx
+    ja .fcn_bad_name
+    lea rcx, [rel str_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .fcn_bad_name
+.fcn_name_ok:
+    mov rax, [rbp - FCN_DEFS]
+    test rax, rax
+    jz .fcn_defs_ok
+    V_TEST_PTR rax, rcx
+    ja .fcn_bad_defs
+    lea rcx, [rel tuple_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .fcn_bad_defs
+.fcn_defs_ok:
+    mov rdi, [rbp - FCN_CODE]
+    call func_free_count
+    mov rcx, [rbp - FCN_CLOS]
+    test rcx, rcx
+    jnz .fcn_have_clos
+    test rax, rax
+    jnz .fcn_need_clos
+    jmp .fcn_clos_ok
+.fcn_have_clos:
+    V_TEST_PTR rcx, rdx
+    ja .fcn_bad_clos
+    lea rdx, [rel tuple_type]
+    cmp [rcx + PyObject.ob_type], rdx
+    jne .fcn_bad_clos
+    cmp rax, [rcx + PyTupleObject.ob_size]
+    jne .fcn_clos_len
+.fcn_clos_ok:
+
+.fcn_make:
+    mov rdi, [rbp - FCN_CODE]
+    mov rsi, [rbp - FCN_GLOB]
+    call func_new
+    mov [rbp - FCN_FUNC], rax
+%macro FCN_STORE 2              ; %1 = slot, %2 = PyFuncObject field
+    mov rax, [rbp - %1]
+    test rax, rax
+    jz %%skip
+    INCREF rax
+    mov rcx, [rbp - FCN_FUNC]
+    mov rdi, [rcx + PyFuncObject.%2]
+    mov [rcx + PyFuncObject.%2], rax
+    test rdi, rdi
+    jz %%skip
+    call obj_decref
+%%skip:
+%endmacro
+    FCN_STORE FCN_NAME, func_name
+    FCN_STORE FCN_DEFS, func_defaults
+    FCN_STORE FCN_CLOS, func_closure
+    mov rax, [rbp - FCN_FUNC]
+    leave
+    ret
+
+.fcn_arity:
+    RAISE exc_TypeError_type, "function() takes at most 5 arguments"
+.fcn_bad_code:
+    RAISE exc_TypeError_type, "function() argument 'code' must be code"
+.fcn_bad_globals:
+    RAISE exc_TypeError_type, "function() argument 'globals' must be dict"
+.fcn_bad_name:
+    RAISE exc_TypeError_type, "arg 3 (name) must be None or string"
+.fcn_bad_defs:
+    RAISE exc_TypeError_type, "arg 4 (defaults) must be None or tuple"
+.fcn_bad_clos:
+    RAISE exc_TypeError_type, "arg 5 (closure) must be tuple"
+.fcn_need_clos:
+    RAISE exc_TypeError_type, "arg 5 (closure) must be tuple"
+.fcn_clos_len:
+    RAISE exc_ValueError_type, "closure does not match the code object's free variables"
+END_FUNC func_construct
+
+section .rodata
+fcn_kw_code:     db "code", 0
+fcn_kw_globals:  db "globals", 0
+fcn_kw_name:     db "name", 0
+fcn_kw_argdefs:  db "argdefs", 0
+fcn_kw_closure:  db "closure", 0
+align 8
+fcn_kwnames: dq fcn_kw_code, fcn_kw_globals, fcn_kw_name, fcn_kw_argdefs
+             dq fcn_kw_closure, 0
+section .text
+
+;; ============================================================================
+;; cell_construct(rdi = type, rsi = args, rdx = nargs) -> the new cell
+;;
+;; tp_new: types.CellType() is an empty cell and types.CellType(x) holds x,
+;; which is how code builds a closure by hand for types.FunctionType.
+;; ============================================================================
+DEF_FUNC cell_construct
+    xor edi, edi
+    test rdx, rdx
+    jz .cc_make
+    cmp rdx, 1
+    jne .cc_arity
+    mov rdi, [rsi]
+.cc_make:
+    call cell_new
+    leave
+    ret
+.cc_arity:
+    RAISE exc_TypeError_type, "cell expected at most 1 argument"
+END_FUNC cell_construct
+
 
 
 ;; ============================================================================
@@ -1960,6 +2197,83 @@ cell_name_str: db "cell", 0
 cell_repr_str: db "<cell>", 0
 
 align 8
+section .text
+
+;; ============================================================================
+;; cell_getattr(rdi = a cell, rsi = the name) -> rax = Value, owned, or 0
+;;
+;; `cell_contents`, the one attribute a cell has beyond object's: the value
+;; the closure sees.  attrs and jsonschema read it at import time, and attrs
+;; writes it too -- that is how it points a method's __class__ cell at the
+;; class it rebuilt.  An empty cell is a ValueError, as in CPython.  Any other
+;; name answers 0 and the generic lookup takes over.
+;; ============================================================================
+DEF_FUNC cell_getattr
+    push rdi
+    sub rsp, 8
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel cell_contents_cstr]
+    call ap_strcmp
+    add rsp, 8
+    pop rdi
+    test eax, eax
+    jnz .cga_other
+    mov rax, [rdi + PyCellObject.ob_ref]
+    test rax, rax
+    jz .cga_empty
+    INCREF_V rax, rcx
+    leave
+    ret
+.cga_empty:
+    RAISE exc_ValueError_type, "Cell is empty"
+.cga_other:
+    xor eax, eax
+    leave
+    ret
+END_FUNC cell_getattr
+
+;; ============================================================================
+;; cell_setattr(rdi = a cell, rsi = the name, rdx = the Value, 0 to delete)
+;;   -> nothing
+;;
+;; `cell_contents` takes any value, and a delete empties the cell.  Anything
+;; else is CPython's AttributeError for an object with no such attribute.
+;; ============================================================================
+CSA_CELL  equ 8
+CSA_NAME  equ 16
+CSA_VAL   equ 24
+CSA_FRAME equ 32
+DEF_FUNC cell_setattr, CSA_FRAME
+    mov [rbp - CSA_CELL], rdi
+    mov [rbp - CSA_NAME], rsi
+    mov [rbp - CSA_VAL], rdx
+    lea rdi, [rsi + PyStrObject.data]
+    lea rsi, [rel cell_contents_cstr]
+    call ap_strcmp
+    test eax, eax
+    jnz .csa_other
+    ; Store first, release second: old and new may be the same object.
+    mov rax, [rbp - CSA_VAL]
+    INCREF_V rax, rcx
+    mov rcx, [rbp - CSA_CELL]
+    mov rdi, [rcx + PyCellObject.ob_ref]
+    mov [rcx + PyCellObject.ob_ref], rax
+    XDECREF_V rdi, rcx
+    leave
+    ret
+.csa_other:
+    mov rdi, [rbp - CSA_CELL]
+    mov rsi, [rbp - CSA_NAME]
+    mov edx, 1
+    extern raise_no_attribute
+    call raise_no_attribute
+END_FUNC cell_setattr
+
+section .rodata
+cell_contents_cstr: db "cell_contents", 0
+section .data
+
+align 8
 global cell_type
 cell_type:
     dq 1                      ; ob_refcnt (immortal)
@@ -1971,13 +2285,13 @@ cell_type:
     dq cell_repr              ; tp_str
     dq 0                      ; tp_hash
     dq 0                      ; tp_call
-    dq 0                      ; tp_getattr
-    dq 0                      ; tp_setattr
+    dq cell_getattr           ; tp_getattr
+    dq cell_setattr           ; tp_setattr
     dq 0                      ; tp_richcompare
     dq 0                      ; tp_iter
     dq 0                      ; tp_iternext
     dq 0                      ; tp_init
-    dq 0                      ; tp_new
+    dq cell_construct         ; tp_new
     dq 0                      ; tp_as_number
     dq 0                      ; tp_as_sequence
     dq 0                      ; tp_as_mapping
@@ -2027,6 +2341,8 @@ DEF_FUNC func_traverse, 8        ; rsp 16-aligned at the call the macros below e
     VISIT_V rax, rcx
     mov rdi, [rbx + PyFuncObject.func_annotations]
     VISIT_PTR rdi
+    mov rax, [rbx + PyFuncObject.func_module]
+    VISIT_V rax, rcx
 
     pop rbx
     leave
@@ -2080,6 +2396,12 @@ DEF_FUNC func_clear, 8            ; 1 pushes, so rsp is 16-aligned
     jz .no_fannos
     call obj_decref
 .no_fannos:
+    mov rdi, [rbx + PyFuncObject.func_module]
+    mov qword [rbx + PyFuncObject.func_module], 0
+    test rdi, rdi
+    jz .no_fmodule
+    DECREF_V rdi, rcx
+.no_fmodule:
 
     pop rbx
     leave

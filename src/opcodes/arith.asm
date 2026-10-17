@@ -33,8 +33,6 @@ extern float_number_methods
 extern raise_exception
 extern exc_TypeError_type
 extern obj_decref
-extern eval_saved_r13
-extern eval_saved_rbx
 extern none_singleton
 extern obj_dealloc
 extern opcode_table
@@ -100,7 +98,7 @@ CO_SIZE  equ 48
 ; V_UNPACK left rax and edx both zero.  edx is left alone -- the decline paths
 ; read it.
 %macro CMP_DECLINED_OR_RAISED 2
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz %2
     cmp rax, [rsp + %1 + CO_EXC]
@@ -118,6 +116,11 @@ CO_SIZE  equ 48
 ; returns NotImplemented printed NotImplemented rather than calling C.__radd__.
 ; (rax, edx) hold the returned Value; r9 holds the op code and does not
 ; survive obj_decref.
+%macro DUNDER_NULL_RAISED 0
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .binop_subclass_raised
+%endmacro
+
 %macro BINOP_DECLINED 1         ; %1 = where to go when it declined
     extern notimpl_singleton
     lea rcx, [rel notimpl_singleton]
@@ -262,7 +265,6 @@ BSF_RNAME equ 56
 BSF_LMETH equ 64
 BSF_EXC   equ 72
 BSF_FRAME equ 80            ; + 0 pushes = 80
-extern current_exception
 extern eval_exception_unwind
 DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov [rbp - BSF_LEFT], rdi
@@ -1168,9 +1170,19 @@ DEF_FUNC_BARE op_binary_op
     ; Reload type's tp_as_number
     cmp qword [rsp + BO_LTAG], TAG_SMALLINT
     je .binop_fallback_int
+    ; A float immediate whose partner float cannot coerce: float's own slot
+    ; still gets to decline, and that is what hands the pair to the right
+    ; type.  Without this arm `x = 1.5; x += 2j` went straight to the dunder
+    ; arm, which asks nothing of a static type, and was a TypeError while
+    ; `1.5 + 2j` was not.
+    cmp qword [rsp + BO_LTAG], TAG_FLOAT
+    je .binop_fallback_float_type
     test qword [rsp + BO_LTAG], TAG_RC_BIT
     jz .binop_try_dunder
     mov rax, [rdi + PyObject.ob_type]
+    jmp .binop_fallback_have_type
+.binop_fallback_float_type:
+    lea rax, [rel float_type]
     jmp .binop_fallback_have_type
 .binop_fallback_float:
     lea rax, [rel float_number_methods]
@@ -1542,7 +1554,7 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
-    jz .binop_left_dunder
+    jz .binop_idunder_null
     BINOP_DECLINED .binop_left_dunder
     jmp .binop_have_result
 
@@ -1567,7 +1579,7 @@ DEF_FUNC_BARE op_binary_op
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
-    jz .binop_try_right_dunder
+    jz .binop_ldunder_null
     BINOP_DECLINED .binop_try_right_dunder
     jmp .binop_have_result
 
@@ -1601,10 +1613,26 @@ DEF_FUNC_BARE op_binary_op
     call dunder_call_2
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jz .binop_no_method
+    jz .binop_rdunder_null
     BINOP_DECLINED .binop_no_method
     jmp .binop_have_result
 
+; A dunder that RAISED answers NULL just as an absent one does, and the
+; protocol used to carry on to the next candidate and finally report
+; "unsupported operand type(s)" over the real exception: `t += x` with t an
+; int subclass whose __add__ raised OverflowError said TypeError, while
+; `t + x`, which goes through the slot wrapper, did not.  Nothing is in
+; flight when an opcode starts (the handler that caught the last one cleared
+; it), so a non-zero current_exception here is this call's.
+.binop_idunder_null:
+    DUNDER_NULL_RAISED
+    jmp .binop_left_dunder
+.binop_ldunder_null:
+    DUNDER_NULL_RAISED
+    jmp .binop_try_right_dunder
+.binop_rdunder_null:
+    DUNDER_NULL_RAISED
+    jmp .binop_no_method
 .binop_no_method:
     ; Whatever the last call left in r9.
     mov r9d, [rsp + BO_OP]
@@ -1968,7 +1996,7 @@ DEF_FUNC_BARE op_compare_op
     push rdi                   ; save left
     push r8                    ; save right tag
     push rsi                   ; save right
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov [rsp + CO_EXC], rax
 
     ; Float coercion: use float_compare when one operand is a float AND the
@@ -2045,7 +2073,7 @@ DEF_FUNC_BARE op_compare_op
     jmp .cmp_do_call_result
 .cmp_subclass_raised:
 .cmp_raised:
-    ; No DECREFs here: the unwinder cleans up from eval_saved_r13, which is
+    ; No DECREFs here: the unwinder cleans up from PyFrame.disp_sp, which is
     ; where the stack was BEFORE these two came off it, so it releases them.
     add rsp, CO_SIZE
     jmp eval_exception_unwind

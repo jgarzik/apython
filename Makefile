@@ -54,7 +54,7 @@ CC = cc
 # src/pyo/complex.asm calls for the general complex power and for abs().
 # float.asm avoids libm by doing its own x87 sequence; complex does not, since
 # the polar form needs all seven and hand-rolling them would be a worse bargain.
-LDFLAGS = -no-pie -lc -lm -lgmp -lz -lcrypto -lexpat -lbz2 -llzma
+LDFLAGS = -no-pie -lc -lm -lgmp -lz -lssl -lcrypto -lexpat -lbz2 -llzma -lffi -ldl
 TARGET = apython
 
 # Source files.  Everything the interpreter is built from lives under src/:
@@ -91,9 +91,17 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
+.PHONY: all install clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
 
-all: $(TARGET) lib-pyc
+all: $(TARGET) lib-pyc build/_ctypes_test.so
+
+# The C library CPython's ctypes tests call into: Modules/_ctypes/_ctypes_test.c
+# verbatim, over a stand-in <Python.h> (tests/ctypes/Python.h), because the
+# tests reach it through CDLL(_ctypes_test.__file__) and never as an extension.
+# lib/_ctypes_test.py points __file__ here.
+build/_ctypes_test.so: tests/ctypes/_ctypes_test.c tests/ctypes/_ctypes_test.h tests/ctypes/Python.h
+	@mkdir -p build
+	$(CC) -shared -fPIC -O1 -w -I tests/ctypes -o $@ tests/ctypes/_ctypes_test.c -lm
 
 # Regenerate the machine-written assembly.  Deliberately phony and deliberately
 # not a prerequisite of anything: the outputs are committed so that building
@@ -122,12 +130,39 @@ regen:
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-# apython reads .pyc and never .py, so the modules it ships in lib/ are not
-# importable until they are byte-compiled.  This is part of building the
-# interpreter, not of testing it: `make check` used to run before anything
-# compiled them, so any test that imported one failed on a fresh checkout.
-lib-pyc:
-	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
+# The library is byte-compiled by apython itself, under its own apython-312
+# cache tag: importlib reads only sys.implementation.cache_tag, so a
+# CPython-compiled .pyc would never be used, and a CPython sharing these
+# directories never runs bytecode apython compiled.  Absolute paths, so the
+# co_filename every traceback prints is where the file is even for the
+# modules loaded before importlib is there to fix it up.  The whole of
+# stdlib/ takes well under a second.
+lib-pyc: $(TARGET)
+	@./$(TARGET) -m compileall -q $(CURDIR)/stdlib $(CURDIR)/lib >/dev/null 2>&1 || true
+
+# An installation in CPython's own layout, so that site.py, sysconfig, venv
+# and pip -- each of which builds paths from these names -- find everything
+# where they look:
+#
+#   $(PREFIX)/bin/apython
+#   $(PREFIX)/lib/python3.12/              stdlib/, CPython's Lib/
+#   $(PREFIX)/lib/python3.12/lib-dynload/  lib/, the stand-ins for C modules
+#   $(PREFIX)/lib/python3.12/site-packages/
+#
+# The default prefix is a directory of its own rather than /usr/local, where
+# lib/python3.12 may already be a real CPython's.  src/pathconfig.asm is the
+# other half of this: it recognises the layout from the binary's location.
+PREFIX ?= /usr/local/apython
+INSTLIB = $(DESTDIR)$(PREFIX)/lib/python3.12
+
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin $(INSTLIB)/lib-dynload $(INSTLIB)/site-packages
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/apython
+	cd stdlib && find . -name __pycache__ -prune -o -type f -print \
+	    | cpio -pdm --quiet $(INSTLIB)
+	cd lib && find . -path ./test -prune -o -name __pycache__ -prune -o -type f -print \
+	    | cpio -pdm --quiet $(INSTLIB)/lib-dynload
+	@$(DESTDIR)$(PREFIX)/bin/apython -m compileall -q $(INSTLIB) >/dev/null 2>&1 || true
 
 # One rule for every source directory: the stem carries the subdirectory, so
 # src/pyo/dict.asm and src/methods/dict.asm land in different objects.
@@ -139,7 +174,7 @@ build/%.o: src/%.asm $(HEADERS) $(FLAGSTAMP)
 # sources, not build products -- see `regen` below.  clean must never touch them.
 clean:
 	rm -rf build $(TARGET)
-	find lib tests compiler -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+	find lib stdlib tests compiler -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc

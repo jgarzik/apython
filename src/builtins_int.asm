@@ -43,13 +43,11 @@ extern str_from_cstr_heap
 extern raise_exception
 extern raise_type_error_with_name
 extern exc_new
-extern current_exception
 extern eval_exception_unwind
 extern type_name_message
 extern dunder_lookup
 extern dunder_bind
 extern deprecation_warn
-extern kw_names_pending
 extern __gmpz_fits_slong_p
 extern strlen
 
@@ -856,7 +854,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     pop rax                                ; exc obj
 
     ; Store exception and jump to unwind
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     jmp eval_exception_unwind
 
 .int_trunc_nonint_error:
@@ -1268,13 +1266,13 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call obj_decref
 
     ; DECREF previous exception if any
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .int_ile_no_prev
     mov rdi, rax
     call obj_decref
 .int_ile_no_prev:
-    mov [rel current_exception], rbx
+    mov [gs:ThreadState.current_exception], rbx
     add rsp, 72
     jmp eval_exception_unwind
 

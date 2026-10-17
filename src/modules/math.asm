@@ -42,6 +42,9 @@ extern obj_decref
 extern obj_incref
 extern obj_dealloc
 extern raise_exception
+extern raise_type_error_counted
+extern value_type
+extern type_name_message
 extern raise_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -93,12 +96,12 @@ extern remainder
 extern copysign
 extern pow
 extern hypot
+extern fma
 extern floor
 extern ceil
 extern trunc
 extern ldexp
 extern __gmpz_mul
-extern kw_names_pending
 extern ap_strcmp
 extern get_iterator_opt
 extern obj_binary_op
@@ -128,15 +131,17 @@ extern __gmpz_fac_ui
 extern __gmpz_bin_ui
 extern __gmpz_fits_ulong_p
 extern __gmpz_fits_slong_p
+extern __gmpz_get_si
+extern val_from_i64
+extern bool_type
+extern set_exception
 extern __gmpz_get_d_2exp
 extern __gmpz_get_ui
 extern get_iterator
 extern call_iternext
 extern ap_realloc
 extern ap_free
-extern current_exception
 extern eval_exception_unwind
-extern eval_saved_r13
 extern frexp
 
 section .text
@@ -1427,6 +1432,10 @@ END_FUNC math_ulp
 ;; math's three keyword-taking functions -- prod(start=), isclose(rel_tol=,
 ;; abs_tol=) -- all bind the same way, and nothing else in this module took a
 ;; keyword at all.  An unknown one raises.
+;;
+;; math_bind_kw_named is the same with r8 = the function's name as a C string,
+;; so an unknown keyword is worded as CPython words it:
+;; "'x' is an invalid keyword argument for print()".
 ;; ============================================================================
 MBK_ARGS  equ 8
 MBK_NPOS  equ 16
@@ -1434,17 +1443,28 @@ MBK_NAMES equ 24
 MBK_OUT   equ 32
 MBK_KW    equ 40
 MBK_I     equ 48
-MBK_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+MBK_FN    equ 56            ; the function's name, or 0 for the bare wording
+MBK_BUF   equ 320           ; the message: four appends of at most 80 bytes
+MBK_FRAME equ 320           ; + 0 pushes = 320, 16-aligned
 global math_bind_kw
-DEF_FUNC math_bind_kw, MBK_FRAME
+DEF_FUNC_BARE math_bind_kw
+    xor r8d, r8d
+    jmp math_bind_kw_named
+END_FUNC math_bind_kw
+
+;; math_bind_kw_named(rdi, rsi, rdx, rcx as math_bind_kw; r8 = the name)
+;;   -> rax = the positional count
+global math_bind_kw_named
+DEF_FUNC math_bind_kw_named, MBK_FRAME
+    mov [rbp - MBK_FN], r8
     mov [rbp - MBK_ARGS], rdi
     mov [rbp - MBK_NPOS], rsi
     mov [rbp - MBK_NAMES], rdx
     mov [rbp - MBK_OUT], rcx
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .mbk_done
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov [rbp - MBK_KW], rax
     mov rcx, [rax + PyTupleObject.ob_size]
     sub [rbp - MBK_NPOS], rcx
@@ -1488,12 +1508,36 @@ DEF_FUNC math_bind_kw, MBK_FRAME
     inc qword [rbp - MBK_I]
     jmp .mbk_loop
 .mbk_unknown:
+    cmp qword [rbp - MBK_FN], 0
+    jne .mbk_named
     RAISE exc_TypeError_type, "invalid keyword argument"
+.mbk_named:
+    extern rbt_append_cstr
+    mov [rbp - MBK_KW], r8          ; the offending name, for the message
+    lea rdi, [rbp - MBK_BUF]
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MBK_KW]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is an invalid keyword argument for "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MBK_FN]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "()"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - MBK_BUF]
+    call raise_exception
 .mbk_done:
     mov rax, [rbp - MBK_NPOS]
     leave
     ret
-END_FUNC math_bind_kw
+END_FUNC math_bind_kw_named
 
 ;; ============================================================================
 ;; math.prod(iterable, *, start=1)
@@ -1519,20 +1563,14 @@ DEF_FUNC math_prod, MPR_FRAME
     call math_bind_kw
     mov r12, rax                    ; the positional count
     cmp r12, 1
-    jl .mpr_args
-    cmp r12, 2
-    jg .mpr_args
+    jne .mpr_args
 
-    ; start defaults to the int 1, and a positional second argument is
-    ; CPython's own spelling of the same thing.
+    ; start defaults to the int 1.  It is keyword-only -- prod(iterable, /,
+    ; *, start=1) -- so a second positional argument is a TypeError, which
+    ; CPython's own test_prod checks.
     mov rax, [rbp - MPR_KWOUT]
     test rax, rax
     jnz .mpr_have_start
-    cmp r12, 2
-    jne .mpr_default_start
-    mov rax, [rbx + 8]
-    jmp .mpr_have_start
-.mpr_default_start:
     mov rax, V_INT(1)
 .mpr_have_start:
     mov [rbp - MPR_ACC], rax
@@ -1596,7 +1634,17 @@ DEF_FUNC math_prod, MPR_FRAME
     CSTRING rdi, `'\x01' object is not iterable`
     call raise_type_error_with_name
 .mpr_args:
-    RAISE exc_TypeError_type, "prod() takes exactly one argument"
+    ; CPython's two wordings: the positional rule up to two, then the total.
+    mov rsi, r12
+    cmp r12, 2
+    jg .mpr_too_many
+    CSTRING rdi, "prod() takes exactly 1 positional argument ("
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
+.mpr_too_many:
+    CSTRING rdi, "prod() takes at most 2 arguments ("
+    CSTRING rdx, " given)"
+    call raise_type_error_counted
 END_FUNC math_prod
 
 ;; ============================================================================
@@ -2327,13 +2375,10 @@ DEF_FUNC math_fsum, FSM_FRAME
     mov rdi, rax
     call math_to_double
     pop rdi
-    push rax                    ; the ok flag
-    movsd [rbp - FSM_X], xmm0
-    mov rsi, rdi
-    DECREF_V rsi, rcx
-    pop rax
     test eax, eax
-    jz .fsm_type
+    jz .fsm_type_item           ; the item is still ours, for the message
+    movsd [rbp - FSM_X], xmm0
+    DECREF_V rdi, rcx
 
     ; A non-finite term is carried separately: CPython adds them up and lets
     ; the ordinary float rules decide inf - inf.
@@ -2422,7 +2467,7 @@ DEF_FUNC math_fsum, FSM_FRAME
 
 .fsm_end:
     ; An exception from the iterator is not the end of it.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .fsm_drop_propagate
 
     ; Sum the partials from the smallest up, which is what makes the last
@@ -2454,19 +2499,31 @@ DEF_FUNC math_fsum, FSM_FRAME
     mov rdi, [rbp - FSM_ITER]
     call obj_decref
     RAISE exc_OverflowError_type, "intermediate overflow in fsum"
-.fsm_type:
+.fsm_type_item:
+    ; CPython names the type, and the item is the last thing that knows it:
+    ; the message is composed before the item is released.
+    mov [rbp - FSM_X], rdi
+    call value_type
+    mov rsi, rax
+    CSTRING rdi, `must be real number, not \x01`
+    call type_name_message
+    mov [rbp - FSM_HI], rax
+    mov rdi, [rbp - FSM_X]
+    DECREF_V rdi, rcx
     mov rdi, [rbp - FSM_P]
     call ap_free
     mov rdi, [rbp - FSM_ITER]
     call obj_decref
-    RAISE exc_TypeError_type, "must be real number"
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, [rbp - FSM_HI]
+    call raise_exception
 .fsm_drop_propagate:
     mov rdi, [rbp - FSM_P]
     call ap_free
     mov rdi, [rbp - FSM_ITER]
     call obj_decref
 .fsm_propagate:
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 .fsm_args:
     lea rdi, [rel mm_n_fsum]
@@ -2616,209 +2673,431 @@ END_FUNC math_hypot
 ;; statistics imports it by name, so its absence would fail that import
 ;; outright.
 ;;
-;; Two accumulators run together, as CPython's does.  While every pair has
-;; been a pair of INTS the answer is exact and an int, kept in an mpz; the
-;; first pair that is not switches to the float sum for good.  CPython uses
-;; double-double arithmetic on the float side where this uses a Neumaier
-;; compensated sum -- very accurate, and not exact.  tests/test_math.py names
-;; that rather than hiding it.
+;; CPython's math_sumprod_impl, path for path, because which path a pair takes
+;; is observable.  The running total starts as the int 0 and is only ever
+;; grown by the ordinary binary `+`.  Beside it run two fast paths, each of
+;; which, once it declines a pair, is switched off for good and its partial sum
+;; folded into the total:
+;;
+;;   int    -- both exact ints fitting an int64, summed in an int64 for as long
+;;             as neither the product nor the sum overflows;
+;;   float  -- an exact float with an exact float, int or bool, summed in
+;;             triple-length arithmetic (CPython's tl_fma over an fma()) for as
+;;             long as the running sum stays finite.
+;;
+;; Everything else is `total = total + p * q`, so a Fraction stays a Fraction,
+;; a Decimal a Decimal and a complex a complex -- it used to be converted to a
+;; double, so sumprod of two Fractions answered a float.  And because the fast
+;; paths never come back, the float sum is the same double CPython's is:
+;; [0.1, 2, 3] . [0.1, 4, 5] is 0.010000000000000002 + 8 + 15, added as
+;; Python objects, not one compensated sum.
 ;; ============================================================================
-MSP_IP    equ 8
-MSP_IQ    equ 16
-MSP_SUM   equ 24
-MSP_C     equ 32             ; the Neumaier compensation
-MSP_A     equ 40
-MSP_B     equ 48
-MSP_ACC   equ 56             ; the exact mpz accumulator, while it is live
-MSP_TMP   equ 64
-MSP_FRAME equ 80            ; + 0 pushes = 80, 16-aligned
+MSF_INT_EN  equ 1
+MSF_INT_USE equ 2
+MSF_FLT_EN  equ 4
+MSF_FLT_USE equ 8
+
+; dl_sum(a, b): the error-free transformation of a sum (Ogita, Rump, Oishi
+; Algorithm 3.1).  %1 = a, %2 = b (both kept), %3 = sum out, %4 = error out,
+; %5 and %6 scratch.  Every operand is a distinct xmm register.
+%macro MSP_DL_SUM 6
+    movapd %3, %1
+    addsd %3, %2                ; x = a + b
+    movapd %5, %3
+    subsd %5, %1                ; z = x - a
+    movapd %6, %3
+    subsd %6, %5                ; x - z
+    movapd %4, %1
+    subsd %4, %6                ; a - (x - z)
+    movapd %6, %2
+    subsd %6, %5                ; b - z
+    addsd %4, %6                ; y = (a - (x - z)) + (b - z)
+%endmacro
+
+;; msp_exact_long(rdi = a Value) -> eax = 1 and rdx = its int64 when it is an
+;; EXACT int (not a bool, not a subclass) that fits; eax = 0 otherwise.
+;; CPython's PyLong_CheckExact plus PyLong_AsLongAndOverflow.
+MEL_INT   equ 8
+MEL_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL msp_exact_long, MEL_FRAME
+    V_IS_INT rdi, rax
+    jb .mel_ptr
+    mov rdx, rdi
+    V_TO_I64 rdx
+    mov eax, 1
+    leave
+    ret
+.mel_ptr:
+    V_TEST_PTR rdi, rax
+    ja .mel_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    jne .mel_no
+    cmp qword [rdi + PyIntObject.compact], 0
+    je .mel_mpz
+    mov rdx, [rdi + PyIntObject.ival]
+    mov eax, 1
+    leave
+    ret
+.mel_mpz:
+    mov [rbp - MEL_INT], rdi
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_fits_slong_p wrt ..plt
+    test eax, eax
+    jz .mel_no
+    mov rdi, [rbp - MEL_INT]
+    lea rdi, [rdi + PyIntObject.mpz]
+    call __gmpz_get_si wrt ..plt
+    mov rdx, rax
+    mov eax, 1
+    leave
+    ret
+.mel_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC msp_exact_long
+
+;; msp_flt_kind(rdi = a Value) -> eax = 2 for an exact float, 1 for an exact
+;; int or a bool whose double is finite, 0 for anything else; xmm0 = the
+;; double for the first two.  An int too large for a double is 0, which is
+;; where CPython's PyLong_AsDouble raised and sumprod cleared it.
+MFK_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL msp_flt_kind, MFK_FRAME
+    V_IS_FLOAT rdi, rax
+    jae .mfk_not_float
+    V_TO_F64 rdi
+    movq xmm0, rdi
+    mov eax, 2
+    leave
+    ret
+.mfk_not_float:
+    V_IS_INT rdi, rax
+    jb .mfk_ptr
+    V_TO_I64 rdi
+    cvtsi2sd xmm0, rdi
+    mov eax, 1
+    leave
+    ret
+.mfk_ptr:
+    V_TEST_PTR rdi, rax
+    ja .mfk_no
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel int_type]
+    cmp rax, rcx
+    je .mfk_heap_int
+    lea rcx, [rel bool_type]
+    cmp rax, rcx
+    jne .mfk_no
+.mfk_heap_int:
+    mov esi, TAG_PTR
+    call float_to_f64           ; rounds to nearest, as PyLong_AsDouble does
+    movapd xmm1, xmm0
+    andpd xmm1, [rel mm_absmask]
+    ucomisd xmm1, [rel mm_inf]
+    jae .mfk_no                 ; too large for a double
+    mov eax, 1
+    leave
+    ret
+.mfk_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC msp_flt_kind
+
+;; msp_add_into(rdi = &total, rsi = term, owned) -> eax = 1, or 0 with an
+;; exception pending.  *total = *total + term through the ordinary binary
+;; operator; the term is released either way, the old total only on success.
+MAI_SLOT  equ 8
+MAI_TERM  equ 16
+MAI_NEW   equ 24
+MAI_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+DEF_FUNC_LOCAL msp_add_into, MAI_FRAME
+    mov [rbp - MAI_SLOT], rdi
+    mov [rbp - MAI_TERM], rsi
+    mov rdi, [rdi]
+    mov edx, NB_ADD
+    call obj_binary_op
+    mov [rbp - MAI_NEW], rax
+    mov rdi, [rbp - MAI_TERM]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - MAI_NEW]
+    test rax, rax
+    jz .mai_fail
+    mov rcx, [rbp - MAI_SLOT]
+    mov rdi, [rcx]
+    mov [rcx], rax
+    DECREF_V rdi, rcx
+    mov eax, 1
+    leave
+    ret
+.mai_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC msp_add_into
+
+;; math_sumprod(rdi = args, rsi = nargs) -> rax = the total Value, or 0 with
+;; an exception pending.  The paths are described above msp_exact_long.
+MSP_ARGS  equ 8
+MSP_IP    equ 16
+MSP_IQ    equ 24
+MSP_A     equ 32
+MSP_B     equ 40
+MSP_TOTAL equ 48            ; the Python-level total, a Value we own
+MSP_ITOT  equ 56            ; the int path's int64
+MSP_HI    equ 64            ; the float path's triple-length sum
+MSP_LO    equ 72
+MSP_TINY  equ 80
+MSP_FLAGS equ 88            ; MSF_*
+MSP_STOP  equ 96            ; bit 0: p is exhausted, bit 1: q is
+MSP_EXC   equ 104
+MSP_X     equ 112
+MSP_Y     equ 120
+MSP_Z     equ 128
+MSP_KIND  equ 136
+MSP_FRAME equ 144           ; + 0 pushes = 144, 16-aligned
 DEF_FUNC math_sumprod, MSP_FRAME
     cmp rsi, 2
     jne .msp_args
-    push rdi
-    mov rdi, [rdi]
-    V_UNPACK rdi, rsi
-    call get_iterator
-    test rax, rax
-    jz .msp_propagate_pop
+    mov [rbp - MSP_ARGS], rdi
+    xor eax, eax
     mov [rbp - MSP_IP], rax
-    mov rdi, [rsp]
-    mov rdi, [rdi + 8]
-    V_UNPACK rdi, rsi
-    call get_iterator
+    mov [rbp - MSP_IQ], rax
+    mov [rbp - MSP_A], rax
+    mov [rbp - MSP_B], rax
+    mov [rbp - MSP_ITOT], rax
+    mov [rbp - MSP_HI], rax     ; +0.0, bit for bit
+    mov [rbp - MSP_LO], rax
+    mov [rbp - MSP_TINY], rax
+    mov qword [rbp - MSP_FLAGS], MSF_INT_EN | MSF_FLT_EN
+    mov rax, V_INT(0)
+    mov [rbp - MSP_TOTAL], rax
+    DUNDER_EXC_SAVE [rbp - MSP_EXC]
+
+    mov rdi, [rbp - MSP_ARGS]
+    mov rdi, [rdi]
+    V_TEST_PTR rdi, rax
+    ja .msp_p_not_iter
+    mov esi, TAG_PTR
+    call get_iterator_opt
     test rax, rax
-    jz .msp_propagate_pop
-    add rsp, 8
+    jz .msp_p_not_iter
+    mov [rbp - MSP_IP], rax
+    mov rdi, [rbp - MSP_ARGS]
+    mov rdi, [rdi + 8]
+    V_TEST_PTR rdi, rax
+    ja .msp_q_not_iter
+    mov esi, TAG_PTR
+    call get_iterator_opt
+    test rax, rax
+    jz .msp_q_not_iter
     mov [rbp - MSP_IQ], rax
 
-    pxor xmm0, xmm0
-    movsd [rbp - MSP_SUM], xmm0
-    movsd [rbp - MSP_C], xmm0
-    call math_new_mpz
-    mov [rbp - MSP_ACC], rax    ; non-zero while the answer is still exact
-
 .msp_loop:
+    mov qword [rbp - MSP_STOP], 0
     mov rdi, [rbp - MSP_IP]
     call call_iternext
-    test rax, rax
-    jz .msp_p_end
     mov [rbp - MSP_A], rax
+    test rax, rax
+    jnz .msp_next_q
+    EXC_RAISED_SINCE [rbp - MSP_EXC], rcx, .msp_fail
+    or qword [rbp - MSP_STOP], 1
+.msp_next_q:
     mov rdi, [rbp - MSP_IQ]
     call call_iternext
-    test rax, rax
-    jz .msp_short
     mov [rbp - MSP_B], rax
-
-    ; The exact road, while both sides have been integers all along.
-    cmp qword [rbp - MSP_ACC], 0
-    je .msp_floats
-    mov rdi, [rbp - MSP_A]
-    call math_index
     test rax, rax
-    jz .msp_inexact
-    mov [rbp - MSP_TMP], rax
-    push rcx
-    mov rdi, [rbp - MSP_B]
-    call math_index
+    jnz .msp_have_pair
+    EXC_RAISED_SINCE [rbp - MSP_EXC], rcx, .msp_fail
+    or qword [rbp - MSP_STOP], 2
+.msp_have_pair:
+    mov rax, [rbp - MSP_STOP]
+    cmp rax, 1
+    je .msp_length
+    cmp rax, 2
+    je .msp_length
+
+    ; --- the int path ---
+    test qword [rbp - MSP_FLAGS], MSF_INT_EN
+    jz .msp_flt
     test rax, rax
-    jz .msp_inexact_pop
-    push rcx
-    mov rdi, [rbp - MSP_ACC]
-    add rdi, PyIntObject.mpz
-    mov rsi, [rbp - MSP_TMP]
-    add rsi, PyIntObject.mpz
-    mov rdx, rax
-    add rdx, PyIntObject.mpz
-    push rax
-    call __gmpz_addmul wrt ..plt
-    pop rdi
-    pop rsi
-    call math_drop_temp
-    pop rsi
-    mov rdi, [rbp - MSP_TMP]
-    call math_drop_temp
-
-.msp_floats:
-    ; And the float road, always: it is the answer as soon as anything is not
-    ; an integer, and it costs nothing to keep current.
+    jnz .msp_int_fin
     mov rdi, [rbp - MSP_A]
-    call math_to_double
+    call msp_exact_long
     test eax, eax
-    jz .msp_type
-    movsd [rbp - MSP_A], xmm0
+    jz .msp_int_fin
+    mov [rbp - MSP_X], rdx
     mov rdi, [rbp - MSP_B]
-    call math_to_double
+    call msp_exact_long
     test eax, eax
-    jz .msp_type
-    movsd xmm1, [rbp - MSP_A]
-    mulsd xmm0, xmm1            ; x = a * b
+    jz .msp_int_fin
+    imul rdx, [rbp - MSP_X]
+    jo .msp_int_fin
+    add rdx, [rbp - MSP_ITOT]
+    jo .msp_int_fin
+    mov [rbp - MSP_ITOT], rdx
+    or qword [rbp - MSP_FLAGS], MSF_INT_USE
+    jmp .msp_release
+.msp_int_fin:
+    ; Finished, overflowed, or not an int: the int path is over for good.
+    and qword [rbp - MSP_FLAGS], ~MSF_INT_EN
+    test qword [rbp - MSP_FLAGS], MSF_INT_USE
+    jz .msp_flt
+    and qword [rbp - MSP_FLAGS], ~MSF_INT_USE
+    mov rdi, [rbp - MSP_ITOT]
+    call val_from_i64
+    mov rsi, rax
+    lea rdi, [rbp - MSP_TOTAL]
+    call msp_add_into
+    test eax, eax
+    jz .msp_fail
 
-    ; Neumaier: whichever of the running sum and the new term is larger keeps
-    ; its bits, and the smaller one's lost bits go to the compensation.
-    movsd xmm1, [rbp - MSP_SUM]
-    movapd xmm2, xmm1
-    addsd xmm2, xmm0            ; t = sum + x
-    movapd xmm3, xmm1
-    andpd xmm3, [rel mm_absmask]
-    movapd xmm4, xmm0
-    andpd xmm4, [rel mm_absmask]
-    ucomisd xmm3, xmm4
-    jb .msp_x_bigger
-    movapd xmm5, xmm1
-    subsd xmm5, xmm2
-    addsd xmm5, xmm0            ; (sum - t) + x
-    jmp .msp_accum
-.msp_x_bigger:
-    movapd xmm5, xmm0
-    subsd xmm5, xmm2
-    addsd xmm5, xmm1            ; (x - t) + sum
-.msp_accum:
-    movsd xmm6, [rbp - MSP_C]
-    addsd xmm6, xmm5
-    movsd [rbp - MSP_C], xmm6
-    movsd [rbp - MSP_SUM], xmm2
-
+.msp_flt:
+    ; --- the float path ---
+    test qword [rbp - MSP_FLAGS], MSF_FLT_EN
+    jz .msp_generic
+    cmp qword [rbp - MSP_STOP], 0
+    jne .msp_flt_fin
     mov rdi, [rbp - MSP_A]
+    call msp_flt_kind
+    mov [rbp - MSP_KIND], rax
+    movsd [rbp - MSP_X], xmm0
     mov rdi, [rbp - MSP_B]
-    jmp .msp_release_pair
+    call msp_flt_kind
+    movsd [rbp - MSP_Y], xmm0
+    ; A float with a float, int or bool: both kinds non-zero, one of them 2.
+    mov rcx, [rbp - MSP_KIND]
+    test eax, eax
+    jz .msp_flt_fin
+    test ecx, ecx
+    jz .msp_flt_fin
+    cmp eax, 2
+    je .msp_flt_take
+    cmp ecx, 2
+    jne .msp_flt_fin
+.msp_flt_take:
+    ; tl_fma: the product exactly, as z + zz ...
+    movsd xmm0, [rbp - MSP_X]
+    mulsd xmm0, [rbp - MSP_Y]
+    movsd [rbp - MSP_Z], xmm0
+    movapd xmm2, xmm0
+    xorpd xmm2, [rel mm_signbit]
+    movsd xmm0, [rbp - MSP_X]
+    movsd xmm1, [rbp - MSP_Y]
+    call fma wrt ..plt          ; zz = fma(x, y, -z)
+    ; ... then SumKVert with K=3 into (hi, lo, tiny).
+    movapd xmm9, xmm0
+    movsd xmm8, [rbp - MSP_LO]
+    MSP_DL_SUM xmm8, xmm9, xmm12, xmm13, xmm14, xmm15     ; r1
+    movsd xmm8, [rbp - MSP_HI]
+    movsd xmm9, [rbp - MSP_Z]
+    MSP_DL_SUM xmm8, xmm9, xmm10, xmm11, xmm14, xmm15     ; sm
+    MSP_DL_SUM xmm12, xmm11, xmm8, xmm9, xmm14, xmm15     ; r2 = dl_sum(r1.hi, sm.lo)
+    movsd xmm0, [rbp - MSP_TINY]
+    addsd xmm0, xmm13
+    addsd xmm0, xmm9
+    ; Only a finite sum is kept; an infinity or a NaN goes the generic way.
+    movapd xmm1, xmm10
+    andpd xmm1, [rel mm_absmask]
+    ucomisd xmm1, [rel mm_inf]
+    jp .msp_flt_fin
+    jae .msp_flt_fin
+    movsd [rbp - MSP_HI], xmm10
+    movsd [rbp - MSP_LO], xmm8
+    movsd [rbp - MSP_TINY], xmm0
+    or qword [rbp - MSP_FLAGS], MSF_FLT_USE
+    jmp .msp_release
+.msp_flt_fin:
+    and qword [rbp - MSP_FLAGS], ~MSF_FLT_EN
+    test qword [rbp - MSP_FLAGS], MSF_FLT_USE
+    jz .msp_generic
+    and qword [rbp - MSP_FLAGS], ~MSF_FLT_USE
+    ; tl_to_d: tiny + last.lo + last.hi, last = dl_sum(lo, hi)
+    movsd xmm8, [rbp - MSP_LO]
+    movsd xmm9, [rbp - MSP_HI]
+    MSP_DL_SUM xmm8, xmm9, xmm10, xmm11, xmm14, xmm15
+    movsd xmm0, [rbp - MSP_TINY]
+    addsd xmm0, xmm11
+    addsd xmm0, xmm10
+    movq rsi, xmm0
+    V_FROM_F64 rsi, rax
+    lea rdi, [rbp - MSP_TOTAL]
+    call msp_add_into
+    test eax, eax
+    jz .msp_fail
 
-.msp_inexact_pop:
-    pop rcx
-.msp_inexact:
-    ; Something is not an integer: the exact accumulator is done with.
-    mov rdi, [rbp - MSP_ACC]
-    test rdi, rdi
-    jz .msp_floats
-    mov qword [rbp - MSP_ACC], 0
-    call int_dealloc
-    jmp .msp_floats
+.msp_generic:
+    cmp qword [rbp - MSP_STOP], 0
+    jne .msp_done
+    mov rdi, [rbp - MSP_A]
+    mov rsi, [rbp - MSP_B]
+    mov edx, NB_MULTIPLY
+    call obj_binary_op
+    test rax, rax
+    jz .msp_fail
+    mov rsi, rax
+    lea rdi, [rbp - MSP_TOTAL]
+    call msp_add_into
+    test eax, eax
+    jz .msp_fail
 
-.msp_release_pair:
+.msp_release:
+    mov rdi, [rbp - MSP_A]
+    mov qword [rbp - MSP_A], 0
+    DECREF_V rdi, rcx
     mov rdi, [rbp - MSP_B]
+    mov qword [rbp - MSP_B], 0
     DECREF_V rdi, rcx
     jmp .msp_loop
 
-.msp_p_end:
-    cmp qword [rel current_exception], 0
-    jne .msp_propagate
-    mov rdi, [rbp - MSP_IQ]
-    call call_iternext
-    test rax, rax
-    jnz .msp_long
-    cmp qword [rel current_exception], 0
-    jne .msp_propagate
-
+.msp_done:
     mov rdi, [rbp - MSP_IP]
     call obj_decref
     mov rdi, [rbp - MSP_IQ]
     call obj_decref
-
-    cmp qword [rbp - MSP_ACC], 0
-    je .msp_float_result
-    mov rdi, [rbp - MSP_ACC]
-    call math_int_result
+    mov rax, [rbp - MSP_TOTAL]
     leave
     ret
-.msp_float_result:
-    movsd xmm0, [rbp - MSP_SUM]
-    addsd xmm0, [rbp - MSP_C]
-    call float_from_f64
-    leave
-    V_PACK rax, rdx
-    ret
 
-.msp_short:
-    cmp qword [rel current_exception], 0
-    jne .msp_propagate
-    call .msp_cleanup
-    RAISE exc_ValueError_type, "Inputs are not the same length"
-.msp_long:
-    mov rdi, rax
+.msp_length:
+    SET_EXC exc_ValueError_type, "Inputs are not the same length"
+.msp_fail:
+    mov rdi, [rbp - MSP_A]
     DECREF_V rdi, rcx
-    call .msp_cleanup
-    RAISE exc_ValueError_type, "Inputs are not the same length"
-.msp_type:
-    call .msp_cleanup
-    RAISE exc_TypeError_type, "must be real number"
-
-.msp_cleanup:
-    mov rdi, [rbp - MSP_ACC]
-    test rdi, rdi
-    jz .msp_cl_iters
-    mov qword [rbp - MSP_ACC], 0
-    call int_dealloc
-.msp_cl_iters:
+    mov rdi, [rbp - MSP_B]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - MSP_TOTAL]
+    DECREF_V rdi, rcx
     mov rdi, [rbp - MSP_IP]
+    test rdi, rdi
+    jz .msp_fail_q
     call obj_decref
+.msp_fail_q:
     mov rdi, [rbp - MSP_IQ]
+    test rdi, rdi
+    jz .msp_fail_ret
     call obj_decref
+.msp_fail_ret:
+    xor eax, eax
+    leave
     ret
 
-.msp_propagate_pop:
-    add rsp, 8
-.msp_propagate:
-    mov [rel eval_saved_r13], r13
-    jmp eval_exception_unwind
+.msp_q_not_iter:
+    EXC_RAISED_SINCE [rbp - MSP_EXC], rcx, .msp_fail
+    mov rdi, [rbp - MSP_IP]
+    call obj_decref
+    mov rsi, [rbp - MSP_ARGS]
+    mov rsi, [rsi + 8]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
+.msp_p_not_iter:
+    EXC_RAISED_SINCE [rbp - MSP_EXC], rcx, .msp_fail
+    mov rsi, [rbp - MSP_ARGS]
+    mov rsi, [rsi]
+    CSTRING rdi, `'\x01' object is not iterable`
+    call raise_type_error_with_name
 .msp_args:
     lea rdi, [rel mm_n_sumprod]
     call math_raise_arity2
@@ -2982,6 +3261,7 @@ section .rodata
 ; faulted on the first call -- SIGSEGV inside math_ret_1, not a wrong answer.
 align 16
 mm_absmask: dq 0x7fffffffffffffff, 0x7fffffffffffffff
+mm_signbit: dq 0x8000000000000000, 0x8000000000000000
 align 8
 mm_inf:     dq 0x7ff0000000000000
 mm_ln2:     dq 0.6931471805599453      ; log(2.0), log2(2.0), log10(2.0):

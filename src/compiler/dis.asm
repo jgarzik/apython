@@ -18,7 +18,6 @@
 extern ap_strlen
 extern code_type
 extern compile_source
-extern current_exception
 extern obj_decref
 extern str_from_cstr_heap
 extern opcode_names

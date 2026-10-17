@@ -52,7 +52,6 @@ extern type_type
 extern exc_TypeError_type
 extern raise_exception
 extern get_iterator_opt
-extern current_exception
 
 section .text
 

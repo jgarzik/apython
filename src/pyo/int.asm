@@ -1900,7 +1900,9 @@ END_FUNC int_invert
 ;; that fits in a register.  The __gmpz_clear is not a new cost -- the object's
 ;; dealloc would have paid it either way.
 ;; ============================================================================
-DEF_FUNC int_shrink, 8            ; 1 pushes, so rsp is 16-aligned
+IS_VAL   equ 8                    ; the int64 across int_dealloc
+IS_FRAME equ 8
+DEF_FUNC int_shrink, IS_FRAME     ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     cmp qword [rbx + PyIntObject.compact], 0
@@ -1943,10 +1945,12 @@ DEF_FUNC int_shrink, 8            ; 1 pushes, so rsp is 16-aligned
     sub rcx, r8
     cmp rcx, rdx
     jae .keep
-    push rax
+    ; Kept in the frame, not pushed: a lone push here entered int_dealloc
+    ; with rsp misaligned.
+    mov [rbp - IS_VAL], rax
     mov rdi, rbx
     call int_dealloc
-    pop rax
+    mov rax, [rbp - IS_VAL]
     V_PACK_I64 rax, rcx
     pop rbx
     leave
@@ -1988,13 +1992,14 @@ DEF_FUNC int_lshift
     ; count that does not fit answered the left operand unchanged; CPython
     ; refuses it.
     INT_NEED_MPZ r12
+    ; Four pushes leave rsp aligned; a push/pop of rdi around this call would
+    ; flip it, so the argument is recomputed from r12 instead.
     lea rdi, [r12 + PyIntObject.mpz]
-    push rdi
     extern __gmpz_fits_slong_p
     call __gmpz_fits_slong_p wrt ..plt
-    pop rdi
     test eax, eax
     jz .shift_too_wide
+    lea rdi, [r12 + PyIntObject.mpz]
     call __gmpz_get_si wrt ..plt
     mov r13, rax
     jmp .have_shift
@@ -2071,10 +2076,13 @@ DEF_FUNC int_lshift
     pop rcx
     test cl, cl
     jz .lsh_done
-    push rax
+    ; The result rides in r12 (the shift operand, dead by now), not on the
+    ; stack: a lone push here entered int_dealloc misaligned, and its
+    ; __gmpz_clear inherited the bad parity.
+    mov r12, rax
     mov rdi, rbx
     call int_dealloc
-    pop rax
+    mov rax, r12
 .lsh_done:
     mov rdi, rax
     call int_shrink

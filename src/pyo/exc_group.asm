@@ -1251,13 +1251,11 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
 .egd_notes_absent:
     ; A missing __notes__ leaves an AttributeError pending, which is the
     ; ordinary answer to a lookup and not this function's failure.
-    extern current_exception
-    extern attr_error_pending
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .egd_notes_clean
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .egd_notes_clean
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
 .egd_notes_clean:
     mov rdi, rbx
     call obj_decref                 ; the name
@@ -1489,6 +1487,11 @@ DEF_FUNC eg_install_methods, EGI_FRAME
     EGI_ADD eg_method_split, "split"
     EGI_ADD eg_method_subgroup, "subgroup"
     EGI_ADD eg_method_derive, "derive"
+    ; PEP 585, as CPython's: BaseExceptionGroup[E] is a GenericAlias, and
+    ; pytest subclasses `AbstractRaises[BaseExceptionGroup[...]]` at import.
+    mov rdi, rbx
+    extern add_class_getitem
+    call add_class_getitem
 
     lea rdi, [rel exc_BaseExceptionGroup_type]
     call type_stamp_methods

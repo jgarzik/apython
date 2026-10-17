@@ -29,7 +29,6 @@ extern none_singleton
 extern exc_TypeError_type
 extern raise_exception
 extern eval_exception_unwind
-extern current_exception
 extern property_type
 extern property_construct
 

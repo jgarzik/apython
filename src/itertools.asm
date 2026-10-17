@@ -21,9 +21,7 @@ extern fatal_error
 extern raise_exception
 extern exc_TypeError_type
 extern exc_StopIteration_type
-extern kw_names_pending
 extern none_singleton
-extern current_exception
 extern tuple_new
 extern list_new
 extern obj_richcompare_bool
@@ -90,25 +88,19 @@ DEF_FUNC call_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     test rax, rax
     jnz .ci_ret               ; got a value, return it
 
-    ; NULL from __next__ — check for StopIteration
-    mov rax, [rel current_exception]
-    test rax, rax
-    jz .ci_null               ; no exception, clean exhaustion
-
-    ; Check if exception is StopIteration
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel exc_StopIteration_type]
-    cmp rcx, rdx
-    jne .ci_null              ; other exception: leave it, return NULL
-
-    ; Clear StopIteration: DECREF and reset current_exception
-    mov rdi, rax
-    call obj_decref
-    mov qword [rel current_exception], 0
+    ; NULL from __next__ — a StopIteration is exhaustion, anything else is
+    ; left for the caller to propagate
+.ci_check:
+    call clear_stopiteration
     jmp .ci_null
 
 .ci_have:
     call rax
+    ; A builtin iterator ends the same way: `map(next, its)` returns NULL
+    ; with the StopIteration its function raised still pending, and the
+    ; contract above says the caller sees exhaustion, not an error.
+    test rax, rax
+    jz .ci_check
 .ci_ret:
     pop rbx
     leave
@@ -120,6 +112,31 @@ DEF_FUNC call_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC call_iternext
+
+;; ============================================================================
+;; clear_stopiteration() -> nothing; a pending StopIteration is dropped.
+;; An iternext that calls user code (map's function, filter's
+;; predicate) ends when that code raises StopIteration, as CPython's does:
+;; there the consumer clears it, and the consumers here -- list(), sorted(),
+;; set(), `yield from`, unpacking -- read a NULL with an exception still
+;; pending as an error, so the iterator clears it before handing NULL back.
+;; Clobbers the caller-saved registers.
+;; ============================================================================
+DEF_FUNC clear_stopiteration
+    mov rax, [gs:ThreadState.current_exception]
+    test rax, rax
+    jz .cs_done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .cs_done
+    mov qword [gs:ThreadState.current_exception], 0
+    mov rdi, rax
+    call obj_decref
+.cs_done:
+    leave
+    ret
+END_FUNC clear_stopiteration
 
 ;; ============================================================================
 ;; get_iterator(rdi = obj payload, esi = obj tag) -> rax = iterator, owned
@@ -224,7 +241,6 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     jnz .validate_iter
 
     ; __iter__ returned NULL: did it raise, or is there no __iter__ at all?
-    extern current_exception
     DUNDER_RAISED r10, .iter_exc_pending
 
     ; __iter__ not found — try __getitem__ sequence protocol
@@ -310,8 +326,7 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
 .iter_exc_pending:
     ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
     extern eval_exception_unwind
-    extern eval_saved_r13
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     pop rbx
     leave
     jmp eval_exception_unwind
@@ -346,7 +361,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov qword [rbp - EN_ITER], 0       ; init iterable ptr to 0 (used to detect kwarg case)
 
     ; Check for kwargs
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jnz .enum_parse_kw
 
@@ -493,7 +508,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     jmp .enum_kw_loop
 
 .enum_kw_done:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; Validate: must have exactly 1 effective positional (the iterable)
     mov rax, [rbp - EN_NPOS]
@@ -543,7 +558,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     ret
 
 .enum_type_error:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     ; CPython builds the iterator before it looks at start=, so an argument
     ; that is wrong in both ways is reported as the iterable it is not:
     ; enumerate(True, True) is "'bool' object is not iterable" there.
@@ -568,7 +583,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     jmp raise_type_error_with_name
 
 .enum_error:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     RAISE exc_TypeError_type, "enumerate() requires 1 or 2 arguments"
 END_FUNC builtin_enumerate
 
@@ -843,7 +858,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     mov qword [rbp - ZP_STRICT], 0
 
     ; Check for strict= kwarg
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .zip_no_kw
 
@@ -898,7 +913,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     jmp .zip_kw_loop
 
 .zip_kw_done:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     jmp .zip_have_npos
 
 .zip_no_kw:
@@ -1142,13 +1157,13 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     call exc_from_cstr
     ; rax = exception object
     push rax
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .zip_strict_no_prev
     call obj_decref
 .zip_strict_no_prev:
     pop rax
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     ; Fall through to .zip_exhausted which returns NULL
 
 .zip_exhausted:
@@ -1347,6 +1362,11 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rdx, r14                     ; nargs = count
     extern obj_call_n
     call obj_call_n
+    test rax, rax
+    jnz .map_called
+    call clear_stopiteration         ; func raised StopIteration: map ends
+    xor eax, eax
+.map_called:
     V_UNPACK rax, rdx
     push rax                         ; save result payload
     push rdx                         ; save result tag
@@ -1622,10 +1642,12 @@ DEF_FUNC_LOCAL filter_iternext
 
 .filter_call_failed:
     ; The exception is recorded; release the item and hand NULL back, which
-    ; is what a raising iternext looks like.
+    ; is what a raising iternext looks like -- unless it is StopIteration,
+    ; which ends the filter instead.
     pop rsi                  ; the item tag
     mov rdi, r13
     DECREF_VAL rdi, rsi
+    call clear_stopiteration
     RET_NULL
     pop r15
     pop r14
@@ -1971,7 +1993,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ; key= and reverse= are keyword-only, so exactly one POSITIONAL argument
     ; is allowed -- the keyword values arrive in the same array and have to
     ; be discounted.  `sorted([], 1)` sorted the [] and dropped the 1.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .sorted_npos_is_nargs
     mov rax, [rax + PyTupleObject.ob_size]
@@ -2031,7 +2053,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ; args[0] = list (a pointer is its own Value)
     mov [rbp - SO_SORT_BUF], r12
 
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .sorted_no_kw
 
@@ -2087,7 +2109,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     ret
 
 .sorted_error:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rsi, rax
     CSTRING rdi, "sorted expected 1 argument, got "
     xor edx, edx
@@ -2108,7 +2130,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, r12
     call obj_decref             ; the partially built list
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 END_FUNC builtin_sorted
 
@@ -2388,7 +2410,7 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     DUNDER_RAISED [rbp - SI_EXC], .si_raised
     jmp .si_exhausted
 .si_raised:
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .si_exhausted               ; no exception, clean exhaustion
     mov rcx, [rax + PyObject.ob_type]
@@ -2414,7 +2436,7 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     call obj_incref
 .si_no_restore:
     mov rcx, [rbp - SI_EXC]
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     pop rdi
     call obj_decref
 .si_exhausted:

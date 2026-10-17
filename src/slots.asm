@@ -47,7 +47,6 @@ extern dunder_lookup_owner
 extern dunder_call_1
 extern dunder_iter
 extern dunder_next
-extern current_exception
 extern eval_exception_unwind
 extern exc_StopIteration_type
 extern obj_decref
@@ -958,7 +957,7 @@ END_FUNC slot_mp_ass_subscript
 ;; to hand back either, so report it rather than continue with a NULL.
 ;; ============================================================================
 DEF_FUNC_LOCAL slot_reraise
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .no_exc
     leave
     jmp eval_exception_unwind
@@ -1021,7 +1020,7 @@ DEF_FUNC slot_tp_iternext
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .got_value
 
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .exhausted
     mov rcx, [rax + PyObject.ob_type]
@@ -1029,7 +1028,7 @@ DEF_FUNC slot_tp_iternext
     cmp rcx, rdx
     jne .exhausted              ; a different exception: leave it pending
     mov rdi, rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .exhausted:
@@ -1084,7 +1083,6 @@ extern dunder_call
 extern exc_MemoryError_type
 extern set_exception
 extern sub_list_for_type
-extern c_recursion_depth
 extern recursion_limit
 
 global slot_tp_call

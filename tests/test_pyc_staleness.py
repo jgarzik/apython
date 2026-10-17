@@ -3,7 +3,7 @@
 A .pyc records the source's mtime and size in its header, and CPython refuses
 one that no longer matches.  Without that check, editing a module and running
 it again silently runs the old code -- which is what happened here, and what
-makes the compiled `lib/` a trap rather than a cache the moment one of its
+makes the compiled `stdlib/` a trap rather than a cache the moment one of its
 sources is touched by hand.
 
 The cache this needs is built by copying one that already exists rather than
@@ -14,11 +14,12 @@ them disagree in both the size and the mtime, which is the case the check is
 for.
 """
 
+import importlib.util
 import os
+import py_compile
 import sys
 
-SRC = os.path.join("lib", "stat.py")
-CACHE = os.path.join("lib", "__pycache__", "stat.cpython-312.pyc")
+SRC = os.path.join("stdlib", "stat.py")
 
 root = "_staletree"
 cachedir = os.path.join(root, "__pycache__")
@@ -30,7 +31,13 @@ for d in (root, cachedir):
 sys.path.insert(0, root)
 
 target_src = os.path.join(root, "stalemod.py")
-target_cache = os.path.join(cachedir, "stalemod.cpython-312.pyc")
+# Under the running interpreter's own cache tag -- importlib reads no other.
+target_cache = importlib.util.cache_from_source(target_src)
+
+# The seed cache is compiled from SRC into a file of its own, so its header
+# records SRC's mtime and size, not those of the copy made below.
+CACHE = os.path.join(root, "seed.pyc")
+py_compile.compile(SRC, cfile=CACHE, doraise=True)
 
 
 def copy(a, b):
@@ -79,6 +86,7 @@ print(restored.S_IFDIR, hasattr(restored, "MARKER"))
 for _name in sorted(os.listdir(cachedir)):
     os.unlink(os.path.join(cachedir, _name))
 os.unlink(target_src)
+os.unlink(CACHE)
 os.rmdir(cachedir)
 os.rmdir(root)
 print("done")

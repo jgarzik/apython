@@ -876,6 +876,12 @@ SM_PATTERN   equ 16
 SM_TOPLEVEL  equ 24
 SM_LASTPOS   equ 32     ; the repeat's last_pos, kept across a body attempt
 SM_COUNT     equ 40     ; MAX_UNTIL's ctx->count, kept across a body attempt
+SM_PR_SKIP   equ 48     ; POSSESSIVE_REPEAT: skip, min, max, count, the
+SM_PR_MIN    equ 56     ; marks saved around one iteration, and the
+SM_PR_MAX    equ 64     ; position it started from -- all live across
+SM_PR_COUNT  equ 72     ; a body sub-match
+SM_PR_MARKS  equ 80
+SM_PR_START  equ 88
 SM_MFRAME    equ 104            ; + 5 pushes = 144, 16-aligned
 
 DEF_FUNC sre_match, SM_MFRAME
@@ -2166,158 +2172,130 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .op_failure
 
 .op_possessive_repeat:
-    ; POSSESSIVE_REPEAT skip min max [body] — like repeat but no backtracking
-    mov r14d, [rbx]            ; skip
-    mov ecx, [rbx + 4]        ; min
-    mov r8d, [rbx + 8]        ; max
+    ; POSSESSIVE_REPEAT skip min max body SUCCESS tail -- CPython's
+    ; SRE_OP_POSSESSIVE_REPEAT.  Each iteration is a sub-match of the body,
+    ; whose SUCCESS ends that sub-match only; once the loop stops nothing
+    ; backtracks into it.  An iteration that fails must leave no trace: its
+    ; marks are put back (LASTMARK_SAVE/MARK_PUSH, MARK_POP/LASTMARK_RESTORE),
+    ; or a group the failed attempt opened reads as matched.  And the tail is
+    ; one word PAST skip: skip lands on the body's SUCCESS, and dispatching
+    ; that ended the whole match right after the body.
+    mov eax, [rbx]
+    mov [rbp - SM_PR_SKIP], rax
+    mov eax, [rbx + 4]
+    mov [rbp - SM_PR_MIN], rax
+    mov eax, [rbx + 8]
+    mov [rbp - SM_PR_MAX], rax
+    mov [rbp - SM_PR_START], r13
+    mov qword [rbp - SM_PR_COUNT], 0
     add rbx, 12                ; body pattern
 
-    push r13                   ; save initial pos
-
-    ; Match minimum
-    mov r9d, ecx
-    test r9d, r9d
-    jz .pr_min_done
+    ; The minimum: every one of these has to match.
 .pr_min_loop:
+    mov rax, [rbp - SM_PR_COUNT]
+    cmp rax, [rbp - SM_PR_MIN]
+    jge .pr_min_done
     mov [r12 + SRE_State.str_pos], r13
-    push r9
-    push r8
-    push r14
-    push rcx
     mov rdi, r12
     mov rsi, rbx
     xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
-    pop rcx
-    pop r14
-    pop r8
-    pop r9
     test eax, eax
     jz .pr_fail
     mov r13, [r12 + SRE_State.str_pos]
-    dec r9d
-    test r9d, r9d
-    jnz .pr_min_loop
+    inc qword [rbp - SM_PR_COUNT]
+    jmp .pr_min_loop
 .pr_min_done:
 
-    ; Greedily match up to max (no backtracking)
-    mov r9, rcx
+    ; Then greedily up to max, stopping at the first failure or at the first
+    ; iteration that matched empty (every later one would too).
 .pr_greedy_loop:
     ; 64-bit and signed: MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1,
     ; so a 32-bit `jge` here read "count >= max" as true at once and the
     ; loop never ran.  See op_repeat_one for the whole story.
-    cmp r9, r8
+    mov rax, [rbp - SM_PR_COUNT]
+    cmp rax, [rbp - SM_PR_MAX]
     jge .pr_greedy_done
-    push r13
+    mov rdi, r12
+    call sre_save_marks
+    mov [rbp - SM_PR_MARKS], rax
     mov [r12 + SRE_State.str_pos], r13
-    push r9
-    push r8
-    push r14
-    push rcx
     mov rdi, r12
     mov rsi, rbx
     xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
-    pop rcx
-    pop r14
-    pop r8
-    pop r9
     test eax, eax
     jz .pr_greedy_stop
-    mov r13, [r12 + SRE_State.str_pos]
-    add rsp, 8
-    inc r9d
+    mov rdi, [rbp - SM_PR_MARKS]   ; MARK_POP_DISCARD: keep the new marks
+    call ap_free
+    inc qword [rbp - SM_PR_COUNT]
+    mov rax, [r12 + SRE_State.str_pos]
+    cmp rax, r13
+    mov r13, rax
+    je .pr_greedy_done         ; zero-width: no further progress possible
     jmp .pr_greedy_loop
 .pr_greedy_stop:
-    pop r13
+    mov rdi, [rbp - SM_PR_MARKS]   ; MARK_POP + LASTMARK_RESTORE
+    mov rsi, r12
+    call sre_restore_marks
+    mov rdi, [rbp - SM_PR_MARKS]
+    call ap_free
 .pr_greedy_done:
-    ; Continue with tail (no backtracking into body)
-    ; rbx = skip_word_addr + 12
-    add rsp, 8                 ; discard initial saved pos
-    lea rcx, [rbx - 12]       ; skip_word_addr
-    mov eax, r14d
-    lea rbx, [rcx + rax*4]    ; skip_word_addr + skip*4
+    mov [r12 + SRE_State.str_pos], r13
+    ; CPython: pattern += pattern[0] + 1, from the skip word -- past SUCCESS.
+    mov rax, [rbp - SM_PR_SKIP]
+    lea rbx, [rbx - 12 + rax*4 + 4]
     jmp .dispatch
 
 .pr_fail:
-    pop r13
+    mov r13, [rbp - SM_PR_START]
+    mov [r12 + SRE_State.str_pos], r13
     jmp .op_failure
 
 .op_possessive_repeat_one:
-    ; Like REPEAT_ONE but possessive
-    mov r14d, [rbx]
-    mov ecx, [rbx + 4]
-    mov r8d, [rbx + 8]
-    add rbx, 12
+    ; POSSESSIVE_REPEAT_ONE skip min max item SUCCESS tail.  The item is one
+    ; character wide and holds no marks, so a failed attempt has nothing to
+    ; undo; skip lands on the tail itself.  Kept in the same frame slots as
+    ; POSSESSIVE_REPEAT -- the push-based version called sre_match with rsp
+    ; 8 off in its minimum loop.
+    mov eax, [rbx]
+    mov [rbp - SM_PR_SKIP], rax
+    mov eax, [rbx + 4]
+    mov [rbp - SM_PR_MIN], rax
+    mov eax, [rbx + 8]
+    mov [rbp - SM_PR_MAX], rax
+    mov [rbp - SM_PR_START], r13
+    mov qword [rbp - SM_PR_COUNT], 0
+    add rbx, 12                ; the item
 
-    push r13
-
-    ; Match minimum
-    mov r9d, ecx
-    test r9d, r9d
-    jz .pro_min_done
-.pro_min_loop:
+.pro_loop:
+    ; 64-bit and signed: MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1.
+    ; See op_repeat_one for the whole story.
+    mov rax, [rbp - SM_PR_COUNT]
+    cmp rax, [rbp - SM_PR_MAX]
+    jge .pro_done
     mov [r12 + SRE_State.str_pos], r13
-    push r9
-    push r8
-    push r14
-    push rcx
     mov rdi, r12
     mov rsi, rbx
     xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
     call sre_match
-    pop rcx
-    pop r14
-    pop r8
-    pop r9
     test eax, eax
-    jz .pro_fail
+    jz .pro_done
     mov r13, [r12 + SRE_State.str_pos]
-    dec r9d
-    test r9d, r9d
-    jnz .pro_min_loop
-.pro_min_done:
-
-    ; Greedy match
-    mov r9, rcx
-.pro_greedy_loop:
-    ; 64-bit and signed: MAXREPEAT is 0xFFFFFFFF, which as an int32 is -1,
-    ; so a 32-bit `jge` here read "count >= max" as true at once and the
-    ; loop never ran.  See op_repeat_one for the whole story.
-    cmp r9, r8
-    jge .pro_greedy_done
-    push r13
+    inc qword [rbp - SM_PR_COUNT]
+    jmp .pro_loop
+.pro_done:
+    mov rax, [rbp - SM_PR_COUNT]
+    cmp rax, [rbp - SM_PR_MIN]
+    jl .pro_fail
     mov [r12 + SRE_State.str_pos], r13
-    push r9
-    push r8
-    push r14
-    push rcx
-    mov rdi, r12
-    mov rsi, rbx
-    xor edx, edx               ; a sub-pattern: its SUCCESS is not the match
-    call sre_match
-    pop rcx
-    pop r14
-    pop r8
-    pop r9
-    test eax, eax
-    jz .pro_greedy_stop
-    mov r13, [r12 + SRE_State.str_pos]
-    add rsp, 8
-    inc r9d
-    jmp .pro_greedy_loop
-.pro_greedy_stop:
-    pop r13
-.pro_greedy_done:
-    ; rbx = skip_word_addr + 12
-    add rsp, 8                 ; discard initial pos
-    lea rcx, [rbx - 12]       ; skip_word_addr
-    mov eax, r14d
-    lea rbx, [rcx + rax*4]    ; skip_word_addr + skip*4
+    mov rax, [rbp - SM_PR_SKIP]
+    lea rbx, [rbx - 12 + rax*4]    ; skip_word_addr + skip*4: the tail
     jmp .dispatch
 
 .pro_fail:
-    pop r13
+    mov r13, [rbp - SM_PR_START]
+    mov [r12 + SRE_State.str_pos], r13
     jmp .op_failure
 
 .op_groupref_ignore:

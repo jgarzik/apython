@@ -23,7 +23,6 @@
 extern ap_strlen
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern current_exception
 extern obj_decref
 extern raise_exception
 extern set_exception

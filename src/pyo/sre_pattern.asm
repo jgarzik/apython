@@ -35,6 +35,7 @@ extern bool_false
 extern sre_match
 extern sre_template_parse
 extern sre_template_expand
+extern raise_type_error_counted
 extern sre_state_reset_marks
 extern sre_search
 extern sre_state_init
@@ -839,8 +840,12 @@ SUB_REPL_TAG equ 72
 ; SUB_STATE and grows downward from there.
 SUB_TMPL     equ 80
 SUB_LITERAL  equ 88
-SUB_STATE    equ 88 + SRE_State_size
-SUB_FRAME    equ 88 + SRE_State_size
+; How many pieces CPython's list would hold so far, and the index of the
+; first that is not the pattern's kind (-1 for none) -- see .sub_mismatch.
+SUB_NPIECES  equ 96
+SUB_BADIDX   equ 104
+SUB_STATE    equ 104 + SRE_State_size
+SUB_FRAME    equ 104 + SRE_State_size
 
 DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -907,6 +912,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_COUNT], rax
     mov qword [rbp - SUB_NSUBS], 0
     mov qword [rbp - SUB_LASTEND], 0
+    mov qword [rbp - SUB_NPIECES], 0
+    mov qword [rbp - SUB_BADIDX], -1
 
     ; Create the empty result -- "" or b"", whichever the pattern is.
     mov rax, [rbp - SUB_PAT]
@@ -936,19 +943,18 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     jne .sub_repl_type
     test rax, rax
     jz .sub_repl_type
-    ; A bytes pattern takes a bytes replacement and a str pattern a str one.
+    ; A str or a bytes, whichever the pattern is: CPython parses either
+    ; against either, and a kind that differs from the pattern's fails only
+    ; when a substitution is actually made -- in the join that assembles the
+    ; result, which .sub_mismatch defers to the end.  With no match the string
+    ; comes back untouched; tabulate relies on exactly that.
     mov rcx, [rax + PyObject.ob_type]
-    mov rdx, [rbp - SUB_PAT]
-    cmp qword [rdx + SRE_PatternObject.is_bytes], 0
-    jne .sub_repl_bytes
-    REQUIRE_STR_TYPE rcx, rdx, .sub_repl_type
-    jmp .sub_repl_ok
-.sub_repl_bytes:
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     je .sub_repl_ok
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jz .sub_repl_type
+    jnz .sub_repl_ok
+    REQUIRE_STR_TYPE rcx, rdx, .sub_repl_type
 .sub_repl_ok:
 
     mov rdi, rax
@@ -1050,6 +1056,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_RESULT], rax
     pop rdi
     call obj_decref
+    inc qword [rbp - SUB_NPIECES]
 .sub_no_prefix:
 
     ; Get replacement: callable or string
@@ -1060,6 +1067,9 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; group needs a match object to read the groups from.
     cmp qword [rbp - SUB_LITERAL], 0
     jz .sub_expand_repl
+    mov rdi, [rbp - SUB_LITERAL]
+    call .sub_mismatch
+    jnz .sub_after_repl
     mov rdi, [rbp - SUB_RESULT]
     mov rsi, [rbp - SUB_LITERAL]
     mov ecx, TAG_PTR
@@ -1094,6 +1104,17 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rsi
     push rsi
     push rsi
+    mov rdi, rsi
+    call .sub_mismatch
+    jz .sub_expand_kind_ok
+    pop rdi
+    pop rdi                    ; the expansion, not wanted after all
+    call obj_decref
+    pop r13
+    pop r12
+    jmp .sub_after_repl
+.sub_expand_kind_ok:
+    mov rsi, [rsp]
     mov rdi, [rbp - SUB_RESULT]
     mov ecx, TAG_PTR
     push rdi
@@ -1174,6 +1195,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     lea rax, [rel none_singleton]
     cmp rsi, rax
     je .sub_repl_none
+    inc qword [rbp - SUB_NPIECES]
     mov rdi, [rbp - SUB_RESULT]
     push rdi
     push rsi
@@ -1273,6 +1295,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call obj_decref
 
 .sub_done:
+    cmp qword [rbp - SUB_BADIDX], -1
+    jne .sub_join_mismatch
     lea rdi, [rbp - SUB_STATE]
     call sre_state_fini
 
@@ -1287,6 +1311,52 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+
+;; .sub_mismatch(rdi = a replacement piece, exactly a str or a bytes) -> ZF set
+;; when it is the pattern's kind.  Either way it is one more piece of the
+;; list CPython joins; the first that is not the pattern's kind is the item
+;; the join refuses, and its index is remembered for .sub_join_mismatch.
+;; Reached by `call` and calls nothing, so alignment is not its concern.
+.sub_mismatch:
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    sete al
+    movzx eax, al
+    mov rcx, [rbp - SUB_PAT]
+    cmp eax, [rcx + SRE_PatternObject.is_bytes]
+    je .sub_mismatch_ok
+    cmp qword [rbp - SUB_BADIDX], -1
+    jne .sub_mismatch_seen
+    mov rax, [rbp - SUB_NPIECES]
+    mov [rbp - SUB_BADIDX], rax
+.sub_mismatch_seen:
+    inc qword [rbp - SUB_NPIECES]
+    or eax, 1                   ; ZF clear: the other kind
+    ret
+.sub_mismatch_ok:
+    inc qword [rbp - SUB_NPIECES]
+    xor eax, eax                ; ZF set: the pattern's kind
+    ret
+
+.sub_join_mismatch:
+    ; The join's refusal, raised once the substitution is over, as CPython's
+    ; join_list raises it: everything this frame owns goes first.
+    mov rdi, [rbp - SUB_RESULT]
+    mov qword [rbp - SUB_RESULT], 0
+    call obj_decref
+    lea rdi, [rbp - SUB_STATE]
+    call sre_state_fini
+    lea rdx, [rel sp_join_want_str]
+    mov rax, [rbp - SUB_PAT]
+    cmp qword [rax + SRE_PatternObject.is_bytes], 0
+    je .sub_join_tail
+    lea rdx, [rel sp_join_want_bytes]
+.sub_join_tail:
+    mov rsi, [rbp - SUB_BADIDX]
+    lea rdi, [rel sp_join_item]
+    call raise_type_error_counted     ; does not return
 
 .sub_callable_raised:
     ; Give back the match the callable was handed and the two registers the
@@ -1348,8 +1418,12 @@ SN_CALLABLE equ 64
 SN_REPL_TAG equ 72
 SN_TMPL     equ 80
 SN_LITERAL  equ 88
-SN_STATE    equ 88 + SRE_State_size
-SN_FRAME    equ 88 + SRE_State_size
+; How many pieces CPython's list would hold so far, and the index of the
+; first that is not the pattern's kind (-1 for none) -- see .subn_mismatch.
+SN_NPIECES  equ 96
+SN_BADIDX   equ 104
+SN_STATE    equ 104 + SRE_State_size
+SN_FRAME    equ 104 + SRE_State_size
 
 DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rbx
@@ -1409,6 +1483,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_COUNT], rax
     mov qword [rbp - SN_NSUBS], 0
     mov qword [rbp - SN_LASTEND], 0
+    mov qword [rbp - SN_NPIECES], 0
+    mov qword [rbp - SN_BADIDX], -1
 
     mov rax, [rbp - SN_PAT]
     mov edx, [rax + SRE_PatternObject.is_bytes]
@@ -1434,18 +1510,18 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     jne .subn_repl_type
     test rax, rax
     jz .subn_repl_type
+    ; A str or a bytes, whichever the pattern is: CPython parses either
+    ; against either, and a kind that differs from the pattern's fails only
+    ; when a substitution is actually made -- in the join that assembles the
+    ; result, which .subn_mismatch defers to the end.  With no match the string
+    ; comes back untouched; tabulate relies on exactly that.
     mov rcx, [rax + PyObject.ob_type]
-    mov rdx, [rbp - SN_PAT]
-    cmp qword [rdx + SRE_PatternObject.is_bytes], 0
-    jne .subn_repl_bytes
-    REQUIRE_STR_TYPE rcx, rdx, .subn_repl_type
-    jmp .subn_repl_ok
-.subn_repl_bytes:
     lea rdx, [rel bytes_type]
     cmp rcx, rdx
     je .subn_repl_ok
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jz .subn_repl_type
+    jnz .subn_repl_ok
+    REQUIRE_STR_TYPE rcx, rdx, .subn_repl_type
 .subn_repl_ok:
 
     mov rdi, rax
@@ -1540,6 +1616,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_RESULT], rax
     pop rdi
     call obj_decref
+    inc qword [rbp - SN_NPIECES]
 .subn_no_prefix:
 
     ; Get replacement: callable or string
@@ -1550,6 +1627,9 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     ; group needs a match object to read the groups from.
     cmp qword [rbp - SN_LITERAL], 0
     jz .subn_expand_repl
+    mov rdi, [rbp - SN_LITERAL]
+    call .subn_mismatch
+    jnz .subn_after_repl
     mov rdi, [rbp - SN_RESULT]
     mov rsi, [rbp - SN_LITERAL]
     mov ecx, TAG_PTR
@@ -1584,6 +1664,17 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi
     push rsi
     push rsi
+    mov rdi, rsi
+    call .subn_mismatch
+    jz .subn_expand_kind_ok
+    pop rdi
+    pop rdi                    ; the expansion, not wanted after all
+    call obj_decref
+    pop r13
+    pop r12
+    jmp .subn_after_repl
+.subn_expand_kind_ok:
+    mov rsi, [rsp]
     mov rdi, [rbp - SN_RESULT]
     mov ecx, TAG_PTR
     push rdi
@@ -1651,6 +1742,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi                    ; replacement payload
     push rsi                   ; save repl payload for DECREF
     push rcx                   ; save repl tag for DECREF
+    inc qword [rbp - SN_NPIECES]
     mov rdi, [rbp - SN_RESULT]
     push rdi
     push rsi
@@ -1741,6 +1833,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
 
 .subn_build_tuple:
+    cmp qword [rbp - SN_BADIDX], -1
+    jne .subn_join_mismatch
     lea rdi, [rbp - SN_STATE]
     call sre_state_fini
 
@@ -1774,6 +1868,52 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+
+;; .subn_mismatch(rdi = a replacement piece, exactly a str or a bytes) -> ZF set
+;; when it is the pattern's kind.  Either way it is one more piece of the
+;; list CPython joins; the first that is not the pattern's kind is the item
+;; the join refuses, and its index is remembered for .subn_join_mismatch.
+;; Reached by `call` and calls nothing, so alignment is not its concern.
+.subn_mismatch:
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel bytes_type]
+    cmp rax, rcx
+    sete al
+    movzx eax, al
+    mov rcx, [rbp - SN_PAT]
+    cmp eax, [rcx + SRE_PatternObject.is_bytes]
+    je .subn_mismatch_ok
+    cmp qword [rbp - SN_BADIDX], -1
+    jne .subn_mismatch_seen
+    mov rax, [rbp - SN_NPIECES]
+    mov [rbp - SN_BADIDX], rax
+.subn_mismatch_seen:
+    inc qword [rbp - SN_NPIECES]
+    or eax, 1                   ; ZF clear: the other kind
+    ret
+.subn_mismatch_ok:
+    inc qword [rbp - SN_NPIECES]
+    xor eax, eax                ; ZF set: the pattern's kind
+    ret
+
+.subn_join_mismatch:
+    ; The join's refusal, raised once the substitution is over, as CPython's
+    ; join_list raises it: everything this frame owns goes first.
+    mov rdi, [rbp - SN_RESULT]
+    mov qword [rbp - SN_RESULT], 0
+    call obj_decref
+    lea rdi, [rbp - SN_STATE]
+    call sre_state_fini
+    lea rdx, [rel sp_join_want_str]
+    mov rax, [rbp - SN_PAT]
+    cmp qword [rax + SRE_PatternObject.is_bytes], 0
+    je .subn_join_tail
+    lea rdx, [rel sp_join_want_bytes]
+.subn_join_tail:
+    mov rsi, [rbp - SN_BADIDX]
+    lea rdi, [rel sp_join_item]
+    call raise_type_error_counted     ; does not return
 
 .subn_callable_raised:
     mov rdi, r14
@@ -2978,6 +3118,9 @@ sre_pattern_type:
 
 section .rodata
 sp_type_name:     db "re.Pattern", 0
+sp_join_item:      db "sequence item ", 0
+sp_join_want_str:  db ": expected str instance, bytes found", 0
+sp_join_want_bytes: db ": expected a bytes-like object, str found", 0
 sp_match_str:     db "match", 0
 sp_search_str:    db "search", 0
 sp_fullmatch_str: db "fullmatch", 0

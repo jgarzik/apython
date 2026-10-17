@@ -11,11 +11,11 @@
 #   gamma, lgamma   CPython uses a Lanczos approximation of its own
 #   hypot (n-ary)   CPython's vector_norm does Veltkamp-Dekker splitting and
 #                   a Neumaier sum; the two-argument form is glibc's in both
-#   sumprod         CPython uses double-double arithmetic on the float side;
-#                   here it is a Neumaier compensated sum
 #
 # math.fsum is NOT in that list.  Exactness is the whole reason it exists, so
 # it is Shewchuk's algorithm, as CPython's is, and it is compared exactly.
+# Nor is math.sumprod: its float path is CPython's triple-length tl_fma, so
+# it is compared exactly too (tests/test_math_sumprod_prod_types.py).
 
 import math
 

@@ -998,9 +998,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_ke_freed:
     cmp qword [rbp-SM_NORAISE], 0
     jne .sm_error_ret           ; the caller reads the pending exception
-    extern current_exception
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     pop r15
     pop r14
     pop r13
@@ -1032,8 +1031,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_cf_freed:
     cmp qword [rbp-SM_NORAISE], 0
     jne .sm_error_ret           ; the caller reads the pending exception
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     pop r15
     pop r14
     pop r13

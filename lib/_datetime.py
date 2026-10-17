@@ -66,8 +66,11 @@ except ImportError:
     def _run_pure_source():
         """Execute _pydatetime.py's source into this module's globals."""
         import os
-        here = os.path.dirname(os.path.abspath(__file__))
-        source = os.path.join(here, '_pydatetime.py')
+        import sys
+        # The standard library's directory, not this file's: _pydatetime is
+        # CPython's module and lives in stdlib/ (lib/python3.12 installed),
+        # while this stand-in lives with the other C-module stand-ins.
+        source = os.path.join(sys._stdlib_dir, '_pydatetime.py')
         with open(source, 'r') as handle:
             text = handle.read()
         # __name__ stays '_datetime', so the classes built here report this

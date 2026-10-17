@@ -18,7 +18,6 @@ extern obj_dealloc
 extern obj_incref
 extern str_from_cstr
 extern type_type
-extern kw_names_pending
 extern obj_as_index
 extern bytes_type
 extern tuple_type
@@ -52,7 +51,7 @@ CN_FRAME equ 16             ; + 2 pushes = 32
 ;; ============================================================================
 
 ;; ============================================================================
-;; code_traverse / code_clear
+;; code_traverse
 ;;
 ;; A code object holds nine owned objects, and one of them -- co_consts -- can
 ;; hold another code object.  With no tp_traverse the collector could not see
@@ -90,24 +89,17 @@ DEF_FUNC code_traverse, 8        ; rsp 16-aligned at the call the macros below e
     ret
 END_FUNC code_traverse
 
-;; Only co_consts, which is the field that can close a cycle.  The rest are
-;; strings and bytes that hold nothing, and the eval loop reads co_names and
-;; the two localsplus tables through r14 and the frame -- clearing those out
-;; from under a frame that is still unwinding would be worse than the cycle.
-global code_clear
-DEF_FUNC code_clear, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi
-    mov rdi, [rbx + PyCodeObject.co_consts]
-    test rdi, rdi
-    jz .cc_done
-    mov qword [rbx + PyCodeObject.co_consts], 0
-    call obj_decref
-.cc_done:
-    pop rbx
-    leave
-    ret
-END_FUNC code_clear
+;; No tp_clear.  Clearing co_consts is not something a code object can
+;; survive: a generator suspended on it keeps the code alive through its frame,
+;; and closing that generator later in the same collection -- gen_dealloc runs
+;; its finally blocks -- re-enters eval_frame, which loads r14 from co_consts
+;; and faulted on the NULL.  Nor does it break anything: co_consts holds
+;; constants -- str, bytes, numbers, tuples, frozensets, other code objects --
+;; none of which can refer back to the code, so a cycle through a code object
+;; is always closed by a function, cell or dict, and their tp_clear breaks it.
+;; CPython does not track code objects at all; tracking stays here so the
+;; collector can see through co_consts, but nothing is torn down from under a
+;; live frame.
 
 DEF_FUNC code_new, CN_FRAME
     push rbx
@@ -954,7 +946,7 @@ code_type:
     dq TYPE_FLAG_HAVE_GC ; tp_flags
     dq 0                ; tp_bases
     dq code_traverse    ; tp_traverse
-    dq code_clear       ; tp_clear
+    dq 0                ; tp_clear -- see code_traverse
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
@@ -1073,10 +1065,10 @@ DEF_FUNC code_method_replace, CR_FRAME
     mov qword [rbp - CR_NKW], 0
 
     ; The keywords, and how many of the arguments are actually positional.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .cr_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov [rbp - CR_KW], rax
     mov rcx, [rax + PyTupleObject.ob_size]
     mov [rbp - CR_NKW], rcx

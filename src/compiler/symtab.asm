@@ -113,6 +113,8 @@ DEF_FUNC sym_new, SN_FRAME
     mov rax, [rbp - SN_KIND]
     cmp eax, SCOPE_FUNCTION
     je .sn_named
+    cmp eax, SCOPE_LAMBDA
+    je .sn_lambda
     cmp eax, SCOPE_CLASS
     jne .sn_unnamed
 .sn_named:
@@ -128,6 +130,16 @@ DEF_FUNC sym_new, SN_FRAME
     ; `a` is not a name reads as 0 here and is simply left unnamed.
     V_TEST_PTR rax, rcx
     ja .sn_unnamed
+    mov [r12 + Scope.name], rax
+    jmp .sn_unnamed
+.sn_lambda:
+    ; A lambda has no name node, but it is "<lambda>" in every qualname
+    ; nested inside it: CPython's `(lambda: lambda: 0)()` is
+    ; "<lambda>.<locals>.<lambda>".  Left at 0, the chain was dropped whole.
+    mov rdi, rbx
+    lea rsi, [rel sym_lambda_name]
+    extern comp_intern_cstr
+    call comp_intern_cstr
     mov [r12 + Scope.name], rax
 .sn_unnamed:
 
@@ -3558,6 +3570,7 @@ END_FUNC sym_visit_children
 
 section .rodata
 sym_dot_zero: db ".0", 0
+sym_lambda_name: db "<lambda>", 0
 
 sym_super_name: db "super", 0
 sym_class_name: db "__class__", 0

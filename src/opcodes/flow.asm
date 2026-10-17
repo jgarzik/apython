@@ -21,8 +21,6 @@ section .text
 
 extern get_iterator_opt
 extern eval_dispatch
-extern eval_saved_r13
-extern eval_co_consts
 extern eval_return
 extern obj_is_true
 extern bool_true
@@ -34,10 +32,8 @@ extern coro_new
 extern async_gen_new
 extern raise_exception
 extern exc_TypeError_type
-extern current_exception
 extern eval_exception_unwind
 extern obj_decref
-extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -98,7 +94,7 @@ END_FUNC op_return_value
 ;; ============================================================================
 DEF_FUNC_BARE op_return_const
     ; ecx = arg (index into co_consts)
-    mov rax, [rel eval_co_consts]
+    mov rax, [gs:ThreadState.eval_co_consts]
     mov rax, [rax + rcx * 8]
     INCREF_V rax, rdx
     mov qword [r12 + PyFrame.instr_ptr], 0  ; mark frame as "returned" (not yielded)
@@ -281,7 +277,7 @@ DEF_FUNC_BARE op_jump_backward
     sub rbx, rcx
     ; The top of every loop is one of the two places a signal is delivered;
     ; the other is the return of a call.  The IP is already advanced past this
-    ; instruction and the unwinder reads it from eval_saved_rbx, so a handler
+    ; instruction and the unwinder reads it from PyFrame.disp_ip, so a handler
     ; that raises reports the line the loop was on.
     CHECK_EVAL_SIGNALS
     DISPATCH
@@ -389,7 +385,7 @@ DEF_FUNC op_format_value, FV_FRAME
 .fv_spec_dunder_none:
     ; NULL is either "no __format__" or "__format__ raised"; falling through
     ; in the second case replaced the exception with a formatting result.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .fv_have_result         ; it raised; rax:rdx is already (0,0)
     mov rdi, [rbp - FV_VALUE]   ; no __format__: fall through as before
 
@@ -411,7 +407,7 @@ DEF_FUNC op_format_value, FV_FRAME
 
 .fv_conv_failed:
     extern eval_exception_unwind
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     jmp eval_exception_unwind
 
@@ -470,7 +466,7 @@ DEF_FUNC op_format_value, FV_FRAME
     pop rax
     jmp .fv_have_result
 .fv_bare_dunder_none:
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .fv_have_result         ; it raised; rax:rdx is already (0,0)
     ; No __format__: fall through to str() as before.
     mov rdi, [rbp - FV_VALUE]
@@ -1004,7 +1000,7 @@ DEF_FUNC op_send, SND_FRAME
     ; The receiver raised.  Its exception belongs to this frame's handlers --
     ; which is what makes END_ASYNC_FOR, and every `try` around an `await`,
     ; work at all.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     extern eval_exception_unwind
     jmp eval_exception_unwind

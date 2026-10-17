@@ -14,7 +14,6 @@ extern obj_decref
 extern str_from_cstr_heap
 extern tuple_new
 extern tuple_type
-extern current_exception
 extern dict_copy_shallow
 extern dict_new
 extern dict_get
@@ -28,7 +27,6 @@ extern raise_key_error
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_KeyError_type
-extern kw_names_pending
 extern tuple_type_call
 extern dict_type
 extern obj_dealloc
@@ -305,12 +303,12 @@ DEF_FUNC dict_method_update, DU_FRAME
     ; kw_names_pending.  Consume it here so nothing downstream sees it.
     xor eax, eax
     mov [rbp - DU_KWNAMES], rax
-    mov rcx, [rel kw_names_pending]
+    mov rcx, [gs:ThreadState.kw_names_pending]
     test rcx, rcx
     jz .du_have_nkw
     mov [rbp - DU_KWNAMES], rcx
     mov rax, [rcx + PyTupleObject.ob_size]
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 .du_have_nkw:
     mov [rbp - DU_NKW], rax
     sub rsi, rax

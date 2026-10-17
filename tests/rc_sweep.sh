@@ -52,7 +52,18 @@ set -u
 
 SIDE=${1:-ap}
 APYTHON=${APYTHON:-./apython}
-PYTHON=${PYTHON:-python3}
+# The control.  It must be the CPython that $CPYTHON_LIB belongs to: the
+# system python3 is an older 3.12 point release, and run over a newer Lib/
+# it segfaulted or hung on a dozen modules (test_typing, test_list,
+# test_exceptions, test_fstring among them) that apython passed -- which
+# made the gap read SMALLER than it is.  Build the checkout out of tree,
+#   mkdir ~/tmp/cpython-build && cd ~/tmp/cpython-build &&
+#   ../repo/cpython/configure && make -j
+# and this picks it up; python3 is the fallback when there is none.
+CPYTHON_BIN=${CPYTHON_BIN:-$HOME/tmp/cpython-build/python}
+if [ -z "${PYTHON:-}" ]; then
+    if [ -x "$CPYTHON_BIN" ]; then PYTHON=$CPYTHON_BIN; else PYTHON=python3; fi
+fi
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$TESTDIR")"
 CPYTHON_LIB=${CPYTHON_LIB:-$HOME/tmp/repo/cpython/Lib}

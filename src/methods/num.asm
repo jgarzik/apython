@@ -16,7 +16,6 @@ extern ap_free
 extern ap_strcmp
 extern str_from_cstr
 extern str_require_str
-extern kw_names_pending
 extern obj_decref
 extern obj_dealloc
 extern str_new_heap
@@ -398,7 +397,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     ; pickle calls it with byteorder= spelled out.  Taking only signed= here
     ; made every such call a TypeError.  The keyword values sit in the
     ; trailing argument slots.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .itb_positional
     mov rcx, [rax + PyTupleObject.ob_size]      ; n_kw
@@ -491,7 +490,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
 
 .itb_kw_done:
     mov r12, r8                                 ; only the positionals remain
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
 .itb_positional:
     cmp r12, 1
@@ -749,7 +748,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     ; pickle spells byteorder= out.  Taking only signed= here made every such
     ; call a TypeError.  The keyword values sit in the trailing argument
     ; slots.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .ifb_no_kw
     mov rcx, [rax + PyTupleObject.ob_size]
@@ -841,7 +840,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
 
 .ifb_kw_done:
     mov rsi, r8                     ; only the positionals remain
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     cmp rsi, 2
     jge .ifb_no_kw
     cmp qword [rbp - IFB_BYTESKW], 0

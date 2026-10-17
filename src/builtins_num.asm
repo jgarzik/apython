@@ -34,7 +34,6 @@ extern obj_repr
 extern obj_decref
 extern raise_exception
 extern exc_new
-extern current_exception
 extern eval_exception_unwind
 extern int_promote_mpz
 
@@ -51,7 +50,6 @@ extern exc_TypeError_type
 extern exc_ValueError_type
 extern dunder_lookup
 extern builtin_int_fn
-extern kw_names_pending
 extern ap_strcmp
 
 ;; ============================================================================
@@ -504,7 +502,7 @@ DEF_FUNC int_type_call, ITC_FRAME
     mov rdi, rsi
     mov rsi, rdx
     ; Check for keyword args
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .itc_no_kw
     ; Have keyword args — get count
@@ -547,7 +545,7 @@ DEF_FUNC int_type_call, ITC_FRAME
     jne .itc_kw_no_pos          ; base= without positional string → TypeError
     ; Good: int('str', base=N) — args are already [str, base], nargs=2
     ; Clear kw_names_pending (we consumed it)
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     leave
     jmp builtin_int_fn
 .itc_kw_no_pos:
@@ -563,14 +561,14 @@ END_FUNC int_type_call
 
 DEF_FUNC_BARE bool_type_call
     ; Check for kwargs — bool() doesn't accept keyword arguments
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jnz .bool_kwargs_error
     mov rdi, rsi
     mov rsi, rdx
     jmp builtin_bool
 .bool_kwargs_error:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     extern exc_TypeError_type
     extern raise_exception
     RAISE exc_TypeError_type, "bool() takes no keyword arguments"
@@ -1704,7 +1702,7 @@ CTC_VAL   equ 16
 CTC_FRAME equ 16            ; + 0 pushes = 16
 
 DEF_FUNC complex_type_call, CTC_FRAME
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [gs:ThreadState.kw_names_pending], 0
     jne .ctc_kwargs
     mov [rbp - CTC_TYPE], rdi
     mov rdi, rsi
@@ -1737,7 +1735,7 @@ DEF_FUNC complex_type_call, CTC_FRAME
     leave
     ret
 .ctc_kwargs:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     RAISE exc_TypeError_type, "complex() takes no keyword arguments"
 END_FUNC complex_type_call
 
@@ -2083,7 +2081,6 @@ extern import_module
 extern dict_get
 extern obj_call_n
 extern exc_DeprecationWarning_type
-extern current_exception
 
 DW_ARGS  equ 24             ; two Values: the message and the category
 DW_MSG   equ 32
@@ -2102,9 +2099,9 @@ DEF_FUNC deprecation_warn, DW_FRAME
     ; the import that is about to run a module body.  A frame slot, not a
     ; push: everything below makes calls, and a lone push would put every one
     ; of them eight bytes out of alignment.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - DW_KW], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     lea rdi, [rel dw_mod_name]
     call str_from_cstr_heap
@@ -2138,7 +2135,7 @@ DEF_FUNC deprecation_warn, DW_FRAME
     mov [rel dw_warn_impl], rax
 
     mov rax, [rbp - DW_KW]
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 
 .dw_have:
     mov rdi, rbx
@@ -2177,11 +2174,11 @@ DEF_FUNC deprecation_warn, DW_FRAME
     ; No _warnings, or no warn in it: say nothing rather than fail.  An
     ; import that raised has to be cleared, or the next opcode would find it.
     mov rax, [rbp - DW_KW]
-    mov [rel kw_names_pending], rax
-    mov rdi, [rel current_exception]
+    mov [gs:ThreadState.kw_names_pending], rax
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .dw_no_module_done
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .dw_no_module_done:
     mov eax, 1

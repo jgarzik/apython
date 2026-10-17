@@ -27,8 +27,6 @@ extern none_singleton
 extern ap_strcmp
 extern str_from_cstr_heap
 extern obj_call_n
-extern current_exception
-extern attr_error_pending
 extern exc_AttributeError_type
 extern type_is_subtype
 extern eval_exception_unwind
@@ -433,7 +431,7 @@ DEF_FUNC module_getattr, MG_FRAME
     ; hasattr(); raise_no_attribute reads attr_error_pending and propagates
     ; this one rather than replacing it, so `m.missing` still reports what the
     ; hook said.  Anything else keeps unwinding.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .mg_really_not_found
     mov rdi, [rax + PyObject.ob_type]
@@ -441,7 +439,7 @@ DEF_FUNC module_getattr, MG_FRAME
     call type_is_subtype
     test eax, eax
     jz .mg_hook_unwind
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
     RET_NULL
     pop r12
     pop rbx
@@ -628,15 +626,16 @@ DEF_FUNC module_repr, MR_FRAME
     call rbt_append_cstr
     jmp .mr_done
 .mr_from:
-    lea rsi, [rel mod_repr_from]
-    call rbt_append_cstr
-    mov rdi, rax
+    ; A path has no length limit, and the shared buffer's pieces stop at
+    ; eighty characters -- a project a few directories deep printed its
+    ; module as "...src/pk'>".  So this form is assembled from strings:
+    ; CPython's "<module %R from %R>", the repr of the name and of the path.
+    mov rdi, rbx
     mov rsi, [rbp - MR_FILE]
-    lea rsi, [rsi + PyStrObject.data]
-    call rbt_append_cstr
-    mov rdi, rax
-    lea rsi, [rel mod_repr_close]
-    call rbt_append_cstr
+    call module_repr_from
+    pop rbx
+    leave
+    ret
 .mr_done:
     call obj_repr_buf_str
     mov edx, TAG_PTR
@@ -644,6 +643,92 @@ DEF_FUNC module_repr, MR_FRAME
     leave
     ret
 END_FUNC module_repr
+
+;; ============================================================================
+;; module_repr_from(rdi = a module, rsi = its __file__ str)
+;;   -> rax = "<module 'name' from '/path'>", edx = TAG_PTR
+;; ============================================================================
+MRF_MOD   equ 8
+MRF_FILE  equ 16
+MRF_ACC   equ 24                ; the string so far
+MRF_FRAME equ 32
+DEF_FUNC_LOCAL module_repr_from, MRF_FRAME
+    mov [rbp - MRF_MOD], rdi
+    mov [rbp - MRF_FILE], rsi
+    lea rdi, [rel mod_repr_open_r]
+    call str_from_cstr_heap
+    mov [rbp - MRF_ACC], rax
+    mov rax, [rbp - MRF_MOD]
+    mov rdi, [rax + PyModuleObject.mod_name]
+    test rdi, rdi
+    jnz .mrf_named
+    lea rdi, [rel mod_repr_unknown]
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call obj_repr
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    jmp .mrf_add_name
+.mrf_named:
+    call obj_repr
+.mrf_add_name:
+    mov rdi, [rbp - MRF_ACC]
+    mov rsi, rax
+    call mrf_append
+    mov [rbp - MRF_ACC], rax
+    lea rdi, [rel mod_repr_from_r]
+    call str_from_cstr_heap
+    mov rdi, [rbp - MRF_ACC]
+    mov rsi, rax
+    call mrf_append
+    mov [rbp - MRF_ACC], rax
+    mov rdi, [rbp - MRF_FILE]
+    call obj_repr
+    mov rdi, [rbp - MRF_ACC]
+    mov rsi, rax
+    call mrf_append
+    mov [rbp - MRF_ACC], rax
+    lea rdi, [rel mod_repr_close_r]
+    call str_from_cstr_heap
+    mov rdi, [rbp - MRF_ACC]
+    mov rsi, rax
+    call mrf_append
+    mov edx, TAG_PTR
+    leave
+    ret
+END_FUNC module_repr_from
+
+;; ============================================================================
+;; mrf_append(rdi = a str, owned, rsi = a str, owned) -> rax = the two
+;;   concatenated; both references released
+;; ============================================================================
+MRA_A     equ 8
+MRA_B     equ 16
+MRA_FRAME equ 16
+DEF_FUNC_LOCAL mrf_append, MRA_FRAME
+    mov [rbp - MRA_A], rdi
+    mov [rbp - MRA_B], rsi
+    mov ecx, TAG_PTR
+    extern str_concat
+    call str_concat
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MRA_A]
+    call obj_decref
+    mov rdi, [rbp - MRA_B]
+    call obj_decref
+    add rsp, 8
+    pop rax
+    leave
+    ret
+END_FUNC mrf_append
 
 ;; ============================================================================
 ;; Data
@@ -658,6 +743,9 @@ mod_repr_unknown: db "?", 0
 mod_repr_builtin: db "' (built-in)>", 0
 mod_repr_plain:   db "'>", 0
 mod_repr_from:    db "' from '", 0
+mod_repr_open_r:  db "<module ", 0
+mod_repr_from_r:  db " from ", 0
+mod_repr_close_r: db ">", 0
 mod_repr_close:   db "'>", 0
 module_type_name: db "module", 0
 ma_dunder_dict: db "__dict__", 0
@@ -784,7 +872,6 @@ END_FUNC namespace_new
 ;;
 ;; CPython takes keywords only, and says so.
 ;; ============================================================================
-extern kw_names_pending
 NTC_TYPE  equ 8
 NTC_NS    equ 16
 NTC_ARGS  equ 24
@@ -799,9 +886,9 @@ DEF_FUNC namespace_type_call, NTC_FRAME
 
     ; The keywords, taken now: a tp_new is expected to consume them, and
     ; type_call hands __init__ its own saved copy.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - NTC_KW], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     xor ecx, ecx
     test rax, rax
     jz .ntc_no_kw

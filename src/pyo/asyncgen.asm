@@ -38,7 +38,6 @@ extern exc_StopIteration_type
 extern exc_RuntimeError_type
 extern exc_GeneratorExit_type
 extern exc_StopAsyncIteration_type
-extern current_exception
 extern eval_exception_unwind
 extern builtin_func_new
 extern type_is_subtype
@@ -137,16 +136,16 @@ DEF_FUNC ags_iternext
     ; cleared for the duration of the resume so that a NULL result means the
     ; body raised and nothing else, and put back if it did not.
     push rax
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     push rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call eval_frame
     pop rcx
     ; An exception the async generator body raised is the result, and
     ; restoring over it ended the iteration silently.
     test rax, rax
     jz .agsend_raised
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     jmp .agsend_settled
 .agsend_raised:
     test rcx, rcx
@@ -213,7 +212,6 @@ DEF_FUNC ags_iternext
 ;; -- and unwind with it, which is how that arm reaches END_ASYNC_FOR too.
 .agsi_body_raised:
     extern eval_exception_unwind
-    extern eval_saved_r13
     add rsp, 8                  ; the scratch pushed before eval_frame
     mov qword [r12 + PyGenObject.gi_running], 0
     mov rdi, [r12 + PyGenObject.gi_frame]
@@ -226,7 +224,7 @@ DEF_FUNC ags_iternext
     pop r12
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .agsi_yielded:
@@ -498,7 +496,7 @@ DEF_FUNC agt_iternext, AGT_FRAME
     ; is pending and belongs to the awaiting frame; if it swallowed it and
     ; returned, the athrow ends the way an exhausted iteration does.
     mov dword [rbx + AsyncGenASend.ags_state], 2
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .agt_null
     lea rdi, [rel exc_StopAsyncIteration_type]
     xor esi, esi
@@ -609,136 +607,29 @@ END_FUNC _agen_aclose_impl
 ;; agen.athrow(exc), the other half of aclose above: the same awaitable,
 ;; carrying the exception rather than the GeneratorExit aclose implies.
 ;; ============================================================================
-AAT_EXC   equ 8             ; the exception, across the receiver check
+AAT_EXC   equ 8             ; the exception throw_args_exc settled on
 AAT_OWNED equ 16            ; non-zero when AAT_EXC is a reference of ours
-AAT_N     equ 24            ; the argument count, likewise
-AAT_ARGS  equ 32            ; and the array
-AAT_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+AAT_RECV  equ 24            ; the async generator
+AAT_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
-    ; CPython takes athrow(typ[, val[, tb]]): the two- and three-argument
-    ; spellings are deprecated but its own test_asyncgen uses them, and the
-    ; value is what the type is CALLED with.  The traceback is accepted and
-    ; ignored, as it is nowhere else in this tree either.
-    cmp rsi, 2
-    jl .arity
-    cmp rsi, 4
-    jg .arity
-    mov qword [rbp - AAT_OWNED], 0
-    cmp rsi, 2
-    jle .not_deprecated
-    ; CPython warns before it does anything else, and a suite that turns
-    ; warnings into errors reads that as the deprecation firing.
-    mov [rbp - AAT_EXC], rdi
-    lea rdi, [rel aat_deprecated]
-    extern deprecation_warn
-    call deprecation_warn
-    mov rdi, [rbp - AAT_EXC]
-    test eax, eax
-    jz .raised                  ; a filter made it an error
-.not_deprecated:
-    mov [rbp - AAT_N], rsi      ; the count, across every call below
-    mov rax, [rdi + 8]          ; the exception or its type, borrowed
-    mov [rbp - AAT_EXC], rax    ; a frame slot: a lone push left both calls
-                                ; below, and ap_malloc under the second, eight
-                                ; bytes out
-    mov [rbp - AAT_ARGS], rdi
-
-    ; It has to BE an exception class or instance.  gen_throw is going to
-    ; raise it, and the type_call below would otherwise jump through whatever
-    ; sits at tp_call in an object of another shape -- `athrow(5, 6)` was a
-    ; segfault from ordinary Python.
-    V_TEST_PTR rax, rcx
-    ja .not_an_exception
-    test rax, rax
-    jz .not_an_exception
-    mov rcx, [rax + PyObject.ob_type]
-    extern type_type
-    lea rdx, [rel type_type]
-    cmp rcx, rdx
-    je .athrow_class
-    extern exc_metatype
-    lea rdx, [rel exc_metatype]
-    cmp rcx, rdx
-    je .athrow_class
-    extern user_type_metatype
-    lea rdx, [rel user_type_metatype]
-    cmp rcx, rdx
-    je .athrow_class
-
-    ; An INSTANCE: its type must derive from BaseException, and a separate
-    ; value is refused rather than used.
-    mov rdi, rcx
-    extern type_is_exc_subclass
-    call type_is_exc_subclass
-    test eax, eax
-    jz .not_an_exception
-    cmp qword [rbp - AAT_N], 3
-    jl .have_exc
-    mov rdi, [rbp - AAT_ARGS]
-    mov rdx, [rdi + 16]
-    lea rcx, [rel none_singleton]
-    cmp rdx, rcx
-    je .have_exc
-    test rdx, rdx
-    jz .have_exc
-    RAISE exc_TypeError_type, "instance exception may not have a separate value"
-
-.athrow_class:
-    mov rdi, rax
-    call type_is_exc_subclass
-    test eax, eax
-    jz .not_an_exception
-    cmp qword [rbp - AAT_N], 3
-    jl .have_exc
-    mov rdi, [rbp - AAT_ARGS]
-    mov rdx, [rdi + 16]         ; the value
-    lea rcx, [rel none_singleton]
-    cmp rdx, rcx
-    je .have_exc
-    test rdx, rdx
-    jz .have_exc
-
-    ; A value that is ALREADY an instance of the class is the exception, not
-    ; an argument to build one from -- _PyErr_SetObject's rule, and without it
-    ; `athrow(ValueError, ValueError('z'))` raised ValueError(ValueError('z')).
-    V_TEST_PTR rdx, rcx
-    ja .athrow_build
-    test rdx, rdx
-    jz .athrow_build
-    push rdx
-    sub rsp, 8
-    mov rdi, [rdx + PyObject.ob_type]
-    mov rsi, [rbp - AAT_EXC]
-    extern type_is_subtype
-    call type_is_subtype
-    add rsp, 8
-    pop rdx
-    test eax, eax
-    jz .athrow_build
-    mov [rbp - AAT_EXC], rdx
-    jmp .have_exc
-
-.athrow_build:
-    ; typ(val), which is what CPython's _PyErr_CreateException does with the
-    ; pair.  Its reference is this function's until async_gen_athrow_new takes
-    ; one of its own.
-    mov rdi, [rbp - AAT_EXC]
-    lea rsi, [rbp - AAT_ARGS]
-    mov rsi, [rsi]
-    add rsi, 16
-    mov edx, 1
-    extern type_call
-    call type_call
-    test rax, rax
-    jz .raised
-    mov [rbp - AAT_EXC], rax
-    mov qword [rbp - AAT_OWNED], 1
-
-.have_exc:
-    mov rdi, [rbp - AAT_ARGS]
+    ; The receiver first, as a method descriptor checks it: nothing below
+    ; should be built for an object that cannot take it.
+    mov [rbp - AAT_RECV], rsi           ; nargs, across the check
+    mov [rbp - AAT_EXC], rdi            ; args, likewise
     mov rdi, [rdi]
     call _agen_check_receiver
-    mov rsi, [rbp - AAT_EXC]
+    mov rdi, [rbp - AAT_EXC]
+    mov rsi, [rbp - AAT_RECV]
+    mov [rbp - AAT_RECV], rax
+    add rdi, 8                          ; self is not one of them
+    dec rsi
+    lea rdx, [rel aat_name]
+    lea rcx, [rel aat_deprecated]
+    call throw_args_exc
+    mov [rbp - AAT_EXC], rax
+    mov [rbp - AAT_OWNED], rdx
+    mov rdi, [rbp - AAT_RECV]
+    mov rsi, rax
     call async_gen_athrow_new
     cmp qword [rbp - AAT_OWNED], 0
     je .out
@@ -751,45 +642,198 @@ DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
 .out:
     leave
     ret
+END_FUNC _agen_athrow_impl
+
+;; ============================================================================
+;; throw_args_exc(rdi = the arguments after self, rsi = how many,
+;;                rdx = the method's name, a C string,
+;;                rcx = the deprecation message, a C string)
+;;   -> rax = the exception, a class or an instance; edx = 1 when rax is a
+;;      new reference the caller must drop, 0 when it is borrowed from args
+;;
+;; The argument handling generator.throw(), coroutine.throw() and
+;; agen.athrow() share -- CPython's _gen_throw: typ[, val[, tb]], the two
+;; longer spellings deprecated, the traceback accepted (None or a traceback)
+;; and otherwise ignored as it is everywhere else in this tree, and the pair
+;; normalized the way PyErr_NormalizeException does.  A class with no value
+;; is answered as the class; the thrower instantiates it.
+;;
+;; Does not return on failure: every refusal raises.
+;; ============================================================================
+TA_ARGS  equ 8
+TA_N     equ 16
+TA_NAME  equ 24
+TA_EXC   equ 32             ; typ, borrowed until something is built
+TA_VAL   equ 40             ; val, or 0 for absent / None
+TA_FRAME equ 48             ; + 0 pushes = 48, 16-aligned
+global throw_args_exc
+DEF_FUNC throw_args_exc, TA_FRAME
+    mov [rbp - TA_ARGS], rdi
+    mov [rbp - TA_N], rsi
+    mov [rbp - TA_NAME], rdx
+    mov qword [rbp - TA_VAL], 0
+    cmp rsi, 1
+    jl .arity
+    cmp rsi, 3
+    jg .arity
+    mov rax, [rdi]
+    mov [rbp - TA_EXC], rax
+    cmp rsi, 1
+    je .classify
+
+    ; CPython warns before it does anything else, and a suite that turns
+    ; warnings into errors reads that as the deprecation firing.  The warning
+    ; runs Python code: nothing may be live in a register across it.
+    mov rdi, rcx
+    call deprecation_warn
+    test eax, eax
+    jz .raised                  ; a filter made it an error
+    mov rdi, [rbp - TA_ARGS]
+    mov rax, [rdi + 8]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .no_value                ; None is no value at all
+    mov [rbp - TA_VAL], rax
+.no_value:
+    cmp qword [rbp - TA_N], 3
+    jl .classify
+    mov rax, [rdi + 16]         ; the traceback: None, or one
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .classify
+    V_TEST_PTR rax, rcx
+    ja .bad_tb
+    test rax, rax
+    jz .bad_tb
+    mov rcx, [rax + PyObject.ob_type]
+    extern traceback_type
+    lea rdx, [rel traceback_type]
+    cmp rcx, rdx
+    jne .bad_tb
+
+.classify:
+    ; It has to BE an exception class or instance.  The thrower is going to
+    ; raise it, and a type_call would otherwise jump through whatever sits at
+    ; tp_call in an object of another shape -- `athrow(5, 6)` was a segfault
+    ; from ordinary Python.  A class is anything whose type is a metatype,
+    ; not one of the three metatypes we ship by pointer.
+    mov rax, [rbp - TA_EXC]
+    V_TEST_PTR rax, rcx
+    ja .not_an_exception
+    test rax, rax
+    jz .not_an_exception
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jnz .a_class
+
+    ; An INSTANCE: its type must derive from BaseException, and a separate
+    ; value is refused rather than used.
+    mov rdi, rcx
+    call type_is_exc_subclass
+    test eax, eax
+    jz .not_an_exception
+    cmp qword [rbp - TA_VAL], 0
+    jne .separate_value
+    jmp .borrowed
+
+.a_class:
+    mov rdi, rax
+    call type_is_exc_subclass
+    test eax, eax
+    jz .not_an_exception
+    mov rdx, [rbp - TA_VAL]
+    test rdx, rdx
+    jz .borrowed
+
+    ; A value that is ALREADY an instance of the class is the exception, not
+    ; an argument to build one from -- _PyErr_SetObject's rule, and without it
+    ; `athrow(ValueError, ValueError('z'))` raised ValueError(ValueError('z')).
+    V_TEST_PTR rdx, rcx
+    ja .build_one
+    mov rdi, [rdx + PyObject.ob_type]
+    mov rsi, [rbp - TA_EXC]
+    call type_is_subtype
+    test eax, eax
+    jz .not_instance
+    mov rax, [rbp - TA_VAL]
+    mov [rbp - TA_EXC], rax
+    jmp .borrowed
+
+.not_instance:
+    ; A tuple is the argument list, anything else the one argument.
+    mov rdx, [rbp - TA_VAL]
+    mov rdi, [rdx + PyObject.ob_type]
+    extern tuple_type
+    lea rsi, [rel tuple_type]
+    call type_is_subtype
+    test eax, eax
+    jz .build_one
+    mov rdx, [rbp - TA_VAL]
+    mov rdi, [rbp - TA_EXC]
+    mov rsi, [rdx + PyTupleObject.ob_item]
+    mov rdx, [rdx + PyTupleObject.ob_size]
+    jmp .build
+.build_one:
+    mov rdi, [rbp - TA_EXC]
+    lea rsi, [rbp - TA_VAL]     ; a one-Value array
+    mov edx, 1
+.build:
+    call type_call
+    test rax, rax
+    jz .raised
+    mov edx, 1                  ; ours: the caller drops it
+    leave
+    ret
+
+.borrowed:
+    mov rax, [rbp - TA_EXC]
+    xor edx, edx
+    leave
+    ret
 
 .raised:
-    ; The type refused the value; its exception is the caller's.
-    extern eval_exception_unwind
+    ; The warning filter or the type refused; its exception is the caller's.
     leave
     jmp eval_exception_unwind
 
+.separate_value:
+    RAISE exc_TypeError_type, "instance exception may not have a separate value"
+
+.bad_tb:
+    RAISE exc_TypeError_type, "throw() third argument must be a traceback object"
+
 .not_an_exception:
-    mov rsi, [rbp - AAT_EXC]
+    mov rsi, [rbp - TA_EXC]
     CSTRING rdi, `exceptions must be classes or instances deriving from BaseException, not \x01`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name      ; does not return
 
 .arity:
     ; _PyArg_CheckPositional's wording, which names the count it got.
-    dec rsi                     ; self is not one of them
     lea rdi, [rel aat_buf]
-    push rsi
-    sub rsp, 8
-    cmp rsi, 1
-    jl .too_few
-    CSTRING rsi, "athrow expected at most 3 arguments, got "
-    jmp .say
-.too_few:
-    CSTRING rsi, "athrow expected at least 1 argument, got "
-.say:
+    mov rsi, [rbp - TA_NAME]
     extern rbt_append_cstr
     call rbt_append_cstr
-    add rsp, 8
-    pop rsi
     mov rdi, rax
+    cmp qword [rbp - TA_N], 1
+    jl .too_few
+    CSTRING rsi, " expected at most 3 arguments, got "
+    jmp .say
+.too_few:
+    CSTRING rsi, " expected at least 1 argument, got "
+.say:
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - TA_N]
     extern msg_append_i64
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel aat_buf]
     call raise_exception        ; does not return
-END_FUNC _agen_athrow_impl
+END_FUNC throw_args_exc
 
 section .rodata
+aat_name: db "athrow", 0
 aat_deprecated: db "the (type, exc, tb) signature of athrow() is deprecated, use the single-arg signature instead.", 0
 section .bss
 aat_buf: resb 96
@@ -969,7 +1013,7 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     ; NULL means the item is ready, unless the body raised or the generator
     ; is finished -- ags_iternext raises StopAsyncIteration for the second,
     ; and a pending exception is the caller's either way.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .agss_propagate
 
     ; The item, and with it the end of this awaitable: a second send() on the
@@ -1112,7 +1156,7 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
 .agtt_finished:
     mov rcx, [rbp - AGTT_SELF]
     mov dword [rcx + AsyncGenASend.ags_state], 2
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .agtt_stop_iteration
 
     ; aclose() swallows the two exits that mean "it is closed now" and reports
@@ -1123,21 +1167,21 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
     lea rcx, [rel async_gen_athrow_type]
     cmp rdx, rcx
     jne .agtt_propagate
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel exc_GeneratorExit_type]
     call type_is_subtype
     test eax, eax
     jnz .agtt_swallow
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel exc_StopAsyncIteration_type]
     call type_is_subtype
     test eax, eax
     jz .agtt_propagate
 .agtt_swallow:
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .agtt_stop_iteration:

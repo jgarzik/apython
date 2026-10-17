@@ -990,14 +990,14 @@ UNWIND_STOP = re.compile(r'^\s*(?:DISPATCH\b|ret\b|jmp\b|leave\b'
                          r'|RAISE\b|SET_EXC\b|END_FUNC\b)')
 UNWIND_DECREF = re.compile(r'^\s*(?:call\s+obj_decref\b|X?DECREF_V(?:AL)?\b'
                            r'|DECREF_REG\b)')
-UNWIND_PUBLISH = re.compile(r'\[rel\s+eval_saved_r13\]\s*,\s*r13')
+UNWIND_PUBLISH = re.compile(r'\[r12\s*\+\s*PyFrame\.disp_sp\]\s*,\s*r13|^\s*PUBLISH_SP\b')
 
 
 def check_unwind_balance(files):
     """A handler that pops an operand and then RAISEs must not also release it.
 
-    DISPATCH publishes eval_saved_r13 BEFORE the handler runs, and
-    eval_exception_unwind restores r13 from it and XDECREF_Vs every slot down
+    DISPATCH publishes r13 (into PyFrame.disp_sp) BEFORE the handler runs,
+    and eval_exception_unwind restores r13 from it and XDECREF_Vs every slot down
     to the handler's depth.  So a VPOP only moves r13: the slot still holds the
     pointer, and the unwinder is what gives that reference back.  Two rules
     follow, and the tree uses both:
@@ -1056,7 +1056,7 @@ def check_unwind_balance(files):
     if '--record-unwind' in sys.argv:
         with open(UNWIND_FLOOR, 'w') as fh:
             fh.write("# Handlers that pop an operand, release something, and\n"
-                     "# then RAISE without republishing eval_saved_r13, one per\n"
+                     "# then RAISE without republishing r13 (PyFrame.disp_sp), one per\n"
                      "# line as `file handler`.  Every one listed here has been\n"
                      "# read: what it releases is NOT what the unwinder gives\n"
                      "# back.  A ratchet -- lint fails on any site not listed,\n"
@@ -1073,7 +1073,7 @@ def check_unwind_balance(files):
         seen.add(key)
         out.append((key.split()[0], 0, msg,
                     "the unwinder releases the popped slot from "
-                    "eval_saved_r13; either drop the decref or republish r13"))
+                    "PyFrame.disp_sp; either drop the decref or republish r13"))
     return out
 
 

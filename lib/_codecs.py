@@ -1244,11 +1244,13 @@ def utf_7_decode(data, errors=None, final=False):
 
 
 def encode(obj, encoding="utf-8", errors="strict"):
-    return lookup(encoding).encode(obj, errors)[0]
+    # By index, not by name: a search function may answer a plain 4-tuple,
+    # which CPython accepts as readily as a CodecInfo.
+    return lookup(encoding)[0](obj, errors)[0]
 
 
 def decode(obj, encoding="utf-8", errors="strict"):
-    return lookup(encoding).decode(obj, errors)[0]
+    return lookup(encoding)[1](obj, errors)[0]
 
 
 # --- the codecs the built-in search function offers -------------------------

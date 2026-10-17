@@ -63,11 +63,10 @@ extern tuple_type
 extern bytes_type
 extern raise_exception
 extern exc_TypeError_type
+extern exc_ReferenceError_type
 extern bool_true
 extern bool_false
 extern none_singleton
-extern kw_names_pending
-extern current_exception
 extern v_int_bias
 
 section .text
@@ -299,11 +298,11 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jmp .cb_loop
 
 .cb_raised:
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     mov rax, [rbp - WC_EXC]
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     jmp .cb_resume
 
 .cb_done:
@@ -881,10 +880,10 @@ DEF_FUNC ref_construct, WRC_FRAME
     ; entirely; ref.__init__ is what refuses them, and a subclass overriding
     ; __init__ is therefore free to have keywords of its own.  __new__ is
     ; expected to consume the global, and type_call hands __init__ its own copy.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .rc_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     sub rdx, [rax + PyTupleObject.ob_size]
     ; ref ITSELF takes none.  CPython raises that from ref.__init__, which
     ; this tree's type_call does not reach for a static type -- the builtin
@@ -989,7 +988,7 @@ DEF_FUNC ref_dunder_init
     ; ref itself takes no keywords -- `ref(o, callback=cb)` is a TypeError in
     ; CPython, raised HERE rather than in __new__, which is why a subclass
     ; that overrides __init__ never sees this refusal.
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [gs:ThreadState.kw_names_pending], 0
     jne .rdi_kwerror
     cmp rsi, 1
     jl .rdi_error
@@ -1002,7 +1001,7 @@ DEF_FUNC ref_dunder_init
 .rdi_error:
     RAISE exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
 .rdi_kwerror:
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     RAISE exc_TypeError_type, "ref() takes no keyword arguments"
 END_FUNC ref_dunder_init
 
@@ -1084,7 +1083,7 @@ DEF_FUNC_LOCAL proxy_referent
     leave
     ret
 .dead:
-    RAISE exc_TypeError_type, "weakly-referenced object no longer exists"
+    RAISE exc_ReferenceError_type, "weakly-referenced object no longer exists"
 END_FUNC proxy_referent
 
 DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
