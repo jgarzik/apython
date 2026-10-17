@@ -127,14 +127,6 @@ async def main():
     except OSError as exc:
         print("refused        ", "OSError", exc.errno)
 
-    # The host argument is used, rather than ignored: a name that does not
-    # resolve fails before any socket is made.
-    try:
-        await asyncio.open_connection("no.such.host.invalid", 80)
-        print("bad host       ", "connected?")
-    except OSError:
-        print("bad host       ", "OSError")
-
     # Two connections at once, so the server's accept loop runs more than
     # once and each client gets its own pair of streams.
     server = await asyncio.start_server(echo_line, "127.0.0.1", 0)

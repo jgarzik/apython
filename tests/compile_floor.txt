@@ -188,6 +188,7 @@ test_control_flow
 test_converter_dunders
 test_copyreg
 test_coro_bound_methods
+test_coro_throw_traceback
 test_crash_regressions
 test_csv
 test_data_descriptor_precedence
@@ -532,6 +533,7 @@ test_ordereddict
 test_ordering_typeerror
 test_oserror
 test_os_write_buffer
+test_path_arg_refusals
 test_pep646
 test_pep695_classdict
 test_pep695_generic_class
@@ -753,6 +755,7 @@ test_sys_exit
 test_sys_is_finalizing
 test_sys_version_platform
 test_termios
+test_throw_handled_context
 test_time_clock_info
 test_time_clocks
 test_time_module
@@ -781,6 +784,7 @@ test_unary
 test_unbound_local
 test_unbound_zero_args
 test_uncallable_bind_lifetime
+test_unexpected_kwarg_message
 test_unicode_case
 test_unicodedata
 test_unicode_names

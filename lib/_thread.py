@@ -166,6 +166,13 @@ class LockType:
     def locked_lock(self):
         return self._locked
 
+    def _at_fork_reinit(self):
+        # What a child of fork() calls on a lock its parent held: the thread
+        # that held it does not exist in the child, so it is simply unlocked.
+        # concurrent.futures.thread registers it at import, which is why its
+        # absence failed the import rather than a fork.
+        self._locked = False
+
     def __repr__(self):
         state = "locked" if self._locked else "unlocked"
         return "<_thread.lock %s>" % state
@@ -195,6 +202,9 @@ class RLock:
 
     def _is_owned(self):
         return self._count > 0
+
+    def _at_fork_reinit(self):
+        self._count = 0
 
     def __repr__(self):
         return "<_thread.RLock count=%d>" % self._count

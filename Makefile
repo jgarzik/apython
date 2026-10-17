@@ -126,8 +126,14 @@ $(TARGET): $(OBJS)
 # importable until they are byte-compiled.  This is part of building the
 # interpreter, not of testing it: `make check` used to run before anything
 # compiled them, so any test that imported one failed on a fresh checkout.
+#
+# stdlib/ is CPython's own Lib/ and compiles in one compileall pass.  Neither
+# is strictly needed any more -- apython compiles a .py it is handed and
+# caches the result under its own apython-312 tag -- but a cold start over the
+# whole standard library is slow, and CPython's bytecode is the reference.
 lib-pyc:
 	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
+	@$(PYTHON) -m compileall -q -j0 stdlib >/dev/null 2>&1 || true
 
 # One rule for every source directory: the stem carries the subdirectory, so
 # src/pyo/dict.asm and src/methods/dict.asm land in different objects.
@@ -139,7 +145,7 @@ build/%.o: src/%.asm $(HEADERS) $(FLAGSTAMP)
 # sources, not build products -- see `regen` below.  clean must never touch them.
 clean:
 	rm -rf build $(TARGET)
-	find lib tests compiler -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+	find lib stdlib tests compiler -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # Test target: compile .py to .pyc, run both python3 and apython, diff
 check: $(TARGET) lib-pyc

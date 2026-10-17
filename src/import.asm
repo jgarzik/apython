@@ -439,12 +439,19 @@ DEF_FUNC import_init
     jmp .pp_entry
 .no_pythonpath:
 
-    ; The modules apython ships itself, last.  They are found relative to the
-    ; interpreter binary rather than the working directory -- a relative "lib"
-    ; entry only resolved when apython happened to be run from its own source
-    ; tree, so `import itertools` worked there and nowhere else.  Last, so a
-    ; real stdlib named by PYTHONPATH wins: these stand in for CPython's C
-    ; modules, not for its Python ones.
+    ; The library apython ships, last, and found relative to the interpreter
+    ; binary rather than the working directory -- a relative "lib" entry only
+    ; resolved when apython happened to be run from its own source tree, so
+    ; `import itertools` worked there and nowhere else.
+    ;
+    ; Two directories, in this order.  stdlib/ is CPython's own Lib/,
+    ; unmodified; lib/ is what stands in for CPython's C modules (_io,
+    ; _socket, _thread, ...).  The stand-ins come SECOND so that no name in
+    ; lib/ can shadow a CPython module of the same name: a module that needs
+    ; to differ from CPython's is a bug or a C module, and either way it does
+    ; not belong ahead of the real one.
+    lea rdi, [rel im_stdlib_path]
+    call import_add_exe_relative_path
     lea rdi, [rel im_lib_path]
     call import_add_exe_relative_path
     lea rdi, [rel im_tests_cpython_path]
@@ -3072,6 +3079,7 @@ im_not_pkg_tail:    db "' is not a package", 0
 im_halted_prefix:    db "import of ", 0
 im_halted_suffix:    db " halted; None in sys.modules", 0
 irr_package_key:    db "__package__", 0
+im_stdlib_path:     db "stdlib", 0
 im_lib_path:        db "lib", 0
 im_tests_cpython_path: db "tests/cpython", 0
 im_builtins:        db "builtins", 0

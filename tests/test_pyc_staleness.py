@@ -3,7 +3,7 @@
 A .pyc records the source's mtime and size in its header, and CPython refuses
 one that no longer matches.  Without that check, editing a module and running
 it again silently runs the old code -- which is what happened here, and what
-makes the compiled `lib/` a trap rather than a cache the moment one of its
+makes the compiled `stdlib/` a trap rather than a cache the moment one of its
 sources is touched by hand.
 
 The cache this needs is built by copying one that already exists rather than
@@ -17,8 +17,8 @@ for.
 import os
 import sys
 
-SRC = os.path.join("lib", "stat.py")
-CACHE = os.path.join("lib", "__pycache__", "stat.cpython-312.pyc")
+SRC = os.path.join("stdlib", "stat.py")
+CACHE = os.path.join("stdlib", "__pycache__", "stat.cpython-312.pyc")
 
 root = "_staletree"
 cachedir = os.path.join(root, "__pycache__")

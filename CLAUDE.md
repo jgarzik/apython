@@ -8,6 +8,12 @@ Python 3.12 implementation in x86-64 NASM assembly: a bytecode interpreter, and
 a compiler for the source language written in the same assembly.  Reads `.py`
 through `src/compiler/`, or `.pyc` through the marshal reader.
 
+The standard library is CPython's own: `stdlib/` is CPython 3.12's `Lib/`,
+unmodified, copied by `tools/vendor_stdlib.sh` (the tag is in
+`stdlib/VENDORED`).  What CPython writes in C is assembly here, or Python in
+`lib/`, which comes AFTER `stdlib/` on `sys.path` so nothing in it can shadow
+a CPython module.  Never edit `stdlib/`; re-vendor it.
+
 ## Build & Test
 
 ```bash
@@ -36,9 +42,11 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
 `make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh` and
-`tests/arity_probe.sh`; it reports more results than there are files because
-the async tests run against the default, poll and io_uring backends; `make check-cpython` runs everything under `tests/cpython/`, none of
-it tolerated as failing.
+`tests/arity_probe.sh`.  A test listed in `tests/known_failures.txt` is
+reported XFAIL, with the reason and the phase that fixes it written beside
+it, and FAILS the run if it starts passing -- so the entry leaves in the
+commit that earns it.  `make check-cpython` runs everything under
+`tests/cpython/`, none of it tolerated as failing.
 
 `make check-source` and `make check-cpython-source` hand apython the `.py`
 instead of the `.pyc`, so our own compiler produces the bytecode.  They are the
@@ -52,7 +60,7 @@ opcode.
 They use different oracles, because their corpora differ.  `check-source` diffs
 against `python3`: those tests print, and CPython is the reference.
 `check-cpython-source` diffs against **the same file run from its `.pyc`** --
-same interpreter, same `lib/unittest.py`, and the only difference is which
+same interpreter, same `unittest`, and the only difference is which
 compiler produced the bytecode.  It cannot use `python3`: this corpus drives our
 own `unittest`, whose progress output differs by design, and two of its files
 import `test.seq_tests` / `test.test_grammar`, which ship in `lib/` and which a
@@ -314,18 +322,19 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   written against.  What it buys over `lib/_sha2.py` and its siblings is
   `pbkdf2_hmac` and `scrypt`, which have no honest Python form at the
   iteration counts anyone uses, and the speed to hash gigabytes.
-  `lib/hashlib.py` decides the routing: OpenSSL for twelve of the fourteen,
-  and `lib/_blake2.py` for blake2b and blake2s always, because OpenSSL's
-  BLAKE2 supports neither keying nor the tree parameters
+  CPython's own `hashlib.py` decides the routing: OpenSSL for twelve of the
+  fourteen, and `lib/_blake2.py` for blake2b and blake2s always, because
+  OpenSSL's BLAKE2 supports neither keying nor the tree parameters
 - `src/modules/socket.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and
   `lib/select.py`, the same split as `_iocore`/`lib/_io.py`
 - `src/pyo/asyncmod.asm` — the `_asynciocore` module: the task type, the
   event loop, `run`, `sleep`, `gather`, `wait_for`, `create_task`, and
-  `wait_fd`, the one primitive the stream layer needs.  `lib/asyncio.py` is
-  the other half, and the streams are Python over `lib/_socket.py` -- the
-  same split as `_iocore`/`lib/_io.py`
+  `wait_fd`.  Nothing reaches it any more: `asyncio` is CPython's package,
+  over `selectors`, since the standard library became CPython's own.  It is
+  kept for a fast event loop to offer through the loop-policy API later, and
+  is otherwise dead weight
 - `src/itertools.asm` — the *iterator builtins* (`enumerate`, `zip`, `map`,
   `filter`, `reversed`, `sorted`, `chain`, `get_iterator`), not the `itertools`
   module, which is `lib/itertools.py`

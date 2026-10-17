@@ -69,7 +69,7 @@ bm_n_lzmacore: db "_lzmacore", 0
 bm_n_unicodedata: db "unicodedata", 0
 bm_n_socket:   db "_socketcore", 0
 bm_n_marshal:  db "marshal", 0
-bm_n_signal:   db "_signal", 0
+bm_n_signal:   db "_signalcore", 0
 bm_n_zlib:     db "_zlibcore", 0
 bm_n_hashlib:  db "_hashlibcore", 0
 bm_n_pyexpat:  db "_pyexpatcore", 0

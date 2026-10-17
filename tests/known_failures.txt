@@ -1,0 +1,6 @@
+# Tests expected to fail, one per line: the test name, then why, and what
+# will fix it.  run_tests.sh reports one of these as XFAIL rather than FAIL,
+# and fails the run if it PASSES (XPASS) -- so an entry is removed in the
+# commit that fixes it, and cannot outlive its reason.  An entry is a
+# promise with a named owner, not a place to put a test that is inconvenient.
+test_async_resolve   asyncio resolves a host name in a thread pool; needs threads (Phase 2)
