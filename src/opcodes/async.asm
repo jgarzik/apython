@@ -815,6 +815,12 @@ DEF_FUNC_BARE op_cleanup_throw
     ; XDECREF_VAL items when adjusting to the next handler's depth)
     INCREF rax
     mov [rel current_exception], rax
+    ; No traceback entry: the throw that reached this handler already
+    ; recorded this frame, and CPython's CLEANUP_THROW goes straight to
+    ; exception_unwind rather than through the label that records one.
+    ; Without this every frame delegating a throw appeared twice.
+    extern tb_suppress_frame
+    mov byte [rel tb_suppress_frame], 1
     jmp eval_exception_unwind
 END_FUNC op_cleanup_throw
 
