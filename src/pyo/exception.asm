@@ -722,7 +722,36 @@ DEF_FUNC exc_getattr
     call ap_strcmp
     test eax, eax
     jz .eg_import_default
+    lea rdi, [r12 + PyStrObject.data]
+    CSTRING rsi, "msg"
+    call ap_strcmp
+    test eax, eax
+    jz .eg_import_msg
     jmp .eg_really_not_found
+
+.eg_import_msg:
+    ; ImportError.msg, a C member in CPython: args[0] when there is exactly
+    ; one argument, else None.  An assigned msg is in exc_dict, found above.
+    ; numpy's import-time fallback reads it off the ImportError it catches.
+    mov rdi, rbx
+    lea rsi, [rel exc_ImportError_type]
+    call exc_isinstance
+    test eax, eax
+    jz .eg_really_not_found
+    mov rax, [rbx + PyExceptionObject.exc_args]
+    test rax, rax
+    jz .return_none
+    cmp qword [rax + PyTupleObject.ob_size], 1
+    jne .return_none
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax]
+    INCREF_V rax, rcx
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .eg_name_default:
     ; `name` belongs to both, so ask about AttributeError and fall through to
@@ -2644,7 +2673,12 @@ exc_metatype:
     dq 0                    ; tp_hash
     dq exc_type_call        ; tp_call  <-- enables CALL on exception types
     dq type_getattr         ; tp_getattr — enables __name__ etc.
-    dq 0                    ; tp_setattr
+    ; type_setattr, as on every other metatype: it refuses a static type with
+    ; CPython's TypeError ("cannot set 'x' attribute of immutable type
+    ; 'ValueError'") and would store into a heaptype.  With 0 here the
+    ; refusal was op_store_attr's generic AttributeError instead.
+    extern type_setattr
+    dq type_setattr         ; tp_setattr
     dq 0                    ; tp_richcompare
     dq 0                    ; tp_iter
     dq 0                    ; tp_iternext

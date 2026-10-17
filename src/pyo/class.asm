@@ -1065,6 +1065,15 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     lea rdx, [rel user_type_metatype]
     cmp rcx, rdx
     je .twm_next
+    ; exc_metatype is the same stand-in for an exception base: it exists to
+    ; give a builtin exception class its own tp_call, and it has no tp_setattr
+    ; because those classes are immutable.  Electing it here made
+    ; `type("T", (Exception,), {})` a class OF exc_metatype, so every store on
+    ; it -- `T.__module__ = ...` -- was "cannot set attribute".
+    extern exc_metatype
+    lea rdx, [rel exc_metatype]
+    cmp rcx, rdx
+    je .twm_next
     mov [rbp - TWM_ITEM], rcx
     mov rdx, [rbp - TWM_WIN]
     test rdx, rdx
@@ -1117,9 +1126,16 @@ DEF_FUNC type_call
     mov rax, [rax + PyObject.ob_type]
     ; The heaptype metatype is an implementation split, not a language type:
     ; CPython has one `type`, and `type(C) is type` for an ordinary class.
+    ; exc_metatype is the same split for the builtin exception classes, and
+    ; answering it here sent types.new_class("E", (KeyError,)) -- which asks
+    ; type(base) for the metaclass -- to build E with exc_metatype.
     lea rcx, [rel user_type_metatype]
     cmp rax, rcx
+    je .type_of_is_type
+    lea rcx, [rel exc_metatype]
+    cmp rax, rcx
     jne .type_of_have_type
+.type_of_is_type:
     lea rax, [rel type_type]
 .type_of_have_type:
     inc qword [rax + PyObject.ob_refcnt]
