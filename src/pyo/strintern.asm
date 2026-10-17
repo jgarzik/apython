@@ -506,6 +506,40 @@ DEF_FUNC_BARE str_all_name_chars
     ret
 END_FUNC str_all_name_chars
 
+;; ============================================================================
+;; str_is_interned(rdi = PyStrObject*) -> eax = 1 when this very object is the
+;;   one the table holds for its bytes, else 0
+;;
+;; There is no flag on the object: membership IS being the table's resident.
+;; An equal string that is not the resident answers 0, which is CPython's
+;; PyUnicode_CHECK_INTERNED.  marshal's writer asks, so that what it wrote
+;; interned comes back interned.  Never raises, never allocates.
+;; ============================================================================
+SII_SELF  equ 8
+SII_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC str_is_interned, SII_FRAME
+    mov [rbp - SII_SELF], rdi
+    mov rdx, [rdi + PyStrObject.ob_hash]
+    cmp rdx, -1
+    jne .sii_lookup
+    lea rdi, [rdi + PyStrObject.data]
+    mov rsi, [rbp - SII_SELF]
+    mov rsi, [rsi + PyStrObject.ob_size]
+    call str_hash_bytes
+    mov rdx, rax
+.sii_lookup:
+    mov rdi, [rbp - SII_SELF]
+    mov rsi, [rdi + PyStrObject.ob_size]
+    lea rdi, [rdi + PyStrObject.data]
+    call si_lookup
+    xor ecx, ecx
+    cmp rax, [rbp - SII_SELF]
+    sete cl
+    mov eax, ecx
+    leave
+    ret
+END_FUNC str_is_interned
+
 section .rodata
 ;; 1 for the bytes an identifier may be made of.  A byte table is enough
 ;; BECAUSE the answer is no for everything above 0x7f: a name written in a

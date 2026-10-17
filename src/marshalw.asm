@@ -45,6 +45,9 @@ MARSHAL_TYPE_ASCII            equ 0x61
 MARSHAL_TYPE_SMALL_TUPLE      equ 0x29
 MARSHAL_TYPE_SHORT_ASCII      equ 0x7a
 MARSHAL_TYPE_UNICODE          equ 0x75
+MARSHAL_TYPE_INTERNED         equ 0x74
+MARSHAL_TYPE_ASCII_INTERNED   equ 0x41
+MARSHAL_TYPE_SHORT_ASCII_INTERNED equ 0x5a
 MARSHAL_FLAG_REF              equ 0x80
 ; A set's entries are sixteen bytes and a dict's twenty-four; the two share a
 ; header and nothing else.
@@ -57,6 +60,7 @@ extern ap_memcpy
 extern obj_decref
 extern obj_incref
 extern bytes_from_data
+extern str_is_interned
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -617,21 +621,51 @@ DEF_FUNC mw_object, MWO_FRAME
     jmp .mwo_long_digit
 
 .mwo_str:
-    ; 'a' for ASCII, 'u' for anything else; CPython also has the SHORT forms
-    ; with a one-byte length, which its reader accepts either way.  ob_size
-    ; is the BYTE length and ob_length the code points; equal means ASCII.
+    ; CPython's choice, in its order: interned or not, then ASCII or not,
+    ; then for ASCII whether the length fits the SHORT form's one byte.  The
+    ; INTERNED codes are what make the reader intern it again -- without them
+    ; a .pyc we write ourselves hands back identifiers that are not `is` the
+    ; same literal elsewhere.  ob_size is the BYTE length and ob_length the
+    ; code points; equal means ASCII.
     mov rdi, rbx
-    mov esi, MARSHAL_TYPE_UNICODE
+    call str_is_interned
+    mov [rbp - MWO_I], rax              ; 1 = interned
+    mov qword [rbp - MWO_N], 0          ; 1 = the SHORT form's one-byte length
     mov rax, [rbx + PyStrObject.ob_size]
     cmp rax, [rbx + PyStrObject.ob_length]
-    jne .mwo_str_ref
+    jne .mwo_str_unicode
+    cmp rax, 256
+    jae .mwo_str_ascii
+    mov qword [rbp - MWO_N], 1
+    mov esi, MARSHAL_TYPE_SHORT_ASCII
+    cmp qword [rbp - MWO_I], 0
+    je .mwo_str_ref
+    mov esi, MARSHAL_TYPE_SHORT_ASCII_INTERNED
+    jmp .mwo_str_ref
+.mwo_str_ascii:
     mov esi, MARSHAL_TYPE_ASCII
+    cmp qword [rbp - MWO_I], 0
+    je .mwo_str_ref
+    mov esi, MARSHAL_TYPE_ASCII_INTERNED
+    jmp .mwo_str_ref
+.mwo_str_unicode:
+    mov esi, MARSHAL_TYPE_UNICODE
+    cmp qword [rbp - MWO_I], 0
+    je .mwo_str_ref
+    mov esi, MARSHAL_TYPE_INTERNED
 .mwo_str_ref:
+    mov rdi, rbx
     call mw_ref
     test eax, eax
     jnz .mwo_out                        ; a back reference; nothing more
     mov rdi, [rbx + PyStrObject.ob_size]
+    cmp qword [rbp - MWO_N], 0
+    je .mwo_str_long_len
+    call mw_byte
+    jmp .mwo_str_data
+.mwo_str_long_len:
     call mw_long
+.mwo_str_data:
     lea rdi, [rbx + PyStrObject.data]
     mov rsi, [rbx + PyStrObject.ob_size]
     call mw_bytes
