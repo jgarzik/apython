@@ -1427,6 +1427,10 @@ END_FUNC math_ulp
 ;; math's three keyword-taking functions -- prod(start=), isclose(rel_tol=,
 ;; abs_tol=) -- all bind the same way, and nothing else in this module took a
 ;; keyword at all.  An unknown one raises.
+;;
+;; math_bind_kw_named is the same with r8 = the function's name as a C string,
+;; so an unknown keyword is worded as CPython words it:
+;; "'x' is an invalid keyword argument for print()".
 ;; ============================================================================
 MBK_ARGS  equ 8
 MBK_NPOS  equ 16
@@ -1434,9 +1438,20 @@ MBK_NAMES equ 24
 MBK_OUT   equ 32
 MBK_KW    equ 40
 MBK_I     equ 48
-MBK_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
+MBK_FN    equ 56            ; the function's name, or 0 for the bare wording
+MBK_BUF   equ 320           ; the message: four appends of at most 80 bytes
+MBK_FRAME equ 320           ; + 0 pushes = 320, 16-aligned
 global math_bind_kw
-DEF_FUNC math_bind_kw, MBK_FRAME
+DEF_FUNC_BARE math_bind_kw
+    xor r8d, r8d
+    jmp math_bind_kw_named
+END_FUNC math_bind_kw
+
+;; math_bind_kw_named(rdi, rsi, rdx, rcx as math_bind_kw; r8 = the name)
+;;   -> rax = the positional count
+global math_bind_kw_named
+DEF_FUNC math_bind_kw_named, MBK_FRAME
+    mov [rbp - MBK_FN], r8
     mov [rbp - MBK_ARGS], rdi
     mov [rbp - MBK_NPOS], rsi
     mov [rbp - MBK_NAMES], rdx
@@ -1488,12 +1503,36 @@ DEF_FUNC math_bind_kw, MBK_FRAME
     inc qword [rbp - MBK_I]
     jmp .mbk_loop
 .mbk_unknown:
+    cmp qword [rbp - MBK_FN], 0
+    jne .mbk_named
     RAISE exc_TypeError_type, "invalid keyword argument"
+.mbk_named:
+    extern rbt_append_cstr
+    mov [rbp - MBK_KW], r8          ; the offending name, for the message
+    lea rdi, [rbp - MBK_BUF]
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MBK_KW]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' is an invalid keyword argument for "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - MBK_FN]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "()"
+    call rbt_append_cstr
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - MBK_BUF]
+    call raise_exception
 .mbk_done:
     mov rax, [rbp - MBK_NPOS]
     leave
     ret
-END_FUNC math_bind_kw
+END_FUNC math_bind_kw_named
 
 ;; ============================================================================
 ;; math.prod(iterable, *, start=1)

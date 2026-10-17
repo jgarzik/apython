@@ -851,19 +851,28 @@ END_FUNC print_sink_flush
 ;; Buffered: builds output in stack buffer, single fwrite() at end
 ;; ============================================================================
 ; Print frame layout
-PR_SEP       equ 8     ; sep string ptr (0 = default " ")
-PR_SEP_TAG   equ 16    ; sep tag
-PR_END       equ 24    ; end string ptr (0 = default "\n")
-PR_END_TAG   equ 32    ; end tag
+PR_SEP       equ 8     ; sep: a str, or 0 for the default " "
+PR_END       equ 24    ; end: a str, or 0 for the default "\n"
 PR_SINK      equ 40    ; where the text goes: an object, or 0 for "sys.stdout"
 PR_FLUSH     equ 48    ; the flush= keyword, once it means something
 PR_OWNSINK   equ 56    ; 1 when PR_SINK is a reference of ours to release:
                        ; print_sink_resolve hands one over, and `file=` does
                        ; not -- that one is borrowed from the argument array
-PR_FRAME     equ 4168            ; + 5 pushes = 4208, 16-aligned
+; math_bind_kw_named's out slots, one per name in pr_kwnames and in that
+; order, so at ascending addresses
+PR_KW_SEP    equ 96
+PR_KW_END    equ 88
+PR_KW_FILE   equ 80
+PR_KW_FLUSH  equ 72
+PR_FRAME     equ 4200            ; + 5 pushes = 4240, 16-aligned; the 4096-byte
+                                 ; buffer sits below PR_KW_SEP
 
 extern kw_names_pending
 extern ap_strcmp
+extern math_bind_kw_named
+extern obj_is_true
+extern rbt_append_cstr
+extern rbt_typename
 
 
 DEF_FUNC builtin_print, PR_FRAME
@@ -885,129 +894,56 @@ DEF_FUNC builtin_print, PR_FRAME
     mov qword [rbp - PR_OWNSINK], 0
     mov qword [rbp - PR_FLUSH], 0
 
-    ; Check for keyword arguments
-    mov rax, [rel kw_names_pending]
-    test rax, rax
-    jz .print_no_kw
+    ; Check for keyword arguments; none is the fast path
+    cmp qword [rel kw_names_pending], 0
+    je .print_no_kw
 
-    ; Parse kwargs
-    mov rcx, [rax + PyTupleObject.ob_size]  ; n_kw
-    sub r12, rcx                             ; r12 = n_pos (positional count)
-    ; Process each kwarg
-    xor r9d, r9d                             ; kw index
-.print_kw_loop:
-    cmp r9, rcx
-    jge .print_kw_done
-    push rcx
-    push rax
-    push r9
+    ; sep, end, file and flush, and nothing else: an unknown keyword is
+    ; CPython's "'x' is an invalid keyword argument for print()", where it
+    ; used to be skipped without a word.
+    xor eax, eax
+    mov [rbp - PR_KW_SEP], rax
+    mov [rbp - PR_KW_END], rax
+    mov [rbp - PR_KW_FILE], rax
+    mov [rbp - PR_KW_FLUSH], rax
+    mov rdi, rbx
+    mov rsi, r12
+    lea rdx, [rel pr_kwnames]
+    lea rcx, [rbp - PR_KW_SEP]
+    lea r8, [rel pr_kw_fn]
+    call math_bind_kw_named
+    mov r12, rax                ; r12 = n_pos
 
-    ; Get kwarg name
-    mov r10, [rax + PyTupleObject.ob_item]        ; kw names payloads
-    mov r10, [r10 + r9*8]                          ; kw name str
-
-    ; Get kwarg value position: n_pos + kw_index
-    mov r11, r12                   ; n_pos
-    add r11, r9                    ; n_pos + kw_index
-    shl r11, 3                     ; one Value per slot
-    ; value at [rbx + r11]
-
-    ; Check "sep"
-    push r10
-    push r11
-    lea rdi, [r10 + PyStrObject.data]
+    ; sep and end: None or a str (a subclass too), checked before anything
+    ; is written, as CPython does.  None is the default, which is the 0 the
+    ; slot already holds.
+    mov rdi, [rbp - PR_KW_SEP]
     CSTRING rsi, "sep"
-    call ap_strcmp
-    test eax, eax
-    pop r11
-    pop r10
-    jz .print_kw_sep
-
-    ; Check "end"
-    push r10
-    push r11
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "end"
-    call ap_strcmp
-    test eax, eax
-    pop r11
-    pop r10
-    jz .print_kw_end
-
-    ; Check "file"
-    push r10
-    push r11
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "file"
-    call ap_strcmp
-    test eax, eax
-    pop r11
-    pop r10
-    jz .print_kw_file
-
-    ; Check "flush"
-    push r10
-    push r11
-    lea rdi, [r10 + PyStrObject.data]
-    CSTRING rsi, "flush"
-    call ap_strcmp
-    test eax, eax
-    pop r11
-    pop r10
-    jz .print_kw_flush
-
-    ; Unknown keyword — skip (be lenient)
-    jmp .print_kw_next
-
-.print_kw_sep:
-    mov rax, [rbx + r11]
-    V_UNPACK rax, rdx
+    call print_str_or_none
     mov [rbp - PR_SEP], rax
-    mov [rbp - PR_SEP_TAG], rdx
-    jmp .print_kw_next
-
-.print_kw_end:
-    mov rax, [rbx + r11]
-    V_UNPACK rax, rdx
+    mov rdi, [rbp - PR_KW_END]
+    CSTRING rsi, "end"
+    call print_str_or_none
     mov [rbp - PR_END], rax
-    mov [rbp - PR_END_TAG], rdx
-    jmp .print_kw_next
 
-.print_kw_flush:
     ; It was accepted and ignored, which cost nothing while stdout was
     ; unbuffered and costs the whole point of the keyword now that it is not.
-    mov rax, [rbx + r11]
-    extern obj_is_true
-    push rcx
-    push r9
-    mov rdi, rax
+    mov rdi, [rbp - PR_KW_FLUSH]
+    test rdi, rdi
+    jz .print_kw_file
     call obj_is_true
-    pop r9
-    pop rcx
     mov [rbp - PR_FLUSH], rax
-    jmp .print_kw_next
 
 .print_kw_file:
     ; file kwarg: the OBJECT, kept as it is.  Reading PyFileObject.file_fd off
     ; whatever pointer arrived meant a StringIO wrote to whatever its second
     ; word happened to hold, and a non-pointer was dropped without a word.
     ; None means sys.stdout, which is the 0 the slot already holds.
-    mov rax, [rbx + r11]
+    mov rax, [rbp - PR_KW_FILE]
     lea rcx, [rel none_singleton]
     cmp rax, rcx
-    je .print_kw_next
+    je .print_no_kw
     mov [rbp - PR_SINK], rax
-    jmp .print_kw_next
-
-.print_kw_next:
-    pop r9
-    pop rax
-    pop rcx
-    inc r9
-    jmp .print_kw_loop
-
-.print_kw_done:
-    mov qword [rel kw_names_pending], 0
 
 .print_no_kw:
     ; No file=, or file=None: whatever sys.stdout names RIGHT NOW.  Resolved
@@ -1077,18 +1013,8 @@ align 16
     jmp .print_loop
 
 .print_custom_sep:
-    ; Custom sep — check if None (means default " ")
-    mov rax, [rbp - PR_SEP_TAG]
-    cmp eax, TAG_PTR
-    jne .print_default_sep_fallback
-
-    ; Heap string sep
+    ; Custom sep: a str, validated when the keyword was bound
     mov rax, [rbp - PR_SEP]
-    ; Check if None singleton
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .print_default_sep_fallback
-
     mov rcx, [rax + PyStrObject.ob_size]
     ; The per-argument copy checks the 4096-byte buffer; this one did not, so
     ; print(..., sep="X"*5000) wrote past the frame over the return address.
@@ -1127,11 +1053,6 @@ align 16
     call print_sink_write
     test eax, eax
     jnz .print_sink_failed
-    jmp .print_loop
-
-.print_default_sep_fallback:
-    mov byte [rbp - PR_FRAME + r15], ' '
-    inc r15
     jmp .print_loop
 
 .flush_and_write_direct:
@@ -1219,14 +1140,8 @@ align 16
     jmp .print_do_flush
 
 .print_custom_end:
-    ; Check if None (means default "\n")
-    mov rax, [rbp - PR_END_TAG]
-    cmp eax, TAG_PTR
-    jne .print_default_end
+    ; A str, validated when the keyword was bound
     mov rax, [rbp - PR_END]
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .print_default_end
 
     ; Custom end string, bounded the same way
     mov rcx, [rax + PyStrObject.ob_size]
@@ -1265,10 +1180,6 @@ align 16
     jnz .print_sink_failed
     jmp .print_do_flush
 
-.print_default_end:
-    mov byte [rbp - PR_FRAME + r15], 10
-    inc r15
-
 .print_do_flush:
     ; Single write for the whole line
     mov rdi, [rbp - PR_SINK]
@@ -1301,6 +1212,58 @@ align 16
     V_PACK rax, rdx             ; builtins return one Value
     ret
 END_FUNC builtin_print
+
+;; ============================================================================
+;; print_str_or_none(rdi = the keyword's Value or 0, rsi = its name, a C
+;;                   string) -> rax = the str, or 0 for "not given or None"
+;; Anything else raises CPython's "sep must be None or a string, not int".
+;; ============================================================================
+PSN_ARG   equ 8
+PSN_NAME  equ 16
+PSN_BUF   equ 256           ; three appends of at most 80 bytes
+PSN_FRAME equ 256           ; + 0 pushes = 256, 16-aligned
+DEF_FUNC_LOCAL print_str_or_none, PSN_FRAME
+    xor eax, eax
+    test rdi, rdi
+    jz .psn_ret                 ; not given
+    lea rcx, [rel none_singleton]
+    cmp rdi, rcx
+    je .psn_ret                 ; None: the default
+    V_TEST_PTR rdi, rcx
+    ja .psn_bad
+    mov rcx, [rdi + PyObject.ob_type]
+    REQUIRE_STR_TYPE rcx, rdx, .psn_bad
+    mov rax, rdi
+.psn_ret:
+    leave
+    ret
+.psn_bad:
+    mov [rbp - PSN_ARG], rdi
+    mov [rbp - PSN_NAME], rsi
+    lea rdi, [rbp - PSN_BUF]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, " must be None or a string, not "
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - PSN_ARG]
+    call rbt_typename
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - PSN_BUF]
+    call raise_exception
+END_FUNC print_str_or_none
+
+; The keywords print() takes, for math_bind_kw_named
+section .rodata
+pr_kw_sep:   db "sep", 0
+pr_kw_end:   db "end", 0
+pr_kw_file:  db "file", 0
+pr_kw_flush: db "flush", 0
+pr_kw_fn:    db "print", 0
+section .data
+align 8
+pr_kwnames:  dq pr_kw_sep, pr_kw_end, pr_kw_file, pr_kw_flush, 0
+section .text
 
 ;; ============================================================================
 ;; builtin_len(PyObject **args, int64_t nargs) -> rax = Value
