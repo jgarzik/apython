@@ -36,6 +36,7 @@ extern sys_close
 extern obj_str
 extern exc_is_syntax
 extern str_type
+extern ap_strcmp
 extern tuple_type
 extern obj_decref
 extern str_type
@@ -2171,9 +2172,8 @@ DEF_FUNC tb_print_one, TP_FRAME
 
     ; "TypeName: str(exc)", with the colon omitted when str(exc) is empty.
     mov rdi, [rbp - TP_EXC]
-    mov rax, [rdi + PyObject.ob_type]
-    mov rdi, [rax + PyTypeObject.tp_name]
-    call tb_write_cstr
+    mov rdi, [rdi + PyObject.ob_type]
+    call tb_write_exc_typename
 
     mov rdi, [rbp - TP_EXC]
     call obj_str
@@ -2211,6 +2211,105 @@ DEF_FUNC tb_print_one, TP_FRAME
     leave
     ret
 END_FUNC tb_print_one
+
+;; ============================================================================
+;; tb_write_exc_typename(rdi = an exception's type) -> nothing; written
+;;
+;; What traceback.py's TracebackException.format_exception_only writes: the
+;; class's __qualname__, preceded by its __module__ and a dot unless that is
+;; "__main__" or "builtins" -- "subprocess.CalledProcessError",
+;; "json.decoder.JSONDecodeError", plain "ValueError".  Either attribute not
+;; being a str falls back to the bare tp_name, as the plain name was before.
+;; ============================================================================
+TWN_TYPE  equ 8
+TWN_KEY   equ 16
+TWN_MOD   equ 24
+TWN_QUAL  equ 32
+TWN_FRAME equ 32
+DEF_FUNC_LOCAL tb_write_exc_typename, TWN_FRAME
+    mov [rbp - TWN_TYPE], rdi
+    mov qword [rbp - TWN_MOD], 0
+    mov qword [rbp - TWN_QUAL], 0
+    CSTRING rdi, "__qualname__"
+    call twn_get_str
+    mov [rbp - TWN_QUAL], rax
+    test rax, rax
+    jz .twn_plain
+    CSTRING rdi, "__module__"
+    call twn_get_str
+    mov [rbp - TWN_MOD], rax
+    test rax, rax
+    jz .twn_qual
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "__main__"
+    call ap_strcmp
+    test eax, eax
+    jz .twn_qual
+    mov rax, [rbp - TWN_MOD]
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "builtins"
+    call ap_strcmp
+    test eax, eax
+    jz .twn_qual
+    mov rdi, [rbp - TWN_MOD]
+    call tb_write_str
+    CSTRING rdi, "."
+    call tb_write_cstr
+.twn_qual:
+    mov rdi, [rbp - TWN_QUAL]
+    call tb_write_str
+    jmp .twn_release
+.twn_plain:
+    mov rax, [rbp - TWN_TYPE]
+    mov rdi, [rax + PyTypeObject.tp_name]
+    call tb_write_cstr
+.twn_release:
+    mov rdi, [rbp - TWN_MOD]
+    test rdi, rdi
+    jz .twn_no_mod
+    call obj_decref
+.twn_no_mod:
+    mov rdi, [rbp - TWN_QUAL]
+    test rdi, rdi
+    jz .twn_out
+    call obj_decref
+.twn_out:
+    leave
+    ret
+
+;; twn_get_str(rdi = attribute name C string) -> rax = that attribute of
+;; [rbp - TWN_TYPE] when it is an exact str, owned, else 0.  A local
+;; subroutine on tb_write_exc_typename's frame, reached by `call` from it.
+twn_get_str:
+    sub rsp, 8
+    call str_from_cstr_heap
+    mov [rbp - TWN_KEY], rax
+    mov rdi, [rbp - TWN_TYPE]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - TWN_KEY]
+    call obj_decref
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .tgs_out
+    V_TEST_PTR rax, rcx
+    ja .tgs_drop
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .tgs_out
+.tgs_drop:
+    mov rdi, rax
+    DECREF_V rdi, rcx
+    xor eax, eax
+.tgs_out:
+    add rsp, 8
+    ret
+END_FUNC tb_write_exc_typename
 
 ;; ============================================================================
 ;; tb_syntax_header(PyObject *exc)
