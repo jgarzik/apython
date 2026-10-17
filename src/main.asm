@@ -377,6 +377,31 @@ DEF_FUNC main, 8
 .flag_two:
     cmp r14d, 3
     jl .usage
+    ; Keep the option for sys.warnoptions / sys._xoptions, which
+    ; main_sys_options builds once sys exists.  `-X dev` is also
+    ; sys.flags.dev_mode, and sys.flags is built before then.
+    mov rdx, [r15 + 16]             ; the option's argument
+    movzx ecx, byte [rax + 1]
+    cmp cl, 'W'
+    jne .flag_two_x
+    mov rcx, [rel main_wopt_count]
+    cmp rcx, MAIN_OPT_MAX
+    jae .flag_two_done
+    lea rsi, [rel main_wopts]
+    mov [rsi + rcx * 8], rdx
+    inc qword [rel main_wopt_count]
+    jmp .flag_two_done
+.flag_two_x:
+    mov rcx, [rel main_xopt_count]
+    cmp rcx, MAIN_OPT_MAX
+    jae .flag_two_done
+    lea rsi, [rel main_xopts]
+    mov [rsi + rcx * 8], rdx
+    inc qword [rel main_xopt_count]
+    cmp dword [rdx], 'dev'          ; "dev" and its NUL
+    jne .flag_two_done
+    mov byte [rel main_sysflags + SF_DEV_MODE], 1
+.flag_two_done:
     add r15, 16
     sub r14d, 2
     jmp .flag_loop
@@ -463,6 +488,7 @@ DEF_FUNC main, 8
     mov edi, r14d               ; argc
     mov rsi, r15                ; argv
     call import_init
+    call main_sys_options
 
     ; SIGINT raises KeyboardInterrupt rather than killing the process where it
     ; stands, which is what every `except KeyboardInterrupt` in the stdlib is
@@ -1019,6 +1045,204 @@ DEF_FUNC_LOCAL main_read_stdin, MRS_FRAME
 END_FUNC main_read_stdin
 
 ;; ============================================================================
+;; main_sys_options() -> nothing; sys.warnoptions and sys._xoptions filled
+;;
+;; In CPython's order: "default" for -X dev, then PYTHONWARNINGS (unless -E),
+;; then each -W, then -b's BytesWarning; warnings.py reads the list at import.
+;; Each -X is a _xoptions key, holding the text after "=", or True.
+;; ============================================================================
+MSO_LIST  equ 8
+MSO_XDICT equ 16
+MSO_I     equ 24
+MSO_CUR   equ 32
+MSO_KEY   equ 40
+MSO_FRAME equ 48
+DEF_FUNC main_sys_options, MSO_FRAME
+    extern sys_module_obj
+    extern dict_get
+    extern list_append
+    extern str_new_heap
+    mov rax, [rel sys_module_obj]
+    mov rax, [rax + PyModuleObject.mod_dict]
+    mov [rbp - MSO_XDICT], rax          ; the sys dict, briefly
+    CSTRING rdi, "_xoptions"
+    call str_from_cstr_heap
+    mov [rbp - MSO_KEY], rax
+    mov rdi, [rbp - MSO_XDICT]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - MSO_CUR], rax
+    mov rdi, [rbp - MSO_KEY]
+    call obj_decref
+    CSTRING rdi, "warnoptions"
+    call str_from_cstr_heap
+    mov [rbp - MSO_KEY], rax
+    mov rdi, [rbp - MSO_XDICT]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - MSO_LIST], rax
+    mov rdi, [rbp - MSO_KEY]
+    call obj_decref
+    mov rax, [rbp - MSO_CUR]
+    mov [rbp - MSO_XDICT], rax
+    cmp qword [rbp - MSO_LIST], 0
+    je .mso_out
+    cmp qword [rbp - MSO_XDICT], 0
+    je .mso_out
+
+    cmp byte [rel main_sysflags + SF_DEV_MODE], 0
+    je .mso_env
+    mov rdi, [rbp - MSO_LIST]
+    CSTRING rsi, "default"
+    call mso_append_cstr
+
+.mso_env:
+    cmp byte [rel main_sysflags + SF_IGNORE_ENV], 0
+    jne .mso_w
+    CSTRING rdi, "PYTHONWARNINGS"
+    call getenv
+    test rax, rax
+    jz .mso_w
+    mov [rbp - MSO_CUR], rax
+.mso_env_item:
+    mov rdi, [rbp - MSO_CUR]
+    xor ecx, ecx
+.mso_env_len:
+    movzx eax, byte [rdi + rcx]
+    test al, al
+    jz .mso_env_have
+    cmp al, ','
+    je .mso_env_have
+    inc rcx
+    jmp .mso_env_len
+.mso_env_have:
+    mov [rbp - MSO_I], rcx
+    test rcx, rcx
+    jz .mso_env_next                    ; an empty item is skipped
+    mov rsi, rcx
+    call str_new_heap
+    mov rdi, [rbp - MSO_LIST]
+    mov rsi, rax
+    call mso_append_owned
+.mso_env_next:
+    mov rax, [rbp - MSO_CUR]
+    add rax, [rbp - MSO_I]
+    cmp byte [rax], 0
+    je .mso_w
+    inc rax
+    mov [rbp - MSO_CUR], rax
+    jmp .mso_env_item
+
+.mso_w:
+    mov qword [rbp - MSO_I], 0
+.mso_w_loop:
+    mov rax, [rbp - MSO_I]
+    cmp rax, [rel main_wopt_count]
+    jae .mso_b
+    lea rcx, [rel main_wopts]
+    mov rsi, [rcx + rax * 8]
+    mov rdi, [rbp - MSO_LIST]
+    call mso_append_cstr
+    inc qword [rbp - MSO_I]
+    jmp .mso_w_loop
+
+.mso_b:
+    movzx eax, byte [rel main_sysflags + SF_BYTES_WARNING]
+    test eax, eax
+    jz .mso_x
+    CSTRING rsi, "default::BytesWarning"
+    cmp eax, 1
+    je .mso_b_add
+    CSTRING rsi, "error::BytesWarning"
+.mso_b_add:
+    mov rdi, [rbp - MSO_LIST]
+    call mso_append_cstr
+
+.mso_x:
+    mov qword [rbp - MSO_I], 0
+.mso_x_loop:
+    mov rax, [rbp - MSO_I]
+    cmp rax, [rel main_xopt_count]
+    jae .mso_out
+    lea rcx, [rel main_xopts]
+    mov rdi, [rcx + rax * 8]
+    mov [rbp - MSO_CUR], rdi
+    ; key up to "=", the value after it or True
+    xor ecx, ecx
+.mso_x_scan:
+    movzx eax, byte [rdi + rcx]
+    test al, al
+    jz .mso_x_have
+    cmp al, '='
+    je .mso_x_have
+    inc rcx
+    jmp .mso_x_scan
+.mso_x_have:
+    mov rsi, rcx
+    push rcx
+    sub rsp, 8
+    call str_new_heap
+    add rsp, 8
+    pop rcx
+    mov [rbp - MSO_KEY], rax
+    mov rdi, [rbp - MSO_CUR]
+    cmp byte [rdi + rcx], '='
+    jne .mso_x_true
+    lea rdi, [rdi + rcx + 1]
+    call str_from_cstr_heap
+    jmp .mso_x_store
+.mso_x_true:
+    extern bool_true
+    lea rax, [rel bool_true]
+    INCREF rax
+.mso_x_store:
+    mov [rbp - MSO_CUR], rax
+    mov rdi, [rbp - MSO_XDICT]
+    mov rsi, [rbp - MSO_KEY]
+    mov rdx, rax
+    call dict_set
+    mov rdi, [rbp - MSO_KEY]
+    call obj_decref
+    mov rdi, [rbp - MSO_CUR]
+    call obj_decref
+    inc qword [rbp - MSO_I]
+    jmp .mso_x_loop
+.mso_out:
+    leave
+    ret
+
+END_FUNC main_sys_options
+
+;; ============================================================================
+;; mso_append_cstr(rdi = list, rsi = C string) -> nothing
+;; ============================================================================
+MAC_LIST  equ 8
+MAC_STR   equ 16
+MAC_FRAME equ 16
+DEF_FUNC_LOCAL mso_append_cstr, MAC_FRAME
+    mov [rbp - MAC_LIST], rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov rdi, [rbp - MAC_LIST]
+    mov rsi, rax
+    call mso_append_owned
+    leave
+    ret
+END_FUNC mso_append_cstr
+
+;; ============================================================================
+;; mso_append_owned(rdi = list, rsi = str, owned) -> nothing; reference spent
+;; ============================================================================
+DEF_FUNC_LOCAL mso_append_owned, MAC_FRAME
+    mov [rbp - MAC_STR], rsi
+    call list_append
+    mov rdi, [rbp - MAC_STR]
+    call obj_decref
+    leave
+    ret
+END_FUNC mso_append_owned
+
+;; ============================================================================
 ;; main_env_flags() -> nothing; main_sysflags updated from the environment
 ;;
 ;; PYTHONNOUSERSITE, PYTHONSAFEPATH and PYTHONDONTWRITEBYTECODE, each set
@@ -1157,6 +1381,12 @@ global main_no_bytecode
 main_no_bytecode: resb 1
 global main_sysflags
 main_sysflags: resb SYSFLAGS_COUNT     ; sys.flags, by SF_ index (macros.inc)
+MAIN_OPT_MAX equ 32
+alignb 8
+main_wopts: resq MAIN_OPT_MAX          ; each -W argument, in order
+main_wopt_count: resq 1
+main_xopts: resq MAIN_OPT_MAX          ; each -X argument, in order
+main_xopt_count: resq 1
 
 section .rodata
 

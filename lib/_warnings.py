@@ -12,7 +12,18 @@ CPython's `warnings.py` does have that fallback; `importlib._bootstrap`'s
 _setup does not, and twenty-one modules of the standard library stop there.
 """
 
-filters = []
+# CPython's init_filters, as its C _warnings installs them outside dev mode:
+# a DeprecationWarning is shown when __main__ triggers it and ignored
+# anywhere else, and the three noisy categories are ignored outright.  With
+# the list empty, every library's deprecation reached the user -- pip's own
+# printed a DeprecationWarning per installed distribution.
+filters = [
+    ("default", None, DeprecationWarning, "__main__", 0),
+    ("ignore", None, DeprecationWarning, None, 0),
+    ("ignore", None, PendingDeprecationWarning, None, 0),
+    ("ignore", None, ImportWarning, None, 0),
+    ("ignore", None, ResourceWarning, None, 0),
+]
 _defaultaction = "default"
 _onceregistry = {}
 _filters_version = 1
