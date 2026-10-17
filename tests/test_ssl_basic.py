@@ -7,6 +7,7 @@
 import os
 import socket
 import ssl
+import warnings
 
 # Run from the .py this is tests/, run from the .pyc it is tests/__pycache__/.
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -114,8 +115,10 @@ print("decode rest", cert["version"], cert["serialNumber"],
 # --- contexts ----------------------------------------------------------------
 
 c = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+# minimum_version is left out: it is the OpenSSL build's policy (771 on one
+# runner, -2 on another), not anything the interpreter decides.
 print("client defaults", c.verify_mode, c.check_hostname,
-      c.protocol, c.minimum_version, c.maximum_version)
+      c.protocol, c.maximum_version)
 s = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 print("server defaults", s.verify_mode, s.check_hostname)
 try:
@@ -240,9 +243,13 @@ except ssl.SSLCertVerificationError as e:
     show_error("unknown ca", e)
     print("unknown ca detail", e.verify_code, e.verify_message)
 
+# Later 3.12 releases warn here (check_hostname without server_hostname);
+# which ones do is the oracle's version, not a behaviour under test.
 try:
-    client_context().wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
-                              server_side=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        client_context().wrap_bio(ssl.MemoryBIO(), ssl.MemoryBIO(),
+                                  server_side=True)
 except ssl.SSLError as e:
     print("wrong side", str(e).split(" (_ssl.c")[0])
 
@@ -319,6 +326,8 @@ cs = client_context().wrap_socket(a, server_hostname="localhost",
 try:
     cs.do_handshake()
 except TimeoutError as e:
-    print("timeout", e)
+    # The "_ssl.c:NNN: " prefix is a line number in CPython's C source,
+    # which moves between point releases.
+    print("timeout", str(e).split(": ", 1)[-1])
 cs.close()
 b.close()
