@@ -1489,6 +1489,11 @@ DEF_FUNC eg_install_methods, EGI_FRAME
     EGI_ADD eg_method_split, "split"
     EGI_ADD eg_method_subgroup, "subgroup"
     EGI_ADD eg_method_derive, "derive"
+    ; PEP 585, as CPython's: BaseExceptionGroup[E] is a GenericAlias, and
+    ; pytest subclasses `AbstractRaises[BaseExceptionGroup[...]]` at import.
+    mov rdi, rbx
+    extern add_class_getitem
+    call add_class_getitem
 
     lea rdi, [rel exc_BaseExceptionGroup_type]
     call type_stamp_methods

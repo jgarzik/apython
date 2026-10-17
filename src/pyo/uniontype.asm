@@ -244,9 +244,15 @@ DEF_FUNC_BARE union_operand_ok
     lea rcx, [rel union_type]
     cmp rax, rcx
     je .uok_yes
+    ; A generic alias or any subclass of one -- collections.abc's
+    ; _CallableGenericAlias is that -- as CPython's PyObject_TypeCheck asks.
     lea rcx, [rel generic_alias_type]
+.uok_ga:
     cmp rax, rcx
     je .uok_yes
+    mov rax, [rax + PyTypeObject.tp_base]
+    test rax, rax
+    jnz .uok_ga
     extern none_singleton
     lea rcx, [rel none_singleton]
     cmp rdi, rcx

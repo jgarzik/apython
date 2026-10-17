@@ -303,6 +303,65 @@ DEF_FUNC generic_alias_class_getitem
 END_FUNC generic_alias_class_getitem
 
 ;; ============================================================================
+;; generic_alias_dunder_or(args = (self, other), nargs) -> a UnionType, or
+;;   NotImplemented
+;;
+;; `list[int] | None` was answered by the nb_or slot alone, and a slot is not
+;; inherited by a Python subclass the way a dict entry is -- so
+;; collections.abc's _CallableGenericAlias, a GenericAlias subclass, could not
+;; be or'ed: `Callable[[Any], None] | None` in pluggy, which pytest imports
+;; first thing, was a TypeError.  Published by name, they are inherited.
+;; ============================================================================
+global generic_alias_dunder_or
+DEF_FUNC generic_alias_dunder_or
+    cmp rsi, 2
+    jne .gado_bad
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    leave
+    jmp gad_or_common
+.gado_bad:
+    RAISE exc_TypeError_type, "__or__() takes exactly one argument"
+END_FUNC generic_alias_dunder_or
+
+;; ============================================================================
+;; generic_alias_dunder_ror(args = (self, other), nargs) -> other | self
+;; ============================================================================
+global generic_alias_dunder_ror
+DEF_FUNC generic_alias_dunder_ror
+    cmp rsi, 2
+    jne .gadr_bad
+    mov rax, [rdi]
+    mov rdi, [rdi + 8]
+    mov rsi, rax
+    leave
+    jmp gad_or_common
+.gadr_bad:
+    RAISE exc_TypeError_type, "__ror__() takes exactly one argument"
+END_FUNC generic_alias_dunder_ror
+
+;; ============================================================================
+;; gad_or_common(rdi = left, rsi = right) -> a UnionType, or NotImplemented
+;;
+;; Tail-jumped into from the two above with their frames already gone.
+;; ============================================================================
+DEF_FUNC_LOCAL gad_or_common
+    extern union_type_or
+    call union_type_or
+    test rax, rax
+    jz .goc_ni
+    V_PACK rax, rdx
+    leave
+    ret
+.goc_ni:
+    extern notimpl_singleton
+    lea rax, [rel notimpl_singleton]
+    INCREF rax
+    leave
+    ret
+END_FUNC gad_or_common
+
+;; ============================================================================
 ;; generic_alias_mro_entries(args = (self, bases), nargs) -> (origin,)
 ;;
 ;; PEP 560: `class C(list[int])` subclasses list.  __build_class__ asks each

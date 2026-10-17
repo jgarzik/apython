@@ -1061,6 +1061,9 @@ DEF_FUNC methods_init
     call add_new_staticmethod
     extern generic_alias_mro_entries
     ADD_FN ga_n_mro_entries, generic_alias_mro_entries
+    extern generic_alias_dunder_or, generic_alias_dunder_ror
+    ADD_FN ga_n_or, generic_alias_dunder_or
+    ADD_FN ga_n_ror, generic_alias_dunder_ror
     extern generic_alias_type
     lea rax, [rel generic_alias_type]
     mov [rax + PyTypeObject.tp_dict], rbx
@@ -2864,3 +2867,5 @@ frozenset_operator_fns:
 
 section .rodata
 ga_n_mro_entries: db "__mro_entries__", 0
+ga_n_or:          db "__or__", 0
+ga_n_ror:         db "__ror__", 0
