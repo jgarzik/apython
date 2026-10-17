@@ -907,12 +907,24 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rax, rax               ; a Value; 0 is the miss
     jnz .ig_ask_getattr
 
-    ; CPython names the type and the attribute here as it does everywhere else.
+    ; CPython names the type and the attribute here as it does everywhere
+    ; else.  Installed rather than raised, with attr_error_pending saying so,
+    ; as .getattr_raised does: unwinding from here skipped hasattr()'s and
+    ; getattr()'s native frames, so hasattr(o, "slot") raised instead of
+    ; answering False.  The callers that would otherwise fall back to the type
+    ; dict -- and find the member descriptor there -- check the flag first.
     mov rdi, rbx
     mov rsi, [rbp - IG_NAME]
-    xor edx, edx                ; a get, so .name and .obj are filled in
-    extern raise_no_attribute
-    call raise_no_attribute
+    extern set_no_attribute
+    call set_no_attribute
+    mov qword [rel attr_error_pending], 1
+    RET_NULL
+    IG_RELEASE_HELD
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .not_found:
     ; __class__ and __dict__ are part of ordinary resolution, not of the hook:

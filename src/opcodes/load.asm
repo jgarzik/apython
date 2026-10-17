@@ -265,6 +265,7 @@ DEF_FUNC_BARE op_load_name
     ; whatever it was keeps the mapping's exception out of a name lookup that
     ; then succeeds in globals or in builtins.
     extern current_exception
+    extern attr_error_pending
     mov rdi, [rel current_exception]
     test rdi, rdi
     jz .try_globals
@@ -538,9 +539,18 @@ DEF_FUNC op_load_attr, LA_FRAME
 
 .la_getattr_done_v:
     ; instance_getattr_where hands back a Value, and a NULL one means it found
-    ; nothing -- 0 is the only NULL encoding.
+    ; nothing -- 0 is the only NULL encoding.  Unless attr_error_pending says
+    ; it installed an AttributeError on the way: an unassigned __slots__ slot,
+    ; or a __getattr__ that said "absent".  The class dict was already asked,
+    ; and asking again finds the slot's member descriptor and hands THAT back.
     test rax, rax
-    jz .la_try_dict
+    jnz .la_gdv_found
+    cmp qword [rel attr_error_pending], 0
+    je .la_try_dict
+    cmp qword [rel current_exception], 0
+    je .la_try_dict
+    jmp .la_no_such_attr
+.la_gdv_found:
     V_UNPACK rax, rdx
     cmp qword [rbp - LA_FROMINST], 2
     je .la_getattr_unbound
@@ -2254,7 +2264,18 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     xor ecx, ecx                ; getattr() wants the bound method itself
     call instance_getattr_where
     test rax, rax
-    jz .ga_type_dict
+    jnz .ga_where_found
+    ; As op_load_attr: an AttributeError installed on the way is the answer.
+    ; getattr() and hasattr() see it pending and decide what it means.
+    cmp qword [rel attr_error_pending], 0
+    je .ga_type_dict
+    cmp qword [rel current_exception], 0
+    je .ga_type_dict
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.ga_where_found:
     V_UNPACK rax, rdx
     jmp .ga_getattr_done
 .ga_call_type_getattr:

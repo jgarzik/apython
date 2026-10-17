@@ -1035,6 +1035,7 @@ extern none_singleton
 RNA_OBJ   equ 8
 RNA_NAME  equ 16
 RNA_ISSET equ 24            ; 1 for a store or a delete, 0 for a read
+RNA_NORET equ 32            ; 1 from set_no_attribute: install, then RETURN
 ; The message is built in the frame rather than in object.asm's shared rtn_buf:
 ; that buffer stayed behind, and a raiser that never returns has no reason to
 ; want a static one.
@@ -1057,6 +1058,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov [rbp - RNA_ISSET], rdx
+    mov qword [rbp - RNA_NORET], 0
     cmp qword [rel attr_error_pending], 0
     je .rna_fresh
     mov qword [rel attr_error_pending], 0
@@ -1308,6 +1310,8 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call .rna_set_attr
 
 .rna_installed:
+    cmp qword [rbp - RNA_NORET], 0
+    jne .rna_return
     ; The tail raise_exception has: it does not republish eval_saved_r13
     ; either, because every caller here is inside a helper the opcode called
     ; rather than an opcode that has popped operands of its own.
@@ -1316,6 +1320,8 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
 
 .rna_bare:
     ; A store, a delete, or an exc_from_cstr that could not allocate.
+    cmp qword [rbp - RNA_NORET], 0
+    jne .rna_return
     lea rdi, [rel exc_AttributeError_type]
     mov rsi, rbx
     call raise_exception
@@ -1348,7 +1354,37 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
 .rsa_done:
     leave
     ret
+
+.rna_return:
+    ; set_no_attribute's exit: the exception is installed and pending, and
+    ; the caller hands back NULL itself.
+    lea rsp, [rbp - RNA_FRAME - 16]
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC raise_no_attribute
+
+;; ============================================================================
+;; set_no_attribute(rdi = the object as a Value, rsi = the attribute name)
+;;   -> returns, with that same AttributeError installed in current_exception
+;;
+;; raise_no_attribute's read form, for a lookup that has to say "absent" to a
+;; caller that may swallow it.  A __slots__ slot never assigned is one:
+;; unwinding from inside instance_getattr skipped hasattr()'s and getattr()'s
+;; own native frames, so `hasattr(o, "slot")` RAISED instead of answering
+;; False.  The prologue is raise_no_attribute's, so its body can be shared.
+;; ============================================================================
+DEF_FUNC set_no_attribute, RNA_FRAME
+    push rbx
+    push r12
+    mov [rbp - RNA_NAME], rsi
+    mov [rbp - RNA_OBJ], rdi
+    mov qword [rbp - RNA_ISSET], 0
+    mov qword [rbp - RNA_NORET], 1
+    xor edx, edx
+    jmp raise_no_attribute.rna_fresh
+END_FUNC set_no_attribute
 
 ;; ============================================================================
 ;; raise_unexpected_keyword(rdi = the function, rsi = its frame,
