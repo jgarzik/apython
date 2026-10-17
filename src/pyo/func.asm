@@ -83,6 +83,7 @@ DEF_FUNC func_new
     mov qword [r13 + PyFuncObject.func_doc], 0
     ; No annotations until MAKE_FUNCTION hands some over.
     mov qword [r13 + PyFuncObject.func_annotations], 0
+    mov qword [r13 + PyFuncObject.func_module], 0
 
     mov rdi, r13
     call gc_track
@@ -731,6 +732,11 @@ DEF_FUNC func_dealloc
     jz .no_func_annos
     call obj_decref
 .no_func_annos:
+    mov rdi, [rbx + PyFuncObject.func_module]
+    test rdi, rdi
+    jz .no_func_module
+    DECREF_V rdi, rcx
+.no_func_module:
 
     ; Free the function object itself (GC-aware)
     mov rdi, rbx
@@ -813,6 +819,14 @@ DEF_FUNC func_setattr, SC_FRAME
     call ap_strcmp
     test eax, eax
     jz .set_doc
+
+    ; __module__ too: it was read from the globals every time, so an
+    ; assignment landed in func_dict and was never read back.
+    lea rdi, [rel fn_attr_module]
+    lea rsi, [r12 + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .set_module
 
     ; So does __annotations__, and it has to go in the field rather than the
     ; dict: func_getattr answers from the field, so an assignment that landed
@@ -993,6 +1007,23 @@ DEF_FUNC func_setattr, SC_FRAME
     ret
 .sa_type:
     RAISE exc_TypeError_type, "__annotations__ must be set to a dict object"
+
+.set_module:
+    ; Anything, including None, as CPython's func_set_module takes; a delete
+    ; stores None the way CPython's does rather than restoring the default.
+    test r13, r13
+    jnz .smod_have
+    extern none_singleton
+    lea r13, [rel none_singleton]
+.smod_have:
+    INCREF_V r13, rax
+    mov rax, [rbx + PyFuncObject.func_module]
+    mov [rbx + PyFuncObject.func_module], r13
+    test rax, rax
+    jz .sd_done
+    mov rdi, rax
+    DECREF_V rdi, rcx
+    jmp .sd_done
 
 .set_doc:
     ; __doc__ takes anything, including None, as CPython's does.
@@ -1525,7 +1556,17 @@ DEF_FUNC func_getattr
     jmp .return_ptr_attr
 
 .return_module:
-    ; The defining module's __name__, out of the function's globals.
+    ; An assigned __module__ first; else the defining module's __name__, out
+    ; of the function's globals.
+    mov rax, [rbx + PyFuncObject.func_module]
+    test rax, rax
+    jz .module_default
+    INCREF_V rax, rcx
+    pop r12
+    pop rbx
+    leave
+    ret
+.module_default:
     mov rdi, [rbx + PyFuncObject.func_globals]
     test rdi, rdi
     jz .doc_none
@@ -2301,6 +2342,8 @@ DEF_FUNC func_traverse, 8        ; rsp 16-aligned at the call the macros below e
     VISIT_V rax, rcx
     mov rdi, [rbx + PyFuncObject.func_annotations]
     VISIT_PTR rdi
+    mov rax, [rbx + PyFuncObject.func_module]
+    VISIT_V rax, rcx
 
     pop rbx
     leave
@@ -2354,6 +2397,12 @@ DEF_FUNC func_clear, 8            ; 1 pushes, so rsp is 16-aligned
     jz .no_fannos
     call obj_decref
 .no_fannos:
+    mov rdi, [rbx + PyFuncObject.func_module]
+    mov qword [rbx + PyFuncObject.func_module], 0
+    test rdi, rdi
+    jz .no_fmodule
+    DECREF_V rdi, rcx
+.no_fmodule:
 
     pop rbx
     leave

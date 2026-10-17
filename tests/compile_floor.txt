@@ -125,6 +125,7 @@ test_compare_reflected_op
 test_comparisons
 test_compile_annotation_scan
 test_compile_annotations
+test_compile_ast_input
 test_compile_async
 test_compile_async_scope
 test_compile_augassign
@@ -335,6 +336,7 @@ test_func_defaults_write
 test_func_dunder_get
 test_function_attrs
 test_function_constructor
+test_function_module_assign
 test_functions
 test_future_annotations
 test_future_import
@@ -480,6 +482,7 @@ test_match_mapping_types
 test_match
 test_math_more
 test_math
+test_math_sumprod_prod_types
 test_member_descriptor_protocol
 test_membership
 test_memmove_boundaries
@@ -513,6 +516,7 @@ test_module_file_attr
 test_module_getattr_del
 test_module_getattr
 test_module_repr_and_property_msg
+test_module_repr_long_path
 test_module_type_new
 test_mro_entries
 test_multiple_inheritance
@@ -578,6 +582,7 @@ test_prepare_raises
 test_print_broken_pipe
 test_print_file
 test_printf_precision
+test_print_keywords
 test_print_sink_lifetime
 test_print_tag
 test_print_to_object
@@ -618,6 +623,7 @@ test_repr_element_raises
 test_repr
 test_repr_str_cycle
 test_re_review
+test_re_sub_mismatched_repl
 test_re_sub_raises
 test_review_regressions
 test_richcompare_bool
@@ -783,6 +789,7 @@ test_tuples
 test_typealias_scope_name
 test_type_annotations_meta
 test_type_cache
+test_type_call_class_setattr
 test_type_comments
 test_type_constructors
 test_type_delattr
@@ -798,6 +805,7 @@ test_unary
 test_unbound_local
 test_unbound_zero_args
 test_uncallable_bind_lifetime
+test_uncaught_exception_name
 test_unexpected_kwarg_message
 test_unicode_case
 test_unicodedata

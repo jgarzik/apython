@@ -324,6 +324,9 @@ struc PyFuncObject
     ; empty dict -- which CPython also stores, since `f.__annotations__['x']
     ; = int` has to stick.
     .func_annotations: resq 1
+    .func_module:   resq 1  ; +96: __module__ once assigned, or NULL for the
+                            ;      globals' __name__ -- a field, like __doc__,
+                            ;      so functools.wraps and friends can set it
 endstruc
 
 ; Code object

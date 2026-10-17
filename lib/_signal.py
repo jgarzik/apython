@@ -57,3 +57,8 @@ def getitimer(*args):
 def valid_signals():
     """valid_signals() -> the set of signal numbers this platform accepts"""
     return {n for n in range(1, NSIG) if n not in (32, 33)}
+
+
+# CPython's signal.py defines these in Python itself, so they report the
+# signal module; test_signal checks every Python-level routine it exports.
+setitimer.__module__ = getitimer.__module__ = valid_signals.__module__ = "signal"
