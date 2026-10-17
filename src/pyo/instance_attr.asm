@@ -1256,7 +1256,7 @@ DEF_FUNC instance_setattr
     extern getset_descr_type
     lea rcx, [rel getset_descr_type]
     cmp [r9 + PyObject.ob_type], rcx
-    jne .sa_no_slot
+    jne .sa_check_heap_descr
     ; The __dict__ and __weakref__ getsets a class body grows are the
     ; instance LAYOUT, handled below -- reached here only when some other
     ; data descriptor (any property) set the MRO flag.  Their getset has no
@@ -1269,6 +1269,52 @@ DEF_FUNC instance_setattr
     mov rdx, r13
     extern getset_descr_set
     call getset_descr_set
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sa_check_heap_descr:
+    ; A data descriptor written in Python -- a class with __set__, or with
+    ; __delete__ for a delete.  op_store_attr calls __set__ before it ever
+    ; gets here, but setattr(), object.__setattr__ and `del obj.x` come
+    ; straight to this store, and they stored into the instance dict past
+    ; it: setattr(struct, "x", 1) on a ctypes Structure, whose fields are
+    ; exactly such descriptors, left the field untouched.
+    mov rcx, [r9 + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .sa_no_slot
+    mov r14, r9                 ; the descriptor, borrowed from the MRO
+    mov rdi, rcx
+    extern dunder_set
+    lea rsi, [rel dunder_set]
+    test r13, r13
+    jnz .sa_heap_lookup
+    lea rsi, [rel ia_dunder_delete]
+.sa_heap_lookup:
+    call dunder_lookup          ; rax = the function, borrowed, or 0
+    test rax, rax
+    jz .sa_no_slot
+    sub rsp, 32                 ; [descriptor, instance, value] + pad
+    mov [rsp], r14
+    mov [rsp + 8], rbx
+    mov [rsp + 16], r13
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 3
+    test r13, r13
+    jnz .sa_heap_call
+    mov edx, 2                  ; __delete__(descriptor, instance)
+.sa_heap_call:
+    extern obj_call_n
+    call obj_call_n
+    add rsp, 32
+    test rax, rax
+    jz .sa_heap_done            ; it raised; the exception is pending
+    DECREF_V rax, rcx
+.sa_heap_done:
     pop r14
     pop r13
     pop r12
@@ -1498,3 +1544,6 @@ trg_del_name:         db "__del__", 0
 
 section .bss
 type_version_counter: resd 1
+
+section .rodata
+ia_dunder_delete: db "__delete__", 0

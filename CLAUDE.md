@@ -112,7 +112,7 @@ diff /tmp/expected.txt /tmp/actual.txt
 ```
 
 **Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
-liblzma-dev, libssl-dev, libexpat1-dev, python3.12
+liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, python3.12
 
 ## Register Convention (eval loop)
 
@@ -323,6 +323,17 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   as the dicts a caller writes: the option names, the defaults and the
   per-filter error wordings are Python's business, the struct layout is the
   assembly's
+- `src/modules/ctypes.asm` — the `_ctypescore` module: dlopen/dlsym, reading
+  and writing memory at an address, libffi's `prep_cif` and `call`, and one
+  closure trampoline every CFUNCTYPE callback enters through (it calls back
+  into Python the way `pyexpat_cb.asm` does).  A shim over `-lffi`, and its
+  arguments ARE raw addresses: that is ctypes.  `lib/_ctypes.py` is the whole
+  object model CPython's unmodified `Lib/ctypes` is written against -- the
+  metatypes, layout and bitfields, the `_objects` keep-alive tree, argument
+  conversion, callbacks -- with each instance's memory a bytearray it owns or
+  an address it borrows.  `tests/ctypes/` is CPython's `_ctypes_test.c` over a
+  stand-in `Python.h`, built to `build/_ctypes_test.so` for CPython's ctypes
+  tests, which only ever reach it through `CDLL(_ctypes_test.__file__)`
 - `src/modules/hashlib.asm` — the `_hashlibcore` module: OpenSSL's
   EVP_MD_CTX and HMAC_CTX, PBKDF2, scrypt and a constant-time compare, behind
   a handle table.  A shim over `-lcrypto`, the same split again:
@@ -334,6 +345,18 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   CPython's own `hashlib.py` decides the routing: OpenSSL for twelve of the
   fourteen, and `lib/_blake2.py` for blake2b and blake2s always, because
   OpenSSL's BLAKE2 supports neither keying nor the tree parameters
+- `src/modules/ssl.asm` — the `_sslcore` module: libssl behind a handle
+  table, the same split again with `lib/_ssl.py` as the `_ssl` surface
+  CPython's `ssl.py` imports (`_SSLContext`, `_SSLSocket`, `MemoryBIO`,
+  `SSLSession`, `Certificate`, the exception family and the constants).
+  What is peculiar to libssl is its width, so the core is not a wrapper per
+  call: each OpenSSL function is one `SSLFN` row -- symbol, result letter,
+  argument letters -- and one engine, `ssl_call`, converts and calls.  The
+  letters are documented at the top of the file; adding a call is adding a
+  row.  OpenSSL never calls Python: a password is evaluated first and parked,
+  an SNI callback runs while the client-hello callback holds the handshake
+  paused, keylog lines are queued and drained, and a certificate is decoded
+  from its DER by the ASN.1 reader at the bottom of `lib/_ssl.py`
 - `src/modules/socket.asm` — the `_socketcore` module: the socket syscalls and the
   constant table, taking and returning sockaddrs as opaque bytes.  The socket
   type, the address packing and `select` are `lib/_socket.py` and

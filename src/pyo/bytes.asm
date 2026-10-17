@@ -2146,8 +2146,39 @@ extern str_set_length
     ; memoryview; this is everything else that can hand over a run of bytes.
     mov rax, [rax + PyTypeObject.tp_as_buffer]
     test rax, rax
-    jz .bls_iterable
+    jz .bls_dunder_buffer
     jmp .bls_copy_buffer
+
+.bls_dunder_buffer:
+    ; ...and a class written in Python exports through __buffer__ (PEP 688);
+    ; its view is then laid out end to end like any other memoryview.
+    extern memoryview_from_dunder_buffer
+    call memoryview_from_dunder_buffer
+    test rax, rax
+    jnz .bls_dunder_view
+    test ecx, ecx
+    jnz .bls_propagate          ; __buffer__ raised
+    mov rdi, [rbp - BLS_ARGS]
+    mov rdi, [rdi]
+    jmp .bls_iterable
+.bls_dunder_view:
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call memoryview_as_bytes
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref             ; the view; its bytes are copied out
+    add rsp, 8
+    pop rax
+    test rax, rax
+    jz .bls_empty
+    mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
+    mov rbx, [rax + PyBytesObject.ob_size]
+    lea r12, [rax + PyBytesObject.data]
+    jmp .bls_copy
 
 .bls_copy_buffer:
     ; bytes_like_ptr_len asks the slot and hands back (data, length); the copy

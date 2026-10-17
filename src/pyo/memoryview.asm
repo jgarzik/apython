@@ -198,6 +198,13 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jnz .mv_from_slot
 
 .mv_really_error:
+    ; PEP 688: a class written in Python exports through __buffer__.
+    mov rdi, [rbp - MV_ARG]
+    call memoryview_from_dunder_buffer
+    test rax, rax
+    jnz .mv_dunder_done
+    test ecx, ecx
+    jnz .mv_dunder_done         ; it raised: 0, with the exception pending
     mov rsi, [rbp - MV_ARG]
     CSTRING rdi, `memoryview: a bytes-like object is required, not '\x01'`
     extern raise_type_error_with_name
@@ -293,7 +300,91 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.mv_dunder_done:
+    test rax, rax
+    jz .mv_dunder_raised
+    mov edx, TAG_PTR
+    leave
+    ret
+.mv_dunder_raised:
+    ; The exception __buffer__ left is carried out non-locally, as every other
+    ; refusal in this constructor is.
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC memoryview_type_call
+
+;; ============================================================================
+;; memoryview_from_dunder_buffer(rdi = an object Value) -> rax = an owned
+;;   memoryview; or rax = 0 with ecx = 0 when its class has no __buffer__,
+;;   or rax = 0 with ecx = 1 when __buffer__ raised or answered something
+;;   that is not a memoryview (the exception is then pending)
+;;
+;; PEP 688's Python-level buffer protocol, which memoryview() and bytes() ask
+;; after every C-level exporter has declined.  Only a heaptype can define it.
+;; The view __buffer__ answers is handed on as it is, rather than wrapped in a
+;; second one: every field a wrapper would copy is already right.
+;; ============================================================================
+MDB_OBJ   equ 8
+MDB_ARGS  equ 32                ; [object, flags] at [rbp-32 .. rbp-16]
+MDB_FRAME equ 32                ; + 0 pushes = 32, 16-aligned
+global memoryview_from_dunder_buffer
+DEF_FUNC memoryview_from_dunder_buffer, MDB_FRAME
+    mov [rbp - MDB_OBJ], rdi
+    V_TEST_PTR rdi, rax
+    ja .mdb_none
+    test rdi, rdi
+    jz .mdb_none
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .mdb_none
+    mov rdi, rax
+    lea rsi, [rel mv_dunder_buffer]
+    extern dunder_lookup
+    call dunder_lookup
+    test rax, rax
+    jz .mdb_none
+    mov rcx, [rbp - MDB_OBJ]
+    mov [rbp - MDB_ARGS], rcx
+    mov rcx, V_INT(0x11C)       ; PyBUF_FULL_RO, what CPython's memoryview asks
+    mov [rbp - MDB_ARGS + 8], rcx
+    mov rdi, rax
+    lea rsi, [rbp - MDB_ARGS]
+    mov edx, 2
+    extern obj_call_n
+    call obj_call_n
+    test rax, rax
+    jz .mdb_raised
+    V_TEST_PTR rax, rcx
+    ja .mdb_wrong
+    lea rcx, [rel memoryview_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .mdb_wrong_ptr
+    xor ecx, ecx
+    leave
+    ret
+.mdb_wrong_ptr:
+    mov rdi, rax
+    call obj_decref
+    jmp .mdb_wrong_msg
+.mdb_wrong:
+    DECREF_V rax, rcx
+.mdb_wrong_msg:
+    extern set_exception
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__buffer__ returned non-memoryview object"
+    call set_exception
+.mdb_raised:
+    xor eax, eax
+    mov ecx, 1
+    leave
+    ret
+.mdb_none:
+    xor eax, eax
+    xor ecx, ecx
+    leave
+    ret
+END_FUNC memoryview_from_dunder_buffer
 
 
 ;; ============================================================================
@@ -2124,4 +2215,5 @@ mv_format_table:
     db 0, 0, 0, 0, 0, 0, 0, 0
     dq 0
 
-
+section .rodata
+mv_dunder_buffer: db "__buffer__", 0

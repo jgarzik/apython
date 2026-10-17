@@ -54,7 +54,7 @@ CC = cc
 # src/pyo/complex.asm calls for the general complex power and for abs().
 # float.asm avoids libm by doing its own x87 sequence; complex does not, since
 # the polar form needs all seven and hand-rolling them would be a worse bargain.
-LDFLAGS = -no-pie -lc -lm -lgmp -lz -lcrypto -lexpat -lbz2 -llzma
+LDFLAGS = -no-pie -lc -lm -lgmp -lz -lssl -lcrypto -lexpat -lbz2 -llzma -lffi -ldl
 TARGET = apython
 
 # Source files.  Everything the interpreter is built from lives under src/:
@@ -93,7 +93,15 @@ PYTHON = python3
 
 .PHONY: all install clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
 
-all: $(TARGET) lib-pyc
+all: $(TARGET) lib-pyc build/_ctypes_test.so
+
+# The C library CPython's ctypes tests call into: Modules/_ctypes/_ctypes_test.c
+# verbatim, over a stand-in <Python.h> (tests/ctypes/Python.h), because the
+# tests reach it through CDLL(_ctypes_test.__file__) and never as an extension.
+# lib/_ctypes_test.py points __file__ here.
+build/_ctypes_test.so: tests/ctypes/_ctypes_test.c tests/ctypes/_ctypes_test.h tests/ctypes/Python.h
+	@mkdir -p build
+	$(CC) -shared -fPIC -O1 -w -I tests/ctypes -o $@ tests/ctypes/_ctypes_test.c -lm
 
 # Regenerate the machine-written assembly.  Deliberately phony and deliberately
 # not a prerequisite of anything: the outputs are committed so that building

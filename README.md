@@ -41,7 +41,7 @@ x86-64 assembly would not have been feasible for 1 person without LLM.
 ## Quick start
 
 **Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
-liblzma-dev, libssl-dev, libexpat1-dev, python3.12
+liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, python3.12
 
 ```bash
 make                # build ./apython
@@ -335,7 +335,9 @@ tests/                  the test suite
 - `zlib1g-dev` — deflate, for `zlib` and everything behind it
 - `libbz2-dev` — bzip2, for `bz2` and the `.bz2` members of a tarball
 - `liblzma-dev` — xz, for `lzma` and the `.xz` members of a tarball
-- `libssl-dev` — OpenSSL's digests, for `_hashlib`'s `pbkdf2_hmac` and `scrypt`
+- `libssl-dev` — OpenSSL: TLS for `ssl` (and so HTTPS), and the digests
+  behind `_hashlib`'s `pbkdf2_hmac` and `scrypt`
+- `libffi-dev` — the foreign-function calls and callbacks behind `ctypes`
 - `libexpat1-dev` — the XML parser behind `pyexpat` and `xml.etree`
 - `python3.12` — compiling test `.py` files to `.pyc`
 

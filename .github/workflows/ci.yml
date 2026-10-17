@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y nasm libgmp-dev zlib1g-dev libbz2-dev \
-            liblzma-dev libssl-dev libexpat1-dev
+            liblzma-dev libssl-dev libexpat1-dev libffi-dev
 
       - name: Build
         run: make

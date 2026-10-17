@@ -195,6 +195,7 @@ test_coro_bound_methods
 test_coro_throw_traceback
 test_crash_regressions
 test_csv
+test_ctypes_basic
 test_data_descriptor_precedence
 test_decode_errors
 test_deep_dealloc
@@ -597,6 +598,7 @@ test_property
 test_property_raises
 test_pycache_write
 test_pyc_hardening
+test_pyclass_descriptor_builtins
 test_pyc_staleness
 test_pyexpat_decl
 test_pyexpat_module
@@ -707,6 +709,8 @@ test_sre_groupdict_refcount
 test_sre_position
 test_sre
 test_sre_scanner_and_boundary
+test_ssl_basic
+test_ssl_shapes
 test_static_bases
 test_stdlib_glue
 test_stdlib_shims

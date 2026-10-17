@@ -38,6 +38,7 @@ extern math_module_create
 extern random_module_create
 extern mmap_module_create
 extern bz2_module_create
+extern ctypes_module_create
 extern lzma_module_create
 extern unicodedata_module_create
 extern socket_module_create
@@ -45,6 +46,7 @@ extern marshal_module_init
 extern signal_module_create
 extern zlib_module_create
 extern hashlib_module_create
+extern ssl_module_create
 extern pyexpat_module_create
 
 section .rodata
@@ -66,6 +68,7 @@ bm_n_math:     db "math", 0
 bm_n_randomcore: db "_randomcore", 0
 bm_n_mmapcore: db "_mmapcore", 0
 bm_n_bz2core: db "_bz2core", 0
+bm_n_ctypescore: db "_ctypescore", 0
 bm_n_lzmacore: db "_lzmacore", 0
 bm_n_unicodedata: db "unicodedata", 0
 bm_n_socket:   db "_socketcore", 0
@@ -73,6 +76,7 @@ bm_n_marshal:  db "marshal", 0
 bm_n_signal:   db "_signalcore", 0
 bm_n_zlib:     db "_zlibcore", 0
 bm_n_hashlib:  db "_hashlibcore", 0
+bm_n_ssl:      db "_sslcore", 0
 bm_n_impcore:  db "_impcore", 0
 bm_n_pyexpat:  db "_pyexpatcore", 0
 
@@ -88,6 +92,7 @@ builtin_module_table:
     dq bm_n_randomcore, random_module_create
     dq bm_n_mmapcore, mmap_module_create
     dq bm_n_bz2core, bz2_module_create
+    dq bm_n_ctypescore, ctypes_module_create
     dq bm_n_lzmacore, lzma_module_create
     dq bm_n_hashlib,  hashlib_module_create
     dq bm_n_impcore,  impcore_module_create
@@ -96,6 +101,7 @@ builtin_module_table:
     dq bm_n_socket,   socket_module_create
     dq bm_n_signal,   signal_module_create
     dq bm_n_sre,      sre_module_create
+    dq bm_n_ssl,      ssl_module_create
     dq bm_n_weakref,  weakref_module_create
     dq bm_n_zlib,     zlib_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global

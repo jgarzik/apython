@@ -528,7 +528,16 @@ DEF_FUNC op_load_attr, LA_FRAME
     extern module_getattr
     lea rdx, [rel module_getattr]
     cmp rax, rdx
+    je .la_getattr_as_is
+    ; So does a SUPER's: super_lookup has already run the whole descriptor
+    ; protocol against __self__, and what it answers is final.  Running the
+    ; block below again bound `super(C, C).prop` -- the property itself, as
+    ; CPython answers it -- to the super object and called the getter on it.
+    extern super_getattr_value
+    lea rdx, [rel super_getattr_value]
+    cmp rax, rdx
     jne .la_getattr_go
+.la_getattr_as_is:
     mov qword [rbp - LA_FROMINST], 1
 .la_getattr_go:
     call rax
@@ -2299,7 +2308,12 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     ; it, which is exactly what Lib/selectors.py does with it.
     lea rdx, [rel module_getattr]
     cmp rcx, rdx
+    je .ga_getattr_as_is
+    ; And a super's, as in op_load_attr: its answer is already final.
+    lea rdx, [rel super_getattr_value]
+    cmp rcx, rdx
     jne .ga_getattr_go
+.ga_getattr_as_is:
     mov qword [rbp - GA_FROMINST], 1
 .ga_getattr_go:
     call rcx
@@ -2397,8 +2411,20 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
     jz .ga_plain
     mov rdi, [rbp - GA_ATTR]
+    ; Found in a CLASS's own MRO, it is read through the class: __get__(None,
+    ; cls), as `cls.name` does.  Passing the class as the instance and its
+    ; metatype as the owner made getattr(cls, name) disagree with cls.name for
+    ; every Python-written data descriptor -- ctypes' Structure fields among
+    ; them, whose __get__ then refused the class as "not a ctype instance".
+    cmp qword [rbp - GA_OWNMRO], 0
+    jne .ga_user_own
     mov rsi, [rbp - GA_OBJ]
     mov rdx, [rbp - GA_TYPE]
+    jmp .ga_user_call
+.ga_user_own:
+    lea rsi, [rel none_singleton]
+    mov rdx, [rbp - GA_OBJ]
+.ga_user_call:
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR
     call dunder_call_3
