@@ -351,9 +351,11 @@ section .text
 ;; how a caller distinguishes "no such module" from "that module has no such
 ;; name".  We raised a bare "cannot import name" with neither in it.
 ;;
-;; The fourth CPython wording -- "from partially initialized module 'm' (most
-;; likely due to a circular import)" -- is not reachable here: it is decided by
-;; __spec__._initializing, and our modules carry __spec__ = None.  bugs.md.
+;; and the fourth, when the module's __spec__._initializing says its body is
+;; still running -- the shape of a circular import:
+;;
+;;     cannot import name 'X' from partially initialized module 'm' (most
+;;     likely due to a circular import) (/path/to/m.py)
 ;;
 ;; %R of a str is its repr, but every name that can appear in an import
 ;; statement is an identifier and every __name__ a dotted one, so plain quotes
@@ -363,14 +365,16 @@ IFE_ATTR  equ 8
 IFE_MOD   equ 16
 IFE_NAME  equ 24                ; __name__, if it is a str
 IFE_PATH  equ 32                ; __file__, if it is a str
+IFE_INIT  equ 40                ; 1 while the module is initializing
 IFE_CAP   equ 1024
-IFE_BUF   equ 32 + IFE_CAP
+IFE_BUF   equ 48 + IFE_CAP
 IFE_FRAME equ IFE_BUF           ; + 0 pushes, and IFE_BUF is a multiple of 16
 DEF_FUNC_LOCAL import_from_error, IFE_FRAME
     mov [rbp - IFE_MOD], rdi
     mov [rbp - IFE_ATTR], rsi
     mov qword [rbp - IFE_NAME], 0
     mov qword [rbp - IFE_PATH], 0
+    mov qword [rbp - IFE_INIT], 0
 
     mov rdi, [rbp - IFE_MOD]
     call import_module_dict
@@ -386,6 +390,9 @@ DEF_FUNC_LOCAL import_from_error, IFE_FRAME
     CSTRING rsi, "__file__"
     call ife_str_field
     mov [rbp - IFE_PATH], rax
+    mov rdi, [rbp - IFE_MOD]
+    call ife_initializing
+    mov [rbp - IFE_INIT], rax
 
 .ife_build:
     lea rdi, [rbp - IFE_BUF]
@@ -395,6 +402,10 @@ DEF_FUNC_LOCAL import_from_error, IFE_FRAME
     mov rdx, [rbp - IFE_ATTR]
     call ife_cat_str
     CSTRING rdx, "' from '"
+    cmp qword [rbp - IFE_INIT], 0
+    je .ife_from
+    CSTRING rdx, "' from partially initialized module '"
+.ife_from:
     call ife_cat_z
     mov rdx, [rbp - IFE_NAME]
     test rdx, rdx
@@ -406,6 +417,10 @@ DEF_FUNC_LOCAL import_from_error, IFE_FRAME
     call ife_cat_z
 .ife_after_name:
     CSTRING rdx, "' ("
+    cmp qword [rbp - IFE_INIT], 0
+    je .ife_open
+    CSTRING rdx, "' (most likely due to a circular import) ("
+.ife_open:
     call ife_cat_z
     mov rdx, [rbp - IFE_PATH]
     test rdx, rdx
@@ -499,6 +514,62 @@ DEF_FUNC_BARE ife_cat_z
     inc rsi
     jmp .measure
 END_FUNC ife_cat_z
+
+;; ============================================================================
+;; ife_initializing(rdi = a module dict) -> rax = 1 while its body runs, else 0
+;;
+;; CPython's _PyModuleSpec_IsInitializing: getattr(__spec__, "_initializing",
+;; False), and true.  importlib sets it around the module body.
+;; ============================================================================
+IFI_SPEC  equ 8
+IFI_KEY   equ 16
+IFI_DICT  equ 24
+IFI_FRAME equ 32
+DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
+    mov [rbp - IFI_DICT], rdi
+    CSTRING rdi, "__spec__"
+    call str_from_cstr_heap
+    mov [rbp - IFI_KEY], rax
+    mov rdi, [rbp - IFI_DICT]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - IFI_SPEC], rax
+    mov rdi, [rbp - IFI_KEY]
+    call obj_decref
+    mov rdi, [rbp - IFI_SPEC]
+    test rdi, rdi
+    jz .ifi_no
+    V_TEST_PTR rdi, rax
+    ja .ifi_no
+    CSTRING rdi, "_initializing"
+    call str_from_cstr_heap
+    mov [rbp - IFI_KEY], rax
+    mov rdi, [rbp - IFI_SPEC]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - IFI_SPEC], rax
+    mov rdi, [rbp - IFI_KEY]
+    call obj_decref
+    mov rdi, [rbp - IFI_SPEC]
+    test rdi, rdi
+    jz .ifi_no
+    extern obj_is_true
+    call obj_is_true
+    mov [rbp - IFI_KEY], rax
+    mov rdi, [rbp - IFI_SPEC]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - IFI_KEY]
+    test eax, eax
+    setnz al
+    movzx eax, al
+    leave
+    ret
+.ifi_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC ife_initializing
 
 ;; ============================================================================
 ;; ife_cat_n(rdi = buffer, rcx = offset, rdx = source, rsi = length)

@@ -266,7 +266,16 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `pyc_write_cache`, which is what puts a `__pycache__` entry beside a `.py`
   the first time it is imported
 - `src/main.asm` — argument parsing, startup order, and the `-t`/`--dis` modes
-- `src/import.asm` — the import system: finders, `sys.modules`, packages
+- `src/import.asm` — the C half of `import`, as CPython splits it: name
+  resolution, the `sys.modules` fast path, the dotted walk and IMPORT_FROM's
+  fallback.  A miss goes to CPython's own importlib
+  (`importlib._bootstrap._find_and_load`) through `lib/_importlib_bootstrap.py`,
+  which `main` runs before `site` -- so meta_path, path hooks, specs, loaders,
+  zipimport and importlib.metadata are CPython's code.  The assembly finders
+  remain only for what loads before importlib exists, and for builtins:
+  `src/modules/impcore.asm` is `_impcore`, whose `create_builtin` is where
+  BuiltinImporter ends up.  Bytecode is cached under the `apython-312` tag
+  only, and `make` precompiles `stdlib/` and `lib/` with apython itself
 - `src/modules/io.asm` — the `_iocore` module: the four `_IOBase` types the rest
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves

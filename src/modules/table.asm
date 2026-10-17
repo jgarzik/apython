@@ -23,6 +23,7 @@
 ASM_INIT
 
 extern array_module_create
+extern impcore_module_create
 extern time_module_create
 extern asyncio_module_create
 extern sre_module_create
@@ -72,6 +73,7 @@ bm_n_marshal:  db "marshal", 0
 bm_n_signal:   db "_signalcore", 0
 bm_n_zlib:     db "_zlibcore", 0
 bm_n_hashlib:  db "_hashlibcore", 0
+bm_n_impcore:  db "_impcore", 0
 bm_n_pyexpat:  db "_pyexpatcore", 0
 
 align 8
@@ -88,6 +90,7 @@ builtin_module_table:
     dq bm_n_bz2core, bz2_module_create
     dq bm_n_lzmacore, lzma_module_create
     dq bm_n_hashlib,  hashlib_module_create
+    dq bm_n_impcore,  impcore_module_create
     dq bm_n_io,       io_module_create
     dq bm_n_pyexpat,  pyexpat_module_create
     dq bm_n_socket,   socket_module_create

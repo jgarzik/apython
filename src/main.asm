@@ -578,9 +578,19 @@ DEF_FUNC main, 8
     ; .pth files, and sets up a venv.  CPython imports it after __main__
     ; exists and before sys.path[0] is the script's directory, and a failure
     ; is fatal there as it is here.
+    ;
+    ; Before it, under -S as well: CPython's importlib, which every import
+    ; from here on goes through (lib/_importlib_bootstrap.py says how).
+    CSTRING rdi, "import _importlib_bootstrap"
+    mov esi, 27
+    call main_run_startup
+    test eax, eax
+    jnz .check_uncaught
     cmp byte [rel main_sysflags + SF_NO_SITE], 0
     jne .site_done
-    call main_import_site
+    CSTRING rdi, "import site"
+    mov esi, 11
+    call main_run_startup
     test eax, eax
     jnz .check_uncaught
 .site_done:
@@ -590,7 +600,12 @@ DEF_FUNC main, 8
     mov rdi, rbx
     mov rax, [rel cmd_source]
     test rax, rax
-    jz .path0_have
+    jnz .path0_not_script
+    extern pathconfig_path0
+    call pathconfig_path0
+    mov rdi, rax
+    jmp .path0_have
+.path0_not_script:
     CSTRING rdi, ""
     lea rcx, [rel main_runmodule_cmd]
     cmp rax, rcx
@@ -1048,22 +1063,27 @@ DEF_FUNC main_env_set
 END_FUNC main_env_set
 
 ;; ============================================================================
-;; main_import_site() -> eax = 0, or 1 with the exception in current_exception
+;; main_run_startup(rdi = source, rsi = its length)
+;;   -> eax = 0, or 1 with the exception in current_exception
 ;;
-;; `import site`, compiled and run in a frame of its own with a namespace of
-;; its own, so that the binding lands nowhere a program can see -- CPython
-;; imports it from C and binds no name at all.
+;; One startup statement -- `import site` and the like -- compiled and run in
+;; a frame of its own with a namespace of its own, so that the binding lands
+;; nowhere a program can see: CPython imports these from C and binds no name.
 ;; ============================================================================
 MIS_CODE  equ 8
 MIS_DICT  equ 16
-MIS_FRAME equ 16
-DEF_FUNC main_import_site, MIS_FRAME
+MIS_SRC   equ 24
+MIS_LEN   equ 32
+MIS_FRAME equ 32
+DEF_FUNC main_run_startup, MIS_FRAME
+    mov [rbp - MIS_SRC], rdi
+    mov [rbp - MIS_LEN], rsi
     extern str_from_cstr_heap
-    CSTRING rdi, "<site>"
+    CSTRING rdi, "<startup>"
     call str_from_cstr_heap
     mov [rbp - MIS_DICT], rax         ; the filename, briefly
-    CSTRING rdi, "import site"
-    mov esi, 11
+    mov rdi, [rbp - MIS_SRC]
+    mov rsi, [rbp - MIS_LEN]
     mov rdx, rax
     mov ecx, CMODE_EXEC
     extern compile_source
@@ -1116,7 +1136,7 @@ DEF_FUNC main_import_site, MIS_FRAME
 .mis_out:
     leave
     ret
-END_FUNC main_import_site
+END_FUNC main_run_startup
 
 section .rodata
 ; The single-letter flags accepted: -E -I -S -s -B -u -b -d -q -v -O -P -R,

@@ -577,3 +577,60 @@ DEF_FUNC pathconfig_cwd_dir
     leave
     ret
 END_FUNC pathconfig_cwd_dir
+
+section .bss
+pc_path0: resb PC_MAX           ; what sys.path[0] is the directory of
+section .text
+
+;; ============================================================================
+;; pathconfig_path0(rdi = the absolute script path) -> rax = C string
+;;
+;; The path sys.path[0] is the directory of.  A script that is a .pyc in a
+;; __pycache__ directory -- `apython pkg/__pycache__/m.cpython-312.pyc` -- is
+;; treated as the source beside it would be: the modules it imports live in
+;; pkg/, and importlib, like CPython's, never imports from __pycache__ by a
+;; bare name.  Anything else is the path unchanged.
+;; ============================================================================
+PP0_SRC   equ 8
+PP0_FRAME equ 16
+DEF_FUNC pathconfig_path0, PP0_FRAME
+    mov [rbp - PP0_SRC], rdi
+    mov rsi, rdi
+    lea rdi, [rel pc_path0]
+    call pc_set
+    lea rdi, [rel pc_path0]
+    call pc_dirname                 ; .../__pycache__, or not
+    lea rdi, [rel pc_path0]
+    xor eax, eax
+.pp0_end:
+    cmp byte [rdi + rax], 0
+    je .pp0_have_len
+    inc rax
+    jmp .pp0_end
+.pp0_have_len:
+    cmp rax, 12
+    jb .pp0_unchanged
+    lea rsi, [rdi + rax - 12]
+    cmp byte [rsi], '/'
+    jne .pp0_unchanged
+    mov rcx, '__pycach'
+    cmp [rsi + 1], rcx
+    jne .pp0_unchanged
+    cmp word [rsi + 9], 'e_'
+    jne .pp0_unchanged
+    cmp byte [rsi + 11], '_'
+    jne .pp0_unchanged
+    ; Drop "/__pycache__", keep a trailing "/x" so the caller's last-slash
+    ; cut leaves the parent directory.
+    mov byte [rsi], 0
+    lea rdi, [rel pc_path0]
+    CSTRING rsi, "/x"
+    call pc_append
+    lea rax, [rel pc_path0]
+    leave
+    ret
+.pp0_unchanged:
+    mov rax, [rbp - PP0_SRC]
+    leave
+    ret
+END_FUNC pathconfig_path0

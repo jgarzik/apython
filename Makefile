@@ -122,18 +122,15 @@ regen:
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $^ $(LDFLAGS)
 
-# apython reads .pyc and never .py, so the modules it ships in lib/ are not
-# importable until they are byte-compiled.  This is part of building the
-# interpreter, not of testing it: `make check` used to run before anything
-# compiled them, so any test that imported one failed on a fresh checkout.
-#
-# stdlib/ is CPython's own Lib/ and compiles in one compileall pass.  Neither
-# is strictly needed any more -- apython compiles a .py it is handed and
-# caches the result under its own apython-312 tag -- but a cold start over the
-# whole standard library is slow, and CPython's bytecode is the reference.
-lib-pyc:
-	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
-	@$(PYTHON) -m compileall -q -j0 stdlib >/dev/null 2>&1 || true
+# The library is byte-compiled by apython itself, under its own apython-312
+# cache tag: importlib reads only sys.implementation.cache_tag, so a
+# CPython-compiled .pyc would never be used, and a CPython sharing these
+# directories never runs bytecode apython compiled.  Absolute paths, so the
+# co_filename every traceback prints is where the file is even for the
+# modules loaded before importlib is there to fix it up.  The whole of
+# stdlib/ takes well under a second.
+lib-pyc: $(TARGET)
+	@./$(TARGET) -m compileall -q $(CURDIR)/stdlib $(CURDIR)/lib >/dev/null 2>&1 || true
 
 # An installation in CPython's own layout, so that site.py, sysconfig, venv
 # and pip -- each of which builds paths from these names -- find everything
@@ -157,7 +154,7 @@ install: all
 	    | cpio -pdm --quiet $(INSTLIB)
 	cd lib && find . -path ./test -prune -o -name __pycache__ -prune -o -type f -print \
 	    | cpio -pdm --quiet $(INSTLIB)/lib-dynload
-	@$(PYTHON) -m compileall -q -j0 $(INSTLIB) >/dev/null 2>&1 || true
+	@$(DESTDIR)$(PREFIX)/bin/apython -m compileall -q $(INSTLIB) >/dev/null 2>&1 || true
 
 # One rule for every source directory: the stem carries the subdirectory, so
 # src/pyo/dict.asm and src/methods/dict.asm land in different objects.

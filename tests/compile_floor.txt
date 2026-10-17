@@ -92,10 +92,12 @@ test_call_instance
 test_call_kwargs_errors
 test_call_recursion
 test_call_spec
+test_cell_contents
 test_class_annotations
 test_classcell_not_a_cell
 test_class_doc_entry
 test_classes
+test_class_instance_base
 test_class_layout_entries
 test_classmethod_metaclass
 test_class_name_at_module
@@ -329,6 +331,7 @@ test_func_attrs
 test_func_defaults_write
 test_func_dunder_get
 test_function_attrs
+test_function_constructor
 test_functions
 test_future_annotations
 test_future_import
@@ -349,6 +352,7 @@ test_generator_introspection
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
+test_genericalias_mro_entries
 test_generic_alias_subst
 test_generic_alias_value
 test_gen_exc_info
@@ -371,7 +375,9 @@ test_identity_values
 test_immediate_args
 test_immediate_operands
 test_imp_module
+test_import_circular_message
 test_import_errors
+test_import_from_module_subclass
 test_import_from_name
 test_import_from
 test_import_kwargs
@@ -458,6 +464,7 @@ test_lzma
 test_maketrans
 test_map_multi
 test_mappingproxy_call
+test_marshal_dumps_interned
 test_marshal_hostile
 test_marshal_interned
 test_marshal_module
@@ -600,6 +607,7 @@ test_reflexive_compare
 test_relative_import
 test_re_module
 test_re_opcodes
+test_re_possessive_groups
 test_repr_depth_unwind
 test_repr_element_raises
 test_repr
@@ -811,6 +819,7 @@ test_warning_registry
 test_warnings_filters
 test_warnings_module
 test_warnings
+test_warn_stacklevel_import
 test_weakref
 test_weakref_slots_dict
 test_weakref_subclass_kwargs

@@ -19,6 +19,7 @@ extern str_new_heap
 extern str_type
 extern none_singleton
 extern module_type
+extern obj_call_n
 extern exc_raise_import
 extern str_from_cstr_heap
 extern str_intern_cstr
@@ -1044,6 +1045,45 @@ global import_submodule_attr
 DEF_FUNC import_submodule_attr, ISA_FRAME
     mov [rbp - ISA_MOD], rdi
     mov [rbp - ISA_ATTR], rsi
+
+    ; With importlib installed, lib/_importlib_bootstrap.py answers, CPython's
+    ; way: sys.modules first, an import only for a package, and only a
+    ; ModuleNotFoundError for exactly that submodule taken as "absent".
+    CSTRING rdi, "_import_submodule"
+    call im_importlib_func
+    test rax, rax
+    jz .isa_own
+    ; (module, name) as an argument array: ISA_T2 is the lower address.
+    mov rcx, [rbp - ISA_MOD]
+    mov [rbp - ISA_T2], rcx
+    mov rcx, [rbp - ISA_ATTR]
+    mov [rbp - ISA_T1], rcx
+    mov rdi, rax
+    lea rsi, [rbp - ISA_T2]
+    mov edx, 2
+    call obj_call_n
+    test rax, rax
+    jz .isa_out_raw                ; it raised: 0 with the exception pending
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .isa_absent
+    ; sys.modules holds the module; the caller takes a borrowed reference.
+    mov [rbp - ISA_T2], rax
+    mov rdi, rax
+    call obj_decref
+    mov rax, [rbp - ISA_T2]
+    leave
+    ret
+.isa_absent:
+    mov rdi, rax
+    call obj_decref
+    xor eax, eax
+.isa_out_raw:
+    leave
+    ret
+.isa_own:
+    mov rdi, [rbp - ISA_MOD]
+    mov rsi, [rbp - ISA_ATTR]
     ; Only a module has a mod_dict.  sys.modules is an ordinary dict and a
     ; program may put anything in it -- importlib's own import_fresh_module
     ; does -- so this used to read a field belonging to some other struct and
@@ -1129,12 +1169,106 @@ isa_dot:         db ".", 0
 section .text
 
 ;; ============================================================================
-;; import_find_and_load(PyObject *name_str) -> PyObject*
-;; Find module on disk and load it.
+;; ifl_get(rdi = a dict, rsi = C string key) -> rax = the Value, BORROWED, or 0
+;; ============================================================================
+IFG_DICT  equ 8
+IFG_KEY   equ 16
+IFG_VAL   equ 24
+IFG_FRAME equ 32
+DEF_FUNC_LOCAL ifl_get, IFG_FRAME
+    mov [rbp - IFG_DICT], rdi
+    mov rdi, rsi
+    call str_from_cstr_heap
+    mov [rbp - IFG_KEY], rax
+    mov rdi, [rbp - IFG_DICT]
+    mov rsi, rax
+    call dict_get
+    mov [rbp - IFG_VAL], rax
+    mov rdi, [rbp - IFG_KEY]
+    call obj_decref
+    mov rax, [rbp - IFG_VAL]
+    leave
+    ret
+END_FUNC ifl_get
+
+;; ============================================================================
+;; im_importlib_func(rdi = C string) -> rax = that function of
+;;   lib/_importlib_bootstrap.py, BORROWED, or 0 while it is not loaded yet
+;;
+;; Looked up each time rather than cached: a process-lifetime pointer to a
+;; module attribute dangles when the module is dropped from sys.modules.
+;; ============================================================================
+IIF_NAME  equ 8
+IIF_FRAME equ 16
+DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
+    mov [rbp - IIF_NAME], rdi
+    mov rdi, [rel sys_modules_dict]
+    CSTRING rsi, "_importlib_bootstrap"
+    call ifl_get
+    test rax, rax
+    jz .iif_none
+    V_TEST_PTR rax, rcx
+    ja .iif_none
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel module_type]
+    cmp rcx, rdx
+    jne .iif_none
+    mov rdi, [rax + PyModuleObject.mod_dict]
+    test rdi, rdi
+    jz .iif_none
+    mov rsi, [rbp - IIF_NAME]
+    call ifl_get
+    leave
+    ret
+.iif_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC im_importlib_func
+
+;; ============================================================================
+;; import_find_and_load(PyObject *name_str) -> PyObject*, a new reference,
+;;   or NULL with the exception pending
+;;
+;; What the import statement does on a sys.modules miss: CPython's
+;; _bootstrap._find_and_load, reached through lib/_importlib_bootstrap.py --
+;; meta_path, path hooks, specs, loaders, all CPython's own code.  Until that
+;; module has finished loading there is no importlib to ask, and the
+;; interpreter's own loader below does the job; it is how importlib itself
+;; gets loaded, and what _impcore.create_builtin uses for a builtin.
+;; ============================================================================
+IFL_NAME  equ 8
+IFL_ARG   equ 16
+IFL_FRAME equ 16
+DEF_FUNC import_find_and_load, IFL_FRAME
+    mov [rbp - IFL_NAME], rdi
+    CSTRING rdi, "_find_and_load"
+    call im_importlib_func
+    test rax, rax
+    jz .ifl_own
+    mov rcx, [rbp - IFL_NAME]
+    mov [rbp - IFL_ARG], rcx
+    mov rdi, rax
+    lea rsi, [rbp - IFL_ARG]
+    mov edx, 1
+    call obj_call_n
+    leave
+    ret
+.ifl_own:
+    mov rdi, [rbp - IFL_NAME]
+    call import_find_and_load_asm
+    leave
+    ret
+END_FUNC import_find_and_load
+
+;; ============================================================================
+;; import_find_and_load_asm(PyObject *name_str) -> PyObject*
+;; Find module on disk and load it, without importlib.
 ;; For dotted names (e.g. "unittest.case"), searches parent package's __path__.
 ;; Returns module object or NULL.
 ;; ============================================================================
-DEF_FUNC import_find_and_load, FL_FRAME
+global import_find_and_load_asm
+DEF_FUNC import_find_and_load_asm, FL_FRAME
     push rbx
     push r12
     push r13
@@ -1366,7 +1500,7 @@ DEF_FUNC import_find_and_load, FL_FRAME
     pop rbx
     leave
     ret
-END_FUNC import_find_and_load
+END_FUNC import_find_and_load_asm
 
 ;; ============================================================================
 ;; sd_pyc_ok(rdi = an open fd on a .pyc, rsi = its path) -> rax = the fd when
