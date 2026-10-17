@@ -1196,7 +1196,7 @@ tuple_type:
     dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_TUPLE_SUBCLASS ; tp_flags
     dq 0                    ; tp_bases
     dq tuple_traverse                        ; tp_traverse
-    dq tuple_clear                        ; tp_clear
+    dq 0                                  ; tp_clear -- see tuple_traverse
     dq 0        ; tp_dictoffset
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
@@ -1210,7 +1210,7 @@ section .text
 ;; ============================================================================
 
 ;; ============================================================================
-;; ---- tuple_traverse / tuple_clear ----
+;; ---- tuple_traverse ----
 ;; ============================================================================
 DEF_FUNC tuple_traverse
     push rbx
@@ -1239,35 +1239,10 @@ DEF_FUNC tuple_traverse
     ret
 END_FUNC tuple_traverse
 
-DEF_FUNC tuple_clear
-    push rbx
-    push r12
-    push r13
-    push r15
-
-    mov rbx, rdi
-    mov r13, [rbx + PyTupleObject.ob_size]
-    mov r12, [rbx + PyTupleObject.ob_item]       ; payloads
-    mov qword [rbx + PyTupleObject.ob_size], 0
-
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    mov rdi, [r12]
-    push r12
-    push r12
-    DECREF_V rdi, rsi
-    pop r12
-    pop r12
-    add r12, 8
-    test r13, r13
-    jnz .loop
-.done:
-    pop r15
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC tuple_clear
+;; No tuple_clear, as CPython has none.  A tuple is immutable, so every cycle
+;; through one also runs through a mutable object whose own tp_clear breaks it.
+;; Emptying a tuple instead tears its items out from under a reader that is
+;; still running: a code object's co_consts is a tuple, and a generator
+;; suspended on that code is closed -- its finally run -- later in the same
+;; collection, where LOAD_CONST indexes the emptied tuple and reads freed
+;; objects.  tests/test_gc_suspended_generator_consts.py is the shape.

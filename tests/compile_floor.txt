@@ -349,6 +349,7 @@ test_gc_instance_type
 test_gc_module
 test_gc_reentrant_collect
 test_gc_static_types
+test_gc_suspended_generator_consts
 test_gen_adv
 test_generator_close_on_drop
 test_generator_close_throw
