@@ -1245,6 +1245,13 @@ DEF_FUNC instance_setattr
     lea rcx, [rel getset_descr_type]
     cmp [r9 + PyObject.ob_type], rcx
     jne .sa_no_slot
+    ; The __dict__ and __weakref__ getsets a class body grows are the
+    ; instance LAYOUT, handled below -- reached here only when some other
+    ; data descriptor (any property) set the MRO flag.  Their getset has no
+    ; setter, so `o.__dict__ = d` on an instance of a class with a property
+    ; was "not writable"; rich's Console is that class, and pip uses rich.
+    test qword [r9 + PyGetSetDescrObject.gs_flags], GS_LAYOUT
+    jnz .sa_no_slot
     mov rdi, r9
     mov rsi, rbx
     mov rdx, r13
