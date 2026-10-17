@@ -30,4 +30,17 @@ if getattr(_bootstrap_external, '_bootstrap', None) is None:
 if getattr(_bootstrap, '_bootstrap_external', None) is None:
     _bootstrap._bootstrap_external = _bootstrap_external
 
+# What CPython's frozen module looks like from outside: the module itself is
+# renamed 'importlib._bootstrap_external' by importlib/__init__.py, but everything defined in it
+# keeps '_frozen_importlib_external' as its __module__.  test_bdb keeps only the meta_path
+# entries whose class __module__ starts with "_frozen_importlib", and pickle
+# finds the classes through this name.
+for _value in list(vars(_bootstrap_external).values()):
+    if getattr(_value, "__module__", None) == 'importlib._bootstrap_external':
+        try:
+            _value.__module__ = '_frozen_importlib_external'
+        except (AttributeError, TypeError):
+            pass
+del _value
+
 sys.modules[__name__] = _bootstrap_external

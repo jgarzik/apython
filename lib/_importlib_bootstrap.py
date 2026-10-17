@@ -129,3 +129,11 @@ def _import_submodule(module, name):
         _remove_importlib_frames(exc)
         raise
     return sys.modules.get(fullname)
+
+
+# Its frames are importlib's, and a debugger asks whose a frame is by the
+# module __name__ in its globals: bdb's skip patterns ("importlib*") pass
+# over importlib._bootstrap's frames and must pass over these too.  Set last,
+# so that the import of this module itself is unaffected; sys.modules keeps
+# it under its own name.
+__name__ = "importlib._bootstrap_apython"

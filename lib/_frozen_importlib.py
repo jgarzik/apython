@@ -57,4 +57,17 @@ finally:
 if getattr(_bootstrap, 'sys', None) is None:
     _bootstrap._setup(sys, _imp)
 
+# What CPython's frozen module looks like from outside: the module itself is
+# renamed 'importlib._bootstrap' by importlib/__init__.py, but everything defined in it
+# keeps '_frozen_importlib' as its __module__.  test_bdb keeps only the meta_path
+# entries whose class __module__ starts with "_frozen_importlib", and pickle
+# finds the classes through this name.
+for _value in list(vars(_bootstrap).values()):
+    if getattr(_value, "__module__", None) == 'importlib._bootstrap':
+        try:
+            _value.__module__ = '_frozen_importlib'
+        except (AttributeError, TypeError):
+            pass
+del _value
+
 sys.modules[__name__] = _bootstrap
