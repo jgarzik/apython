@@ -102,7 +102,6 @@ extern ceil
 extern trunc
 extern ldexp
 extern __gmpz_mul
-extern kw_names_pending
 extern ap_strcmp
 extern get_iterator_opt
 extern obj_binary_op
@@ -142,9 +141,7 @@ extern get_iterator
 extern call_iternext
 extern ap_realloc
 extern ap_free
-extern current_exception
 extern eval_exception_unwind
-extern eval_saved_r13
 extern frexp
 
 section .text
@@ -1464,10 +1461,10 @@ DEF_FUNC math_bind_kw_named, MBK_FRAME
     mov [rbp - MBK_NPOS], rsi
     mov [rbp - MBK_NAMES], rdx
     mov [rbp - MBK_OUT], rcx
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .mbk_done
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov [rbp - MBK_KW], rax
     mov rcx, [rax + PyTupleObject.ob_size]
     sub [rbp - MBK_NPOS], rcx
@@ -2470,7 +2467,7 @@ DEF_FUNC math_fsum, FSM_FRAME
 
 .fsm_end:
     ; An exception from the iterator is not the end of it.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .fsm_drop_propagate
 
     ; Sum the partials from the smallest up, which is what makes the last
@@ -2526,7 +2523,7 @@ DEF_FUNC math_fsum, FSM_FRAME
     mov rdi, [rbp - FSM_ITER]
     call obj_decref
 .fsm_propagate:
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 .fsm_args:
     lea rdi, [rel mm_n_fsum]

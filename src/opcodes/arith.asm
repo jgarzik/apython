@@ -33,8 +33,6 @@ extern float_number_methods
 extern raise_exception
 extern exc_TypeError_type
 extern obj_decref
-extern eval_saved_r13
-extern eval_saved_rbx
 extern none_singleton
 extern obj_dealloc
 extern opcode_table
@@ -100,7 +98,7 @@ CO_SIZE  equ 48
 ; V_UNPACK left rax and edx both zero.  edx is left alone -- the decline paths
 ; read it.
 %macro CMP_DECLINED_OR_RAISED 2
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz %2
     cmp rax, [rsp + %1 + CO_EXC]
@@ -119,7 +117,7 @@ CO_SIZE  equ 48
 ; (rax, edx) hold the returned Value; r9 holds the op code and does not
 ; survive obj_decref.
 %macro DUNDER_NULL_RAISED 0
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .binop_subclass_raised
 %endmacro
 
@@ -267,7 +265,6 @@ BSF_RNAME equ 56
 BSF_LMETH equ 64
 BSF_EXC   equ 72
 BSF_FRAME equ 80            ; + 0 pushes = 80
-extern current_exception
 extern eval_exception_unwind
 DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov [rbp - BSF_LEFT], rdi
@@ -1999,7 +1996,7 @@ DEF_FUNC_BARE op_compare_op
     push rdi                   ; save left
     push r8                    ; save right tag
     push rsi                   ; save right
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov [rsp + CO_EXC], rax
 
     ; Float coercion: use float_compare when one operand is a float AND the
@@ -2076,7 +2073,7 @@ DEF_FUNC_BARE op_compare_op
     jmp .cmp_do_call_result
 .cmp_subclass_raised:
 .cmp_raised:
-    ; No DECREFs here: the unwinder cleans up from eval_saved_r13, which is
+    ; No DECREFs here: the unwinder cleans up from PyFrame.disp_sp, which is
     ; where the stack was BEFORE these two came off it, so it releases them.
     add rsp, CO_SIZE
     jmp eval_exception_unwind

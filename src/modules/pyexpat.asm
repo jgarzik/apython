@@ -10,7 +10,7 @@
 ; The OTHER half is `src/modules/pyexpat_cb.asm`, which is called BY LIBEXPAT.
 ; They are separate files because the two sides disagree on the one rule that
 ; matters: **`RAISE` is legal here and forbidden there.**  `RAISE` tail-jumps
-; into `eval_exception_unwind`, which does `mov rsp, [rel eval_base_rsp]` and
+; into `eval_exception_unwind`, which does `mov rsp, [gs:ThreadState.eval_base_rsp]` and
 ; never returns -- from a trampoline that would abandon every libexpat frame
 ; in between.
 ;
@@ -105,7 +105,6 @@ extern bytes_type
 extern bytearray_type
 extern type_is_subtype
 extern obj_is_true
-extern current_exception
 
 section .data
 align 8
@@ -1066,7 +1065,7 @@ DEF_FUNC px_parse, PP_FRAME
 
     ; The order is pyexpat.c's get_parse_result: a pending exception wins over
     ; whatever libexpat thought of the document.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .pending
     cmp dword [rbp - PP_STATUS], 0
     je .expat_error

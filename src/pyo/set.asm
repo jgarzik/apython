@@ -1412,7 +1412,6 @@ END_FUNC set_dealloc
 ;; Constructor: set() or set(iterable)
 ;; self = set_type, args = arg array, nargs = count
 ;; ============================================================================
-extern current_exception
 extern raise_exception
 extern exc_TypeError_type
 

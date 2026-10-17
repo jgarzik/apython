@@ -39,12 +39,24 @@ extern sys_write
 ;; reaches glibc's strtod from here -- and that is one of the few call paths out
 ;; of this codebase that actually uses aligned SSE.
 ;; ============================================================================
+extern main_tstate
+extern tstate_install
 DEF_FUNC main, 8
     push rbx
     push r12
     push r13
     push r14
     push r15
+
+    ; gs first: every per-thread word -- the exception state, the dispatch
+    ; loop's published registers, the recursion counters -- is reached
+    ; through it, and the selftest modes run code that touches them too.
+    mov r14d, edi
+    mov r15, rsi
+    lea rdi, [rel main_tstate]
+    call tstate_install
+    mov edi, r14d
+    mov rsi, r15
 
     ; Check argc >= 2
     cmp edi, 2
@@ -664,8 +676,7 @@ DEF_FUNC main, 8
 
     ; Check for unhandled exception
 .check_uncaught:
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .exit_ok
 
@@ -694,9 +705,9 @@ DEF_FUNC main, 8
     call traceback_print
 
     ; DECREF the exception object before exiting
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
 
     ; Exit 1
     mov ebx, 1
@@ -769,9 +780,9 @@ DEF_FUNC main, 8
 .se_zero:
     xor ebx, ebx
 .se_finish:
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     jmp .exit_cleanup
 
 .exit_ok:
@@ -916,7 +927,7 @@ DEF_FUNC main, 8
     ; A source file that failed to compile has a real SyntaxError pending, with
     ; a line number in it; saying "failed to load" instead would throw that
     ; away.  Nothing has run yet, so there is no traceback to print.
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .load_failed_plain
     ; Whatever is waiting on stdout goes out before the report does.  CPython
@@ -930,9 +941,9 @@ DEF_FUNC main, 8
     call fileobj_flush_std
     pop rdi
     call traceback_print
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     ; .exit_cleanup DECREFs the globals dict and the code object, and at this
     ; point neither exists -- nothing has been loaded yet.  Return straight out
     ; with the status instead.
@@ -1351,9 +1362,8 @@ DEF_FUNC main_run_startup, MIS_FRAME
     mov rdi, [rbp - MIS_CODE]
     call obj_decref
 
-    extern current_exception
     xor eax, eax
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .mis_out
 .mis_failed:
     mov eax, 1

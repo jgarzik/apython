@@ -52,7 +52,6 @@ extern dict_new
 extern dict_add_builtin_func
 extern exc_TypeError_type
 extern int_from_i64
-extern kw_names_pending
 extern list_append
 extern list_new
 extern method_new
@@ -250,10 +249,10 @@ DEF_FUNC posixdir_follow_arg, PFA_FRAME
     mov [rbp - PFA_NARGS], rsi
     mov dword [rbp - PFA_RES], 1
 
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .pfa_out
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     mov rcx, [rax + PyTupleObject.ob_size]
     mov rdx, rsi

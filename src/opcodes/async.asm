@@ -40,10 +40,7 @@ extern async_gen_type
 extern dunder_call_1
 extern dunder_aiter
 extern dunder_anext
-extern current_exception
 extern eval_exception_unwind
-extern eval_saved_r13
-extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -76,7 +73,6 @@ extern opcode_dispatch_table
 ;; ============================================================================
 AAI_OBJ   equ 8
 AAI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
-extern current_exception
 extern dunder_lookup
 extern dunder_call_1
 extern raise_type_error_with_name
@@ -171,7 +167,7 @@ DEF_FUNC_LOCAL async_awaitable_iter, AAI_FRAME
 .aai_failed:
     ; __await__ raised, or tp_iter did.  A pending exception is the caller's
     ; to propagate or to chain; say which happened rather than guess for it.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .aai_pending
 .aai_no:
     xor eax, eax
@@ -357,7 +353,7 @@ DEF_FUNC_BARE op_get_aiter
     ; __aiter__ ran and raised.  The iterable is ours and the unwinder will
     ; not release it, so drop it before leaving.
     call obj_decref
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .gai_error:
@@ -376,7 +372,7 @@ DEF_FUNC_BARE op_get_aiter
     ; not before the message is composed.
     mov rsi, rdi
     VPUSH_PTR rdi
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp .gai_raise
 
 .gai_iter_error:
@@ -503,7 +499,7 @@ DEF_FUNC_BARE op_get_anext
 
 .gan_propagate:
     ; The stack is as DISPATCH published it -- nothing was popped -- so
-    ; eval_saved_r13 needs no correction here.
+    ; PyFrame.disp_sp needs no correction here.
     jmp eval_exception_unwind
 
 .gan_error:
@@ -604,7 +600,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
 .baw_exit_missing:
     ; dunder_lookup_special answers 0 for "absent" and for "the lookup itself
     ; raised"; only the first is a TypeError of our own.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .baw_lookup_raised
 .baw_no_exit:
     ; The same two wordings op_before_with uses, and for the same reason:
@@ -655,7 +651,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     jmp eval_exception_unwind
 
 .baw_enter_missing:
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .baw_enter_raised
 .baw_no_enter:
     ; The __aexit__ method pushed above has taken mgr's slot, so the unwinder
@@ -705,7 +701,7 @@ DEF_FUNC_BARE op_end_async_for
 .eaf_reraise:
     ; Not StopAsyncIteration — re-raise the original exception.
     VPOP_VAL rdi, rsi          ; exc payload+tag
-    ; DISPATCH published eval_saved_r13 at the depth this handler was ENTERED
+    ; DISPATCH published PyFrame.disp_sp at the depth this handler was ENTERED
     ; with, and eval_exception_unwind restores r13 from it -- so the pop above
     ; has to be published too, or the unwinder brings the exception's slot
     ; back to life while current_exception also points at it.  Its release
@@ -717,7 +713,7 @@ DEF_FUNC_BARE op_end_async_for
     ; RAISE_VARARGS, RERAISE, SEND's propagate arm, the two intrinsics.  This
     ; was the one that did not.  (CLEANUP_THROW below reaches the same place
     ; from the other side, by peeking and taking a second reference.)
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     ; raise_exception_obj TAKES the reference VPOP_VAL just transferred off
     ; the stack -- it does not add one.  The comment that used to sit here
     ; said the opposite.
@@ -814,13 +810,12 @@ DEF_FUNC_BARE op_cleanup_throw
     ; eval_exception_unwind will restore r13 from saved value and
     ; XDECREF_VAL items when adjusting to the next handler's depth)
     INCREF rax
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     ; No traceback entry: the throw that reached this handler already
     ; recorded this frame, and CPython's CLEANUP_THROW goes straight to
     ; exception_unwind rather than through the label that records one.
     ; Without this every frame delegating a throw appeared twice.
-    extern tb_suppress_frame
-    mov byte [rel tb_suppress_frame], 1
+    mov byte [gs:ThreadState.tb_suppress_frame], 1
     jmp eval_exception_unwind
 END_FUNC op_cleanup_throw
 

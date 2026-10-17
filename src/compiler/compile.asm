@@ -24,7 +24,6 @@
 extern ap_free
 extern ap_strcmp
 extern dict_get
-extern kw_names_pending
 extern obj_as_index
 extern obj_call_n
 extern str_from_cstr_heap
@@ -66,7 +65,6 @@ extern none_singleton
 extern cg_expr
 extern cg_unit_free
 extern cg_unit_init
-extern current_exception
 extern exc_from_cstr
 extern exc_set_context
 extern obj_decref
@@ -514,17 +512,17 @@ DEF_FUNC comp_set_pending, 8
     pop rax
 
     ; Chain onto whatever was already being handled, as a raise would.
-    mov rsi, [rel current_exception]
+    mov rsi, [gs:ThreadState.current_exception]
     test rsi, rsi
     jz .no_prev
     push rax
     mov rdi, rax
     call exc_set_context
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
     pop rax
 .no_prev:
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
 .none:
     pop rbx
     leave
@@ -948,7 +946,6 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     jmp .car_cleanup
 END_FUNC compile_ast_raw
 
-section .bss
 ;; PEP 563: whether the code that called compile(), exec() or eval() was
 ;; itself compiled under `from __future__ import annotations`.  CPython
 ;; inherits the future flags of the calling frame into a nested compile
@@ -957,9 +954,7 @@ section .bss
 ;; parameter because compile_source has four callers that are not builtins --
 ;; `./apython foo.py` among them -- and none of them has a frame to inherit
 ;; from.  CONSUMED by the next compile, so it can never leak into one that
-;; did not ask.
-global comp_inherit_future
-comp_inherit_future: resq 1
+;; did not ask.  comp_inherit_future lives in ThreadState (src/include/threadstate.inc).
 section .text
 
 
@@ -1028,8 +1023,8 @@ DEF_FUNC compile_source_ex, CS_FRAME
     ; PEP 563 is inherited from the code that called compile()/exec()/eval(),
     ; which is CPython's rule.  Consumed here, so it cannot leak into a
     ; compile that did not ask.
-    mov rax, [rel comp_inherit_future]
-    mov qword [rel comp_inherit_future], 0
+    mov rax, [gs:ThreadState.comp_inherit_future]
+    mov qword [gs:ThreadState.comp_inherit_future], 0
     test rax, rax
     jz .cs_no_inherit
     mov dword [rbx + Comp.future_anno], 1
@@ -2035,12 +2030,10 @@ section .text
 
 extern builtins_dict_global
 extern type_is_subtype
-extern current_exception
 extern dict_get
 extern dict_set
 extern dict_type
 extern eval_frame
-extern eval_saved_r12
 extern frame_free
 extern frame_new
 extern obj_dealloc
@@ -2119,7 +2112,7 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     jne .have_globals
     ; Nothing supplied: fall back to the calling frame, the same source
     ; globals() and locals() use.
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .no_frame
     mov rdx, [rax + PyFrame.globals]
@@ -2281,8 +2274,8 @@ END_FUNC ev_run_code
 ;; two halves of one file disagreed about what an annotation is.
 ;; ============================================================================
 DEF_FUNC_LOCAL comp_note_caller_future
-    mov qword [rel comp_inherit_future], 0
-    mov rax, [rel eval_saved_r12]
+    mov qword [gs:ThreadState.comp_inherit_future], 0
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .cncf_done
     mov rax, [rax + PyFrame.code]
@@ -2290,7 +2283,7 @@ DEF_FUNC_LOCAL comp_note_caller_future
     jz .cncf_done
     test dword [rax + PyCodeObject.co_flags], CO_FUTURE_ANNOTATIONS
     jz .cncf_done
-    mov qword [rel comp_inherit_future], 1
+    mov qword [gs:ThreadState.comp_inherit_future], 1
 .cncf_done:
     leave
     ret
@@ -2580,10 +2573,10 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     ; by kw_names_pending.
     mov [rbp - CO_NPOS], rsi
     mov qword [rbp - CO_KWNAMES], 0
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .co_positional
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov [rbp - CO_KWNAMES], rax
     mov rcx, [rax + PyTupleObject.ob_size]
     sub [rbp - CO_NPOS], rcx

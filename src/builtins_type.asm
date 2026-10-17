@@ -39,8 +39,6 @@ extern type_is_subtype
 ; --- singletons and the exception plumbing ---
 extern bool_true
 extern bool_false
-extern current_exception
-extern attr_error_pending
 extern eval_exception_unwind
 extern exc_TypeError_type
 extern raise_exception
@@ -134,10 +132,9 @@ DEF_FUNC obj_declared_class, ODC_FRAME
     ; attr_error_pending is the tree's own flag for "the AttributeError below
     ; is the ordinary answer to a lookup", which is exactly the one CPython
     ; swallows here.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .odc_none
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     jne .odc_none
     extern eval_exception_unwind
     leave

@@ -32,7 +32,6 @@ extern obj_richcompare_bool
 extern obj_as_index
 extern obj_as_index_seq
 extern recursion_limit
-extern c_recursion_depth
 extern exc_RecursionError_type
 extern int_fits_i64
 extern exc_OverflowError_type
@@ -1042,7 +1041,6 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ; Did iternext raise, or was something already being handled?  Inside an
     ; `except` block current_exception is the exception being handled, so a
     ; bare test made tuple(x) there re-raise it.
-    extern current_exception
     EXC_RAISED_SINCE [rbp - TTC_EXC], rax, .ttc_exc_cleanup
 
     ; Convert list to tuple

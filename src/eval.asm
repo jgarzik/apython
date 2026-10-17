@@ -8,7 +8,6 @@
 
 ; External opcode handlers (defined in opcodes_*.asm files)
 extern eval_hook_mask
-extern systrace_any
 extern op_pop_top
 extern op_push_null
 extern op_return_value
@@ -186,15 +185,13 @@ eval_no_frame_msg: db "exception raised outside the interpreter loop", 0
 ; read-modify-write and c_recursion_depth straddled a cache line.  Costs
 ; nothing to say so.
 align 8
-global recursion_depth
 global recursion_limit
-recursion_depth: dq 0
-; Depth of C-level container recursion -- comparing or hashing a structure
-; that reaches itself.  Separate from recursion_depth because a non-local
-; exit discards those C frames without unwinding them, so it is reset by
+; recursion_depth and c_recursion_depth are per thread, in ThreadState; the
+; LIMIT is the interpreter's, as CPython's is.  c_recursion_depth is the depth
+; of C-level container recursion -- comparing or hashing a structure that
+; reaches itself.  Separate from recursion_depth because a non-local exit
+; discards those C frames without unwinding them, so it is reset by
 ; eval_exception_unwind rather than balanced, exactly as repr_depth is.
-global c_recursion_depth
-c_recursion_depth: dq 0
 ; CPython's default.  apython's frames are cheaper -- about 320 machine-stack
 ; bytes each against an 8 MB rlimit -- but matching CPython is what programs
 ; and tests expect, and sys.setrecursionlimit() can raise it.
@@ -212,6 +209,7 @@ section .text
 
 DEF_FUNC eval_frame
     SAVE_EVAL_REGS
+    mov r15, [gs:ThreadState.ts_self]   ; one gs load; the rest are base+disp
 
     ; r12 = frame
     mov r12, rdi
@@ -241,29 +239,28 @@ DEF_FUNC eval_frame
     mov rcx, [rax + PyCodeObject.co_names]
     mov rcx, [rcx + PyTupleObject.ob_item]
 
-    ; Save caller's eval globals (for nested eval_frame calls)
-    mov rax, [rel eval_saved_rbx]
+    ; Save caller's eval globals (for nested eval_frame calls).  The caller's
+    ; IP and stack top need no saving: DISPATCH published them into the
+    ; caller's own frame (PyFrame.disp_ip / .disp_sp), which this frame does
+    ; not touch.
+    mov rax, [r15 + ThreadState.eval_saved_r12]
     push rax
-    mov rax, [rel eval_saved_r12]
+    mov rax, [r15 + ThreadState.eval_co_names]
     push rax
-    mov rax, [rel eval_saved_r13]
+    mov rax, [r15 + ThreadState.eval_co_consts]
     push rax
-    mov rax, [rel eval_co_names]
-    push rax
-    mov rax, [rel eval_co_consts]
-    push rax
-    mov rax, [rel eval_base_rsp]
+    mov rax, [r15 + ThreadState.eval_base_rsp]
     push rax
     ; The CALL_FUNCTION_EX cleanup registrations belong to whichever frame is
     ; running.  There is one global for each, and a raise inside a *nested*
     ; frame unwinds only to that frame -- leaving the outer opcode's C frame
     ; alive, so the unwinder freed a buffer the outer opcode then freed
     ; again.  Scope them the way the other eval globals are scoped.
-    mov rax, [rel cfex_temp_pending]
+    mov rax, [r15 + ThreadState.cfex_temp_pending]
     push rax
-    mov rax, [rel cfex_merged_pending]
+    mov rax, [r15 + ThreadState.cfex_merged_pending]
     push rax
-    mov rax, [rel cfex_kwnames_pending]
+    mov rax, [r15 + ThreadState.cfex_kwnames_pending]
     push rax
     ; build_class_pending is the same kind of registration, and was the one
     ; left unscoped.  type_from_parts records the half-built class in it so
@@ -274,17 +271,17 @@ DEF_FUNC eval_frame
     ; in, which runs a frame of its own and unwinds out of it.  So a class
     ; whose parent's __init_subclass__ abandoned a generator came out of
     ; construction with a refcount one short.
-    mov rax, [rel build_class_pending]
+    mov rax, [r15 + ThreadState.build_class_pending]
     push rax
     ; One pad, because the push list has to stay even: everything below it
     ; would otherwise make its calls 8 bytes out of alignment.  eval_return
     ; also uses the slot, to carry an exception past the restore that has to
     ; be released after it rather than during it.
     sub rsp, 8
-    mov qword [rel cfex_temp_pending], 0
-    mov qword [rel cfex_merged_pending], 0
-    mov qword [rel cfex_kwnames_pending], 0
-    mov qword [rel build_class_pending], 0
+    mov qword [r15 + ThreadState.cfex_temp_pending], 0
+    mov qword [r15 + ThreadState.cfex_merged_pending], 0
+    mov qword [r15 + ThreadState.cfex_kwnames_pending], 0
+    mov qword [r15 + ThreadState.build_class_pending], 0
 
     ; KW_NAMES is per-call-site state: it names the keywords of the ONE call
     ; that follows it, and the callee is meant to consume it.  A builtin that
@@ -295,9 +292,9 @@ DEF_FUNC eval_frame
     ; keyword arguments in it anywhere.  Scope it to the frame, as the cfex
     ; globals above are.  The tuple is borrowed from co_consts, so no
     ; refcounting.
-    mov rax, [rel kw_names_pending]
+    mov rax, [r15 + ThreadState.kw_names_pending]
     push rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [r15 + ThreadState.kw_names_pending], 0
 
     ; The exception being HANDLED is scoped to the frame as well, and takes
     ; the slot the alignment pad used to occupy, so the push list stays even.
@@ -325,42 +322,36 @@ DEF_FUNC eval_frame
     mov rax, [r12 + PyFrame.exc_state]
     test rax, rax
     jnz .ef_own_exc
-    mov rax, [rel handled_exception]        ; shared: keep it, count it
+    mov rax, [r15 + ThreadState.handled_exception]        ; shared: keep it, count it
     test rax, rax
     jz .ef_exc_pushed
     INCREF rax
     jmp .ef_exc_pushed
 .ef_own_exc:
     mov qword [r12 + PyFrame.exc_state], 0
-    mov r11, [rel handled_exception]        ; ours to hold for the duration
-    mov [rel handled_exception], rax        ; the frame's reference moves in
+    mov r11, [r15 + ThreadState.handled_exception]        ; ours to hold for the duration
+    mov [r15 + ThreadState.handled_exception], rax        ; the frame's reference moves in
     mov rax, r11
 .ef_exc_pushed:
     push rax
 
     ; Set globals for this frame
-    mov [rel eval_co_consts], r14
-    mov [rel eval_co_names], rcx
+    mov [r15 + ThreadState.eval_co_consts], r14
+    mov [r15 + ThreadState.eval_co_names], rcx
 
     ; Set up for this frame.  The frame that was current until now is this
     ; one's caller, and linking them is what gives sys._getframe an f_back to
     ; walk: nothing else maintained the chain, and PyFrame.prev_frame was
     ; written once, as zero, and never read.  eval_return restores the global
     ; from its own stack, so the links stay consistent as frames unwind.
-    mov rax, [rel eval_saved_r12]
+    mov rax, [r15 + ThreadState.eval_saved_r12]
     mov [r12 + PyFrame.prev_frame], rax
-    ; And where the caller was when it made this call.  eval_saved_rbx still
-    ; holds its IP here -- this frame's own does not go in until below -- so
-    ; sys._getframe(1).f_lineno can answer for a frame that is not the one
-    ; running.
-    test rax, rax
-    jz .ef_no_caller
-    mov rcx, [rel eval_saved_rbx]
-    mov [rax + PyFrame.call_ip], rcx
-.ef_no_caller:
-    mov [rel eval_saved_r12], r12
+    ; Where the caller was when it made this call needs no recording: its
+    ; last DISPATCH left it in the caller's PyFrame.disp_ip, which is what
+    ; sys._getframe(1).f_lineno reads for a frame that is not the one running.
+    mov [r15 + ThreadState.eval_saved_r12], r12
     ; Save machine stack pointer for exception unwind cleanup
-    mov [rel eval_base_rsp], rsp
+    mov [r15 + ThreadState.eval_base_rsp], rsp
 
     ; Recursion guard.  A Python-level call costs about 320 bytes of machine
     ; stack across op_call, func_call and eval_frame, so the 8 MB default ran
@@ -369,37 +360,37 @@ DEF_FUNC eval_frame
     ; the frame's globals and eval_base_rsp are in place so the raise unwinds
     ; through this frame, and decremented in eval_return, which is the only
     ; exit (.no_handler jumps there too).
-    inc qword [rel recursion_depth]
-    mov rax, [rel recursion_depth]
+    inc qword [r15 + ThreadState.recursion_depth]
+    mov rax, [r15 + ThreadState.recursion_depth]
     cmp rax, [rel recursion_limit]
     jg .eval_recursion_error
 
     ; Check for pending throw (set by gen_throw before resume)
-    mov [rel eval_saved_rbx], rbx
-    mov [rel eval_saved_r13], r13
-    cmp byte [rel throw_pending], 0
+    mov [r12 + PyFrame.disp_ip], rbx
+    mov [r12 + PyFrame.disp_sp], r13
+    cmp byte [r15 + ThreadState.throw_pending], 0
     je .no_throw
 
 .throw_resume:
-    mov byte [rel throw_pending], 0
+    mov byte [r15 + ThreadState.throw_pending], 0
     jmp eval_exception_unwind
 
 .eval_recursion_error:
     ; Out of line: this must not sit between the throw_pending test and
     ; .throw_resume, or every generator throw falls into it.
-    mov [rel eval_saved_rbx], rbx
-    mov [rel eval_saved_r13], r13
+    mov [r12 + PyFrame.disp_ip], rbx
+    mov [r12 + PyFrame.disp_sp], r13
     ; CPython refuses the call before the frame exists, so its traceback ends
     ; at the caller.  This frame is already up; keep it out of the report.
-    mov byte [rel tb_suppress_frame], 1
+    mov byte [r15 + ThreadState.tb_suppress_frame], 1
     RAISE exc_RecursionError_type, "maximum recursion depth exceeded"
 
 .trace_call_raised:
     ; A trace function that raised on the way into the frame.  The exception
     ; is pending; unwind from here, which is what the frame's own raise would
     ; have done.  Out of line, so it is not in the fall-through to dispatch.
-    mov [rel eval_saved_rbx], rbx
-    mov [rel eval_saved_r13], r13
+    mov [r12 + PyFrame.disp_ip], rbx
+    mov [r12 + PyFrame.disp_sp], r13
     jmp eval_exception_unwind
 
 .no_throw:
@@ -408,7 +399,7 @@ DEF_FUNC eval_frame
     ; function unwinds through this frame and sys._getframe() inside the
     ; tracer sees it.  systrace_call is a load and a branch when nothing is
     ; set.
-    cmp qword [rel systrace_any], 0
+    cmp qword [r15 + ThreadState.systrace_any], 0
     je .no_trace_call
     extern systrace_call
     call systrace_call
@@ -471,7 +462,8 @@ END_FUNC eval_hook_thunk
 ;; rax contains the return value. Restores callee-saved regs and returns.
 ;; ============================================================================
 DEF_FUNC_BARE eval_return
-    dec qword [rel recursion_depth]
+    mov r15, [gs:ThreadState.ts_self]   ; one gs load; the rest are base+disp
+    dec qword [r15 + ThreadState.recursion_depth]
 
     ; The 'return' event.  This is the single exit -- op_return_value,
     ; op_yield_value, op_interpreter_exit and the unwinder's .no_handler all
@@ -482,7 +474,7 @@ DEF_FUNC_BARE eval_return
     ;
     ; It has to run BEFORE the pop chain below, and rax and rdx are the return
     ; value, so both are saved across it.
-    cmp qword [rel systrace_any], 0
+    cmp qword [r15 + ThreadState.systrace_any], 0
     je .er_no_trace
     push rax
     push rdx
@@ -509,8 +501,8 @@ DEF_FUNC_BARE eval_return
     ; r12 is the frame on all three ways in -- a return, a yield, and the
     ; unwinder's .no_handler, which restores it from eval_saved_r12 first.
     pop rcx
-    mov r11, [rel handled_exception]
-    mov [rel handled_exception], rcx
+    mov r11, [r15 + ThreadState.handled_exception]
+    mov [r15 + ThreadState.handled_exception], rcx
     mov qword [rsp + 8], 0      ; the pad, standing in for "nothing to release"
     cmp dword [r12 + PyFrame.exc_depth], 0
     jne .er_exc_own
@@ -522,28 +514,24 @@ DEF_FUNC_BARE eval_return
 .er_exc_done:
 
     pop rcx
-    mov [rel kw_names_pending], rcx
+    mov [r15 + ThreadState.kw_names_pending], rcx
     pop r11                     ; the pad: an exception to release, or 0
     pop rcx
-    mov [rel build_class_pending], rcx
+    mov [r15 + ThreadState.build_class_pending], rcx
     pop rcx
-    mov [rel cfex_kwnames_pending], rcx
+    mov [r15 + ThreadState.cfex_kwnames_pending], rcx
     pop rcx
-    mov [rel cfex_merged_pending], rcx
+    mov [r15 + ThreadState.cfex_merged_pending], rcx
     pop rcx
-    mov [rel cfex_temp_pending], rcx
+    mov [r15 + ThreadState.cfex_temp_pending], rcx
     pop rcx
-    mov [rel eval_base_rsp], rcx
+    mov [r15 + ThreadState.eval_base_rsp], rcx
     pop rcx
-    mov [rel eval_co_consts], rcx
+    mov [r15 + ThreadState.eval_co_consts], rcx
     pop rcx
-    mov [rel eval_co_names], rcx
+    mov [r15 + ThreadState.eval_co_names], rcx
     pop rcx
-    mov [rel eval_saved_r13], rcx
-    pop rcx
-    mov [rel eval_saved_r12], rcx
-    pop rcx
-    mov [rel eval_saved_rbx], rcx
+    mov [r15 + ThreadState.eval_saved_r12], rcx
 
     ; How was this frame entered?  Asked HERE, while r12 is still the frame
     ; being left -- RESTORE_EVAL_REGS below makes it the caller's again.  A
@@ -704,23 +692,23 @@ DEF_FUNC_BARE eval_exception_unwind
     ; again after the last one -- during startup, and during the shutdown
     ; DECREF cascade, which runs __del__.  Unwinding to it would be
     ; `mov rsp, 0`; there is genuinely nowhere to unwind to, so say so.
-    cmp qword [rel eval_base_rsp], 0
+    cmp qword [gs:ThreadState.eval_base_rsp], 0
     je .no_interpreter_frame
 
     ; Restore machine stack to eval frame level (discard intermediate frames)
-    mov rsp, [rel eval_base_rsp]
+    mov rsp, [gs:ThreadState.eval_base_rsp]
 
     ; Clear stale kw_names_pending — the non-local jump from raise_exception
     ; bypasses CALL opcode cleanup, leaving kw_names_pending set.
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; repr_depth is bracketed by repr_push/repr_pop around a container repr,
     ; and the pop is skipped by any raise from inside a nested __repr__.  It
     ; saturates at 64 and then every container repr in the process raises,
     ; and repr_stack keeps 64 dangling pointers that repr_check_active
     ; compares by address.
-    mov qword [rel repr_depth], 0
-    mov qword [rel c_recursion_depth], 0
+    mov qword [gs:ThreadState.repr_depth], 0
+    mov qword [gs:ThreadState.c_recursion_depth], 0
 
     ; gc_collecting is set for the duration of a collection and cleared at
     ; the end.  A raise that escapes the collector -- one with no Python frame
@@ -740,50 +728,48 @@ DEF_FUNC_BARE eval_exception_unwind
     ;
     ; The stack grows down, so the landing point tells the two apart exactly:
     ; below the collector's frame it survives, above it it is gone.
-    mov rax, [rel gc_collect_rsp]
+    mov rax, [gs:ThreadState.gc_collect_rsp]
     test rax, rax
     jz .gc_flag_done            ; no collection running; nothing to decide
-    cmp rax, [rel eval_base_rsp]
+    cmp rax, [gs:ThreadState.eval_base_rsp]
     ja .gc_flag_done            ; landing deeper: the collector is still there
     mov qword [rel gc_collecting], 0
-    mov qword [rel gc_collect_rsp], 0
+    mov qword [gs:ThreadState.gc_collect_rsp], 0
 .gc_flag_done:
 
     ; Free stale cfex_temp_pending buffer if set
-    mov rdi, [rel cfex_temp_pending]
+    mov rdi, [gs:ThreadState.cfex_temp_pending]
     test rdi, rdi
     jz .no_cfex_temp
-    mov qword [rel cfex_temp_pending], 0
+    mov qword [gs:ThreadState.cfex_temp_pending], 0
     extern gc_collecting
-    extern gc_collect_rsp
 extern ap_free
-extern repr_depth
 extern exc_RecursionError_type
     call ap_free
 .no_cfex_temp:
 
     ; Free stale cfex_merged_pending buffer if set
-    mov rdi, [rel cfex_merged_pending]
+    mov rdi, [gs:ThreadState.cfex_merged_pending]
     test rdi, rdi
     jz .no_cfex_merged
-    mov qword [rel cfex_merged_pending], 0
+    mov qword [gs:ThreadState.cfex_merged_pending], 0
     call ap_free
 .no_cfex_merged:
 
     ; DECREF stale cfex_kwnames_pending tuple if set
-    mov rdi, [rel cfex_kwnames_pending]
+    mov rdi, [gs:ThreadState.cfex_kwnames_pending]
     test rdi, rdi
     jz .no_cfex_kwnames
-    mov qword [rel cfex_kwnames_pending], 0
+    mov qword [gs:ThreadState.cfex_kwnames_pending], 0
     extern obj_decref
     call obj_decref
 .no_cfex_kwnames:
 
     ; DECREF stale build_class_pending type object if set
-    mov rdi, [rel build_class_pending]
+    mov rdi, [gs:ThreadState.build_class_pending]
     test rdi, rdi
     jz .no_build_class
-    mov qword [rel build_class_pending], 0
+    mov qword [gs:ThreadState.build_class_pending], 0
     call obj_decref
 .no_build_class:
 
@@ -793,20 +779,20 @@ extern exc_RecursionError_type
     ; non-local jump to here bypasses the restore, leaving regs corrupted.
     ; rbx: use saved copy from eval_dispatch (pre-advance, points to instruction)
     ; r12: reload from frame pointer (saved in eval_frame_r12)
-    mov rbx, [rel eval_saved_rbx]   ; restore bytecode IP (pre-advance copy)
-    mov r12, [rel eval_saved_r12]   ; restore frame pointer
-    mov r13, [rel eval_saved_r13]   ; restore value stack pointer
+    mov r12, [gs:ThreadState.eval_saved_r12]   ; restore frame pointer
+    mov rbx, [r12 + PyFrame.disp_ip]           ; restore bytecode IP (pre-advance copy)
+    mov r13, [r12 + PyFrame.disp_sp]           ; restore value stack pointer
 
     ; Record this frame in the exception's traceback.  Every frame the
     ; exception passes through gets an entry, which is what makes a real
     ; "most recent call last" report possible; the old code attached one
     ; empty entry to the first frame and nothing after that.
-    cmp byte [rel tb_suppress_frame], 0
+    cmp byte [gs:ThreadState.tb_suppress_frame], 0
     je .tb_record
-    mov byte [rel tb_suppress_frame], 0
+    mov byte [gs:ThreadState.tb_suppress_frame], 0
     jmp .skip_tb
 .tb_record:
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .skip_tb
     mov rsi, [r12 + PyFrame.code]
@@ -825,7 +811,7 @@ extern exc_RecursionError_type
     ; The 'exception' event.  The unwinder is entered once per frame as an
     ; exception travels outward, which is where CPython raises it too, and by
     ; here rbx, r12 and r13 are the frame's own again.
-    cmp qword [rel systrace_any], 0
+    cmp qword [gs:ThreadState.systrace_any], 0
     je .no_trace_exc
     extern systrace_exception
     call systrace_exception
@@ -835,13 +821,13 @@ extern exc_RecursionError_type
     mov rax, [r12 + PyFrame.code]
     mov rcx, [rax + PyCodeObject.co_consts]
     mov rcx, [rcx + PyTupleObject.ob_item]          ; consts payload array
-    mov [rel eval_co_consts], rcx
+    mov [gs:ThreadState.eval_co_consts], rcx
     mov rcx, [rax + PyCodeObject.co_names]
     mov rcx, [rcx + PyTupleObject.ob_item]
-    mov [rel eval_co_names], rcx
+    mov [gs:ThreadState.eval_co_names], rcx
 
     ; Compute bytecode offset in instruction units (halfwords)
-    ; eval_saved_rbx points to the instruction word (before add rbx, 2)
+    ; PyFrame.disp_ip points to the instruction word (before add rbx, 2)
     lea rcx, [rax + PyCodeObject.co_code]
     mov rdi, rax             ; rdi = code object for exc_table_find_handler
     mov rsi, rbx             ; rbx = saved pre-advance bytecode IP
@@ -899,8 +885,8 @@ extern exc_RecursionError_type
 .no_lasti:
 
     ; Push the exception onto the value stack (transfer ownership)
-    mov rdx, [rel current_exception]
-    mov qword [rel current_exception], 0   ; clear: ownership moves to value stack
+    mov rdx, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0   ; clear: ownership moves to value stack
     VPUSH_PTR rdx
 
     ; Set rbx to handler target
@@ -924,7 +910,7 @@ extern exc_RecursionError_type
     ; empty, so a reachable-but-wrong depth degrades to a clean NULL rather
     ; than to a wild pointer.
     ;
-    ; Reaching here at all means some handler published eval_saved_r13 below
+    ; Reaching here at all means some handler published PyFrame.disp_sp below
     ; the depth its own instruction is covered at.  Nothing does today.
     mov rsi, r13
 .sb_zero:
@@ -977,21 +963,21 @@ END_FUNC eval_exception_unwind
 ;; ============================================================================
 DEF_FUNC exc_install, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
-    mov rsi, [rel current_exception]
+    mov rsi, [gs:ThreadState.current_exception]
     test rsi, rsi
     jnz .ei_replace
-    mov rsi, [rel handled_exception]
+    mov rsi, [gs:ThreadState.handled_exception]
     test rsi, rsi
     jz .ei_done
     call exc_set_context        ; rdi = new, rsi = context (borrowed)
     jmp .ei_done
 .ei_replace:
     call exc_set_context
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
 .ei_done:
     pop rdi
-    mov [rel current_exception], rdi
+    mov [gs:ThreadState.current_exception], rdi
     leave
     ret
 END_FUNC exc_install
@@ -1068,7 +1054,7 @@ op_resume:
 ; Pop the return value from the value stack and return from eval_frame.
 op_interpreter_exit:
     ; Check for unhandled exception
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jnz .unhandled_exception
     VPOP rax                  ; the return Value
@@ -1140,7 +1126,7 @@ op_interpreter_exit:
 
 .no_filename:
     ; Print exception: "TypeName: message\n"
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .exit_now
 
@@ -1504,72 +1490,58 @@ opcode_table:
     dq op_unimplemented      ; 255
 
 ;; ============================================================================
-;; Global exception state (BSS)
+;; The main thread's ThreadState (src/include/threadstate.inc)
 ;; ============================================================================
-;; The block below is `align 64` and the two byte-sized flags are at the END of
-;; it, both deliberately.
+;; Every per-thread word the interpreter keeps -- current_exception and
+;; handled_exception, the registers DISPATCH publishes, the pending words, the
+;; recursion counters -- lives in a ThreadState reached through gs.  This is
+;; the main thread's, installed by tstate_install as the first thing main does.
 ;;
-;; tb_suppress_frame used to sit in the middle as a lone `resb 1`, which put
-;; every word after it at `addr % 8 == 1`: eval_saved_r12 and
-;; build_class_pending each STRADDLED a 64-byte line, and both are saved and
-;; restored on every Python call.  Worse, eval.o's .bss has sh_addralign 4, so
-;; the words DISPATCH writes on every opcode avoided splitting a line only
-;; because dunder_cache_vals happened to end where it did -- any edit changing
-;; another file's .bss size by a non-multiple of 8 would have turned every one
-;; of them into a split access, and it would have read as an unrelated
-;; regression somewhere else entirely.
+;; `align 64` because the first line of the struct is the eight words DISPATCH
+;; and eval_frame/eval_return touch; the struct keeps its byte flags at the end
+;; so no word after them is off 8-byte alignment.  That arrangement was learned
+;; the hard way when these were loose .bss words: a lone `resb 1` in the middle
+;; put eval_saved_r12 across a line on every Python call.
 ;;
-;; With the flags moved out, current_exception through eval_co_consts are six
-;; consecutive words in one cache line, which is what DISPATCH and
-;; eval_frame/eval_return actually touch.
+;; The two exception words answer different questions.  current_exception is
+;; the one IN FLIGHT; handled_exception is the one an `except` block is
+;; HANDLING -- CPython's tstate->exc_info->exc_value, which sys.exc_info()
+;; reads, a bare `raise` re-raises and an implicit __context__ chains to.  A
+;; generator swaps its own in and out around each resume (PyFrame.exc_state).
 section .bss
 align 64
-global current_exception
-current_exception: resq 1    ; PyExceptionObject* or NULL -- IN FLIGHT
-;; The exception being HANDLED: what an `except` block installed and what
-;; POP_EXCEPT takes down again, CPython's tstate->exc_info->exc_value.  It is
-;; a separate word from current_exception because the two answer different
-;; questions -- "is one in flight?" and "which one is this code handling?" --
-;; and a single word could only ever answer one of them.  sys.exc_info() reads
-;; this, a bare `raise` re-raises it, and an implicit __context__ chains to it.
-;; A generator swaps its own in and out around each resume (PyFrame.exc_state).
-global handled_exception
-handled_exception: resq 1    ; PyExceptionObject* or NULL -- BEING HANDLED
-eval_base_rsp: resq 1        ; machine stack pointer at eval dispatch level
-global eval_saved_rbx
-eval_saved_rbx: resq 1       ; bytecode IP saved at dispatch (for exception unwind)
-global eval_saved_r12
-eval_saved_r12: resq 1       ; frame pointer saved at frame entry (for exception unwind)
-global eval_saved_r13
-eval_saved_r13: resq 1       ; value stack ptr saved at dispatch (for exception unwind)
-global eval_co_names
-eval_co_names: resq 1        ; co_names payload pointer (&tuple.ob_item[0])
-global eval_co_consts
-eval_co_consts: resq 1       ; co_consts payload pointer (&tuple.ob_item[0])
+global main_tstate
+main_tstate: resb ThreadState_size
 
-global kw_names_pending
-kw_names_pending: resq 1     ; tuple of kw names for next CALL, or NULL
-
-global cfex_temp_pending
-cfex_temp_pending: resq 1    ; temp buffer from op_call_function_ex, or NULL
-
-global cfex_merged_pending
-cfex_merged_pending: resq 1  ; merged buffer from op_call_function_ex kwargs, or NULL
-
-global cfex_kwnames_pending
-cfex_kwnames_pending: resq 1 ; kw_names tuple from op_call_function_ex kwargs, or NULL
-
-global build_class_pending
-build_class_pending: resq 1  ; type object from builtin___build_class__ during construction, or NULL
-
-
-; The two byte-sized flags, together, at the end -- see the note at the top of
-; this block.  A `resb 1` anywhere above them puts every word after it off
-; 8-byte alignment.
-global throw_pending
-throw_pending: resb 1           ; nonzero = gen_throw set current_exception before resume
-global tb_suppress_frame
-tb_suppress_frame: resb 1    ; 1 = the next unwind adds no traceback entry
+section .text
+;; ============================================================================
+;; tstate_install(rdi = ThreadState*) -> nothing
+;;
+;; Point gs at a ThreadState and record its own address in ts_self.  The
+;; raw syscall, not glibc's: arch_prctl has no wrapper worth the PLT, and
+;; nothing here may touch a field before gs is set.  Failure is fatal --
+;; every opcode writes through gs.
+;; ============================================================================
+ARCH_SET_GS     equ 0x1001
+SYS_arch_prctl  equ 158
+DEF_FUNC tstate_install
+    push rdi
+    sub rsp, 8
+    mov rsi, rdi
+    mov edi, ARCH_SET_GS
+    mov eax, SYS_arch_prctl
+    syscall
+    add rsp, 8
+    pop rdi
+    test rax, rax
+    jnz .ti_failed
+    mov [gs:ThreadState.ts_self], rdi
+    leave
+    ret
+.ti_failed:
+    CSTRING rdi, "tstate_install: arch_prctl(ARCH_SET_GS) failed"
+    call fatal_error
+END_FUNC tstate_install
 
 ;; ============================================================================
 ;; Read-only data for traceback printing

@@ -9,7 +9,6 @@
 %include "listsort.inc"
 extern str_type
 extern ap_memcmp
-extern current_exception
 extern obj_as_index
 extern obj_as_slice_index
 %include "opcodes.inc"
@@ -325,7 +324,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; add_method_to_dict_checked, which counts keyword values in nargs and
     ; would therefore reject l.sort(key=f).
     mov rax, rsi                ; nargs, self included
-    mov rcx, [rel kw_names_pending]
+    mov rcx, [gs:ThreadState.kw_names_pending]
     test rcx, rcx
     jz .ls_have_npos
     sub rax, [rcx + PyTupleObject.ob_size]
@@ -344,9 +343,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov qword [rbp - LS_NK], 0
 
     ; --- Parse keyword arguments ---
-    extern kw_names_pending
     extern ap_strcmp
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .ls_no_kw
 
@@ -453,7 +451,7 @@ DEF_FUNC list_method_sort, LS_FRAME
 .ls_kw_done:
     pop rsi
     pop rdi
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rbx, [rbp - LS_LIST]       ; reload list (clobbered by kw parsing)
 
 .ls_no_kw:
@@ -1117,10 +1115,10 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     mov rbx, rdi            ; save args ptr
     mov r12, rsi            ; save nargs
 
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .ldi_kw_done
-    mov qword [rel kw_names_pending], 0     ; consumed, whichever way this goes
+    mov qword [gs:ThreadState.kw_names_pending], 0     ; consumed, whichever way this goes
     mov rcx, [rax + PyTupleObject.ob_size]
     sub r12, rcx                            ; the positional count alone
 

@@ -1005,9 +1005,6 @@ END_FUNC raise_missing_arguments
 ;; exactly: a message built into a buffer and handed to a raise that does not
 ;; return.
 ;; ============================================================================
-extern attr_error_pending
-extern current_exception
-extern eval_saved_r13
 extern eval_exception_unwind
 extern value_type
 extern module_type
@@ -1059,10 +1056,10 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov [rbp - RNA_OBJ], rdi
     mov [rbp - RNA_ISSET], rdx
     mov qword [rbp - RNA_NORET], 0
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .rna_fresh
-    mov qword [rel attr_error_pending], 0
-    cmp qword [rel current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .rna_fresh
 
     ; CPython's set_attribute_error_context runs after the hook as well, so a
@@ -1071,7 +1068,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     ; itself, which is what the probe below leaves alone.
     cmp qword [rbp - RNA_ISSET], 0
     jne .rna_pending_raise
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     mov rdi, rbx
     extern exc_AttributeError_type
     lea rsi, [rel exc_AttributeError_type]
@@ -1118,7 +1115,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     pop r12
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 .rna_fresh:
     push rdi
@@ -1298,7 +1295,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov rdi, rax
     extern exc_install
     call exc_install
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .rna_installed
 
@@ -1312,7 +1309,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
 .rna_installed:
     cmp qword [rbp - RNA_NORET], 0
     jne .rna_return
-    ; The tail raise_exception has: it does not republish eval_saved_r13
+    ; The tail raise_exception has: it does not republish PyFrame.disp_sp
     ; either, because every caller here is inside a helper the opcode called
     ; rather than an opcode that has popped operands of its own.
     leave

@@ -34,8 +34,6 @@ extern sys_write
 extern exc_StopAsyncIteration_type
 extern method_new
 extern builtin_func_new
-extern current_exception
-extern throw_pending
 extern exc_set_context
 
 ; The awaitables live in asyncgen.asm; these are what this file reaches for.
@@ -261,14 +259,14 @@ DEF_FUNC gen_iternext
     ; cleared for the duration of the resume so that a NULL result means the
     ; body raised and nothing else, and put back if it did not.
     push rax
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     push rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call eval_frame
     pop rcx
     test rax, rax
     jz .gs_gen_raised
-    mov [rel current_exception], rcx    ; takes over the saved reference
+    mov [gs:ThreadState.current_exception], rcx    ; takes over the saved reference
     jmp .gs_exc_settled
 .gs_gen_raised:
     ; The body raised, and that exception is the result.  The caller's, if it
@@ -357,8 +355,7 @@ DEF_FUNC_LOCAL async_gen_init_hooks, AGIH_FRAME
     mov qword [rdi + PyGenObject.ag_hooks_done], 1
     mov [rbp - AGIH_GEN], rdi
 
-    extern asyncgen_finalizer_hook
-    mov rax, [rel asyncgen_finalizer_hook]
+    mov rax, [gs:ThreadState.asyncgen_finalizer_hook]
     test rax, rax
     jz .agih_no_final
     mov [rdi + PyGenObject.ag_finalizer], rax
@@ -366,8 +363,7 @@ DEF_FUNC_LOCAL async_gen_init_hooks, AGIH_FRAME
     call obj_incref
 .agih_no_final:
 
-    extern asyncgen_firstiter_hook
-    mov rax, [rel asyncgen_firstiter_hook]
+    mov rax, [gs:ThreadState.asyncgen_firstiter_hook]
     test rax, rax
     jz .agih_done
     sub rsp, 16
@@ -472,7 +468,7 @@ DEF_FUNC_LOCAL gen_dealloc_close, GDC_FRAME
 .gdc_settle:
     ; GeneratorExit and StopIteration on the way out are the expected
     ; outcomes; anything else is left pending for the caller to report.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .gdc_free
     mov rcx, [rax + PyObject.ob_type]
@@ -483,8 +479,8 @@ DEF_FUNC_LOCAL gen_dealloc_close, GDC_FRAME
     cmp rcx, rdx
     jne .gdc_free
 .gdc_swallow:
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .gdc_free:
@@ -542,7 +538,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     mov rdi, r12
     call obj_incref
 .gd_no_pending:
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
 
     ; An async generator with a finalizer is HANDED OVER rather than closed.
     ; Closing it here would run its `await`s with no loop to run them on;
@@ -579,10 +575,10 @@ DEF_FUNC gen_dealloc, GD_FRAME
 
     ; Anything the cleanup raised is reported and dropped, as an exception
     ; from __del__ is: there is no caller left to hand it to.
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .gd_close_done
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     ; The full report, as CPython's does: the generator itself, then the
     ; traceback of where inside the cleanup it happened.  One line naming
     ; neither was all this used to print.
@@ -594,7 +590,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     call obj_decref
 .gd_close_done:
     ; Hand the reference taken above back to the global.
-    mov [rel current_exception], r12
+    mov [gs:ThreadState.current_exception], r12
     dec qword [rbx + PyObject.ob_refcnt]
     jnz .gd_resurrected         ; someone kept it: free nothing
 
@@ -765,9 +761,9 @@ DEF_FUNC gen_send
     ; cleared for the duration of the resume so that a NULL result means the
     ; body raised and nothing else, and put back if it did not.
     push rax
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     push rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call eval_frame
     pop rcx
     ; If the generator body raised, that exception is the result and must not
@@ -776,7 +772,7 @@ DEF_FUNC gen_send
     ; StopIteration instead of the exception.
     test rax, rax
     jz .gsend_raised
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     jmp .gsend_settled
 .gsend_raised:
     test rcx, rcx
@@ -941,13 +937,13 @@ DEF_FUNC_LOCAL gt_throw_by_name, GTBN_FRAME
 
 .gtbn_absent:
     ; No throw at all, which is not this function's failure.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .gtbn_none
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .gtbn_none
-    mov qword [rel attr_error_pending], 0
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .gtbn_none:
     xor eax, eax
@@ -990,7 +986,7 @@ DEF_FUNC gen_throw, GT_FRAME
     ; belongs to the caller, and DECREFing it here freed an exception that was
     ; still being handled out there.  Before the delegation below, because the
     ; sub-iterator's throw runs arbitrary code.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov [rbp - GT_SAVED_EXC], rax
 
     ; --- PEP 380: a `yield from` throws into the SUB-iterator first --------
@@ -1051,7 +1047,7 @@ DEF_FUNC gen_throw, GT_FRAME
     ; The child yielded, so this generator is still suspended at the same
     ; `yield from` and that value is its answer.
     mov rcx, [rbp - GT_SAVED_EXC]
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     pop r13
     pop r12
     pop rbx
@@ -1064,11 +1060,11 @@ DEF_FUNC gen_throw, GT_FRAME
     ; the exception.  If it merely finished, it is resumed normally: the
     ; delegation loop re-enters SEND, finds the child exhausted and takes its
     ; return value, which is what a `value = yield from sub` is waiting for.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .gt_resume_throwing
 
     mov rcx, [rbp - GT_SAVED_EXC]
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     mov rdi, rbx
     lea rsi, [rel none_singleton]
     pop r13
@@ -1119,7 +1115,7 @@ DEF_FUNC gen_throw, GT_FRAME
     call exc_new
 
 .gt_have_exc:
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
 
 .gt_resume:
     ; The exception is raised AT the suspended yield, so its __context__ is
@@ -1132,7 +1128,7 @@ DEF_FUNC gen_throw, GT_FRAME
     mov rsi, [r13 + PyFrame.exc_state]
     test rsi, rsi
     jz .gt_no_chain
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .gt_no_chain
     call exc_set_context
@@ -1148,7 +1144,7 @@ DEF_FUNC gen_throw, GT_FRAME
     mov [r13 + PyFrame.instr_ptr], rax
 
     ; Set throw_pending so eval_frame resume immediately unwinds
-    mov byte [rel throw_pending], 1
+    mov byte [gs:ThreadState.throw_pending], 1
 
     ; Resume execution — eval_frame will see throw_pending and unwind
     mov rdi, r13
@@ -1177,10 +1173,10 @@ DEF_FUNC gen_throw, GT_FRAME
     ; handle the throw and it propagates -- which is what CPython does, and
     ; raising StopIteration over the top of it freed it twice.  Otherwise
     ; the caller's own pending exception goes back.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .gt_exhausted_propagating
     mov rcx, [rbp - GT_SAVED_EXC]
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
 .gt_exhausted_propagating:
 
     ; Exhausted.  Clear before freeing, as gen_iternext does.
@@ -1204,10 +1200,10 @@ DEF_FUNC gen_throw, GT_FRAME
 .gt_frame_gone:
     ; It closed itself on the way out; there is nothing left to free and the
     ; exhausted bookkeeping below is still what the caller needs.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .gt_exhausted_propagating
     mov rcx, [rbp - GT_SAVED_EXC]
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     jmp .gt_exhausted_propagating
 
 .gt_yielded:
@@ -1215,7 +1211,7 @@ DEF_FUNC gen_throw, GT_FRAME
     ; frame's exc_state on the way out of eval_return; what goes back here is
     ; the caller's in-flight exception, put aside before the throw.
     mov rcx, [rbp - GT_SAVED_EXC]
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     mov rax, r12
     mov rdx, r13
     pop r13
@@ -1390,14 +1386,13 @@ DEF_FUNC gen_close_iter, GCI_FRAME
     ; No close at all is not an error: obj_getattr_opt leaves an
     ; AttributeError pending the way every miss does, and it is not this
     ; function's failure.
-    extern attr_error_pending
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .gci_done
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .gci_done
-    mov qword [rel attr_error_pending], 0
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .gci_done:
@@ -1429,7 +1424,7 @@ DEF_FUNC gen_close, GCW_FRAME
     leave
     ret
 .gcw_propagate:
-    ; As in _gen_throw_impl's .gti_propagate below: eval_saved_r13 is not
+    ; As in _gen_throw_impl's .gti_propagate below: PyFrame.disp_sp is not
     ; republished, because r13 here is whatever the caller left in it and a
     ; bound method leaves nargs.  eval_dispatch published the right one.
     leave
@@ -1481,7 +1476,7 @@ DEF_FUNC gen_close_impl, GC_FRAME
     ; The generator finished.  GeneratorExit and StopIteration coming back
     ; out are the expected outcomes and are swallowed; anything else is a
     ; real error from the cleanup and propagates.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .gc_done
     mov rcx, [rax + PyObject.ob_type]
@@ -1494,8 +1489,8 @@ DEF_FUNC gen_close_impl, GC_FRAME
     jne .gc_propagate
 
 .gc_swallow:
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .gc_done:
@@ -1970,7 +1965,7 @@ DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     ; A NULL result means exhaustion only when nothing is pending; the
     ; generator body may have raised, and turning that into StopIteration
     ; swallowed it.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .gsi_propagate
 
     ; StopIteration — raise with actual return value from generator
@@ -2054,7 +2049,7 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
     ; out of throw().  Raising StopIteration instead also DECREF'd the
     ; still-pending exception a second time, which is where the double free
     ; came from.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .gti_propagate
 
     ; Exhausted — raise StopIteration with return value
@@ -2086,7 +2081,7 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
 .gti_propagate:
     ; The generator did not handle it, so the exception leaves throw().
     ;
-    ; eval_saved_r13 is NOT republished here.  r13 is the value stack only
+    ; PyFrame.disp_sp is NOT republished here.  r13 is the value stack only
     ; when this is reached straight from the eval loop, which is what
     ; LOAD_ATTR's method fast path does; through a bound method it is
     ; method_call's copy of nargs, and publishing that sent the unwinder
@@ -2096,7 +2091,7 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
     ; test_asyncio found it.
     ;
     ; The right value is already published: eval_dispatch writes all three of
-    ; eval_saved_rbx/r12/r13 for the frame whose opcode is running, and that
+    ; eval_saved_r12 and the frame's disp_ip/disp_sp for the frame whose opcode is running, and that
     ; is the frame this exception is leaving into.  src/pyo/class.asm's
     ; .init_raised carries the same note for the same reason.
     extern eval_exception_unwind

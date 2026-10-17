@@ -32,10 +32,7 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern eval_saved_rbx
-extern eval_saved_r13
 extern opcode_dispatch_table
-extern eval_co_names
 extern obj_dealloc
 extern obj_decref
 extern op_load_attr
@@ -45,13 +42,10 @@ extern op_store_attr
 extern func_type
 extern frame_new
 extern frame_alloc_inline
-extern frame_datastack_top
-extern frame_datastack_end
 extern frame_free
 extern eval_frame
 extern eval_exception_unwind
 extern builtins_dict_global
-extern attr_error_pending
 
 section .text
 
@@ -431,8 +425,7 @@ DEF_FUNC_BARE op_load_attr_instance
     ; that raise_no_attribute should hand over rather than replace, and every
     ; ordinary lookup clears it -- object.asm calls that "it cannot survive a
     ; lookup".  This is a lookup.
-    extern attr_error_pending
-    mov qword [rel attr_error_pending], 0
+    CLEAR_ATTR_ERROR_PENDING
 
     ; INCREF the attribute BEFORE releasing the object: the object may hold
     ; the only reference to the dict the attribute lives in.
@@ -561,11 +554,11 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     shl r9, 3
     add r9, FRAME_HEADER_SIZE
 
-    mov r15, [rel frame_datastack_top]
+    mov r15, [gs:ThreadState.frame_datastack_top]
     lea rdx, [r15 + r9]
-    cmp rdx, [rel frame_datastack_end]
+    cmp rdx, [gs:ThreadState.frame_datastack_end]
     ja .lap_frame_slow
-    mov [rel frame_datastack_top], rdx
+    mov [gs:ThreadState.frame_datastack_top], rdx
 
 .lap_frame_ready:
     ; frame_new's header, minus prev_frame -- eval_frame overwrites that from
@@ -581,7 +574,7 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     mov qword [r15 + PyFrame.locals], 0
     mov qword [r15 + PyFrame.instr_ptr], 0
     mov qword [r15 + PyFrame.stack_ptr], 0
-    mov qword [r15 + PyFrame.call_ip], 0
+    mov qword [r15 + PyFrame.disp_ip], 0
     mov qword [r15 + PyFrame.exc_state], 0
     mov qword [r15 + PyFrame.frame_obj], 0
     mov qword [r15 + PyFrame.gen_owner], 0
@@ -638,7 +631,7 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
     ; attr_error_pending says a __getattr__ raised an AttributeError that
     ; raise_no_attribute should hand over rather than replace, and every
     ; ordinary lookup clears it.  This is a lookup.
-    mov qword [rel attr_error_pending], 0
+    CLEAR_ATTR_ERROR_PENDING
 
     mov rdi, [rbp - LAP_OBJ]
     mov [r13 - 8], rax              ; the result replaces the object
@@ -650,12 +643,12 @@ DEF_FUNC op_load_attr_property, LAP_FRAME
 .lap_propagate:
     ; The getter raised.  The object goes, as op_call_py_exact releases its
     ; arguments before propagating, and rbx is not advanced: the unwinder
-    ; reads the current IP from eval_saved_rbx, which DISPATCH set.
+    ; reads the current IP from PyFrame.disp_ip, which DISPATCH set.
     mov rdi, [rbp - LAP_OBJ]
     DECREF_V rdi, rdx
     sub r13, 8
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .lap_frame_slow:

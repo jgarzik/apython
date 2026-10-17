@@ -8,7 +8,7 @@
 ;   **NEVER `RAISE` FROM THIS FILE.**
 ;
 ; `RAISE` and `raise_exception` tail-jump into `eval_exception_unwind`, which
-; does `mov rsp, [rel eval_base_rsp]` and never comes back -- from a
+; does `mov rsp, [gs:ThreadState.eval_base_rsp]` and never comes back -- from a
 ; trampoline that would discard every libexpat frame between here and
 ; XML_Parse, without libexpat ever getting the chance to clean up.  Use
 ; `set_exception`, then `px_stop`, then RETURN.  eval.asm's own docblock for
@@ -53,8 +53,6 @@ extern dict_new
 extern dict_set
 extern dict_get
 extern none_singleton
-extern current_exception
-extern kw_names_pending
 extern set_exception
 extern exc_TypeError_type
 
@@ -120,7 +118,7 @@ DEF_FUNC %1, CB_FRAME
     PX_SAVE_RAW %3
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne %%out
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne %%out
     call px_flush               ; every handler but character data flushes
     test eax, eax
@@ -169,7 +167,7 @@ DEF_FUNC %1, CB_FRAME
 %endif
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne %%out
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne %%out
     call px_flush
     test eax, eax
@@ -212,7 +210,7 @@ DEF_FUNC %1, CB_FRAME
     mov [rbp - CB_H], rdi
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne %%out
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne %%out
     call px_flush
     test eax, eax
@@ -271,7 +269,7 @@ DEF_FUNC px_call, 56
     mov [rbp - PC_NARGS], rcx
     movsx rsi, esi
 
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .stopped
 
     mov rax, [rdi + PxHandle.handlers + rsi*8]
@@ -279,7 +277,7 @@ DEF_FUNC px_call, 56
     jz .stopped
     mov [rbp - PC_FN], rax
 
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rbp - PC_H]
     mov qword [rcx + PxHandle.in_callback], 1
 
@@ -505,7 +503,7 @@ DEF_FUNC px_cb_start_element, 120
 
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne .out
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .out
     ; Every trampoline but the character-data one flushes first, or coalesced
     ; text would arrive after the element that follows it.
@@ -698,7 +696,7 @@ DEF_FUNC px_cb_end_element, EE_FRAME
 
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne .out
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .out
     call px_flush
     test eax, eax
@@ -755,7 +753,7 @@ DEF_FUNC px_cb_chardata, 48
 
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne .out
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .out
 
     mov rdi, rbx

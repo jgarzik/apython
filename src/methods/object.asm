@@ -16,7 +16,6 @@
 
 ; External functions
 extern frozenset_type
-extern current_exception
 extern int_is_integer
 extern complex_type
 extern obj_decref
@@ -1718,7 +1717,6 @@ OGA2_FRAME equ 16           ; + 0 pushes = 16
 global object_method_getattribute
 DEF_FUNC object_method_getattribute, OGA2_FRAME
     extern builtin_getattr
-    extern instance_getattr_skip
     cmp rsi, 2
     jne .omg_plain
     mov rax, [rdi]
@@ -1726,10 +1724,10 @@ DEF_FUNC object_method_getattribute, OGA2_FRAME
     ja .omg_plain
     test rax, rax
     jz .omg_plain
-    mov [rel instance_getattr_skip], rax
+    mov [gs:ThreadState.instance_getattr_skip], rax
 .omg_plain:
     call builtin_getattr        ; with the wrong count it raises, as it should
-    mov qword [rel instance_getattr_skip], 0
+    mov qword [gs:ThreadState.instance_getattr_skip], 0
     leave
     ret
 END_FUNC object_method_getattribute
@@ -2586,7 +2584,6 @@ END_FUNC generic_method_contains
 ;; DICT and handed it back as the result of list's constructor, and every
 ;; container and scalar __new__ in this tree did that.
 ;; ============================================================================
-extern kw_names_pending
 extern type_check_is_class
 extern type_is_subtype
 extern raise_new_bad_class
@@ -2745,7 +2742,7 @@ DEF_FUNC %1                     ; 2 pushes + frame 0 = 16, 16-aligned
     ; __new__ fills itself through set.update, which refuses keywords, so
     ; `class FS(frozenset)` with its own __init__ was refused under update's
     ; name before its __init__ ever ran.
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rdi, rbx
     mov rsi, r12
     call %3

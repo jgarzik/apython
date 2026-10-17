@@ -16,6 +16,10 @@
 %include "object.inc"
 %include "eventloop.inc"
 
+%if EventLoop_size != TS_EVENTLOOP_SIZE
+%error "ThreadState.eventloop is not EventLoop_size bytes: fix TS_EVENTLOOP_SIZE in threadstate.inc"
+%endif
+
 extern bool_true
 extern bool_false
 extern coro_type
@@ -41,7 +45,6 @@ extern raise_exception_obj
 extern exc_new
 extern exc_RuntimeError_type
 extern exc_CancelledError_type
-extern current_exception
 extern eval_exception_unwind
 extern builtin_func_new
 extern getenv
@@ -69,7 +72,7 @@ DEF_FUNC eventloop_init
 .try_uring:
     ; Set uring backend, then call init via vtable
     lea rax, [rel uring_backend]
-    mov [rel eventloop + EventLoop.backend], rax
+    mov [gs:ThreadState.eventloop + EventLoop.backend], rax
     call [rax + IOBackend.init]
     test eax, eax
     js .try_poll
@@ -80,7 +83,7 @@ DEF_FUNC eventloop_init
 .try_poll:
     ; Use poll backend
     lea rax, [rel poll_backend]
-    mov [rel eventloop + EventLoop.backend], rax
+    mov [gs:ThreadState.eventloop + EventLoop.backend], rax
 
     ; Call poll init via vtable
     call [rax + IOBackend.init]
@@ -90,10 +93,10 @@ DEF_FUNC eventloop_init
     ; eventloop_teardown drains the queue and clears root_task, so these are
     ; a first-run initialisation rather than a way of forgetting a previous
     ; run's contents -- which is what they used to be.
-    mov qword [rel eventloop + EventLoop.ready_head], 0
-    mov qword [rel eventloop + EventLoop.ready_tail], 0
-    mov dword [rel eventloop + EventLoop.running], 1
-    mov qword [rel eventloop + EventLoop.root_task], 0
+    mov qword [gs:ThreadState.eventloop + EventLoop.ready_head], 0
+    mov qword [gs:ThreadState.eventloop + EventLoop.ready_tail], 0
+    mov dword [gs:ThreadState.eventloop + EventLoop.running], 1
+    mov qword [gs:ThreadState.eventloop + EventLoop.root_task], 0
 
     xor eax, eax               ; return 0 = success
     leave
@@ -118,13 +121,13 @@ DEF_FUNC eventloop_teardown
     jmp .tdn_drain
 .tdn_drained:
 
-    mov rax, [rel eventloop + EventLoop.backend]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.backend]
     test rax, rax
     jz .td_done
     mov rax, [rax + IOBackend.teardown]
     call rax
 .td_done:
-    mov dword [rel eventloop + EventLoop.running], 0
+    mov dword [gs:ThreadState.eventloop + EventLoop.running], 0
     leave
     ret
 END_FUNC eventloop_teardown
@@ -468,19 +471,19 @@ DEF_FUNC_BARE ready_enqueue
     mov dword [rdi + AsyncTask.queued], 1
     inc qword [rdi + PyObject.ob_refcnt]
     mov qword [rdi + AsyncTask.next], 0
-    mov rax, [rel eventloop + EventLoop.ready_tail]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.ready_tail]
     test rax, rax
     jz .re_empty
 
     ; Append to tail
     mov [rax + AsyncTask.next], rdi
-    mov [rel eventloop + EventLoop.ready_tail], rdi
+    mov [gs:ThreadState.eventloop + EventLoop.ready_tail], rdi
     ret
 
 .re_empty:
     ; Queue was empty
-    mov [rel eventloop + EventLoop.ready_head], rdi
-    mov [rel eventloop + EventLoop.ready_tail], rdi
+    mov [gs:ThreadState.eventloop + EventLoop.ready_head], rdi
+    mov [gs:ThreadState.eventloop + EventLoop.ready_tail], rdi
     ret
 .re_already:
     ret
@@ -491,18 +494,18 @@ END_FUNC ready_enqueue
 ;; O(1) pop from ready queue head.
 ;; ============================================================================
 DEF_FUNC_BARE ready_dequeue
-    mov rax, [rel eventloop + EventLoop.ready_head]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.ready_head]
     test rax, rax
     jz .rd_empty
     mov dword [rax + AsyncTask.queued], 0
 
     ; Advance head
     mov rcx, [rax + AsyncTask.next]
-    mov [rel eventloop + EventLoop.ready_head], rcx
+    mov [gs:ThreadState.eventloop + EventLoop.ready_head], rcx
     test rcx, rcx
     jnz .rd_done
     ; Queue now empty
-    mov qword [rel eventloop + EventLoop.ready_tail], 0
+    mov qword [gs:ThreadState.eventloop + EventLoop.ready_tail], 0
 .rd_done:
     mov qword [rax + AsyncTask.next], 0
 .rd_empty:
@@ -602,14 +605,14 @@ DEF_FUNC task_step, TS_FRAME
 
 .ts_sleep:
     ; rax = delay_ns
-    mov rdi, [rel eventloop + EventLoop.backend]
+    mov rdi, [gs:ThreadState.eventloop + EventLoop.backend]
     mov rdi, [rdi + IOBackend.submit_timeout]
     mov rsi, rbx               ; task
     mov rdx, rax               ; delay_ns
     ; swap args: submit_timeout(task, delay_ns)
     mov rdi, rbx
     mov rsi, rax
-    mov rax, [rel eventloop + EventLoop.backend]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.backend]
     call [rax + IOBackend.submit_timeout]
     jmp .ts_ret
 
@@ -624,7 +627,7 @@ DEF_FUNC task_step, TS_FRAME
     mov rdi, rbx
     mov esi, eax               ; fd
     mov edx, r12d              ; events
-    mov rax, [rel eventloop + EventLoop.backend]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.backend]
     call [rax + IOBackend.submit_poll_fd]
     jmp .ts_ret
 
@@ -692,7 +695,7 @@ DEF_FUNC task_step, TS_FRAME
     ; Submit timeout for outer task
     mov rdi, rbx               ; task
     mov rsi, [r12 + WaitForAwaitable.timeout_ns]
-    mov rax, [rel eventloop + EventLoop.backend]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.backend]
     call [rax + IOBackend.submit_timeout]
 
     ; DECREF wfa
@@ -728,7 +731,7 @@ DEF_FUNC task_step, TS_FRAME
     ; deliberately leaves it pending.  The whole re-raise path downstream
     ; (task_wake_waiters' .tw_set_cancel, task_iternext's .ti_done_exc)
     ; already exists and was simply unreachable.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .ts_finished_value
     cmp rax, [rbp - TS_EXC]
@@ -737,7 +740,7 @@ DEF_FUNC task_step, TS_FRAME
     ; Move it, owned: raise_exception_obj took over its caller's reference,
     ; so the global holds exactly one and the task takes it over in turn.
     mov [rbx + AsyncTask.exception], rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     mov dword [rbx + AsyncTask.done], 1
     mov rdi, rbx
     call task_wake_waiters
@@ -780,7 +783,7 @@ DEF_FUNC task_step, TS_FRAME
     ; Exception propagated (NULL return) — grab from current_exception, and
     ; for the same reason as above, only if it is not the one that was
     ; already in flight when the step began.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .ts_cancel_no_exc
     cmp rax, [rbp - TS_EXC]
@@ -788,8 +791,8 @@ DEF_FUNC task_step, TS_FRAME
     INCREF rax
     mov [rbx + AsyncTask.exception], rax
     ; Clear current_exception
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     jmp .ts_cancel_done
 .ts_cancel_caught:
@@ -970,10 +973,8 @@ END_FUNC task_add_waiter
 ;; ============================================================================
 ER_ROOT equ 8
 ER_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
-section .bss
-global eventloop_root_exception
-eventloop_root_exception: resq 1    ; the root task's exception, owned, or 0
-section .text
+; eventloop_root_exception -- the root task's exception, owned, or 0 -- is
+; in ThreadState with the loop itself.
 
 DEF_FUNC eventloop_run, ER_FRAME
     push rbx
@@ -984,9 +985,9 @@ DEF_FUNC eventloop_run, ER_FRAME
     ; is read on every pass round the loop for the done check, and a raw
     ; pointer there was safe only while tasks could not be collected.
     call obj_incref
-    mov [rel eventloop + EventLoop.root_task], rbx
+    mov [gs:ThreadState.eventloop + EventLoop.root_task], rbx
     mov [rbp - ER_ROOT], rbx
-    mov qword [rel eventloop_root_exception], 0
+    mov qword [gs:ThreadState.eventloop_root_exception], 0
 
     ; Enqueue root task
     mov rdi, rbx
@@ -1015,7 +1016,7 @@ DEF_FUNC eventloop_run, ER_FRAME
     je .er_done
 
     ; Wait for I/O events
-    mov rax, [rel eventloop + EventLoop.backend]
+    mov rax, [gs:ThreadState.eventloop + EventLoop.backend]
     call [rax + IOBackend.wait_and_drain]
 
     jmp .er_loop
@@ -1030,7 +1031,7 @@ DEF_FUNC eventloop_run, ER_FRAME
     test rax, rax
     jz .er_result
     INCREF rax
-    mov [rel eventloop_root_exception], rax
+    mov [gs:ThreadState.eventloop_root_exception], rax
     xor eax, eax
     xor edx, edx
     jmp .er_release
@@ -1044,8 +1045,8 @@ DEF_FUNC eventloop_run, ER_FRAME
 .er_release:
 
     ; And let go of the root task.
-    mov rdi, [rel eventloop + EventLoop.root_task]
-    mov qword [rel eventloop + EventLoop.root_task], 0
+    mov rdi, [gs:ThreadState.eventloop + EventLoop.root_task]
+    mov qword [gs:ThreadState.eventloop + EventLoop.root_task], 0
     test rdi, rdi
     jz .er_out
     push rax
@@ -1373,9 +1374,7 @@ task_type:
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
 
-section .bss
-align 8
-global eventloop
-eventloop: resb EventLoop_size
+; The loop is per thread, as CPython's running loop is: ThreadState.eventloop
+; (src/include/threadstate.inc), with its backend's state beside it.
 
 section .data

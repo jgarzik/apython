@@ -38,7 +38,6 @@ extern exc_StopIteration_type
 extern exc_RuntimeError_type
 extern exc_GeneratorExit_type
 extern exc_StopAsyncIteration_type
-extern current_exception
 extern eval_exception_unwind
 extern builtin_func_new
 extern type_is_subtype
@@ -137,16 +136,16 @@ DEF_FUNC ags_iternext
     ; cleared for the duration of the resume so that a NULL result means the
     ; body raised and nothing else, and put back if it did not.
     push rax
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     push rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call eval_frame
     pop rcx
     ; An exception the async generator body raised is the result, and
     ; restoring over it ended the iteration silently.
     test rax, rax
     jz .agsend_raised
-    mov [rel current_exception], rcx
+    mov [gs:ThreadState.current_exception], rcx
     jmp .agsend_settled
 .agsend_raised:
     test rcx, rcx
@@ -213,7 +212,6 @@ DEF_FUNC ags_iternext
 ;; -- and unwind with it, which is how that arm reaches END_ASYNC_FOR too.
 .agsi_body_raised:
     extern eval_exception_unwind
-    extern eval_saved_r13
     add rsp, 8                  ; the scratch pushed before eval_frame
     mov qword [r12 + PyGenObject.gi_running], 0
     mov rdi, [r12 + PyGenObject.gi_frame]
@@ -226,7 +224,7 @@ DEF_FUNC ags_iternext
     pop r12
     pop rbx
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .agsi_yielded:
@@ -498,7 +496,7 @@ DEF_FUNC agt_iternext, AGT_FRAME
     ; is pending and belongs to the awaiting frame; if it swallowed it and
     ; returned, the athrow ends the way an exhausted iteration does.
     mov dword [rbx + AsyncGenASend.ags_state], 2
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .agt_null
     lea rdi, [rel exc_StopAsyncIteration_type]
     xor esi, esi
@@ -1015,7 +1013,7 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     ; NULL means the item is ready, unless the body raised or the generator
     ; is finished -- ags_iternext raises StopAsyncIteration for the second,
     ; and a pending exception is the caller's either way.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .agss_propagate
 
     ; The item, and with it the end of this awaitable: a second send() on the
@@ -1158,7 +1156,7 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
 .agtt_finished:
     mov rcx, [rbp - AGTT_SELF]
     mov dword [rcx + AsyncGenASend.ags_state], 2
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .agtt_stop_iteration
 
     ; aclose() swallows the two exits that mean "it is closed now" and reports
@@ -1169,21 +1167,21 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
     lea rcx, [rel async_gen_athrow_type]
     cmp rdx, rcx
     jne .agtt_propagate
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel exc_GeneratorExit_type]
     call type_is_subtype
     test eax, eax
     jnz .agtt_swallow
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel exc_StopAsyncIteration_type]
     call type_is_subtype
     test eax, eax
     jz .agtt_propagate
 .agtt_swallow:
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .agtt_stop_iteration:

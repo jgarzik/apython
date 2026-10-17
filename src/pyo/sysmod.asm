@@ -21,7 +21,6 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern dict_new
-extern kw_names_pending
 extern str_intern
 extern dict_set
 extern dict_get
@@ -1573,8 +1572,7 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     ; the TypeError CPython gives.
     cmp qword [rbp - SGS_NARGS], 2
     jl .sgs_no_default
-    extern current_exception
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     mov rdi, [rbp - SGS_ARGS]
     mov rax, [rdi + 8]
     INCREF_V rax, rdx
@@ -1673,8 +1671,7 @@ DEF_FUNC sys_breakpointhook_func
 .sbh_none:
     ; No pdb, or it would not import.  Answer None rather than raising: a
     ; breakpoint() in a program with no debugger available should not stop it.
-    extern current_exception
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
@@ -1831,7 +1828,7 @@ END_FUNC sys_set_int_max_str_digits_func
 DEF_FUNC sys_get_coroutine_origin_tracking_depth_func
     test rsi, rsi
     jne .get_codt_error
-    mov rdi, [rel coroutine_origin_depth]
+    mov rdi, [gs:ThreadState.coroutine_origin_depth]
     call int_from_i64
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -1863,7 +1860,7 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
     test rax, rax
     js .set_codt_value_error
 
-    mov [rel coroutine_origin_depth], rax
+    mov [gs:ThreadState.coroutine_origin_depth], rax
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -2204,10 +2201,7 @@ sys_stdout_obj: resq 1
 ; still suspended when it shuts down; CPython's BaseEventLoop.run_forever reads
 ; them on its first line, which is why their absence stopped asyncio outright.
 ; NULL means "no hook", which is what a program sees as None.
-global asyncgen_firstiter_hook
-asyncgen_firstiter_hook: resq 1
-global asyncgen_finalizer_hook
-asyncgen_finalizer_hook: resq 1
+; asyncgen_firstiter_hook / asyncgen_finalizer_hook lives in ThreadState (src/include/threadstate.inc).
 
 ; Set once, by main's teardown, before the first finalizer runs.  It is what
 ; sys.is_finalizing() answers, and the reason it is here rather than in main is
@@ -2222,9 +2216,8 @@ interp_finalizing: resq 1
 ; run_forever and GETS it back on the way out, so a missing pair is not a
 ; missing feature, it is a dead event loop.  An int that remembers what it was
 ; told is the whole contract a caller can observe; CPython's affects only the
-; traceback a coroutine created under it carries.
-global coroutine_origin_depth
-coroutine_origin_depth: resq 1
+; traceback a coroutine created under it carries.  coroutine_origin_depth
+; lives in ThreadState (src/include/threadstate.inc).
 
 section .data
 align 8
@@ -2342,7 +2335,7 @@ DEF_FUNC sys_get_asyncgen_hooks_func, GAH_FRAME
     ; gave back -- so the value is carried in rbx rather than read out of rax.
     ; Taken from rax, the pair stored ITSELF in both fields, and its repr
     ; recursed until the machine stack ran out.
-    mov rbx, [rel asyncgen_firstiter_hook]
+    mov rbx, [gs:ThreadState.asyncgen_firstiter_hook]
     test rbx, rbx
     jnz .gah_have_first
     lea rbx, [rel none_singleton]
@@ -2354,7 +2347,7 @@ DEF_FUNC sys_get_asyncgen_hooks_func, GAH_FRAME
     mov rdx, rbx
     call structseq_set
 
-    mov rbx, [rel asyncgen_finalizer_hook]
+    mov rbx, [gs:ThreadState.asyncgen_finalizer_hook]
     test rbx, rbx
     jnz .gah_have_final
     lea rbx, [rel none_singleton]
@@ -2399,9 +2392,8 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
 
     ; The keyword names, if any, are in kw_names_pending, and the values sit
     ; at the end of the positional array -- the shape every builtin here reads.
-    extern kw_names_pending
-    mov rbx, [rel kw_names_pending]
-    mov qword [rel kw_names_pending], 0
+    mov rbx, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; Positional first: args[0] is firstiter, args[1] is finalizer.
     xor ecx, ecx                ; i = 0
@@ -2531,12 +2523,12 @@ DEF_FUNC_LOCAL sah_store, SAHS_FRAME
 .sahs_put:
     cmp qword [rbp - SAHS_WHICH], 0
     jne .sahs_final
-    mov rdi, [rel asyncgen_firstiter_hook]
-    mov [rel asyncgen_firstiter_hook], rdx
+    mov rdi, [gs:ThreadState.asyncgen_firstiter_hook]
+    mov [gs:ThreadState.asyncgen_firstiter_hook], rdx
     jmp .sahs_release
 .sahs_final:
-    mov rdi, [rel asyncgen_finalizer_hook]
-    mov [rel asyncgen_finalizer_hook], rdx
+    mov rdi, [gs:ThreadState.asyncgen_finalizer_hook]
+    mov [gs:ThreadState.asyncgen_finalizer_hook], rdx
 .sahs_release:
     test rdi, rdi
     jz .sahs_ok
@@ -2595,15 +2587,15 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     ; print() reads kw_names_pending, and whatever called US may have left one
     ; there.  Saved and restored rather than cleared, because a caller further
     ; up is entitled to find it as it was.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - SDH_KW], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     lea rdi, [rbp - SDH_REPR]
     mov esi, 1
     extern builtin_print
     call builtin_print
     mov rax, [rbp - SDH_KW]
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 
     mov rdi, [rbp - SDH_REPR]
     call obj_decref
@@ -2789,8 +2781,7 @@ END_FUNC sys_unraisablehook_func
 ;; and unittest both use it.
 ;; ============================================================================
 DEF_FUNC sys_exc_info_func
-    extern handled_exception
-    mov rax, [rel handled_exception]
+    mov rax, [gs:ThreadState.handled_exception]
     test rax, rax
     jz .sei_none
     push rax
@@ -2857,7 +2848,7 @@ END_FUNC sys_exc_info_func
 ;; exception being HANDLED, not the one merely in flight.
 ;; ============================================================================
 DEF_FUNC sys_exception_func
-    mov rax, [rel handled_exception]
+    mov rax, [gs:ThreadState.handled_exception]
     test rax, rax
     jnz .sx_have
     LOAD_NONE rax

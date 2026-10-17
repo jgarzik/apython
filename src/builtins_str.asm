@@ -28,7 +28,6 @@ extern none_type
 extern obj_str
 extern obj_decref
 extern obj_incref
-extern kw_names_pending
 extern str_from_cstr_heap
 extern bytes_decode_impl
 extern ap_strcmp
@@ -81,10 +80,10 @@ DEF_FUNC builtin_str_fn, SB_FRAME
 
     ; Keyword arguments arrive as trailing positional slots, named by
     ; kw_names_pending.  str's three names are object, encoding and errors.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .str_bind_positional
-    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
+    mov qword [gs:ThreadState.kw_names_pending], 0     ; consumed, however this ends
     mov rcx, [rax + PyTupleObject.ob_size]
     mov [rbp - SB_NKW], rcx
     sub qword [rbp - SB_NPOS], rcx

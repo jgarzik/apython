@@ -42,7 +42,6 @@ extern obj_incref
 extern obj_decref
 extern set_exception
 extern str_from_cstr_heap
-extern eval_saved_r12
 extern exc_TypeError_type
 extern exc_RuntimeError_type
 extern none_singleton
@@ -502,7 +501,7 @@ SFC_FRAME   equ 32              ; 16 used + 16 pad = 32, 16-aligned
 DEF_FUNC_LOCAL super_frame_class, SFC_FRAME
     push rbx
     push r12
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     test rax, rax
     jz .sfc_no_args
     mov [rbp - SFC_FRAME_P], rax

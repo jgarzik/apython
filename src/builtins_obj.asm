@@ -26,10 +26,8 @@ extern raise_exception
 extern dunder_name_obj
 extern obj_getattr_opt
 extern exc_new
-extern current_exception
 extern eval_exception_unwind
 extern none_singleton
-extern eval_saved_r12
 extern obj_dealloc
 
 extern float_type
@@ -44,7 +42,6 @@ extern value_type
 extern raise_type_error_counted
 extern _bytes_decode_impl
 extern ba_shared_decode
-extern kw_names_pending
 extern ap_strcmp
 extern raise_type_error_with_name
 extern bool_true
@@ -285,8 +282,7 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     ; Only a StopIteration means "use the default".  This cleared whatever was
     ; pending, so next(it, d) answered d for a __next__ that failed outright
     ; and the real exception surfaced somewhere unrelated.
-    extern current_exception
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .next_two_ret_default
     cmp rax, [rbp - NX_EXC]
@@ -298,7 +294,7 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     jne .next_two_raised
     push rdi
     mov rdi, rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     pop rdi
 .next_two_ret_default:
@@ -348,8 +344,7 @@ DEF_FUNC builtin_next_fn, NX_FRAME
                                        ; which packs a (payload, tag) pair and
                                        ; would read rdx as a tag it never set
     ; NULL from __next__ — check for StopIteration in current_exception
-    extern current_exception
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .next_stop                      ; no exception, clean exhaustion
     mov rcx, [rax + PyObject.ob_type]
@@ -1122,10 +1117,10 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ; key= and default=.  Nothing here read kw_names_pending, so both arrived
     ; as extra POSITIONAL operands and were compared as values:
     ; min([1,-3,2], key=abs) compared the function object against the list.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .mm_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rax + PyTupleObject.ob_size]
     mov rdx, [rbp - MM_NPOS]
     sub rdx, rcx
@@ -1440,7 +1435,7 @@ DEF_FUNC builtin_globals
     jne .globals_error
 
     ; Get current eval frame from saved r12
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     mov rax, [rax + PyFrame.globals]
     INCREF rax
     mov edx, TAG_PTR
@@ -1468,7 +1463,7 @@ DEF_FUNC builtin_locals
     jne .locals_error
 
     ; Get current eval frame
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     ; Check if frame has a locals dict
     mov rcx, [rax + PyFrame.locals]
     test rcx, rcx
@@ -1495,7 +1490,7 @@ DEF_FUNC builtin_locals
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .locals_no_frame:
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     mov rax, [rax + PyFrame.globals]
     INCREF rax
     mov edx, TAG_PTR
@@ -2038,9 +2033,9 @@ DEF_FUNC builtin_open_fn
 
     ; The pending keyword names belong to the open() call, not to the import
     ; that is about to run a module body; park them across it.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     push rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     lea rdi, [rel bo_mod_name]
     call str_from_cstr_heap
@@ -2071,7 +2066,7 @@ DEF_FUNC builtin_open_fn
     mov [rel builtin_open_impl], r13
 
     pop rax
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 
 .bo_have:
     mov rax, [r13 + PyObject.ob_type]
@@ -2091,7 +2086,7 @@ DEF_FUNC builtin_open_fn
 
 .bo_import_failed:
     add rsp, 8                  ; the parked keyword names
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bo_propagate
     RAISE exc_ImportError_type, "open() requires the _io module"
 .bo_propagate:
@@ -2350,7 +2345,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     jnz .fmt_dunder_ok
     ; NULL means either "no __format__" or "__format__ raised"; falling
     ; through in the second case replaced the real exception.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .fmt_propagate
     jmp .fmt_apply_spec
 .fmt_dunder_ok:
@@ -2443,7 +2438,6 @@ END_FUNC builtin_format_fn
 ;; 0 args: returns frame locals dict (same as locals())
 ;; 1 arg: returns obj.__dict__
 ;; ============================================================================
-extern eval_saved_r12
 global builtin_vars_fn
 VR_OBJ   equ 8
 VR_EXC   equ 16
@@ -2531,7 +2525,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     DUNDER_RAISED [rbp - VR_EXC], .vars_ask_raised
     jmp .vars_no_dict
 .vars_ask_raised:
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .vars_no_dict
     mov rdi, [rax + PyObject.ob_type]
@@ -2539,8 +2533,8 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     call type_is_subtype
     test eax, eax
     jz .vars_propagate
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
     jmp .vars_no_dict
 .vars_propagate:
@@ -2627,7 +2621,6 @@ END_FUNC builtin_aiter_fn
 ;;   -> rax = Value
 ;; Calls tp_iternext; on StopAsyncIteration returns default
 ;; ============================================================================
-extern current_exception
 global builtin_anext_fn
 AN_ITER    equ 8
 AN_DEFAULT equ 16
@@ -2684,7 +2677,7 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     jb .an_reraise
 
     ; Clear the exception and return default
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     mov rax, [rbp - AN_DEFAULT]
     mov edx, [rbp - AN_DEFTAG]
     INCREF_VAL rax, rdx
@@ -2739,7 +2732,6 @@ END_FUNC builtin_anext_fn
 ;; globals and locals are still ignored: they only matter for a relative
 ;; import, and level > 0 is rejected below rather than silently mishandled.
 ;; ============================================================================
-extern kw_names_pending
 extern sys_modules_dict
 extern dict_get
 extern obj_as_index
@@ -2774,8 +2766,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     ; kw_names_pending.  Consume it: a builtin that leaves it set hands its
     ; caller's keywords to whatever call runs next -- and this one runs a
     ; whole module body before it returns.
-    mov rax, [rel kw_names_pending]
-    mov qword [rel kw_names_pending], 0
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
     test rax, rax
     jz .imp_have_pos
 
@@ -3007,9 +2999,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 
 .imp_failed:
     ; NULL means the module body raised and the exception is still pending.
-    extern current_exception
     extern eval_exception_unwind
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .imp_propagate
     extern exc_ImportError_type
     RAISE exc_ImportError_type, "import failed"
@@ -3091,8 +3082,7 @@ DEF_FUNC builtin_breakpoint, BBP_FRAME
     ret
 .bbp_none:
     ; No sys, or no hook on it.  None, as a breakpoint with nowhere to go.
-    extern current_exception
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value

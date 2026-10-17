@@ -1412,12 +1412,17 @@ struc PyFrame
     .exc_depth:     resd 1  ; +64: unpopped PUSH_EXC_INFO count
     .nlocalsplus:   resd 1  ; +68: number of locals + cells + frees
     .func_obj:      resq 1  ; +72: ptr to function object (for closures)
-    .call_ip:       resq 1  ; +80: where this frame was when it called into
-                            ;      the next one -- what f_lineno reads for a
-                            ;      frame that is not the innermost.  instr_ptr
-                            ;      cannot carry it: non-zero there means the
-                            ;      frame is SUSPENDED, and func_call reads it
-                            ;      to decide whether to free the frame.
+    .disp_ip:       resq 1  ; +80: the bytecode IP of the instruction this
+                            ;      frame last dispatched (before the advance),
+                            ;      published by DISPATCH on every instruction.
+                            ;      For the running frame it is where the
+                            ;      unwinder resumes and what f_lineno reads; for
+                            ;      an outer frame it is the call it is waiting
+                            ;      in.  Zeroed at frame creation, so a frame that
+                            ;      has never run reads 0.  instr_ptr cannot
+                            ;      carry it: non-zero there means the frame is
+                            ;      SUSPENDED, and func_call reads it to decide
+                            ;      whether to free the frame.
     .exc_state:     resq 1  ; +88: the exception this frame is HANDLING while
                             ;      it is suspended, owned, or 0.  Only a
                             ;      generator or coroutine ever has one: an
@@ -1452,7 +1457,11 @@ struc PyFrame
     ; consumed, and it has to be read out of the frame before it is freed.
     .entry_kind:    resd 1  ; +112: FRAME_ENTRY_*
     .entry_slots:   resd 1  ; +116: inline only
-    .localsplus:            ; +120: Value array (variable size)
+    .disp_sp:       resq 1  ; +120: the value stack top DISPATCH published
+                            ;      with .disp_ip -- what the unwinder restores
+                            ;      r13 from.  Written before it is read: the
+                            ;      frame's first eval_frame entry stores it.
+    .localsplus:            ; +128: Value array (variable size)
 endstruc
 
 FRAME_ENTRY_CALL   equ 0    ; entered by `call eval_frame`; left by `ret`

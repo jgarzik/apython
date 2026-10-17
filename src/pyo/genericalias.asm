@@ -1650,11 +1650,10 @@ DEF_FUNC_LOCAL gap_has_attr, GHA_FRAME
     leave
     ret
 .gha_clear:
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .gha_no
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .gha_no:
     xor eax, eax

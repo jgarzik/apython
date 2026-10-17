@@ -40,8 +40,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern eval_saved_rbx
-extern eval_saved_r13
 extern opcode_dispatch_table
 extern eval_frame
 extern eval_inline_ret_bug
@@ -49,13 +47,9 @@ extern eval_dispatch
 extern eval_exception_unwind
 extern frame_new
 extern frame_alloc_inline
-extern frame_datastack_top
-extern frame_datastack_end
 extern frame_free
 extern func_type
 extern builtins_dict_global
-extern kw_names_pending
-extern current_exception
 extern obj_dealloc
 extern obj_decref
 extern op_call
@@ -89,9 +83,10 @@ section .text
 ;; with rsp 16-aligned and DEF_FUNC_BARE leaves it there, which is the parity
 ;; the one call below wants.
 DEF_FUNC_BARE op_call_py_exact
+    mov r11, [gs:ThreadState.ts_self]   ; one gs load; the rest are base+disp
     ; ecx is the oparg and must survive to .cpe_deopt, so nothing before the
     ; last guard touches rcx.
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [r11 + ThreadState.kw_names_pending], 0
     jne .cpe_deopt
 
     mov r8d, ecx
@@ -148,11 +143,11 @@ DEF_FUNC_BARE op_call_py_exact
     ; Before the first inline call top and end are both zero, so the compare
     ; fails and the region gets made below; after it, this is the whole
     ; allocation.
-    mov r15, [rel frame_datastack_top]
+    mov r15, [r11 + ThreadState.frame_datastack_top]
     lea rdx, [r15 + r9]
-    cmp rdx, [rel frame_datastack_end]
+    cmp rdx, [r11 + ThreadState.frame_datastack_end]
     ja .cpe_frame_slow
-    mov [rel frame_datastack_top], rdx
+    mov [r11 + ThreadState.frame_datastack_top], rdx
 
 .cpe_frame_ready:
     ; frame_new's header, minus what this path already knows.  prev_frame is
@@ -167,7 +162,7 @@ DEF_FUNC_BARE op_call_py_exact
     mov qword [r15 + PyFrame.locals], 0     ; a function call has fast locals
     mov qword [r15 + PyFrame.instr_ptr], 0  ; not a resume, and not suspended
     mov qword [r15 + PyFrame.stack_ptr], 0
-    mov qword [r15 + PyFrame.call_ip], 0
+    mov qword [r15 + PyFrame.disp_ip], 0
     mov qword [r15 + PyFrame.exc_state], 0
     mov qword [r15 + PyFrame.frame_obj], 0
     mov qword [r15 + PyFrame.gen_owner], 0
@@ -250,7 +245,7 @@ DEF_FUNC_BARE op_call_py_exact
                                 ; itself
     ;
     ; rbx is deliberately NOT advanced past the CACHE entries here.  The
-    ; unwinder reads the current IP from eval_saved_rbx, which DISPATCH set to
+    ; unwinder reads the current IP from PyFrame.disp_ip, which DISPATCH set to
     ; this CALL's own address, and a propagate out of the callee has to find it
     ; there -- exactly as .cpe_propagate relied on.  The resume advances it.
     jmp eval_frame
@@ -361,7 +356,7 @@ DEF_FUNC_BARE eval_inline_resume
 
 .eir_propagate:
     ; The callee raised and found no handler.  rbx is still the CALL's own
-    ; address, which is what the unwinder reads out of eval_saved_rbx.
-    mov [rel eval_saved_r13], r13
+    ; address, which is what the unwinder reads out of PyFrame.disp_ip.
+    PUBLISH_SP
     jmp eval_exception_unwind
 END_FUNC eval_inline_resume

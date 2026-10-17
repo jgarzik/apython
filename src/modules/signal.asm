@@ -42,8 +42,6 @@ extern raise_oserror
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_KeyboardInterrupt_type
-extern current_exception
-extern eval_saved_r12
 extern sigaction
 extern sys_alarm
 extern sys_pause
@@ -190,7 +188,7 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     ; sigint_handler stores it, and traceback.print_stack(frame) walks it.
     ; It is the frame this loop is running in, which is what eval_saved_r12
     ; holds -- the same one sys._getframe() answers with.
-    mov rdi, [rel eval_saved_r12]
+    mov rdi, [gs:ThreadState.eval_saved_r12]
     test rdi, rdi
     jz .srp_no_frame
     extern frameobj_for

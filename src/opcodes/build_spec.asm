@@ -32,8 +32,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern eval_saved_rbx
-extern eval_saved_r13
 extern opcode_dispatch_table
 extern obj_dealloc
 extern obj_decref

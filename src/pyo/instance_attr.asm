@@ -29,19 +29,16 @@ extern str_from_cstr
 extern str_from_cstr_heap
 extern ap_strcmp
 extern type_repr
-extern attr_error_pending
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern kw_names_pending
 extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
 extern dunder_lookup
 extern dunder_call_2
 extern builtin_func_type
-extern current_exception
 extern dict_type
 extern tuple_type
 extern int_type
@@ -60,7 +57,6 @@ extern getset_descr_type
 
 ; Kept in class.asm, which also uses them
 extern base_slot
-extern instance_getattr_skip
 extern type_install_slots
 
 section .text
@@ -125,7 +121,7 @@ DEF_FUNC instance_getattr, IGA_FRAME
     mov qword [rbp - IGA_WHERE], 0
     mov qword [rbp - IGA_UNBOUND], 0
 .iga_body:
-    mov qword [rel attr_error_pending], 0
+    CLEAR_ATTR_ERROR_PENDING
     mov [rbp - IGA_SELF], rdi
     mov [rbp - IGA_NAME], rsi
     test rdi, rdi
@@ -138,10 +134,10 @@ DEF_FUNC instance_getattr, IGA_FRAME
     ; it is asking about.  CPython gets this from slot dispatch -- calling
     ; object's slot cannot reach the subclass's -- and this is the same thing
     ; said explicitly.
-    mov rax, [rel instance_getattr_skip]
+    mov rax, [gs:ThreadState.instance_getattr_skip]
     cmp rax, rdi
     jne .iga_hook
-    mov qword [rel instance_getattr_skip], 0
+    mov qword [gs:ThreadState.instance_getattr_skip], 0
     jmp .iga_default
 .iga_hook:
     mov rdi, [rdi + PyObject.ob_type]
@@ -186,9 +182,9 @@ DEF_FUNC instance_getattr, IGA_FRAME
     ; a TypeError.  Returning NULL bare would let raise_no_attribute replace
     ; it with a generic AttributeError; the flag is how instance_getattr
     ; already hands one over.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .iga_raised_bare
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
 .iga_raised_bare:
     xor eax, eax
     leave
@@ -604,7 +600,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     push rbx
     push r12
     push r13
-    mov qword [rel attr_error_pending], 0
+    CLEAR_ATTR_ERROR_PENDING
 
     mov rbx, rdi                ; rbx = self (instance)
     mov r12, rsi                ; r12 = name
@@ -917,7 +913,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rsi, [rbp - IG_NAME]
     extern set_no_attribute
     call set_no_attribute
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
     RET_NULL
     IG_RELEASE_HELD
     pop r13
@@ -990,7 +986,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ;
     ; Anything else is a genuine failure in the middle of a lookup and keeps
     ; unwinding, which is what it did before.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .getattr_unwind
     push rax
@@ -1001,7 +997,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     pop rcx
     test eax, eax
     jz .getattr_unwind
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
     RET_NULL
     IG_RELEASE_HELD
     pop r13
@@ -1122,7 +1118,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     test rdi, rdi
     jz .agh_no
 
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .agh_no
     mov rdi, [rbx + PyObject.ob_type]
@@ -1140,8 +1136,8 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     jz .agh_no
 
     ; rbx still holds the exception, and the global still holds its reference.
-    mov qword [rel current_exception], 0
-    mov qword [rel attr_error_pending], 0
+    mov qword [gs:ThreadState.current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
     mov rdi, rbx
     call obj_decref
 
@@ -1157,7 +1153,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     ; The hook raised in its turn.  An AttributeError from it is still the
     ; protocol saying "absent", and getattr(o, n, default) has to see that --
     ; the same handover .getattr_raised above makes.
-    mov rbx, [rel current_exception]
+    mov rbx, [gs:ThreadState.current_exception]
     test rbx, rbx
     jz .agh_zero
     mov rdi, [rbx + PyObject.ob_type]
@@ -1165,7 +1161,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     call type_is_subtype
     test eax, eax
     jz .agh_zero
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
 .agh_zero:
     xor eax, eax
     xor edx, edx

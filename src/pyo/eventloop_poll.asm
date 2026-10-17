@@ -34,16 +34,10 @@ align 8
 ; armed -- so the task waited for a wakeup that could never come.  256 timers
 ; is one `gather` of 300 sleeps, which is not an unusual program.
 ;
-; pollfd array and the parallel fd->task mapping, one entry each per fd.
-poll_fds:       resq 1      ; PollFd*
-poll_fd_tasks:  resq 1      ; AsyncTask**
-poll_cap:       resd 1
-poll_nfds:      resd 1
-
-; Timer min-heap: (deadline_ns, task*) per entry.
-timer_heap:     resq 1      ; TimerEntry*
-timer_cap:      resd 1
-timer_count:    resd 1
+; The pollfd array and the parallel fd->task mapping, one entry each per fd
+; (poll_fds, poll_fd_tasks, poll_cap, poll_nfds), and the timer min-heap of
+; (deadline_ns, task*) entries (timer_heap, timer_cap, timer_count), belong to
+; the loop, which is per thread: they are in ThreadState.
 
 ; Scratch timespec for clock_gettime
 timespec_buf:   resq 2
@@ -55,8 +49,8 @@ section .text
 ;; Initialize poll backend.
 ;; ============================================================================
 DEF_FUNC poll_init
-    mov dword [rel poll_nfds], 0
-    mov dword [rel timer_count], 0
+    mov dword [gs:ThreadState.poll_nfds], 0
+    mov dword [gs:ThreadState.timer_count], 0
     xor eax, eax
     leave
     ret
@@ -72,8 +66,8 @@ POLL_FIRST_CAP equ 64
 
 DEF_FUNC_LOCAL poll_grow_timers, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
-    mov ebx, [rel timer_cap]
-    cmp ebx, [rel timer_count]
+    mov ebx, [gs:ThreadState.timer_cap]
+    cmp ebx, [gs:ThreadState.timer_count]
     jg .pgt_ok
     test ebx, ebx
     jnz .pgt_double
@@ -82,14 +76,14 @@ DEF_FUNC_LOCAL poll_grow_timers, 8            ; 1 pushes, so rsp is 16-aligned
 .pgt_double:
     add ebx, ebx
 .pgt_alloc:
-    mov rdi, [rel timer_heap]
+    mov rdi, [gs:ThreadState.timer_heap]
     mov esi, ebx
     imul rsi, rsi, TimerEntry_size
     call ap_realloc             ; ap_realloc(0, n) is a fresh allocation
     test rax, rax
     jz .pgt_fail
-    mov [rel timer_heap], rax
-    mov [rel timer_cap], ebx
+    mov [gs:ThreadState.timer_heap], rax
+    mov [gs:ThreadState.timer_cap], ebx
 .pgt_ok:
     mov eax, 1
     pop rbx
@@ -105,8 +99,8 @@ END_FUNC poll_grow_timers
 DEF_FUNC_LOCAL poll_grow_fds
     push rbx
     push r12
-    mov ebx, [rel poll_cap]
-    cmp ebx, [rel poll_nfds]
+    mov ebx, [gs:ThreadState.poll_cap]
+    cmp ebx, [gs:ThreadState.poll_nfds]
     jg .pgf_ok
     test ebx, ebx
     jnz .pgf_double
@@ -115,21 +109,21 @@ DEF_FUNC_LOCAL poll_grow_fds
 .pgf_double:
     add ebx, ebx
 .pgf_alloc:
-    mov rdi, [rel poll_fds]
+    mov rdi, [gs:ThreadState.poll_fds]
     mov esi, ebx
     imul rsi, rsi, PollFd_size
     call ap_realloc
     test rax, rax
     jz .pgf_fail
-    mov [rel poll_fds], rax
-    mov rdi, [rel poll_fd_tasks]
+    mov [gs:ThreadState.poll_fds], rax
+    mov rdi, [gs:ThreadState.poll_fd_tasks]
     mov esi, ebx
     shl rsi, 3
     call ap_realloc
     test rax, rax
     jz .pgf_fail
-    mov [rel poll_fd_tasks], rax
-    mov [rel poll_cap], ebx
+    mov [gs:ThreadState.poll_fd_tasks], rax
+    mov [gs:ThreadState.poll_cap], ebx
 .pgf_ok:
     mov eax, 1
     pop r12
@@ -154,13 +148,13 @@ DEF_FUNC poll_teardown
     ; Release everything the two arrays still hold.  A loop torn down with
     ; work outstanding -- a cancelled sleep, a socket nobody read -- used to
     ; leave those tasks unreferenced by anything and unfreed.
-    mov ebx, [rel poll_nfds]
-    mov dword [rel poll_nfds], 0
+    mov ebx, [gs:ThreadState.poll_nfds]
+    mov dword [gs:ThreadState.poll_nfds], 0
     test ebx, ebx
     jz .pt_timers
 .pt_fd_loop:
     dec ebx
-    mov rax, [rel poll_fd_tasks]
+    mov rax, [gs:ThreadState.poll_fd_tasks]
     mov rdi, [rax + rbx*8]
     mov qword [rax + rbx*8], 0
     test rdi, rdi
@@ -171,13 +165,13 @@ DEF_FUNC poll_teardown
     jnz .pt_fd_loop
 
 .pt_timers:
-    mov ebx, [rel timer_count]
-    mov dword [rel timer_count], 0
+    mov ebx, [gs:ThreadState.timer_count]
+    mov dword [gs:ThreadState.timer_count], 0
     test ebx, ebx
     jz .pt_done
 .pt_timer_loop:
     dec ebx
-    mov rax, [rel timer_heap]
+    mov rax, [gs:ThreadState.timer_heap]
     mov r12d, ebx
     shl r12d, 4
     mov rdi, [rax + r12 + TimerEntry.task]
@@ -234,9 +228,9 @@ DEF_FUNC poll_submit_timeout
     test eax, eax
     pop rax
     jz .pst_full                ; out of memory: the only way to lose one now
-    mov ecx, [rel timer_count]
+    mov ecx, [gs:ThreadState.timer_count]
 
-    mov rdx, [rel timer_heap]
+    mov rdx, [gs:ThreadState.timer_heap]
     ; Entry = timer_heap[timer_count]
     mov rdi, rcx
     shl rdi, 4                 ; * TimerEntry_size (16 bytes)
@@ -245,7 +239,7 @@ DEF_FUNC poll_submit_timeout
     mov [rdi + TimerEntry.deadline_ns], rax
     mov [rdi + TimerEntry.task], rbx
 
-    inc dword [rel timer_count]
+    inc dword [gs:ThreadState.timer_count]
 
     ; The heap OWNS its entry.  A task waiting on a timer may have no other
     ; reference at all -- asyncio.sleep() inside a task nobody holds -- and
@@ -284,10 +278,10 @@ DEF_FUNC poll_submit_poll_fd
     pop rdi
     test eax, eax
     jz .pspf_full
-    mov ecx, [rel poll_nfds]
+    mov ecx, [gs:ThreadState.poll_nfds]
 
     ; Fill pollfd entry
-    mov rax, [rel poll_fds]
+    mov rax, [gs:ThreadState.poll_fds]
     mov r8d, ecx
     imul r8d, PollFd_size
     add rax, r8
@@ -297,10 +291,10 @@ DEF_FUNC poll_submit_poll_fd
 
     ; Store task mapping.  The array owns it, for the same reason the timer
     ; heap owns its entries.
-    mov rax, [rel poll_fd_tasks]
+    mov rax, [gs:ThreadState.poll_fd_tasks]
     mov [rax + rcx*8], rdi
 
-    inc dword [rel poll_nfds]
+    inc dword [gs:ThreadState.poll_nfds]
     call obj_incref
 
 .pspf_full:
@@ -322,11 +316,11 @@ DEF_FUNC poll_cancel_io, 8            ; 1 pushes, so rsp is 16-aligned
 
     ; Scan pollfd array
     xor ecx, ecx
-    mov edx, [rel poll_nfds]
+    mov edx, [gs:ThreadState.poll_nfds]
 .pc_fd_loop:
     cmp ecx, edx
     jge .pc_check_timers
-    mov rax, [rel poll_fd_tasks]
+    mov rax, [gs:ThreadState.poll_fd_tasks]
     cmp [rax + rcx*8], rbx
     je .pc_remove_fd
     inc ecx
@@ -342,12 +336,12 @@ DEF_FUNC poll_cancel_io, 8            ; 1 pushes, so rsp is 16-aligned
     pop rdx
     pop rcx
     dec edx
-    mov [rel poll_nfds], edx
+    mov [gs:ThreadState.poll_nfds], edx
     cmp ecx, edx
     je .pc_check_timers        ; was already last
 
     ; Copy last entry to current slot
-    mov rax, [rel poll_fds]
+    mov rax, [gs:ThreadState.poll_fds]
     mov r8d, edx
     imul r8d, PollFd_size
     mov edi, ecx
@@ -358,18 +352,18 @@ DEF_FUNC poll_cancel_io, 8            ; 1 pushes, so rsp is 16-aligned
     mov r9w, [rax + r8 + 4]
     mov [rax + rdi + 4], r9w
     ; Copy task mapping
-    mov rax, [rel poll_fd_tasks]
+    mov rax, [gs:ThreadState.poll_fd_tasks]
     mov r9, [rax + rdx*8]
     mov [rax + rcx*8], r9
 
 .pc_check_timers:
     ; Scan timer heap (linear scan, rare operation)
     xor ecx, ecx
-    mov edx, [rel timer_count]
+    mov edx, [gs:ThreadState.timer_count]
 .pc_timer_loop:
     cmp ecx, edx
     jge .pc_done
-    mov rax, [rel timer_heap]
+    mov rax, [gs:ThreadState.timer_heap]
     mov edi, ecx
     shl edi, 4
     cmp [rax + rdi + TimerEntry.task], rbx
@@ -387,10 +381,10 @@ DEF_FUNC poll_cancel_io, 8            ; 1 pushes, so rsp is 16-aligned
     pop rdx
     pop rcx
     dec edx
-    mov [rel timer_count], edx
+    mov [gs:ThreadState.timer_count], edx
     cmp ecx, edx
     je .pc_done
-    mov rax, [rel timer_heap]
+    mov rax, [gs:ThreadState.timer_heap]
     mov edi, edx
     shl edi, 4
     mov r8d, ecx
@@ -420,12 +414,12 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
 
     ; Compute timeout_ms from timer heap
-    mov eax, [rel timer_count]
+    mov eax, [gs:ThreadState.timer_count]
     test eax, eax
     jz .pwd_no_timers
 
     ; Get earliest deadline
-    mov rax, [rel timer_heap]
+    mov rax, [gs:ThreadState.timer_heap]
     mov rbx, [rax + TimerEntry.deadline_ns]  ; min deadline
 
     ; Get current time
@@ -457,7 +451,7 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 
 .pwd_no_timers:
     ; No timers — check if we have fds
-    mov eax, [rel poll_nfds]
+    mov eax, [gs:ThreadState.poll_nfds]
     test eax, eax
     jz .pwd_idle
     mov r12d, 100              ; 100ms default timeout
@@ -473,8 +467,8 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 
 .pwd_do_poll:
     ; Call poll(poll_fds, nfds, timeout_ms)
-    mov rdi, [rel poll_fds]
-    mov esi, [rel poll_nfds]
+    mov rdi, [gs:ThreadState.poll_fds]
+    mov esi, [gs:ThreadState.poll_nfds]
     mov edx, r12d
     call poll
     ; rax = number of fds ready (or -1 on error)
@@ -484,11 +478,11 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     mov r13, rax               ; r13 = now_ns
 
 .pwd_timer_check:
-    mov eax, [rel timer_count]
+    mov eax, [gs:ThreadState.timer_count]
     test eax, eax
     jz .pwd_check_fds
 
-    mov rcx, [rel timer_heap]
+    mov rcx, [gs:ThreadState.timer_heap]
     cmp r13, [rcx + TimerEntry.deadline_ns]
     jl .pwd_check_fds          ; heap top not expired yet
 
@@ -496,8 +490,8 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     mov rbx, [rcx + TimerEntry.task]  ; expired task
 
     ; Remove top: replace with last, sift down
-    dec dword [rel timer_count]
-    mov eax, [rel timer_count]
+    dec dword [gs:ThreadState.timer_count]
+    mov eax, [gs:ThreadState.timer_count]
     test eax, eax
     jz .pwd_timer_empty
 
@@ -526,13 +520,13 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 .pwd_check_fds:
     ; Process ready fds
     xor ecx, ecx               ; index
-    mov r12d, [rel poll_nfds]
+    mov r12d, [gs:ThreadState.poll_nfds]
 
 .pwd_fd_loop:
     cmp ecx, r12d
     jge .pwd_done
 
-    mov rax, [rel poll_fds]
+    mov rax, [gs:ThreadState.poll_fds]
     mov edx, ecx
     imul edx, PollFd_size
     movzx r8d, word [rax + rdx + PollFd.revents]
@@ -541,7 +535,7 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 
     ; This fd has events — enqueue its task
     push rcx
-    mov rax, [rel poll_fd_tasks]
+    mov rax, [gs:ThreadState.poll_fd_tasks]
     mov rbx, [rax + rcx*8]
 
     ; Set send_value to None (fd ready notification)
@@ -551,7 +545,7 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 
     ; Remove this fd entry (swap with last, decrement)
     dec r12d
-    mov [rel poll_nfds], r12d
+    mov [gs:ThreadState.poll_nfds], r12d
 
     pop rcx
     cmp ecx, r12d
@@ -559,7 +553,7 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
 
     ; Swap with last
     push rcx
-    mov rax, [rel poll_fds]
+    mov rax, [gs:ThreadState.poll_fds]
     mov edx, r12d
     imul edx, PollFd_size
     mov edi, ecx
@@ -569,7 +563,7 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     mov r9w, [rax + rdx + 4]
     mov [rax + rdi + 4], r9w
 
-    mov rax, [rel poll_fd_tasks]
+    mov rax, [gs:ThreadState.poll_fd_tasks]
     mov r9, [rax + r12*8]
     mov [rax + rcx*8], r9
     pop rcx
@@ -601,7 +595,7 @@ END_FUNC poll_wait_and_drain
 ;; eax = index of newly inserted element
 DEF_FUNC_LOCAL timer_sift_up
     push rbx
-    mov rbx, [rel timer_heap]
+    mov rbx, [gs:ThreadState.timer_heap]
 
 .tsu_loop:
     test eax, eax
@@ -646,8 +640,8 @@ END_FUNC timer_sift_up
 DEF_FUNC_LOCAL timer_sift_down
     push rbx
     push r12
-    mov rbx, [rel timer_heap]
-    mov r12d, [rel timer_count]
+    mov rbx, [gs:ThreadState.timer_heap]
+    mov r12d, [gs:ThreadState.timer_count]
 
 .tsd_loop:
     ; left = 2*index + 1

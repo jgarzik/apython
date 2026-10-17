@@ -15,7 +15,6 @@ extern str_from_cstr_heap
 extern obj_str
 extern obj_decref
 extern obj_dealloc
-extern attr_error_pending
 extern builtin_isinstance
 extern builtin_issubclass
 extern bool_true
@@ -49,7 +48,6 @@ extern dict_type
 extern tuple_type
 extern set_type
 extern bytes_type
-extern current_exception
 
 ; New builtin function implementations (in builtins_extra.asm)
 extern builtin_abs
@@ -254,7 +252,7 @@ DEF_FUNC_BARE builtin_func_call
     ; the positional ones are counted; a method that takes no keywords at all
     ; still says so itself, as it did before any of this.
     mov r8, rdx
-    mov rcx, [rel kw_names_pending]
+    mov rcx, [gs:ThreadState.kw_names_pending]
     test rcx, rcx
     jz .bfc_have_npos
     sub r8, [rcx + PyTupleObject.ob_size]
@@ -717,8 +715,7 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     ; exception the program actually has to see.
     mov rdi, [rbp - PSW_STR]
     call obj_decref
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .psw_raised
 .psw_not_object:
     CSTRING rdi, "write"
@@ -814,8 +811,7 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
 
 .psf_no_flush:
     ; Missing, or the lookup raised -- the same 0 for both, so ask.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .psf_failed
     CSTRING rdi, "flush"
     call str_from_cstr_heap
@@ -867,7 +863,6 @@ PR_KW_FLUSH  equ 72
 PR_FRAME     equ 4200            ; + 5 pushes = 4240, 16-aligned; the 4096-byte
                                  ; buffer sits below PR_KW_SEP
 
-extern kw_names_pending
 extern ap_strcmp
 extern math_bind_kw_named
 extern obj_is_true
@@ -895,7 +890,7 @@ DEF_FUNC builtin_print, PR_FRAME
     mov qword [rbp - PR_FLUSH], 0
 
     ; Check for keyword arguments; none is the fast path
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [gs:ThreadState.kw_names_pending], 0
     je .print_no_kw
 
     ; sep, end, file and flush, and nothing else: an unknown keyword is

@@ -4,7 +4,6 @@
 %include "object.inc"
 
 extern eval_dispatch
-extern eval_saved_r13
 extern import_module
 extern obj_decref
 extern raise_exception
@@ -13,8 +12,6 @@ extern exc_raise_import
 extern dict_get
 extern str_from_cstr_heap
 extern str_type
-extern eval_co_names
-extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -47,12 +44,12 @@ DEF_FUNC_BARE op_import_name
     push rsi                    ; fromlist payload
     push rdx                    ; level
 
-    ; The two operands are ours now.  eval_saved_r13 was captured by
+    ; The two operands are ours now.  PyFrame.disp_sp was captured by
     ; eval_dispatch *before* those pops, so a non-local unwind out of
     ; import_module would have walked the value stack back down over both
     ; slots and DECREF'd them a second time -- a double free of the
     ; fromlist tuple on every failing import.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
 
     ; Decode level from SmallInt
     cmp ecx, TAG_SMALLINT
@@ -130,14 +127,13 @@ DEF_FUNC_BARE op_import_name
     ; import_module raises for a module it cannot find, but returns NULL for
     ; one whose body raised -- that exception is already pending and must be
     ; propagated, not replaced.
-    extern current_exception
     extern eval_exception_unwind
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .propagate_import_exc
     RAISE exc_ImportError_type, "import failed"
 
 .propagate_import_exc:
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 END_FUNC op_import_name
 
@@ -317,16 +313,16 @@ DEF_FUNC op_import_from, IF2_FRAME
 .if_error:
     ; A submodule whose body raised leaves its exception pending; reporting
     ; "cannot import name" over it would hide the real cause.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .propagate_from_exc
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     mov rdi, [rbp - IF2_MOD]
     mov rsi, [rbp - IF_ATTR]
     call import_from_error
     ud2
 
 .propagate_from_exc:
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     jmp eval_exception_unwind
 END_FUNC op_import_from

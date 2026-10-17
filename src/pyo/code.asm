@@ -18,7 +18,6 @@ extern obj_dealloc
 extern obj_incref
 extern str_from_cstr
 extern type_type
-extern kw_names_pending
 extern obj_as_index
 extern bytes_type
 extern tuple_type
@@ -1066,10 +1065,10 @@ DEF_FUNC code_method_replace, CR_FRAME
     mov qword [rbp - CR_NKW], 0
 
     ; The keywords, and how many of the arguments are actually positional.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .cr_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov [rbp - CR_KW], rax
     mov rcx, [rax + PyTupleObject.ob_size]
     mov [rbp - CR_NKW], rcx

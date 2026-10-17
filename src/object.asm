@@ -17,8 +17,6 @@ extern bool_false
 extern bool_true
 extern int_repr
 extern int_type
-extern current_exception
-extern eval_saved_r13
 extern eval_exception_unwind
 extern int_promote_mpz
 extern int_to_i64
@@ -77,11 +75,7 @@ END_FUNC obj_decref
 ; drained object and make no progress in the ordinary case.
 TRASH_LIMIT equ 50
 
-section .bss
-trash_nesting: resq 1
-trash_later:   resq 1
-
-section .text
+; trash_nesting and trash_later lives in ThreadState (src/include/threadstate.inc).
 
 ;; ============================================================================
 ;; obj_dealloc(PyObject *obj)
@@ -95,7 +89,7 @@ DEF_FUNC_BARE obj_dealloc
     sub rsp, 8                  ; the calls below want a 16-byte rsp
     mov rbx, rdi
 
-    cmp qword [rel trash_nesting], TRASH_LIMIT
+    cmp qword [gs:ThreadState.trash_nesting], TRASH_LIMIT
     jl .td_enter
 
     ; Too deep: set it aside for the outermost dealloc.  It has to leave the
@@ -112,13 +106,13 @@ DEF_FUNC_BARE obj_dealloc
     mov rdi, rbx
     call gc_untrack
 .td_no_gc:
-    mov rax, [rel trash_later]
+    mov rax, [gs:ThreadState.trash_later]
     mov [rbx + PyObject.ob_refcnt], rax
-    mov [rel trash_later], rbx
+    mov [gs:ThreadState.trash_later], rbx
     jmp .td_out
 
 .td_enter:
-    inc qword [rel trash_nesting]
+    inc qword [gs:ThreadState.trash_nesting]
 
     ; PEP 442: __del__ runs before anything is taken apart -- before the weak
     ; references are cleared and before tp_dealloc releases a field -- and if
@@ -211,9 +205,9 @@ DEF_FUNC_BARE obj_dealloc
     call ap_free
 
 .td_leave:
-    dec qword [rel trash_nesting]
+    dec qword [gs:ThreadState.trash_nesting]
     jnz .td_out
-    cmp qword [rel trash_later], 0
+    cmp qword [gs:ThreadState.trash_later], 0
     je .td_out
 
     ; The outermost dealloc empties the chain, one object at a time.  The
@@ -221,19 +215,19 @@ DEF_FUNC_BARE obj_dealloc
     ; on the chain rather than onto the machine stack once they are deep
     ; enough -- which is what keeps this loop, and not the stack, bounded.
 .td_drain:
-    inc qword [rel trash_nesting]
+    inc qword [gs:ThreadState.trash_nesting]
 .td_drain_loop:
-    mov rbx, [rel trash_later]
+    mov rbx, [gs:ThreadState.trash_later]
     test rbx, rbx
     jz .td_drain_done
     mov rax, [rbx + PyObject.ob_refcnt]
-    mov [rel trash_later], rax
+    mov [gs:ThreadState.trash_later], rax
     mov qword [rbx + PyObject.ob_refcnt], 0
     mov rdi, rbx
     call obj_dealloc
     jmp .td_drain_loop
 .td_drain_done:
-    dec qword [rel trash_nesting]
+    dec qword [gs:ThreadState.trash_nesting]
 
 .td_out:
     add rsp, 8
@@ -1648,9 +1642,7 @@ section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it
 ; handed the exception back rather than unwinding.  Cleared on entry to every
 ; instance_getattr, so it cannot survive a lookup, and consumed by
-; raise_no_attribute.
-global attr_error_pending
-attr_error_pending: resq 1
+; raise_no_attribute.  attr_error_pending lives in ThreadState (src/include/threadstate.inc).
 
 rtn_buf: resb RTN_BUFSZ
 section .text

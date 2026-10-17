@@ -846,8 +846,7 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
 .fwl_done:
     mov rdi, [rbp - FWL_ITER]
     call obj_decref
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .fwl_raised
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]

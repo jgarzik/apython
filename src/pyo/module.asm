@@ -27,8 +27,6 @@ extern none_singleton
 extern ap_strcmp
 extern str_from_cstr_heap
 extern obj_call_n
-extern current_exception
-extern attr_error_pending
 extern exc_AttributeError_type
 extern type_is_subtype
 extern eval_exception_unwind
@@ -433,7 +431,7 @@ DEF_FUNC module_getattr, MG_FRAME
     ; hasattr(); raise_no_attribute reads attr_error_pending and propagates
     ; this one rather than replacing it, so `m.missing` still reports what the
     ; hook said.  Anything else keeps unwinding.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .mg_really_not_found
     mov rdi, [rax + PyObject.ob_type]
@@ -441,7 +439,7 @@ DEF_FUNC module_getattr, MG_FRAME
     call type_is_subtype
     test eax, eax
     jz .mg_hook_unwind
-    mov qword [rel attr_error_pending], 1
+    mov qword [gs:ThreadState.attr_error_pending], 1
     RET_NULL
     pop r12
     pop rbx
@@ -874,7 +872,6 @@ END_FUNC namespace_new
 ;;
 ;; CPython takes keywords only, and says so.
 ;; ============================================================================
-extern kw_names_pending
 NTC_TYPE  equ 8
 NTC_NS    equ 16
 NTC_ARGS  equ 24
@@ -889,9 +886,9 @@ DEF_FUNC namespace_type_call, NTC_FRAME
 
     ; The keywords, taken now: a tp_new is expected to consume them, and
     ; type_call hands __init__ its own saved copy.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rbp - NTC_KW], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     xor ecx, ecx
     test rax, rax
     jz .ntc_no_kw

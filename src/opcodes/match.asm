@@ -21,7 +21,6 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_r13
 extern fatal_error
 extern async_gen_wrap_value
 extern none_singleton
@@ -34,14 +33,11 @@ extern exc_RuntimeError_type
 extern exc_SystemError_type
 extern exc_StopIteration_type
 extern exc_TypeError_type
-extern current_exception
 extern eval_exception_unwind
 extern obj_decref
 extern prep_reraise_star
 extern tuple_new
 extern list_type
-extern eval_co_names
-extern eval_saved_rbx
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -528,11 +524,11 @@ extern obj_decref
     ; Raising from this hand-rolled frame is safe: eval_exception_unwind
     ; reloads rbx, r12, r13 and rsp from the eval_saved_* globals, and
     ; op_import_from already raises from the same subsystem the same way.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .is_all_propagate
     call .is_all_name
     mov rdi, [rbp - IS_MOD]
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     xor edx, edx                      ; a get, not a set
     extern raise_no_attribute
     call raise_no_attribute
@@ -540,7 +536,7 @@ extern obj_decref
 .is_all_propagate:
     ; The submodule was found and its body raised; that is the real cause.
     IS_DROP_OWNDICT
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     jmp eval_exception_unwind
 
@@ -563,7 +559,7 @@ extern obj_decref
     mov [rbp - IS_SUBNAME], rsi
     IS_DROP_OWNDICT
     mov rsi, [rbp - IS_SUBNAME]
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     CSTRING rdi, `'\x01' object does not support indexing`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
@@ -650,7 +646,7 @@ extern obj_decref
     INCREF_V rsi, rax
     mov [rbp - IS_SUBNAME], rsi
     IS_DROP_OWNDICT
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     mov rdi, [rbp - IS_MOD]
     mov rsi, [rbp - IS_SUBNAME]
     xor edx, edx                      ; a get, not a set
@@ -693,14 +689,14 @@ extern obj_decref
     ; Pop the exception, raise RuntimeError instead
     VPOP rdi
     DECREF_V rdi, rsi
-    mov [rel eval_saved_r13], r13  ; update — popped and DECREF'd
+    PUBLISH_SP  ; update — popped and DECREF'd
     RAISE exc_RuntimeError_type, "generator raised StopIteration"
 .ci1_si_reraise:
     ; Not StopIteration — pop from TOS, set as current_exception, re-raise
     VPOP_VAL rax, rsi              ; exception (ref transferred from stack)
-    mov [rel eval_saved_r13], r13  ; update — popped and transferred
-    mov rcx, [rel current_exception]
-    mov [rel current_exception], rax
+    PUBLISH_SP  ; update — popped and transferred
+    mov rcx, [gs:ThreadState.current_exception]
+    mov [gs:ThreadState.current_exception], rax
     cmp rcx, rax
     je .ci1_si_go
     test rcx, rcx
@@ -715,8 +711,7 @@ extern obj_decref
 .ci1_si_go:
     ; This is a re-raise, so it adds no traceback entry -- the frame already
     ; recorded one where the exception was first raised.
-    extern tb_suppress_frame
-    mov byte [rel tb_suppress_frame], 1
+    mov byte [gs:ThreadState.tb_suppress_frame], 1
     jmp eval_exception_unwind
 
 .ci1_unary_positive:
@@ -1014,11 +1009,10 @@ DEF_FUNC op_setup_annotations
     ; and lets anything else through; clearing whatever it was keeps an
     ; exception from a mapping's __getitem__ out of an opcode that has nothing
     ; to do with it.
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .sa_map_make
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .sa_map_make:
     call dict_new
@@ -1836,14 +1830,14 @@ DEF_FUNC op_match_class, MC_FRAME
 ;; Everything this frame owns, released.  A RAISE abandons the frame, so what
 ;; is not released here is leaked.
 .mc_release_all:
-    ; The unwinder cleans the value stack down from eval_saved_r13, which
+    ; The unwinder cleans the value stack down from PyFrame.disp_sp, which
     ; DISPATCH set BEFORE this handler popped its three inputs -- so without
     ; this it releases them a second time, and the double free surfaced as a
     ; segfault in the NEXT match, reading ob_type off a class the allocator
     ; had handed out again.  op_call's .propagate_exc republishes for exactly
     ; this reason and says so.  Removing this line makes valgrind report a
     ; use-after-free of the subject, which is how it was confirmed.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     mov rdi, [rbp - MC_RESULT]
     test rdi, rdi
     jz .mra_no_result
@@ -1979,10 +1973,9 @@ DEF_FUNC_LOCAL typing_call, TYC_FRAME
     test rbx, rbx
     jnz .tyc_have_module
 
-    extern kw_names_pending
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     push rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     CSTRING rdi, "_typing"
     extern str_from_cstr_heap
@@ -1999,7 +1992,7 @@ DEF_FUNC_LOCAL typing_call, TYC_FRAME
     call obj_decref
 
     pop rax
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
     test rbx, rbx
     jz .tyc_failed
     mov [rel typing_module], rbx        ; the reference the module table holds

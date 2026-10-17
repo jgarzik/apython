@@ -4,7 +4,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern eval_saved_r13
 extern get_iterator_opt
 extern int_is_integer
 extern ap_malloc
@@ -34,7 +33,6 @@ extern obj_richcompare_bool
 extern obj_as_index
 extern obj_as_index_seq
 extern recursion_limit
-extern c_recursion_depth
 extern exc_RecursionError_type
 extern int_fits_i64
 extern str_type
@@ -820,7 +818,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r13
     pop r12
     pop rbx
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     jmp eval_exception_unwind
 
@@ -2216,8 +2214,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov r13, rdx            ; nargs
 
     ; Reject keyword arguments
-    extern kw_names_pending
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jnz .ltc_kwarg_error
 
@@ -2339,7 +2336,6 @@ DEF_FUNC list_type_call, LTC_FRAME
     ; already being handled?  A bare test against 0 cannot tell: inside an
     ; `except` block current_exception is the exception being handled, so
     ; list(x) there re-raised it.
-    extern current_exception
     EXC_RAISED_SINCE [rbp - LTC_EXC], rax, .ltc_exc_cleanup
 
     mov rax, rbx            ; return the list
@@ -2396,7 +2392,7 @@ DEF_FUNC list_type_call, LTC_FRAME
 
 .ltc_kwarg_error:
     ; Clear kw_names_pending to avoid stale state
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     RAISE exc_TypeError_type, "list() takes no keyword arguments"
 END_FUNC list_type_call
 

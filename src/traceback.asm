@@ -40,7 +40,6 @@ extern ap_strcmp
 extern tuple_type
 extern obj_decref
 extern str_type
-extern current_exception
 extern none_singleton
 extern obj_dealloc
 extern traceback_type
@@ -1617,9 +1616,9 @@ DEF_FUNC traceback_unraisable_default, TPU_FRAME
     mov rsi, [rbp - TPU_OBJ]
     call tb_unraisable_name
     mov rdi, [rbp - TPU_EXC]
-    mov qword [rel tb_chain_suppress], 1
+    mov qword [gs:ThreadState.tb_chain_suppress], 1
     call traceback_print
-    mov qword [rel tb_chain_suppress], 0
+    mov qword [gs:ThreadState.tb_chain_suppress], 0
     leave
     ret
 END_FUNC traceback_unraisable_default
@@ -1658,11 +1657,11 @@ DEF_FUNC_LOCAL tb_unraisable_name, TUN_FRAME
 .tpu_failed:
     ; A repr that raised leaves ITS exception pending; the one being reported
     ; is what matters, so put that back.
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .tpu_failed_msg
     mov rax, [rbp - TUN_EXC]
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     call obj_decref
 .tpu_failed_msg:
     CSTRING rdi, "<object repr() failed>"
@@ -1793,9 +1792,9 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
 
     ; The hook runs with no exception pending: it is ordinary Python, and the
     ; one being reported is an argument, not the current state.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov [rbp - TPH_SAVED], rax
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
 
     mov rax, [rbp - TPH_ARG]
     mov [rbp - TPH_ARGV], rax
@@ -1809,10 +1808,10 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     ; was given is dropped -- CPython says "Exception ignored in
     ; sys.unraisablehook: <the hook>" and does not fall back to printing the
     ; original.  Reporting both would be reporting the same failure twice.
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .tph_no_exc
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     push rdi
     CSTRING rdi, "Exception ignored in sys.unraisablehook: "
     call tb_write_cstr
@@ -1823,14 +1822,14 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     pop rdi
     push rdi
     ; One exception, no chain -- the same rule as the default hook below.
-    mov qword [rel tb_chain_suppress], 1
+    mov qword [gs:ThreadState.tb_chain_suppress], 1
     call traceback_print
-    mov qword [rel tb_chain_suppress], 0
+    mov qword [gs:ThreadState.tb_chain_suppress], 0
     pop rdi
     call obj_decref
 .tph_no_exc:
     mov rax, [rbp - TPH_SAVED]
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     pop rax
     test rax, rax
     jz .tph_hook_done
@@ -1895,7 +1894,7 @@ extern dict_get
 extern type_is_subtype
 
 DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     mov [rbp - TPN_EXC], rax
     mov qword [rbp - TPN_NOTES], 0
 
@@ -1979,7 +1978,7 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
 
 .tpn_out:
     mov rax, [rbp - TPN_EXC]
-    mov [rel current_exception], rax
+    mov [gs:ThreadState.current_exception], rax
     leave
     ret
 END_FUNC tb_print_notes
@@ -1992,9 +1991,8 @@ TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
 TP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 TB_RECURSIVE_CUTOFF equ 3
-TB_SEEN_MAX equ 64
 DEF_FUNC traceback_print
-    mov qword [rel tb_seen_n], 0
+    mov qword [gs:ThreadState.tb_seen_n], 0
     mov rsi, rdi
     xor edi, edi
     call tb_print_one
@@ -2015,26 +2013,25 @@ DEF_FUNC tb_print_one, TP_FRAME
     mov [rbp - TP_EXC], rdi
 
     ; Already reported? then this is a cycle; stop here.
-    mov rcx, [rel tb_seen_n]
+    mov rcx, [gs:ThreadState.tb_seen_n]
     xor edx, edx
-    lea r8, [rel tb_seen]
 .tp_seen_scan:
     cmp rdx, rcx
     jge .tp_seen_add
-    cmp [r8 + rdx*8], rdi
+    cmp [gs:ThreadState.tb_seen + rdx*8], rdi
     je .tp_skip
     inc rdx
     jmp .tp_seen_scan
 .tp_seen_add:
     cmp rcx, TB_SEEN_MAX
     jae .tp_seen_done
-    mov [r8 + rcx*8], rdi
+    mov [gs:ThreadState.tb_seen + rcx*8], rdi
     inc rcx
-    mov [rel tb_seen_n], rcx
+    mov [gs:ThreadState.tb_seen_n], rcx
 .tp_seen_done:
 
     ; The unraisable hook reports one exception, not a chain -- see the flag.
-    cmp qword [rel tb_chain_suppress], 0
+    cmp qword [gs:ThreadState.tb_chain_suppress], 0
     jne .tp_header
 
     ; A __cause__ or __context__ is reported first, then the linking sentence.
@@ -2500,13 +2497,6 @@ DEF_FUNC tb_syntax_header, SH_FRAME
     ret
 END_FUNC tb_syntax_header
 
-section .bss
-tb_seen:   resq TB_SEEN_MAX
-tb_seen_n: resq 1
-; Set while the default unraisable hook is printing: CPython's hook reports
-; the exception on its own, with no __cause__ / __context__ chain.
-tb_chain_suppress: resq 1
-section .text
 
 ;; ============================================================================
 ;; (was src/except.asm)

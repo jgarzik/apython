@@ -49,7 +49,6 @@ extern exc_TypeError_type
 extern exc_AttributeError_type
 extern rbt_append_cstr
 extern dict_type
-extern eval_saved_r12
 extern code_addr2line
 extern obj_as_index
 extern str_type
@@ -222,10 +221,11 @@ END_FUNC frameobj_new
 ;; detached view keeps what it was left with; that is the whole point of
 ;; detaching.
 ;;
-;; Where the frame is depends on which frame it is: the innermost one is the
-;; interpreter's, whose IP lives in eval_saved_rbx; an outer one was left at
-;; the call it made, recorded in call_ip; a suspended generator's is
-;; instr_ptr.  Reading only instr_ptr answered 0 for every running frame.
+;; Every frame's position is its PyFrame.disp_ip, which DISPATCH writes on
+;; each instruction: the innermost frame's is the instruction running, an
+;; outer one's is the call it is waiting in.  A frame that has never run has
+;; 0 there and is answered from instr_ptr.  Reading only instr_ptr answered 0
+;; for every running frame.
 ;; ============================================================================
 global frameobj_refresh_pos
 DEF_FUNC frameobj_refresh_pos, 8            ; 1 push, so rsp is 16-aligned
@@ -242,15 +242,13 @@ DEF_FUNC frameobj_refresh_pos, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, [rbx + PyFrameObject.f_code]
     test rdi, rdi
     jz .frp_done
-    extern eval_saved_r12
-    mov rax, [rel eval_saved_r12]
+    mov rax, [gs:ThreadState.eval_saved_r12]
     cmp rax, rcx
     jne .frp_not_current
-    extern eval_saved_rbx
-    mov rsi, [rel eval_saved_rbx]
+    mov rsi, [rcx + PyFrame.disp_ip]   ; the running frame's last DISPATCH
     jmp .frp_have_ip
 .frp_not_current:
-    mov rsi, [rcx + PyFrame.call_ip]
+    mov rsi, [rcx + PyFrame.disp_ip]
     test rsi, rsi
     jnz .frp_have_ip
     mov rsi, [rcx + PyFrame.instr_ptr]
@@ -767,7 +765,7 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     mov [rbp - SGF_DEPTH], rax
 .sgf_have_depth:
 
-    mov rbx, [rel eval_saved_r12]
+    mov rbx, [gs:ThreadState.eval_saved_r12]
     test rbx, rbx
     jz .sgf_too_deep
 .sgf_descend:
@@ -827,7 +825,7 @@ DEF_FUNC sys_current_frames_func, 40    ; + 1 push = 48, 16-aligned
     jz .scf_fail
     mov [rbp - SCF_DICT], rax
 
-    mov rbx, [rel eval_saved_r12]
+    mov rbx, [gs:ThreadState.eval_saved_r12]
     test rbx, rbx
     jz .scf_done                ; no Python frame: an empty mapping
 
@@ -891,7 +889,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     pop rcx
     mov rcx, rax
 .sgm_have_depth:
-    mov rbx, [rel eval_saved_r12]
+    mov rbx, [gs:ThreadState.eval_saved_r12]
 .sgm_descend:
     test rbx, rbx
     jz .sgm_none

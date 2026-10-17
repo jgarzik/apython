@@ -37,11 +37,9 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_ImportError_type
 extern import_find_and_load_asm
-extern import_path_override
 extern pc_dynload
 extern list_new
 extern list_append
-extern current_exception
 extern eval_exception_unwind
 
 section .text
@@ -90,10 +88,10 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     call obj_decref
 .icb_have_dirs:
     mov rax, [rel icb_dirs]
-    mov [rel import_path_override], rax
+    mov [gs:ThreadState.import_path_override], rax
     mov rdi, [rbp - ICB_NAME]
     call import_find_and_load_asm
-    mov qword [rel import_path_override], 0
+    mov qword [gs:ThreadState.import_path_override], 0
     test rax, rax
     jz .icb_failed
     leave

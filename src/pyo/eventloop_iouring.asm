@@ -43,30 +43,11 @@ URING_RING_ENTRIES equ 256
 ;; ============================================================================
 ;; State
 ;; ============================================================================
+; The ring -- its fd, the mmap'd SQ/CQ/SQE regions and the pointers and masks
+; cached from them -- belongs to the loop, and the loop is per thread, so it
+; is in ThreadState (uring_*, src/include/threadstate.inc).
 section .bss
 align 8
-; io_uring file descriptor
-uring_fd:        resd 1
-uring_pad:       resd 1
-
-; Ring pointers
-uring_sq_ring:   resq 1  ; mmap'd SQ ring base
-uring_cq_ring:   resq 1  ; mmap'd CQ ring base
-uring_sqes:      resq 1  ; mmap'd SQE array base
-uring_sq_size:   resq 1  ; SQ ring mmap size
-uring_cq_size:   resq 1  ; CQ ring mmap size
-uring_sqe_size:  resq 1  ; SQE array mmap size
-
-; Ring parameters (cached from mmap'd ring)
-uring_sq_mask:   resd 1
-uring_cq_mask:   resd 1
-uring_sq_head:   resq 1  ; ptr to sq head in shared memory
-uring_sq_tail:   resq 1  ; ptr to sq tail in shared memory
-uring_sq_array:  resq 1  ; ptr to sq index array
-uring_cq_head:   resq 1  ; ptr to cq head in shared memory
-uring_cq_tail:   resq 1  ; ptr to cq tail in shared memory
-uring_cqes_base: resq 1  ; ptr to CQE array
-
 ; Setup params (on stack in init, but we need the offsets)
 uring_params_buf: resb IoUringParams_size
 
@@ -98,7 +79,7 @@ DEF_FUNC uring_init
     test eax, eax
     js .ui_fail
 
-    mov [rel uring_fd], eax
+    mov [gs:ThreadState.uring_fd], eax
     mov ebx, eax              ; save fd
 
     ; Calculate mmap sizes from params
@@ -109,7 +90,7 @@ DEF_FUNC uring_init
     mov ecx, [r12 + IoUringParams.sq_entries]
     shl ecx, 2                                  ; * 4
     add eax, ecx
-    mov [rel uring_sq_size], rax
+    mov [gs:ThreadState.uring_sq_size], rax
 
     ; mmap SQ ring
     xor edi, edi               ; addr = NULL
@@ -121,27 +102,27 @@ DEF_FUNC uring_init
     call sys_mmap
     cmp rax, -4095              ; mmap answers -errno, never -1
     jae .ui_close_fail
-    mov [rel uring_sq_ring], rax
+    mov [gs:ThreadState.uring_sq_ring], rax
 
     ; Cache SQ ring pointers
     mov rcx, rax               ; base
     mov edx, [r12 + 40 + SQOFF_HEAD]
     lea rdi, [rcx + rdx]
-    mov [rel uring_sq_head], rdi
+    mov [gs:ThreadState.uring_sq_head], rdi
     mov edx, [r12 + 40 + SQOFF_TAIL]
     lea rdi, [rcx + rdx]
-    mov [rel uring_sq_tail], rdi
+    mov [gs:ThreadState.uring_sq_tail], rdi
     mov edx, [r12 + 40 + SQOFF_RING_MASK]
     mov eax, [rcx + rdx]
-    mov [rel uring_sq_mask], eax
+    mov [gs:ThreadState.uring_sq_mask], eax
     mov edx, [r12 + 40 + SQOFF_ARRAY]
     lea rdi, [rcx + rdx]
-    mov [rel uring_sq_array], rdi
+    mov [gs:ThreadState.uring_sq_array], rdi
 
     ; SQE array size = sq_entries * 64
     mov ecx, [r12 + IoUringParams.sq_entries]
     shl ecx, 6                 ; * 64
-    mov [rel uring_sqe_size], rcx
+    mov [gs:ThreadState.uring_sqe_size], rcx
 
     ; mmap SQEs: offset = 0x10000000ULL (IORING_OFF_SQES)
     xor edi, edi
@@ -153,14 +134,14 @@ DEF_FUNC uring_init
     call sys_mmap
     cmp rax, -4095              ; mmap answers -errno, never -1
     jae .ui_unmap_sq
-    mov [rel uring_sqes], rax
+    mov [gs:ThreadState.uring_sqes], rax
 
     ; CQ ring size = cq_off.cqes + cq_entries * 16
     mov eax, [r12 + 80 + CQOFF_CQES]
     mov ecx, [r12 + IoUringParams.cq_entries]
     shl ecx, 4                 ; * 16 (CQE size)
     add eax, ecx
-    mov [rel uring_cq_size], rax
+    mov [gs:ThreadState.uring_cq_size], rax
 
     ; mmap CQ ring: offset = 0x8000000ULL (IORING_OFF_CQ_RING)
     xor edi, edi
@@ -172,22 +153,22 @@ DEF_FUNC uring_init
     call sys_mmap
     cmp rax, -4095              ; mmap answers -errno, never -1
     jae .ui_unmap_sqes
-    mov [rel uring_cq_ring], rax
+    mov [gs:ThreadState.uring_cq_ring], rax
 
     ; Cache CQ ring pointers
     mov rcx, rax
     mov edx, [r12 + 80 + CQOFF_HEAD]
     lea rdi, [rcx + rdx]
-    mov [rel uring_cq_head], rdi
+    mov [gs:ThreadState.uring_cq_head], rdi
     mov edx, [r12 + 80 + CQOFF_TAIL]
     lea rdi, [rcx + rdx]
-    mov [rel uring_cq_tail], rdi
+    mov [gs:ThreadState.uring_cq_tail], rdi
     mov edx, [r12 + 80 + CQOFF_RING_MASK]
     mov eax, [rcx + rdx]
-    mov [rel uring_cq_mask], eax
+    mov [gs:ThreadState.uring_cq_mask], eax
     mov edx, [r12 + 80 + CQOFF_CQES]
     lea rdi, [rcx + rdx]
-    mov [rel uring_cqes_base], rdi
+    mov [gs:ThreadState.uring_cqes_base], rdi
 
     ; Success
     xor eax, eax
@@ -197,12 +178,12 @@ DEF_FUNC uring_init
     ret
 
 .ui_unmap_sqes:
-    mov rdi, [rel uring_sqes]
-    mov rsi, [rel uring_sqe_size]
+    mov rdi, [gs:ThreadState.uring_sqes]
+    mov rsi, [gs:ThreadState.uring_sqe_size]
     call sys_munmap
 .ui_unmap_sq:
-    mov rdi, [rel uring_sq_ring]
-    mov rsi, [rel uring_sq_size]
+    mov rdi, [gs:ThreadState.uring_sq_ring]
+    mov rsi, [gs:ThreadState.uring_sq_size]
     call sys_munmap
 .ui_close_fail:
     mov edi, ebx
@@ -220,20 +201,20 @@ END_FUNC uring_init
 ;; ============================================================================
 DEF_FUNC uring_teardown
     ; Unmap rings
-    mov rdi, [rel uring_cq_ring]
-    mov rsi, [rel uring_cq_size]
+    mov rdi, [gs:ThreadState.uring_cq_ring]
+    mov rsi, [gs:ThreadState.uring_cq_size]
     call sys_munmap
 
-    mov rdi, [rel uring_sqes]
-    mov rsi, [rel uring_sqe_size]
+    mov rdi, [gs:ThreadState.uring_sqes]
+    mov rsi, [gs:ThreadState.uring_sqe_size]
     call sys_munmap
 
-    mov rdi, [rel uring_sq_ring]
-    mov rsi, [rel uring_sq_size]
+    mov rdi, [gs:ThreadState.uring_sq_ring]
+    mov rsi, [gs:ThreadState.uring_sq_size]
     call sys_munmap
 
     ; Close uring fd
-    mov edi, [rel uring_fd]
+    mov edi, [gs:ThreadState.uring_fd]
     call sys_close
 
     leave
@@ -245,28 +226,28 @@ END_FUNC uring_teardown
 ;; Get next available SQE slot.
 ;; ============================================================================
 DEF_FUNC_LOCAL uring_get_sqe
-    mov rax, [rel uring_sq_tail]
+    mov rax, [gs:ThreadState.uring_sq_tail]
     mov ecx, [rax]             ; tail value
-    mov rdx, [rel uring_sq_head]
+    mov rdx, [gs:ThreadState.uring_sq_head]
     mov edx, [rdx]             ; head value
 
     ; Check if full: tail - head >= entries
     mov r8d, ecx
     sub r8d, edx
-    cmp r8d, [rel uring_sq_mask]
+    cmp r8d, [gs:ThreadState.uring_sq_mask]
     ja .ugs_full               ; ring is full
 
     ; SQE index = tail & mask
     mov eax, ecx
-    and eax, [rel uring_sq_mask]
+    and eax, [gs:ThreadState.uring_sq_mask]
 
     ; Set sq_array[index] = index (identity mapping)
-    mov rdx, [rel uring_sq_array]
+    mov rdx, [gs:ThreadState.uring_sq_array]
     mov [rdx + rax*4], eax
 
     ; Return SQE pointer
     shl eax, 6                ; * 64
-    add rax, [rel uring_sqes]
+    add rax, [gs:ThreadState.uring_sqes]
 
     ; Zero the SQE
     push rax
@@ -282,7 +263,7 @@ DEF_FUNC_LOCAL uring_get_sqe
     pop rax
 
     ; Advance tail
-    mov rdx, [rel uring_sq_tail]
+    mov rdx, [gs:ThreadState.uring_sq_tail]
     inc dword [rdx]
 
     leave
@@ -296,13 +277,13 @@ DEF_FUNC_LOCAL uring_get_sqe
     ; the task waiting for a wakeup that was never armed: one `gather` of a
     ; few hundred sleeps hung the whole loop.
     call uring_submit_pending
-    mov rax, [rel uring_sq_tail]
+    mov rax, [gs:ThreadState.uring_sq_tail]
     mov ecx, [rax]
-    mov rdx, [rel uring_sq_head]
+    mov rdx, [gs:ThreadState.uring_sq_head]
     mov edx, [rdx]
     mov r8d, ecx
     sub r8d, edx
-    cmp r8d, [rel uring_sq_mask]
+    cmp r8d, [gs:ThreadState.uring_sq_mask]
     ja .ugs_really_full
     leave
     jmp uring_get_sqe
@@ -318,14 +299,14 @@ END_FUNC uring_get_sqe
 ;; min_complete=1; this is the half that only submits.
 ;; ============================================================================
 DEF_FUNC_LOCAL uring_submit_pending
-    mov rax, [rel uring_sq_tail]
+    mov rax, [gs:ThreadState.uring_sq_tail]
     mov eax, [rax]
-    mov rcx, [rel uring_sq_head]
+    mov rcx, [gs:ThreadState.uring_sq_head]
     sub eax, [rcx]
     test eax, eax
     jz .usp_none
     mov esi, eax                ; to_submit
-    mov edi, [rel uring_fd]
+    mov edi, [gs:ThreadState.uring_fd]
     xor edx, edx                ; min_complete = 0
     xor ecx, ecx                ; no flags: do not wait
     xor r8d, r8d
@@ -446,7 +427,7 @@ DEF_FUNC uring_wait_and_drain
     push r12
 
     ; io_uring_enter(fd, to_submit=0, min_complete=1, flags=GETEVENTS)
-    mov edi, [rel uring_fd]
+    mov edi, [gs:ThreadState.uring_fd]
     xor esi, esi               ; to_submit (SQEs already queued via tail advance)
     mov edx, 1                 ; min_complete
     mov ecx, IORING_ENTER_GETEVENTS
@@ -454,13 +435,13 @@ DEF_FUNC uring_wait_and_drain
     xor r9d, r9d               ; sigsz = 0
 
     ; Count pending submissions: tail - head
-    mov rax, [rel uring_sq_tail]
+    mov rax, [gs:ThreadState.uring_sq_tail]
     mov eax, [rax]
-    mov rcx, [rel uring_sq_head]
+    mov rcx, [gs:ThreadState.uring_sq_head]
     sub eax, [rcx]
     mov esi, eax               ; to_submit = pending count
 
-    mov edi, [rel uring_fd]
+    mov edi, [gs:ThreadState.uring_fd]
     mov edx, 1
     mov ecx, IORING_ENTER_GETEVENTS
     xor r8d, r8d
@@ -468,9 +449,9 @@ DEF_FUNC uring_wait_and_drain
     call sys_io_uring_enter
 
     ; Drain CQ ring
-    mov rax, [rel uring_cq_head]
+    mov rax, [gs:ThreadState.uring_cq_head]
     mov ebx, [rax]             ; head
-    mov rax, [rel uring_cq_tail]
+    mov rax, [gs:ThreadState.uring_cq_tail]
     mov r12d, [rax]            ; tail
 
 .uwd_drain:
@@ -479,9 +460,9 @@ DEF_FUNC uring_wait_and_drain
 
     ; Get CQE at head & mask
     mov eax, ebx
-    and eax, [rel uring_cq_mask]
+    and eax, [gs:ThreadState.uring_cq_mask]
     shl eax, 4                 ; * 16 (CQE size)
-    add rax, [rel uring_cqes_base]
+    add rax, [gs:ThreadState.uring_cqes_base]
 
     ; Extract task from user_data
     mov rdi, [rax + IoUringCqe.user_data]
@@ -506,7 +487,7 @@ DEF_FUNC uring_wait_and_drain
 
 .uwd_done:
     ; Update CQ head
-    mov rax, [rel uring_cq_head]
+    mov rax, [gs:ThreadState.uring_cq_head]
     mov [rax], ebx
 
     pop r12

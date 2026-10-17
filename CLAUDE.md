@@ -127,7 +127,30 @@ Callee-saved registers hold global interpreter state:
 | `r15` | Free — scratch for handlers |
 | `ecx` | Opcode arg on handler entry |
 
-co_names is accessed via the `LOAD_CO_NAMES reg` macro (reads the `eval_co_names` global), not a dedicated register.
+co_names is accessed via the `LOAD_CO_NAMES reg` macro (reads `ThreadState.eval_co_names` through gs), not a dedicated register.
+
+## Per-thread state (gs)
+
+Everything the interpreter keeps per thread -- `current_exception`,
+`handled_exception`, `eval_saved_r12` (the running frame), `eval_base_rsp`, the `*_pending` words, the recursion
+counters, the frame data stack, the repr/traceback cycle guards, the trace
+hooks and the asyncio loop -- is a field of `struc ThreadState` in
+`src/include/threadstate.inc`, reached through the gs segment base:
+`mov rax, [gs:ThreadState.current_exception]`.  `main` points gs at
+`main_tstate` (`tstate_install`, src/eval.asm) before anything else runs.
+`lea` does NOT apply the segment base: a field whose address is wanted is
+`[gs:ThreadState.ts_self]` plus the field offset, and an array field is
+indexed in place (`[gs:ThreadState.tb_seen + rdx*8]`).  Shared state --
+allocator, freelists, the collector, caches, interned strings -- stays an
+ordinary `[rel ...]` global.
+
+DISPATCH does NOT go through gs: it publishes the IP and value stack top into
+the running frame, `[r12 + PyFrame.disp_ip]` / `[r12 + PyFrame.disp_sp]`, and
+the unwinder reads them back from the frame `ThreadState.eval_saved_r12`
+names.  Code that republishes r13 for the unwinder and cannot be sure r12 is
+still the frame uses `PUBLISH_SP` (macros.inc).  A gs-relative access has about
+twice the load latency and half the store rate of a plain one on the machine
+this was measured on, so gs is for cold paths and for loading `ts_self` once.
 
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
@@ -417,7 +440,7 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   whole corpus runs on a mixed pool/libc heap
 - `src/compiler/` — The Python **source** compiler (see below)
 - `src/include/` — `object.inc` (every struct and id enum), `macros.inc`,
-  `value.inc`, `opcodes.inc`, and the three private ABIs `sre.inc`,
+  `value.inc`, `threadstate.inc` (the per-thread state, see above), `opcodes.inc`, and the three private ABIs `sre.inc`,
   `eventloop.inc` and `listsort.inc`
 
 ## Source Compiler (`src/compiler/`)
@@ -521,7 +544,7 @@ These cost real time; the shapes recur.
 Defined in `src/include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
 
 - **PyTypeObject** (object.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
-- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, localsplus +80 (variable-size Value[])
+- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, disp_ip +80, disp_sp +120 (both written by DISPATCH), localsplus +128 (variable-size Value[])
 - **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
 - **PyCodeObject** (object.inc): co_consts, co_names, co_firstlineno +112, co_linetable +120, co_code starts at +128

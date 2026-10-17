@@ -40,7 +40,6 @@ extern ar_fieldkinds
 extern comp_intern
 extern comp_intern_forced
 extern comp_error
-extern comp_inherit_future
 extern compile_source_ex
 extern tuple_type
 extern list_type
@@ -640,7 +639,7 @@ DEF_FUNC compile_ast_input, CAI_FRAME
     lea rsi, [rel bool_true]
     cmp rdx, rsi
     jne .cai_no_future
-    mov qword [rel comp_inherit_future], 1
+    mov qword [gs:ThreadState.comp_inherit_future], 1
 .cai_no_future:
     mov r8, [rcx]               ; the raw tree, borrowed: the pair holds it
     lea rdi, [rel al_empty_src]
@@ -656,13 +655,13 @@ DEF_FUNC compile_ast_input, CAI_FRAME
     ret
 
 .cai_hand_back:
-    mov qword [rel comp_inherit_future], 0
+    mov qword [gs:ThreadState.comp_inherit_future], 0
     mov rax, [rbp - CAI_RES]    ; owned, and now the caller's
     leave
     ret
 
 .cai_fail:
-    mov qword [rel comp_inherit_future], 0
+    mov qword [gs:ThreadState.comp_inherit_future], 0
     xor eax, eax
     leave
     ret

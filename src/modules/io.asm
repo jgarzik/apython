@@ -470,7 +470,6 @@ extern instance_dealloc
 extern bytes_like_ptr_len
 extern obj_is_true
 extern obj_getattr_opt
-extern kw_names_pending
 extern ap_strcmp
 extern obj_repr
 extern str_concat
@@ -931,10 +930,10 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     ; closefd=False)` read False as the MODE, and any keyword at all shifted
     ; the positional count.  Consume it: a builtin that leaves it set hands
     ; its caller's keywords to whatever call runs next.
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .fi_no_kw
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rax + PyTupleObject.ob_size]
     mov rdx, [rbp - FI_NPOS]
     sub rdx, rcx
@@ -2507,8 +2506,7 @@ DEF_FUNC iobase_exit_fn
     leave
     ret
 .ibx_maybe_raised:
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .ibx_none
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx

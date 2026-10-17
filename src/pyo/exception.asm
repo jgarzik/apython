@@ -58,7 +58,6 @@ extern raise_exception
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
-extern kw_names_pending
 extern dict_get
 extern dict_new
 extern dict_set
@@ -253,10 +252,9 @@ END_FUNC exc_set_context
 ;; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
 ;; ============================================================================
 DEF_FUNC raise_key_error
-    extern current_exception
     call set_key_error
-    mov rdi, [rel current_exception]
-    mov qword [rel current_exception], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
     call raise_exception_obj
     ud2
 END_FUNC raise_key_error
@@ -2180,7 +2178,7 @@ DEF_FUNC exc_type_call, ETC_FRAME
     call exc_user_init
     test rax, rax
     jz .etc_no_user_init
-    mov r12, [rel kw_names_pending]
+    mov r12, [gs:ThreadState.kw_names_pending]
     test r12, r12
     jz .etc_kw_done
     mov rcx, [r12 + PyTupleObject.ob_size]
@@ -2192,10 +2190,10 @@ DEF_FUNC exc_type_call, ETC_FRAME
     call exc_kw_family
     mov [rbp - ETC_KWFAM], rax
 
-    mov r12, [rel kw_names_pending]
+    mov r12, [gs:ThreadState.kw_names_pending]
     test r12, r12
     jz .etc_kw_done
-    mov qword [rel kw_names_pending], 0     ; consumed, however this ends
+    mov qword [gs:ThreadState.kw_names_pending], 0     ; consumed, however this ends
     mov rcx, [r12 + PyTupleObject.ob_size]
     sub [rbp - ETC_NARGS], rcx              ; .args gets the positionals only
     cmp qword [rbp - ETC_KWFAM], 0

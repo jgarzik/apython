@@ -1554,11 +1554,10 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; slot declines" -- a number slot has no other way to say NULL -- and the
     ; interpreter would report "unsupported operand type(s) for %" over the
     ; top of the real message.
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .bm_failed_no_exc
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     pop r12
     pop rbx
     leave
@@ -2511,8 +2510,7 @@ extern str_set_length
     ; convert 'map' object to bytes" over a pending exception threw the real
     ; one away: a generator or a map that raises part way through reported a
     ; type error, which is exactly the shape str.join was fixed for.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bls_propagate
     mov rdi, [rbp - BLS_ARGS]
     mov rsi, [rdi]
@@ -2615,7 +2613,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     extern raise_typed_message
     call raise_typed_message
 .btc_dunder_absent:
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .btc_propagate                  ; it raised: that is the answer
     mov rsi, [rbp - BTC_BUF]
     mov rdx, [rbp - BTC_LEN]
@@ -2688,8 +2686,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     leave
     ret
 .btc_propagate:
-    extern eval_saved_r13
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     pop rbx
     leave
     extern eval_exception_unwind

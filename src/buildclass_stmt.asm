@@ -18,13 +18,10 @@
 extern type_from_parts
 extern bc_call_kw
 extern bc_prepare_name
-extern class_kwnames_pending
-extern class_kwvalues_pending
 
 ; --- the rest of the tree ---
 extern ap_strcmp
 extern builtins_dict_global
-extern current_exception
 extern dict_new
 extern eval_exception_unwind
 extern eval_frame
@@ -33,7 +30,6 @@ extern exc_metatype
 extern frame_free
 extern frame_new
 extern func_type
-extern kw_names_pending
 extern obj_dealloc
 extern obj_decref
 extern obj_getattr_opt
@@ -429,7 +425,7 @@ BCL_ORIG  equ 96
     ; to be ignored: the metatype never got a chance to run.
     mov qword [rbp - BCL_OKWN], 0
     mov qword [rbp - BCL_OKWV], 0
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .bc_no_kwargs
     mov rcx, [rax + PyTupleObject.ob_size]
@@ -448,7 +444,7 @@ BCL_ORIG  equ 96
     mov [rbp - BCL_META], rax
 .bc_no_kwargs:
     ; Consumed: anything we call from here on must not see them again.
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rsi, [rbp - BCL_NPOS]
     ; r12 will be used later for the type object
 
@@ -719,8 +715,7 @@ BCL_ORIG  equ 96
     ; produced a class *and* an error reported somewhere else entirely.
     test edx, edx
     jnz .bc_body_ok
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bc_body_raised
 .bc_body_ok:
     ; DECREF return value (should be None — TAG_NONE, not a pointer)
@@ -829,15 +824,15 @@ BCL_ORIG  equ 96
     ; pair: type_from_parts calls __init_subclass__ and has no other way to
     ; know them.
     mov rax, [rbp - BCL_OKWN]
-    mov [rel class_kwnames_pending], rax
+    mov [gs:ThreadState.class_kwnames_pending], rax
     mov rax, [rbp - BCL_OKWV]
-    mov [rel class_kwvalues_pending], rax
+    mov [gs:ThreadState.class_kwvalues_pending], rax
     mov rdi, r14
     mov rsi, [rbp - BCL_BASES]
     mov rdx, r15
     call type_from_parts
-    mov qword [rel class_kwnames_pending], 0
-    mov qword [rel class_kwvalues_pending], 0
+    mov qword [gs:ThreadState.class_kwnames_pending], 0
+    mov qword [gs:ThreadState.class_kwvalues_pending], 0
     push rax
     mov rdi, [rbp - BCL_BASES]
     test rdi, rdi
@@ -1220,11 +1215,10 @@ DEF_FUNC_LOCAL bc_mro_entries, 40           ; + 1 push = 48, 16-aligned
     ; InterfaceClass INSTANCE, is the reason that matters: type(Interface)
     ; is the metaclass, and it builds another instance.  type.__new__ still
     ; refuses a non-class base, in type_from_parts, in CPython's words.
-    extern current_exception
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .bme_keep
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .bme_keep:
     mov edi, 1

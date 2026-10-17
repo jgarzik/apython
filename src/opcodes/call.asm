@@ -15,7 +15,6 @@
 section .text
 
 extern eval_dispatch
-extern eval_saved_r13
 extern obj_dealloc
 extern obj_decref
 extern raise_exception
@@ -23,17 +22,11 @@ extern func_new
 extern exc_TypeError_type
 extern str_type
 extern exc_SystemError_type
-extern current_exception
 extern eval_exception_unwind
-extern kw_names_pending
 extern func_type
-extern cfex_temp_pending
-extern cfex_merged_pending
-extern cfex_kwnames_pending
 extern ap_malloc
 extern ap_free
 extern tuple_new
-extern eval_saved_rbx
 extern opcode_table
 extern opcode_dispatch_table
 
@@ -120,7 +113,7 @@ DEF_FUNC op_call, CL_FRAME
     ; Checked here rather than in the specialized handler alone so that a site
     ; which will never qualify -- a builtin, a class, a callable instance --
     ; is not rewritten and immediately deopted on every execution.
-    cmp qword [rel kw_names_pending], 0
+    cmp qword [gs:ThreadState.kw_names_pending], 0
     jne .cl_no_spec
     mov r8d, ecx
     add r8d, 2
@@ -293,8 +286,7 @@ DEF_FUNC op_call, CL_FRAME
     ; profile.py charges every builtin's time to its caller.  systrace_c_callable
     ; answers 0 for everything that is not a C function, which includes every
     ; Python call, so the second branch is free too.
-    extern sys_profilefunc
-    cmp qword [rel sys_profilefunc], 0
+    cmp qword [gs:ThreadState.sys_profilefunc], 0
     jne .call_profiled
 .call_unprofiled:
     mov rdi, [rbp - CL_CALLABLE]           ; callable
@@ -341,7 +333,7 @@ DEF_FUNC op_call, CL_FRAME
     ; Clear kw_names_pending: func_call clears it for Python functions,
     ; but builtins and other callables don't. Ensure it's always clean
     ; after a call so it can't contaminate the next func_call.
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; Pop nargs args and DECREF each (tag-aware for SmallInts)
     mov rcx, [rbp - CL_NARGS]
@@ -373,8 +365,7 @@ DEF_FUNC op_call, CL_FRAME
     mov rax, [rbp - CL_RETVAL]
     test rax, rax
     jnz .push_result
-    extern current_exception
-    mov rcx, [rel current_exception]
+    mov rcx, [gs:ThreadState.current_exception]
     test rcx, rcx
     jnz .propagate_exc
 
@@ -396,7 +387,7 @@ DEF_FUNC op_call, CL_FRAME
     ; Exception pending from callee — propagate to caller's handler
     extern eval_exception_unwind
     leave
-    mov [rel eval_saved_r13], r13  ; update — cleanup already popped/DECREF'd args
+    PUBLISH_SP  ; update — cleanup already popped/DECREF'd args
     jmp eval_exception_unwind
 
 .not_callable:
@@ -656,7 +647,7 @@ DEF_FUNC op_call_function_ex
 .cfex_args_ready:
     ; Clear cfex_temp_pending BEFORE the call, so exception unwind
     ; won't free it (we free it ourselves in the normal path below).
-    mov qword [rel cfex_temp_pending], 0
+    mov qword [gs:ThreadState.cfex_temp_pending], 0
     mov rdx, [rbp - CFX_ARGS]
     mov rdx, [rdx + PyVarObject.ob_size]
     mov rdi, [rbp - CFX_FUNC]
@@ -734,7 +725,7 @@ DEF_FUNC op_call_function_ex
 .cfex_alloc_merged:
     call ap_malloc
     mov [rbp - CFX_MERGED], rax
-    mov [rel cfex_merged_pending], rax  ; register for exception cleanup
+    mov [gs:ThreadState.cfex_merged_pending], rax  ; register for exception cleanup
 
     ; Copy positional args from tuple to merged buffer
     mov rsi, [rbp - CFX_ARGS]
@@ -764,7 +755,7 @@ DEF_FUNC op_call_function_ex
     mov rdi, [rbp - CFX_NKW]
     call tuple_new
     mov [rbp - CFX_KWNAMES], rax
-    mov [rel cfex_kwnames_pending], rax  ; register for exception cleanup
+    mov [gs:ThreadState.cfex_kwnames_pending], rax  ; register for exception cleanup
 
     ; Iterate kwargs dict entries, copy values to merged buffer and keys to kw_names
     mov r12, [rbp - CFX_KWARGS]
@@ -808,7 +799,7 @@ DEF_FUNC op_call_function_ex
 .cfex_dict_done:
     ; Set kw_names_pending for the callee
     mov rax, [rbp - CFX_KWNAMES]
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 
     ; Call tp_call(func, merged_args, n_pos + n_kw)
     mov rdi, [rbp - CFX_FUNC]
@@ -822,15 +813,15 @@ DEF_FUNC op_call_function_ex
     mov [rbp - CFX_RETTAG], rdx
 
     ; Clear kw_names_pending
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; Free merged buffer and clear pending
-    mov qword [rel cfex_merged_pending], 0
+    mov qword [gs:ThreadState.cfex_merged_pending], 0
     mov rdi, [rbp - CFX_MERGED]
     call ap_free
 
     ; DECREF kw_names tuple and clear pending
-    mov qword [rel cfex_kwnames_pending], 0
+    mov qword [gs:ThreadState.cfex_kwnames_pending], 0
     mov rdi, [rbp - CFX_KWNAMES]
     call obj_decref
 
@@ -840,7 +831,7 @@ DEF_FUNC op_call_function_ex
     ; The message names the callee and the type it was handed.  The value
     ; stack still owns func, the NULL under it and the sequence -- this raise
     ; abandons the frame and the unwinder releases all three from
-    ; eval_saved_r13, which DISPATCH set before the pops.
+    ; PyFrame.disp_sp, which DISPATCH set before the pops.
     VPEEK rdi
     V_TEST_PTR rdi, rcx
     ja .cfex_args_not_iterable      ; an immediate callable: no name to read
@@ -861,7 +852,7 @@ DEF_FUNC op_call_function_ex
     VPEEK rdi
     CSTRING rdx, " argument after * must be an iterable, not "
     xor ecx, ecx
-    ; NO `mov [rel eval_saved_r13], r13` here.  DISPATCH set that global before
+    ; NO republish of r13 here.  DISPATCH set that global before
     ; this handler popped its three operands, which is exactly what the comment
     ; above relies on; republishing it now would point the unwinder BELOW them
     ; and leak the starred sequence -- measured at 48 bytes per raise.
@@ -896,18 +887,18 @@ DEF_FUNC op_call_function_ex
 .cfex_ar_no_kwargs:
     ; A 0 with nothing pending is the allocator failing rather than user code
     ; raising, and the caller still needs to be told something.
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .cfex_args_not_iterable
     add rsp, CFX_CARVE
     pop r12
     pop rbx
     pop rbp
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .cfex_cleanup:
     ; Clear kw_names_pending (safety)
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
 .cfex_cleanup_shared:
     ; DECREF args tuple
@@ -930,8 +921,7 @@ DEF_FUNC op_call_function_ex
     mov rdx, [rbp - CFX_RETTAG]
     test rdx, rdx                    ; TAG_NULL = 0 means error
     jnz .cfex_push_result
-    extern current_exception
-    mov rcx, [rel current_exception]
+    mov rcx, [gs:ThreadState.current_exception]
     test rcx, rcx
     jnz .cfex_propagate_exc
 
@@ -951,7 +941,7 @@ DEF_FUNC op_call_function_ex
     pop r12
     pop rbx
     pop rbp
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .cfex_not_callable:
@@ -1009,7 +999,7 @@ DEF_FUNC op_before_with
     call dunder_lookup_special
     test rax, rax
     jnz .bw_exit_bound
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bw_lookup_raised
 
     ; Some types serve their attributes from tp_getattr rather than a type
@@ -1053,7 +1043,7 @@ DEF_FUNC op_before_with
     call dunder_lookup_special
     test rax, rax
     jnz .bw_enter_bound
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .bw_lookup_raised_after_exit
 
     lea rdi, [rel bw_str_enter]
@@ -1146,7 +1136,7 @@ DEF_FUNC op_before_with
     ;
     ; The test must precede V_UNPACK, which maps NULL and integer 0 to the
     ; same payload.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .bw_enter_null_no_exc
     VPOP rdi                        ; the bound __exit__ pushed above
@@ -1160,7 +1150,7 @@ DEF_FUNC op_before_with
     ; r13 is now one slot BELOW what DISPATCH published -- mgr was popped and
     ; the __exit__ that replaced it has been popped too -- so the unwinder
     ; must be told, or its pop loop reads the dead mgr slot as a live Value.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .bw_enter_null_no_exc:
@@ -1349,11 +1339,11 @@ DEF_FUNC op_with_except_start, WES_FRAME
     DISPATCH
 
 .wes_raised:
-    ; Nothing was popped and nothing pushed, so eval_saved_r13 is still what
+    ; Nothing was popped and nothing pushed, so PyFrame.disp_sp is still what
     ; DISPATCH published -- which is what the exception table wants.  CPython
     ; leaves all four inputs in place here too and lets the handler's own
     ; depth pop them.
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .wes_null_no_exc
     leave

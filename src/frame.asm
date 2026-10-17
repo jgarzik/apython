@@ -58,14 +58,14 @@ FRAME_DATASTACK_BYTES equ 4 * 1024 * 1024
 ;; a tail call, so the handler makes one call either way.
 ;; ============================================================================
 DEF_FUNC frame_alloc_inline
-    cmp qword [rel frame_datastack_base], 0
+    cmp qword [gs:ThreadState.frame_datastack_base], 0
     je .fai_create
 .fai_have_region:
-    mov rax, [rel frame_datastack_top]
+    mov rax, [gs:ThreadState.frame_datastack_top]
     lea rcx, [rax + rdi]
-    cmp rcx, [rel frame_datastack_end]
+    cmp rcx, [gs:ThreadState.frame_datastack_end]
     ja .fai_pool                ; no room: the pool, which can always grow
-    mov [rel frame_datastack_top], rcx
+    mov [gs:ThreadState.frame_datastack_top], rcx
     leave
     ret
 .fai_pool:
@@ -81,10 +81,10 @@ DEF_FUNC frame_alloc_inline
     pop rdi
     test rax, rax
     jz .fai_pool                ; no region, ever: the pool does the work
-    mov [rel frame_datastack_base], rax
-    mov [rel frame_datastack_top], rax
+    mov [gs:ThreadState.frame_datastack_base], rax
+    mov [gs:ThreadState.frame_datastack_top], rax
     add rax, FRAME_DATASTACK_BYTES
-    mov [rel frame_datastack_end], rax
+    mov [gs:ThreadState.frame_datastack_end], rax
     jmp .fai_have_region
 END_FUNC frame_alloc_inline
 
@@ -241,11 +241,11 @@ DEF_FUNC frame_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov [r11 + PyFrame.locals], r14
     mov qword [r11 + PyFrame.instr_ptr], 0
     mov qword [r11 + PyFrame.stack_ptr], 0
-    ; call_ip is read by frameobj_refresh_pos for any frame that is not the
+    ; disp_ip is read by frameobj_refresh_pos for any frame that is not the
     ; innermost, and nothing wrote it here -- so a recycled frame answered
     ; f_lineno from the previous call's saved IP.  Valgrind reports it as a
     ; branch on uninitialised memory in frameobj_detach.
-    mov qword [r11 + PyFrame.call_ip], 0
+    mov qword [r11 + PyFrame.disp_ip], 0
     mov dword [r11 + PyFrame.exc_depth], 0
     ; The pool hands back memory it did not zero, so a field that is read
     ; before it is written has to be initialised here.  exc_state is XDECREFd
@@ -390,17 +390,18 @@ DEF_FUNC frame_free, 8            ; 3 pushes, so rsp is 16-aligned
     mov qword [rbx + PyFrame.exc_state], 0
     call obj_decref
 .no_exc_state:
+    mov rcx, [gs:ThreadState.ts_self]   ; one gs load; the rest are base+disp
 
     ; A datastack frame goes back by moving the top, and that is correct
     ; because these frames nest -- see the header above frame_alloc_inline.
     ; The test is an address range, which is also what keeps the two kinds of
     ; frame apart while both are in use.
-    mov rax, [rel frame_datastack_base]
+    mov rax, [rcx + ThreadState.frame_datastack_base]
     cmp rbx, rax
     jb .ff_pool
-    cmp rbx, [rel frame_datastack_end]
+    cmp rbx, [rcx + ThreadState.frame_datastack_end]
     jae .ff_pool
-    mov [rel frame_datastack_top], rbx
+    mov [rcx + ThreadState.frame_datastack_top], rbx
     pop r13
     pop r12
     pop rbx
@@ -439,12 +440,12 @@ DEF_FUNC frame_pool_drain
 
     ; The datastack region, if one was ever made.  Nothing can still be using
     ; it: this runs at exit, after the last frame.
-    mov rdi, [rel frame_datastack_base]
+    mov rdi, [gs:ThreadState.frame_datastack_base]
     test rdi, rdi
     jz .no_datastack
-    mov qword [rel frame_datastack_base], 0
-    mov qword [rel frame_datastack_top], 0
-    mov qword [rel frame_datastack_end], 0
+    mov qword [gs:ThreadState.frame_datastack_base], 0
+    mov qword [gs:ThreadState.frame_datastack_top], 0
+    mov qword [gs:ThreadState.frame_datastack_end], 0
     call ap_free
 .no_datastack:
 
@@ -513,13 +514,8 @@ section .data
 
 ; The datastack: base and end bound the region, top is the bump pointer.
 ; Zero until the first inline call, which is what makes the handler's inline
-; fast path fall through to frame_alloc_inline exactly once.
-align 8
-global frame_datastack_top
-global frame_datastack_end
-frame_datastack_base: dq 0
-frame_datastack_top:  dq 0
-frame_datastack_end:  dq 0
+; fast path fall through to frame_alloc_inline exactly once.  The three words
+; (frame_datastack_base/_top/_end) lives in ThreadState (src/include/threadstate.inc).
 
 ; Freelists: each is (head_ptr, count)
 align 8

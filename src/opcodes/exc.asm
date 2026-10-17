@@ -21,11 +21,7 @@
 
 extern opcode_table
 extern opcode_dispatch_table
-extern eval_saved_rbx
-extern eval_saved_r13
 
-extern current_exception
-extern handled_exception
 
 extern eg_is_base_exception_group
 
@@ -53,7 +49,6 @@ extern obj_decref
 
 extern raise_exception
 
-extern tb_suppress_frame
 
 extern tuple_new
 
@@ -85,7 +80,7 @@ DEF_FUNC_BARE op_push_exc_info
     inc dword [r12 + PyFrame.exc_depth]
 
     ; Push the previous handled_exception (or None if NULL)
-    mov rdx, [rel handled_exception]
+    mov rdx, [gs:ThreadState.handled_exception]
     test rdx, rdx
     jnz .have_prev
     lea rdx, [rel none_singleton]
@@ -96,7 +91,7 @@ DEF_FUNC_BARE op_push_exc_info
     ; Set new exception as handled and push it too
     ; INCREF for the value stack copy
     INCREF rax
-    mov [rel handled_exception], rax
+    mov [gs:ThreadState.handled_exception], rax
     VPUSH_PTR rax            ; push new exc
 
     DISPATCH
@@ -120,17 +115,17 @@ DEF_FUNC_BARE op_pop_except
     ; been freed and reused underneath it.  `AttributeError.obj` is what made
     ; it reachable -- it is the first thing to put an arbitrary object, and so
     ; an arbitrary __del__, inside an exception.
-    mov rcx, [rel handled_exception]    ; the one being taken down
+    mov rcx, [gs:ThreadState.handled_exception]    ; the one being taken down
     lea rdx, [rel none_singleton]
     cmp rax, rdx
     je .pe_none
-    mov [rel handled_exception], rax    ; the stack's reference moves into it
+    mov [gs:ThreadState.handled_exception], rax    ; the stack's reference moves into it
     xor eax, eax                        ; and nothing is left over to release
     jmp .pe_release
 .pe_none:
     ; None on the stack means there was nothing being handled; the None is
     ; still this handler's to release.
-    mov qword [rel handled_exception], 0
+    mov qword [gs:ThreadState.handled_exception], 0
 
 .pe_release:
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
@@ -163,7 +158,7 @@ DEF_FUNC_BARE op_check_exc_match
     ; still believe it is live: exc_isinstance raises for `except (1,)`, and
     ; its pop loop would DECREF the same reference a second time.  Every
     ; handler that pops and releases owes this store; this one did not make it.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
 
     ; Save type for DECREF
     sub rsp, 8                 ; pad: rsp is 16-aligned on entry to a
@@ -417,7 +412,7 @@ DEF_FUNC_BARE op_raise_varargs
     ; block's exception.  Reading current_exception instead made it a
     ; RuntimeError everywhere the handler had suspended and come back --
     ; across an `await`, most visibly.
-    mov rax, [rel handled_exception]
+    mov rax, [gs:ThreadState.handled_exception]
     test rax, rax
     jnz .do_reraise
     ; Nothing is being handled - raise RuntimeError
@@ -433,20 +428,20 @@ DEF_FUNC_BARE op_raise_varargs
     ; label that records one.  Without this every re-raise added a second
     ; entry for the same frame, pointing at the `raise` line.
     INCREF rax
-    mov rdi, [rel current_exception]
-    mov [rel current_exception], rax
+    mov rdi, [gs:ThreadState.current_exception]
+    mov [gs:ThreadState.current_exception], rax
     test rdi, rdi
     jz .do_reraise_go
     call obj_decref
 .do_reraise_go:
-    mov byte [rel tb_suppress_frame], 1
+    mov byte [gs:ThreadState.tb_suppress_frame], 1
     jmp eval_exception_unwind
 
 .raise_exc:
     ; TOS is the exception to raise
     xor r15d, r15d                 ; no `from` clause
     VPOP_VAL rdi, r8
-    mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
+    PUBLISH_SP  ; update saved stack — VPOP consumed the item
 
 .raise_normalize:
     ; rdi/r8 = the exception operand, r15 = the raw `from` operand as a Value
@@ -532,7 +527,7 @@ DEF_FUNC_BARE op_raise_varargs
     ; that raises comes BACK here with the object built and its own exception
     ; pending, so rax alone does not say whether the construction succeeded.
     push rdi
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     push rax
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
@@ -543,7 +538,7 @@ DEF_FUNC_BARE op_raise_varargs
     pop rdi                   ; discard type (immortal, no DECREF needed)
     test rax, rax
     jz .raise_propagate
-    cmp rcx, [rel current_exception]
+    cmp rcx, [gs:ThreadState.current_exception]
     jne .raise_ctor_raised    ; __new__ or __init__ raised; THAT is the
                               ; exception now, and it is already pending
     mov rdi, rax
@@ -577,7 +572,7 @@ DEF_FUNC_BARE op_raise_varargs
     mov rdi, rax
     call obj_decref
 .raise_propagate:
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .raise_exc_obj:
@@ -625,7 +620,7 @@ DEF_FUNC_BARE op_raise_varargs
     ; so it survives the normaliser's calls) and applied at .raise_exc_obj.
     VPOP r15                  ; cause, as an encoded Value; never 0 here
     VPOP_VAL rdi, r8          ; exception
-    mov [rel eval_saved_r13], r13  ; update saved stack — VPOPs consumed both
+    PUBLISH_SP  ; update saved stack — VPOPs consumed both
     jmp .raise_normalize
 END_FUNC op_raise_varargs
 
@@ -725,11 +720,11 @@ END_FUNC raise_coerce_cause
 DEF_FUNC_BARE op_reraise
     ; Pop the exception from value stack
     VPOP_VAL rdi, r8
-    mov [rel eval_saved_r13], r13  ; update saved stack — VPOP consumed the item
+    PUBLISH_SP  ; update saved stack — VPOP consumed the item
 
     ; Store it as current exception
     push rdi
-    mov rax, [rel current_exception]
+    mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .no_prev_rr
     push rdi
@@ -738,12 +733,12 @@ DEF_FUNC_BARE op_reraise
     pop rdi
 .no_prev_rr:
     pop rdi
-    mov [rel current_exception], rdi
+    mov [gs:ThreadState.current_exception], rdi
     ; RERAISE must not add a traceback entry: CPython records one at its
     ; `error:` label, which RERAISE skips by jumping straight to the unwind.
     ; Without this the implicit cleanup handler at the end of every `except`
     ; block added a second entry for the same frame, pointing at the
     ; `except` line.
-    mov byte [rel tb_suppress_frame], 1
+    mov byte [gs:ThreadState.tb_suppress_frame], 1
     jmp eval_exception_unwind
 END_FUNC op_reraise

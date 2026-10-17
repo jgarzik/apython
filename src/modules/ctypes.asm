@@ -52,8 +52,6 @@ extern memoryview_type
 extern ap_memcpy
 extern obj_as_index
 extern obj_call_n
-extern current_exception
-extern kw_names_pending
 extern raise_exception
 extern raise_type_error_with_name
 extern exc_TypeError_type
@@ -592,7 +590,7 @@ DEF_FUNC cx_tramp, CT_FRAME
     V_PACK rax, rdx
     mov [rbp - CT_V1], rax
 
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
     mov rdi, [rbp - CT_UD]
     lea rsi, [rbp - CT_V0]
     mov edx, 2
@@ -602,10 +600,10 @@ DEF_FUNC cx_tramp, CT_FRAME
     DECREF_V rax, rcx
     jmp .ct_out
 .ct_raised:
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .ct_out
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .ct_out:
     mov rax, [rbp - CT_V0]

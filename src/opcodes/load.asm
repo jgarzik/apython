@@ -21,9 +21,6 @@ extern exc_TypeError_type
 section .text
 
 extern eval_dispatch
-extern eval_saved_rbx
-extern eval_saved_r13
-extern eval_co_consts
 extern dict_get
 extern dict_get_index
 extern instance_setattr
@@ -46,7 +43,6 @@ extern dunder_lookup
 extern int_type
 extern float_type
 extern none_type
-extern eval_co_names
 extern obj_dealloc
 extern opcode_table
 extern opcode_dispatch_table
@@ -91,7 +87,7 @@ LSA_FRAME    equ 120        ; + 0 pushes; a handler is entered by jmp, so
 ;; ============================================================================
 DEF_FUNC_BARE op_load_const
     ; ecx = arg (index into co_consts)
-    mov rax, [rel eval_co_consts]
+    mov rax, [gs:ThreadState.eval_co_consts]
     mov rax, [rax + rcx * 8]
     INCREF_V rax, rdx
     VPUSH rax
@@ -264,12 +260,10 @@ DEF_FUNC_BARE op_load_name
     ; CPython clears a KeyError and lets anything else through; clearing
     ; whatever it was keeps the mapping's exception out of a name lookup that
     ; then succeeds in globals or in builtins.
-    extern current_exception
-    extern attr_error_pending
-    mov rdi, [rel current_exception]
+    mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .try_globals
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
 .try_globals:
@@ -554,9 +548,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; and asking again finds the slot's member descriptor and hands THAT back.
     test rax, rax
     jnz .la_gdv_found
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .la_try_dict
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .la_try_dict
     jmp .la_no_such_attr
 .la_gdv_found:
@@ -1356,7 +1350,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; The exception is already pending; hand it to the frame's own handler.
     extern eval_exception_unwind
     leave
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     jmp eval_exception_unwind
 
 .la_done:
@@ -1856,7 +1850,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rsi, [rbp - LSA_CLASSTAG]
     DECREF_VAL rdi, rsi
     ; DISPATCH saved the stack top from before the three operands were popped.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     lea rdi, [rel exc_TypeError_type]
     mov rsi, [rbp - LSA_ORIGIN]
     extern raise_exception
@@ -1870,7 +1864,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, [rbp - LSA_CLASS]
     call obj_decref
     ; DISPATCH saved the stack top from before the three operands were popped.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     RAISE exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
 
 .lsa_not_found:
@@ -1890,7 +1884,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; DISPATCH saved the stack top as it was BEFORE this handler popped its
     ; three operands, and the unwinder cleans up from there -- so raising
     ; without republishing r13 releases those three a second time.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     jmp eval_exception_unwind
 
@@ -2035,9 +2029,9 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp .lsa_done
 
 .lsa_propagate:
-    ; As at .lsa_not_found: the unwinder starts from eval_saved_r13, which is
+    ; As at .lsa_not_found: the unwinder starts from PyFrame.disp_sp, which is
     ; where the stack was before the three operands came off it.
-    mov [rel eval_saved_r13], r13
+    PUBLISH_SP
     leave
     extern eval_exception_unwind
     jmp eval_exception_unwind
@@ -2276,9 +2270,9 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     jnz .ga_where_found
     ; As op_load_attr: an AttributeError installed on the way is the answer.
     ; getattr() and hasattr() see it pending and decide what it means.
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .ga_type_dict
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     je .ga_type_dict
     xor eax, eax
     pop rbx

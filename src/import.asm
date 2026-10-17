@@ -27,8 +27,6 @@ extern dict_new
 extern dict_get
 extern dict_set
 extern dict_del
-extern current_exception
-extern attr_error_pending
 extern eval_exception_unwind
 extern list_new
 extern list_append
@@ -548,10 +546,10 @@ END_FUNC irnm_cat_n
 ;; ============================================================================
 global import_clear_attr_error
 DEF_FUNC import_clear_attr_error
-    cmp qword [rel attr_error_pending], 0
+    cmp qword [gs:ThreadState.attr_error_pending], 0
     je .ica_done
-    mov qword [rel attr_error_pending], 0
-    mov qword [rel current_exception], 0
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    mov qword [gs:ThreadState.current_exception], 0
 .ica_done:
     leave
     ret
@@ -1428,7 +1426,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; Search sys.path -- or, for _impcore.create_builtin, only the directory
     ; the stand-ins for C modules live in: a builtin does not depend on what
     ; a program has done to sys.path, as CPython's are compiled in.
-    mov rdi, [rel import_path_override]
+    mov rdi, [gs:ThreadState.import_path_override]
     test rdi, rdi
     jnz .have_search_list
     mov rdi, [rel sys_path_list]
@@ -3251,8 +3249,6 @@ import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
 ; str, or 0.  Owned; cleared at the start of every search.
 import_ns_portions: resq 1
 
-section .bss
-global import_path_override
 ; A list searched in place of sys.path by the interpreter's own finder, or 0.
 ; _impcore.create_builtin points it at the lib/ directory alone.
-import_path_override: resq 1
+; import_path_override lives in ThreadState (src/include/threadstate.inc).

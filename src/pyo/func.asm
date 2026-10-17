@@ -113,7 +113,6 @@ END_FUNC func_new
 ;;   5. Apply positional defaults (func_defaults)
 ;;   6. Apply kw-only defaults (func_kwdefaults)
 ;; ============================================================================
-extern kw_names_pending
 extern dict_new
 extern dict_set
 extern dict_get
@@ -139,9 +138,9 @@ DEF_FUNC func_call
     mov r15d, edx           ; r15d = nargs
 
     ; Read and clear kw_names_pending
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     mov [rsp+0], rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; Compute positional_count = nargs - len(kw_names) or nargs if no kw
     mov ecx, r15d

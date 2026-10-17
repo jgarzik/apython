@@ -678,10 +678,9 @@ DEF_FUNC codec_via_python, CVP_FRAME
     test rbx, rbx
     jnz .cvp_call
 
-    extern kw_names_pending
-    mov rax, [rel kw_names_pending]
+    mov rax, [gs:ThreadState.kw_names_pending]
     push rax
-    mov qword [rel kw_names_pending], 0
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     CSTRING rdi, "_codecs"
     call str_from_cstr_heap
@@ -751,7 +750,7 @@ DEF_FUNC codec_via_python, CVP_FRAME
     pop rbx
 
     pop rax
-    mov [rel kw_names_pending], rax
+    mov [gs:ThreadState.kw_names_pending], rax
 
     mov rax, [rbp - CVP_DIR]
     test eax, eax
@@ -845,8 +844,7 @@ DEF_FUNC codec_via_python, CVP_FRAME
 .cvp_import_failed:
     ; import_module leaves its own exception pending; if it somehow did not,
     ; say what was being looked for.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .cvp_failed_pending
     extern exc_LookupError_type
     SET_EXC exc_LookupError_type, "unknown encoding"

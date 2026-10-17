@@ -6,7 +6,6 @@
 %include "object.inc"
 
 extern ap_memcpy
-extern current_exception
 extern obj_richcompare_bool
 extern eval_exception_unwind
 extern bool_true
@@ -337,7 +336,6 @@ END_FUNC dict_alloc_tables
 ;; dict_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyDictObject*
 ;; Constructor: dict() or dict(mapping)
 ;; ============================================================================
-extern kw_names_pending
 extern dict_method_update
 
 DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
@@ -350,8 +348,8 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     mov r12, rdx               ; nargs
 
     ; Check for keyword arguments
-    mov r14, [rel kw_names_pending]
-    mov qword [rel kw_names_pending], 0  ; clear immediately
+    mov r14, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0  ; clear immediately
 
     ; Determine positional arg count
     xor r13d, r13d             ; r13 = n_pos = nargs
@@ -511,8 +509,7 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     ; .dtc_try_iterable says.  Substituting a type error over a pending
     ; exception threw the real one away: dict(map(f, xs)) for an f that raises
     ; reported "dict() argument must be a mapping or iterable".
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .dtc_propagate
     extern exc_TypeError_type
     RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
@@ -1290,8 +1287,7 @@ DEF_FUNC dict_subscript, DSUB_FRAME
     jnz .ds_missing_answered
     ; 0 is "no __missing__" or "it raised"; only the first falls through to
     ; the KeyError this lookup was always going to give.
-    extern current_exception
-    cmp qword [rel current_exception], 0
+    cmp qword [gs:ThreadState.current_exception], 0
     jne .ds_missing_raised
 
 .plain_key_error:
@@ -1837,7 +1833,6 @@ DRC_FRAME equ 80            ; + 0 pushes = 80
 ; catches x == x.  The body is wrapped so its several exits need not each be
 ; touched, exactly as list_richcompare and tuple_richcompare are.  CPython's
 ; test_copy.test_deepcopy_reflexive_dict is the test for it.
-extern c_recursion_depth
 extern recursion_limit
 extern exc_RecursionError_type
 DEF_FUNC dict_richcompare
