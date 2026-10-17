@@ -470,6 +470,181 @@ DEF_FUNC pc_find_executable, PFE_FRAME
 END_FUNC pc_find_executable
 
 ;; ============================================================================
+;; pc_try_dir(rdi = the directory a binary sits in) -> eax = 1 when a build
+;;   tree or an installation is found from it, and the buffers set
+;; ============================================================================
+PTD_DIR   equ PC_MAX
+PTD_FRAME equ PC_MAX
+DEF_FUNC pc_try_dir, PTD_FRAME
+    mov rsi, rdi
+    lea rdi, [rbp - PTD_DIR]
+    call pc_set
+    ; The build tree.
+    lea rdi, [rbp - PTD_DIR]
+    CSTRING rsi, "/stdlib"
+    CSTRING rdx, "/lib"
+    CSTRING rcx, "/tests/cpython"
+    call pc_try_layout
+    test eax, eax
+    jnz .ptd_out
+    ; An installation: the library is under the parent of bin/.
+    lea rdi, [rbp - PTD_DIR]
+    call pc_dirname
+    lea rdi, [rbp - PTD_DIR]
+    CSTRING rsi, "/lib/python3.12"
+    CSTRING rdx, "/lib/python3.12/lib-dynload"
+    xor ecx, ecx
+    call pc_try_layout
+.ptd_out:
+    leave
+    ret
+END_FUNC pc_try_dir
+
+;; ============================================================================
+;; pc_venv_home(rdi = the binary's directory, rsi = an out buffer of PC_MAX)
+;;   -> eax = 1 with the buffer holding pyvenv.cfg's `home`, else 0
+;;
+;; pyvenv.cfg is looked for beside the binary and one directory up, where
+;; venv puts it.  Lines are `key = value`; only `home` is read, spaces
+;; around either side stripped, as site.py strips them.
+;; ============================================================================
+PVH_OUT   equ 8
+PVH_FD    equ 16
+PVH_N     equ 24
+PVH_TRY   equ 32                ; 0 beside the binary, 1 one directory up
+PVH_PATH  equ 48 + PC_MAX       ; the file's path
+PVH_BUF   equ 48 + 2 * PC_MAX   ; its contents
+PVH_FRAME equ 48 + 2 * PC_MAX
+DEF_FUNC pc_venv_home, PVH_FRAME
+    extern sys_open, sys_read, sys_close
+    mov [rbp - PVH_OUT], rsi
+    mov rsi, rdi
+    lea rdi, [rbp - PVH_PATH]
+    call pc_set
+    mov qword [rbp - PVH_TRY], 0
+.pvh_try:
+    lea rdi, [rbp - PVH_PATH]
+    CSTRING rsi, "/pyvenv.cfg"
+    call pc_append
+    lea rdi, [rbp - PVH_PATH]
+    xor esi, esi
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    jns .pvh_read
+    ; Not here: one directory up, once.
+    cmp qword [rbp - PVH_TRY], 0
+    jne .pvh_no
+    inc qword [rbp - PVH_TRY]
+    lea rdi, [rbp - PVH_PATH]
+    call pc_dirname                 ; drop /pyvenv.cfg
+    lea rdi, [rbp - PVH_PATH]
+    call pc_dirname                 ; and the binary's directory
+    jmp .pvh_try
+.pvh_read:
+    mov [rbp - PVH_FD], rax
+    mov rdi, rax
+    lea rsi, [rbp - PVH_BUF]
+    mov edx, PC_MAX - 1
+    call sys_read
+    test rax, rax
+    jns .pvh_have
+    xor eax, eax
+.pvh_have:
+    mov [rbp - PVH_N], rax
+    mov rdi, [rbp - PVH_FD]
+    call sys_close
+    lea rsi, [rbp - PVH_BUF]
+    mov rax, [rbp - PVH_N]
+    mov byte [rsi + rax], 0
+    ; Scan line by line for "home".
+.pvh_line:
+    cmp byte [rsi], 0
+    je .pvh_no
+.pvh_lead:
+    cmp byte [rsi], ' '
+    je .pvh_lead_skip
+    cmp byte [rsi], 9
+    jne .pvh_key
+.pvh_lead_skip:
+    inc rsi
+    jmp .pvh_lead
+.pvh_key:
+    cmp dword [rsi], 'home'
+    jne .pvh_next
+    lea rdx, [rsi + 4]
+.pvh_eq_sp:
+    cmp byte [rdx], ' '
+    je .pvh_eq_skip
+    cmp byte [rdx], 9
+    jne .pvh_eq
+.pvh_eq_skip:
+    inc rdx
+    jmp .pvh_eq_sp
+.pvh_eq:
+    cmp byte [rdx], '='
+    jne .pvh_next
+    inc rdx
+.pvh_val_sp:
+    cmp byte [rdx], ' '
+    je .pvh_val_skip
+    cmp byte [rdx], 9
+    jne .pvh_val
+.pvh_val_skip:
+    inc rdx
+    jmp .pvh_val_sp
+.pvh_val:
+    ; Copy to the end of the line, then strip trailing space and CR.
+    mov rdi, [rbp - PVH_OUT]
+    xor ecx, ecx
+.pvh_copy:
+    movzx eax, byte [rdx + rcx]
+    test al, al
+    jz .pvh_copied
+    cmp al, 10
+    je .pvh_copied
+    cmp rcx, PC_MAX - 2
+    jae .pvh_copied
+    mov [rdi + rcx], al
+    inc rcx
+    jmp .pvh_copy
+.pvh_copied:
+    test rcx, rcx
+    jz .pvh_term
+    movzx eax, byte [rdi + rcx - 1]
+    cmp al, ' '
+    je .pvh_trim
+    cmp al, 13
+    je .pvh_trim
+    cmp al, 9
+    jne .pvh_term
+.pvh_trim:
+    dec rcx
+    jmp .pvh_copied
+.pvh_term:
+    mov byte [rdi + rcx], 0
+    test rcx, rcx
+    jz .pvh_no
+    mov eax, 1
+    leave
+    ret
+.pvh_next:
+    cmp byte [rsi], 0
+    je .pvh_no
+    cmp byte [rsi], 10
+    je .pvh_next_line
+    inc rsi
+    jmp .pvh_next
+.pvh_next_line:
+    inc rsi
+    jmp .pvh_line
+.pvh_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC pc_venv_home
+
+;; ============================================================================
 ;; pathconfig_init() -> nothing; the five pc_ buffers set
 ;;
 ;; Called once, from import_init, before sys or sys.path exists.
@@ -484,26 +659,28 @@ DEF_FUNC pathconfig_init, PCI_FRAME
     mov byte [rdi + rax], 0
     call pc_dirname
 
-    ; The build tree.
     lea rdi, [rbp - PCI_DIR]
-    CSTRING rsi, "/stdlib"
-    CSTRING rdx, "/lib"
-    CSTRING rcx, "/tests/cpython"
-    call pc_try_layout
+    call pc_try_dir
     test eax, eax
     jnz .pci_exe
 
-    ; An installation: the library is under the parent of bin/.
+    ; A venv made with copies rather than symlinks: the binary is the venv's
+    ; own, and its pyvenv.cfg names the installation it came from (`home`,
+    ; that installation's bin/).  CPython's getpath reads the same key.
     lea rdi, [rbp - PCI_DIR]
-    call pc_dirname
+    lea rsi, [rel pc_tmp]
+    call pc_venv_home
+    test eax, eax
+    jz .pci_neither
     lea rdi, [rbp - PCI_DIR]
-    CSTRING rsi, "/lib/python3.12"
-    CSTRING rdx, "/lib/python3.12/lib-dynload"
-    xor ecx, ecx
-    call pc_try_layout
+    lea rsi, [rel pc_tmp]
+    call pc_set
+    lea rdi, [rbp - PCI_DIR]
+    call pc_try_dir
     test eax, eax
     jnz .pci_exe
 
+.pci_neither:
     ; Neither: the binary's own directory, laid out as a build tree, which is
     ; what every apython before this file assumed.  Imports beyond the
     ; builtins will fail, and say which module they could not find.
