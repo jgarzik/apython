@@ -325,6 +325,7 @@ test_frame_lineno
 test_frame_live
 test_frame_object_cycles
 test_frames_and_time
+test_frozen_importlib_names
 test_frozenset_descriptors
 test_frozenset_hash
 test_frozenset
@@ -435,6 +436,7 @@ test_io_subclass
 test_io_tail
 test_isinstance_hostile
 test_islice_consumes
+test_islice_none_args
 test_iterable_arg_errors
 test_iterable_arguments
 test_iterator_cycles
@@ -446,6 +448,7 @@ test_iter_sentinel
 test_itertools_compress_batched
 test_itertools_gc
 test_itertools
+test_itertools_semantics
 test_itertools_tail
 test_join_iterable_raises
 test_kwargs
@@ -682,6 +685,7 @@ test_slots_mangling
 test_slots
 test_slots_store_cache
 test_slots_suppression
+test_slots_unset_hasattr
 test_smallint_identity
 test_smallstr_builtins
 test_smallstr_classes
@@ -827,6 +831,7 @@ test_utf16_utf32
 test_utf8_validate_boundaries
 test_value_funnel_guards
 test_value_typeconfusion
+test_venv_copies
 test_view_and_slots
 test_warning_registry
 test_warnings_filters
