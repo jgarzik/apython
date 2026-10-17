@@ -1766,6 +1766,7 @@ global path_is_source
 global src_read_file
 
 STAT_SIZE    equ 144
+PYC_MAGIC    equ 0x0a0d0dcb     ; 3531 and \r\n, as marshal.asm checks it
 STAT_ST_SIZE equ 48
 
 section .text
@@ -1887,6 +1888,53 @@ DEF_FUNC src_read_file, SR_FRAME
 END_FUNC src_read_file
 
 ;; ============================================================================
+;; path_is_pyc(const char *path) -> eax = 1 when it is marshalled bytecode
+;;
+;; CPython's maybe_pyc_file: a ".pyc" name, or a file that opens with the
+;; 3.12 magic number.  Anything else is source, whatever it is called -- a
+;; script with no extension, like the bin/pip a venv installs, used to be
+;; read as a .pyc and refused for its magic number.
+;; ============================================================================
+PIP_PATH  equ 8
+PIP_FD    equ 16
+PIP_BUF   equ 24
+PIP_FRAME equ 32
+DEF_FUNC path_is_pyc, PIP_FRAME
+    mov [rbp - PIP_PATH], rdi
+    call ap_strlen
+    mov rcx, [rbp - PIP_PATH]
+    cmp rax, 4
+    jb .pip_probe
+    cmp dword [rcx + rax - 4], '.pyc'
+    je .pip_yes
+.pip_probe:
+    mov rdi, [rbp - PIP_PATH]
+    xor esi, esi                    ; O_RDONLY
+    xor edx, edx
+    call sys_open
+    test rax, rax
+    js .pip_yes                     ; unopenable: pyc_read_file says so
+    mov [rbp - PIP_FD], rax
+    mov dword [rbp - PIP_BUF], 0
+    mov rdi, rax
+    lea rsi, [rbp - PIP_BUF]
+    mov edx, 4
+    call sys_read
+    mov rdi, [rbp - PIP_FD]
+    call sys_close
+    cmp dword [rbp - PIP_BUF], PYC_MAGIC
+    jne .pip_no
+.pip_yes:
+    mov eax, 1
+    leave
+    ret
+.pip_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC path_is_pyc
+
+;; ============================================================================
 ;; code_from_path(const char *path) -> rax = PyCodeObject*, or 0
 ;; A .py is compiled; anything else is read as marshalled bytecode.  A failed
 ;; compile leaves its exception pending, exactly as pyc_read_file's callers
@@ -1902,6 +1950,10 @@ DEF_FUNC code_from_path, CP_FRAME
     call path_is_source
     test eax, eax
     jnz .source
+    mov rdi, rbx
+    call path_is_pyc
+    test eax, eax
+    jz .source
     mov rdi, rbx
     call pyc_read_file
     pop rbx

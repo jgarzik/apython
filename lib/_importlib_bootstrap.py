@@ -118,10 +118,14 @@ def _import_submodule(module, name):
     if not hasattr(module, "__path__"):
         return None
     try:
-        _find_and_load(fullname)
+        _find_and_load_unwrapped(fullname, _import)
     except ModuleNotFoundError as exc:
         if (exc.name == fullname and
                 sys.modules.get(fullname, _NEEDS_LOADING) is not None):
             return None
+        _remove_importlib_frames(exc)
+        raise
+    except BaseException as exc:
+        _remove_importlib_frames(exc)
         raise
     return sys.modules.get(fullname)

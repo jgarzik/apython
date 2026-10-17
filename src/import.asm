@@ -1425,8 +1425,14 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
 .copy_done:
     mov byte [r12 + rcx], 0    ; null-terminate
 
-    ; Search sys.path
+    ; Search sys.path -- or, for _impcore.create_builtin, only the directory
+    ; the stand-ins for C modules live in: a builtin does not depend on what
+    ; a program has done to sys.path, as CPython's are compiled in.
+    mov rdi, [rel import_path_override]
+    test rdi, rdi
+    jnz .have_search_list
     mov rdi, [rel sys_path_list]
+.have_search_list:
     mov rsi, [rbp - FL_LEAF]
     mov rdx, [rbp - FL_LEAFLEN]
     mov rcx, r12                ; full path component (with slashes)
@@ -3244,3 +3250,9 @@ import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
 ; The PEP 420 portion directories the last search collected, as a list of
 ; str, or 0.  Owned; cleared at the start of every search.
 import_ns_portions: resq 1
+
+section .bss
+global import_path_override
+; A list searched in place of sys.path by the interpreter's own finder, or 0.
+; _impcore.create_builtin points it at the lib/ directory alone.
+import_path_override: resq 1

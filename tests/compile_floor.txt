@@ -105,6 +105,7 @@ test_class_namespace_copy
 test_cli
 test_closures
 test_cmath
+test_cmdline_warnoptions
 test_codec_args
 test_codec_handlers
 test_codecs_binding
@@ -217,6 +218,7 @@ test_descriptor_class_access
 test_descriptor_receiver
 test_descriptors
 test_descriptor_subclass
+test_dict_assign_with_property
 test_dict_bugs
 test_dict_clear_reentrant
 test_dict_compare
@@ -265,6 +267,7 @@ test_exception_args_assign
 test_exception_class_lifetime
 test_exception_context
 test_exception_dunder_str
+test_exception_group_class_getitem
 test_exception_group_deep
 test_exception_group_new
 test_exception_group_notes
@@ -353,6 +356,7 @@ test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
 test_genericalias_mro_entries
+test_genericalias_or_subclass
 test_generic_alias_subst
 test_generic_alias_value
 test_gen_exc_info
@@ -484,6 +488,7 @@ test_memoryview_exports
 test_memoryview_formats
 test_memoryview_released
 test_memoryview_stride
+test_metaclass_data_descriptor
 test_metaclass_lifetime
 test_metaclass_prepare
 test_metaclass
@@ -825,6 +830,7 @@ test_weakref_slots_dict
 test_weakref_subclass_kwargs
 test_weakref_types
 test_with_exit_raises
+test_with_exit_traceback
 test_wrong_answers
 test_zero_valued_lookup
 test_zip_strict_message

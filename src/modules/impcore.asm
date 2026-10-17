@@ -37,6 +37,10 @@ extern raise_exception
 extern exc_TypeError_type
 extern exc_ImportError_type
 extern import_find_and_load_asm
+extern import_path_override
+extern pc_dynload
+extern list_new
+extern list_append
 extern current_exception
 extern eval_exception_unwind
 
@@ -66,7 +70,30 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     jne .icb_type
     mov [rbp - ICB_NAME], rdi
     DUNDER_EXC_SAVE [rbp - ICB_EXC]
+    ; The search covers the stand-ins' directory and nothing else, however
+    ; sys.path has been rearranged: pip's bootstrap replaces it outright.
+    mov rax, [rel icb_dirs]
+    test rax, rax
+    jnz .icb_have_dirs
+    xor edi, edi
+    call list_new
+    mov [rel icb_dirs], rax
+    lea rdi, [rel pc_dynload]
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rel icb_dirs]
+    mov rsi, rax
+    call list_append
+    add rsp, 8
+    pop rdi
+    call obj_decref
+.icb_have_dirs:
+    mov rax, [rel icb_dirs]
+    mov [rel import_path_override], rax
+    mov rdi, [rbp - ICB_NAME]
     call import_find_and_load_asm
+    mov qword [rel import_path_override], 0
     test rax, rax
     jz .icb_failed
     leave
@@ -258,6 +285,9 @@ DEF_FUNC impcore_module_create, IMC_FRAME
     leave
     ret
 END_FUNC impcore_module_create
+
+section .bss
+icb_dirs: resq 1               ; [the stand-ins directory], made once
 
 section .rodata
 imc_name:               db "_impcore", 0

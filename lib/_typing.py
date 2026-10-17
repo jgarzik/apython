@@ -36,9 +36,12 @@ class TypeVar:
     so it may name a parameter declared after it.
     """
 
+    # "__dict__" because CPython's TypeVar, ParamSpec and TypeVarTuple carry
+    # a managed dict: typing_extensions -- vendored into pip -- sets
+    # __default__ and has_default on them, and a slots-only instance refused.
     __slots__ = ("_name", "_bound", "_constraints", "_evaluate_bound",
                  "_evaluate_constraints", "_covariant", "_contravariant",
-                 "_infer_variance")
+                 "_infer_variance", "__dict__")
 
     def __init__(self, name, *constraints, bound=None, covariant=False,
                  contravariant=False, infer_variance=False):
@@ -153,7 +156,7 @@ class ParamSpec:
     """`**P` in `def f[**P]()`: a whole parameter list as one variable."""
 
     __slots__ = ("_name", "_bound", "_evaluate_bound", "_covariant",
-                 "_contravariant", "_infer_variance")
+                 "_contravariant", "_infer_variance", "__dict__")
 
     def __init__(self, name, *, bound=None, covariant=False,
                  contravariant=False, infer_variance=False):
@@ -215,7 +218,7 @@ class ParamSpec:
 class TypeVarTuple:
     """`*Ts` in `def f[*Ts]()`: any number of types as one variable."""
 
-    __slots__ = ("_name",)
+    __slots__ = ("_name", "__dict__")
 
     def __init__(self, name):
         self._name = name
