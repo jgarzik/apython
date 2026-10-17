@@ -210,7 +210,26 @@ DEF_FUNC op_import_from, IF2_FRAME
     VPEEK rdi
     mov [rbp - IF2_MOD], rdi
 
-    ; Get module's type and tp_getattr
+    ; Anything but an exact module -- six.moves is a ModuleType SUBCLASS
+    ; whose names are lazy descriptors on the class -- takes the whole
+    ; attribute protocol, as `obj.name` does; tp_getattr alone handed back
+    ; the descriptor itself.  CPython's import_from is PyObject_GetAttr.
+    mov rax, [rdi + PyObject.ob_type]
+    extern module_type
+    lea rcx, [rel module_type]
+    cmp rax, rcx
+    je .if_plain_module
+    V_TEST_PTR rdi, rcx
+    ja .if_plain_module
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    test rax, rax
+    jz .if_try_submodule
+    VPUSH rax
+    leave
+    DISPATCH
+.if_plain_module:
+    mov rdi, [rbp - IF2_MOD]
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
