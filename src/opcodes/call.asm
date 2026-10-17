@@ -1299,14 +1299,24 @@ DEF_FUNC op_with_except_start, WES_FRAME
     mov rdx, [rcx + PyObject.ob_type]
     mov [rsp], rdx                   ; exc_type
     mov [rsp + 8], rcx               ; exc_val
-    jmp .wes_set_tb
+    ; exc_tb is the exception's own __traceback__, as CPython's
+    ; PyException_GetTraceback -- not None.  contextlib's __exit__ writes it
+    ; back with `exc.__traceback__ = traceback`, so None there wiped every
+    ; frame below the `with` from the exception, and pytest reported a
+    ; failing test at the line in pluggy that threw it.
+    mov rdx, [rcx + PyExceptionObject.exc_tb]
+    test rdx, rdx
+    jnz .wes_have_tb
+    lea rdx, [rel none_singleton]
+.wes_have_tb:
+    mov [rsp + 16], rdx
+    jmp .wes_call
 .wes_none_exc:
     lea rdx, [rel none_singleton]
     mov [rsp], rdx                   ; exc_type = None
     mov [rsp + 8], rdx               ; exc_val = None
-.wes_set_tb:
-    lea rdx, [rel none_singleton]
     mov [rsp + 16], rdx              ; exc_tb = None
+.wes_call:
 
     ; Call bound_exit(exc_type, exc_val, exc_tb)
     mov rdi, [rbp - WES_FUNC]                 ; callable = bound method
