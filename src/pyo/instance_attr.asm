@@ -489,7 +489,10 @@ DEF_FUNC type_refresh_attr_flags
     ; `p` straight into the instance dict, so the setter never ran.
     ; The MRO's dicts, scanned for anything a data descriptor could be.  Cold,
     ; and the answer saves the hot path an MRO walk per attribute access.
-    mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR
+    ; TYPE_FLAG_HEAP_DATA_DESCR is the same answer counted over the
+    ; heaptypes alone, so the walk goes on past a static type that set the
+    ; wide bit, and stops at the first heaptype that sets both.
+    mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR | TYPE_FLAG_HEAP_DATA_DESCR
     not rax
     and [rbx + PyTypeObject.tp_flags], rax
     mov r12, rbx                        ; the MRO walker
@@ -503,6 +506,9 @@ DEF_FUNC type_refresh_attr_flags
     test eax, eax
     jz .trg_mro_next
     or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .trg_mro_next
+    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
     jmp .trg_has_del
 .trg_mro_next:
     MRO_NEXT r12, rbx

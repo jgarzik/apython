@@ -1347,8 +1347,20 @@ TYPE_FLAG_DECLARED_SLOTS equ 0x800000
 ; without widening the gate to every static type.
 TYPE_FLAG_DESCRIPTOR     equ 0x1000000
 
+; TYPE_FLAG_MRO_HAS_DATA_DESCR narrowed to the HEAPTYPES of the MRO: some class
+; written in Python, in this type's MRO, keeps something that may be a data
+; descriptor in its dict.  The same over-approximation, from the same scan.
+;
+; Read on a METATYPE.  A data descriptor on a class's metaclass outranks the
+; class's own dict, but `type`'s getsets -- in every metaclass's MRO, so the
+; wide flag is set on all of them -- are answered by type_getattr_meta's
+; ladder already.  What is left to look for is only ever in a metaclass the
+; user wrote, and this bit says whether there is one, so a class made by
+; ABCMeta or EnumType pays nothing for the check either.
+TYPE_FLAG_HEAP_DATA_DESCR equ 0x2000000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
-; above leave free -- they stop at bit 20.  It is a stamp from one global
+; above leave free -- they stop at bit 25.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of
 ; its dict, and comparing one is both "the same class" and "nothing has been
 ; added to it or to anything in its MRO since".
