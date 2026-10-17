@@ -451,8 +451,17 @@ DEF_FUNC super_lookup, SL_FRAME
 
 ;; --- a property, run --------------------------------------------------------
 .sl_property:
-    mov rdi, rax
+    ; With no instance -- super(B) unbound, or super(B, B) whose __self__ IS
+    ; the class -- CPython calls __get__(None, type), and a property answers
+    ; that with itself.  Lib/ssl.py depends on it:
+    ; `super(SSLContext, SSLContext).options.__set__(self, value)` reaches
+    ; the base class's property to run its setter.
     mov rsi, [rbp - SL_OBJ]
+    test rsi, rsi
+    jz .sl_plain
+    cmp rsi, [rbp - SL_OBJTYPE]
+    je .sl_plain
+    mov rdi, rax
     call property_descr_get     ; -> (rax, rdx), owned
     mov [rbp - SL_BIND], rax
     mov [rbp - SL_TYPE], rdx    ; SL_TYPE is spent; reuse it for the tag

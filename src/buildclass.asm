@@ -1025,6 +1025,23 @@ TFP_ADDWEAK equ 112
     jz .tfp_base_next           ; the incumbent is already a builtin
     test qword [r11 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .tfp_base_next
+    ; ...and only when the heaptype's own layout is object's.  One that
+    ; descends from a builtin of the same width already IS that layout:
+    ; `class G(F, ValueError)` with F an OSError subclass has to stay an
+    ; OSError -- picking ValueError lost OSError's constructor, and with it
+    ; .errno and .strerror (ssl.SSLCertVerificationError is that shape).
+    mov rdx, rax
+.tfp_base_static_of:
+    mov rdx, [rdx + PyTypeObject.tp_base]
+    test rdx, rdx
+    jz .tfp_base_tie_take
+    test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .tfp_base_static_of
+    lea rdi, [rel object_type]
+    cmp rdx, rdi
+    jne .tfp_base_next          ; a real layout of its own: keep it
+.tfp_base_tie_take:
+    mov rdx, r10                ; the widths are equal
 .tfp_base_take:
     mov r10, rdx
     mov rax, r11

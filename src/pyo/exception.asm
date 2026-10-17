@@ -1335,7 +1335,12 @@ DEF_FUNC_BARE exc_isinstance
     extern user_type_metatype
     lea rcx, [rel user_type_metatype]
     cmp rax, rcx
-    jne .not_a_class
+    je .is_class
+    ; ...or a metaclass of the program's own: `class E(OSError,
+    ; metaclass=M)` has M for a type, and is still a class.  Ask the flag,
+    ; not the identity -- lib/_ssl.py's SSLError is that shape.
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .not_a_class
 
 .is_class:
     ; Single type: the exception's MRO, so a class with several bases is
