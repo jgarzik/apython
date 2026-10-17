@@ -36,6 +36,7 @@ extern method_new
 extern builtin_func_new
 extern current_exception
 extern throw_pending
+extern exc_set_context
 
 ; The awaitables live in asyncgen.asm; these are what this file reaches for.
 extern _get_agen_aclose_builtin
@@ -1121,6 +1122,21 @@ DEF_FUNC gen_throw, GT_FRAME
     mov [rel current_exception], rax
 
 .gt_resume:
+    ; The exception is raised AT the suspended yield, so its __context__ is
+    ; what this frame is handling there -- not what the caller of throw() is
+    ; handling, which for asyncio's Task.__wakeup is the very object being
+    ; thrown.  A frame handling nothing leaves the context alone: a delegator
+    ; resumed with the exception its child let go chains it to its own
+    ; handler on the way through.  That is _PyErr_ChainStackItem, and
+    ; exc_set_context refuses a self-link and breaks cycles as it does.
+    mov rsi, [r13 + PyFrame.exc_state]
+    test rsi, rsi
+    jz .gt_no_chain
+    mov rdi, [rel current_exception]
+    test rdi, rdi
+    jz .gt_no_chain
+    call exc_set_context
+.gt_no_chain:
     ; Push dummy value onto frame stack (eval_frame expects TOS after YIELD_VALUE)
     FRAME_PUSH_NONE r13, rax
 
