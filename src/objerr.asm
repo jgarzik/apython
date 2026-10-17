@@ -1349,3 +1349,64 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     leave
     ret
 END_FUNC raise_no_attribute
+
+;; ============================================================================
+;; raise_unexpected_keyword(rdi = the function, rsi = its frame,
+;;                          rdx = the keyword's name, a str)
+;;   -> does not return: "h() got an unexpected keyword argument 'nosuch'"
+;;
+;; CPython names the function by its __qualname__ and quotes the keyword; the
+;; bare "got an unexpected keyword argument" said neither.  The frame is freed
+;; here, as raise_missing_arguments frees it: the caller was part-way through
+;; filling it and never gets control back.
+;; ============================================================================
+RUK_FUNC    equ 8
+RUK_FRAME_P equ 16
+RUK_NAME    equ 24
+RUK_SLOTS   equ 32
+; Each append is bounded at 80 bytes by rbt_append_cstr, so two names, the
+; fixed text and the quotes fit with room to spare.
+RUK_BUFLEN  equ 256
+RUK_BUF     equ RUK_SLOTS + RUK_BUFLEN
+RUK_FRAME   equ RUK_BUF                 ; 288, 16-aligned with no pushes
+
+global raise_unexpected_keyword
+DEF_FUNC raise_unexpected_keyword, RUK_FRAME
+    mov [rbp - RUK_FUNC], rdi
+    mov [rbp - RUK_FRAME_P], rsi
+    mov [rbp - RUK_NAME], rdx
+
+    lea rdi, [rbp - RUK_BUF]
+    mov byte [rdi], 0
+    mov rax, [rbp - RUK_FUNC]
+    mov rcx, [rax + PyFuncObject.func_code]
+    mov rsi, [rcx + PyCodeObject.co_qualname]
+    test rsi, rsi
+    jnz .ruk_have_qualname
+    mov rsi, [rax + PyFuncObject.func_name]
+    test rsi, rsi
+    jz .ruk_no_name
+.ruk_have_qualname:
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "() "
+    call rbt_append_cstr
+    mov rdi, rax
+.ruk_no_name:
+    CSTRING rsi, "got an unexpected keyword argument '"
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - RUK_NAME]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "'"
+    call rbt_append_cstr
+
+    mov rdi, [rbp - RUK_FRAME_P]
+    call frame_free
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rbp - RUK_BUF]
+    call raise_exception
+END_FUNC raise_unexpected_keyword

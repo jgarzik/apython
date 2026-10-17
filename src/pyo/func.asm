@@ -642,8 +642,14 @@ DEF_FUNC func_bind_kwargs
     jmp .kw_next
 
 .kw_unexpected:
-    ; Raise TypeError for unexpected keyword argument
-    RAISE exc_TypeError_type, "got an unexpected keyword argument"
+    ; "h() got an unexpected keyword argument 'nosuch'"; frees the frame
+    mov rax, [rsp+16]
+    mov rdx, [r14 + PyTupleObject.ob_item]
+    mov rdx, [rdx + rax*8]         ; the keyword's name
+    mov rdi, rbx
+    mov rsi, r12
+    extern raise_unexpected_keyword
+    call raise_unexpected_keyword
 
 .kw_next:
     inc qword [rsp+16]
