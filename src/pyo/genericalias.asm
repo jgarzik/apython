@@ -303,6 +303,34 @@ DEF_FUNC generic_alias_class_getitem
 END_FUNC generic_alias_class_getitem
 
 ;; ============================================================================
+;; generic_alias_mro_entries(args = (self, bases), nargs) -> (origin,)
+;;
+;; PEP 560: `class C(list[int])` subclasses list.  __build_class__ asks each
+;; base that is not a class what to put in its place, and an alias answers
+;; with its origin -- so `class D(dict["k", int])`, which setuptools'
+;; pkg_resources declares at module scope, was "bases must be types".
+;; ============================================================================
+global generic_alias_mro_entries
+DEF_FUNC generic_alias_mro_entries
+    cmp rsi, 2
+    jne .game_bad
+    mov rax, [rdi]
+    push qword [rax + PyGenericAliasObject.ga_origin]
+    sub rsp, 8
+    mov edi, 1
+    call tuple_new
+    add rsp, 8
+    pop rdi
+    INCREF rdi
+    mov rcx, [rax + PyTupleObject.ob_item]
+    mov [rcx], rdi
+    leave
+    ret
+.game_bad:
+    RAISE exc_TypeError_type, "__mro_entries__() takes exactly one argument"
+END_FUNC generic_alias_mro_entries
+
+;; ============================================================================
 ;; generic_alias_repr(rdi = the alias) -> rax = a PyStrObject*, or 0
 ;;
 ;; "list[int]" -- origin name, then the argument's repr.
