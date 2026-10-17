@@ -90,25 +90,19 @@ DEF_FUNC call_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     test rax, rax
     jnz .ci_ret               ; got a value, return it
 
-    ; NULL from __next__ — check for StopIteration
-    mov rax, [rel current_exception]
-    test rax, rax
-    jz .ci_null               ; no exception, clean exhaustion
-
-    ; Check if exception is StopIteration
-    mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel exc_StopIteration_type]
-    cmp rcx, rdx
-    jne .ci_null              ; other exception: leave it, return NULL
-
-    ; Clear StopIteration: DECREF and reset current_exception
-    mov rdi, rax
-    call obj_decref
-    mov qword [rel current_exception], 0
+    ; NULL from __next__ — a StopIteration is exhaustion, anything else is
+    ; left for the caller to propagate
+.ci_check:
+    call clear_stopiteration
     jmp .ci_null
 
 .ci_have:
     call rax
+    ; A builtin iterator ends the same way: `map(next, its)` returns NULL
+    ; with the StopIteration its function raised still pending, and the
+    ; contract above says the caller sees exhaustion, not an error.
+    test rax, rax
+    jz .ci_check
 .ci_ret:
     pop rbx
     leave
@@ -120,6 +114,31 @@ DEF_FUNC call_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC call_iternext
+
+;; ============================================================================
+;; clear_stopiteration() -> nothing; a pending StopIteration is dropped.
+;; An iternext that calls user code (map's function, filter's
+;; predicate) ends when that code raises StopIteration, as CPython's does:
+;; there the consumer clears it, and the consumers here -- list(), sorted(),
+;; set(), `yield from`, unpacking -- read a NULL with an exception still
+;; pending as an error, so the iterator clears it before handing NULL back.
+;; Clobbers the caller-saved registers.
+;; ============================================================================
+DEF_FUNC clear_stopiteration
+    mov rax, [rel current_exception]
+    test rax, rax
+    jz .cs_done
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    jne .cs_done
+    mov qword [rel current_exception], 0
+    mov rdi, rax
+    call obj_decref
+.cs_done:
+    leave
+    ret
+END_FUNC clear_stopiteration
 
 ;; ============================================================================
 ;; get_iterator(rdi = obj payload, esi = obj tag) -> rax = iterator, owned
@@ -1347,6 +1366,11 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rdx, r14                     ; nargs = count
     extern obj_call_n
     call obj_call_n
+    test rax, rax
+    jnz .map_called
+    call clear_stopiteration         ; func raised StopIteration: map ends
+    xor eax, eax
+.map_called:
     V_UNPACK rax, rdx
     push rax                         ; save result payload
     push rdx                         ; save result tag
@@ -1622,10 +1646,12 @@ DEF_FUNC_LOCAL filter_iternext
 
 .filter_call_failed:
     ; The exception is recorded; release the item and hand NULL back, which
-    ; is what a raising iternext looks like.
+    ; is what a raising iternext looks like -- unless it is StopIteration,
+    ; which ends the filter instead.
     pop rsi                  ; the item tag
     mov rdi, r13
     DECREF_VAL rdi, rsi
+    call clear_stopiteration
     RET_NULL
     pop r15
     pop r14

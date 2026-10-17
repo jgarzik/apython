@@ -63,6 +63,7 @@ extern tuple_type
 extern bytes_type
 extern raise_exception
 extern exc_TypeError_type
+extern exc_ReferenceError_type
 extern bool_true
 extern bool_false
 extern none_singleton
@@ -1084,7 +1085,7 @@ DEF_FUNC_LOCAL proxy_referent
     leave
     ret
 .dead:
-    RAISE exc_TypeError_type, "weakly-referenced object no longer exists"
+    RAISE exc_ReferenceError_type, "weakly-referenced object no longer exists"
 END_FUNC proxy_referent
 
 DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
