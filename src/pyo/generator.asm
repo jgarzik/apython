@@ -2016,19 +2016,37 @@ DEF_FUNC _gen_close_impl
     ret
 END_FUNC _gen_close_impl
 
-;; _gen_throw_impl(args, nargs) — gen.throw(exc_type)
+;; _gen_throw_impl(args, nargs) — gen.throw(typ[, val[, tb]]), and
+;; coroutine.throw(), which is the same method.  throw_args_exc in asyncgen.asm
+;; settles the arguments, for agen.athrow() as well.
+GTI_EXC   equ 8             ; what throw_args_exc answered
+GTI_OWNED equ 16            ; non-zero when GTI_EXC is a reference of ours
+GTI_FRAME equ 24            ; + 1 push = 32, 16-aligned
 global _gen_throw_impl
-DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
+DEF_FUNC _gen_throw_impl, GTI_FRAME
     push rbx
 
-    cmp rsi, 2
-    jne .gti_error
-
-    mov rax, rdi               ; save args ptr
-    mov rbx, [rax]            ; rbx = gen
-    mov rsi, [rax + 8]       ; exc_type = args[1].payload
-    mov rdi, rbx              ; gen = args[0].payload
-    call gen_throw
+    mov rbx, [rdi]            ; rbx = gen
+    add rdi, 8                ; self is not one of them
+    dec rsi
+    lea rdx, [rel gti_name]
+    lea rcx, [rel gti_deprecated]
+    extern throw_args_exc
+    call throw_args_exc
+    mov [rbp - GTI_EXC], rax
+    mov [rbp - GTI_OWNED], rdx
+    mov rdi, rbx
+    mov rsi, rax
+    call gen_throw            ; takes a reference of its own
+    cmp qword [rbp - GTI_OWNED], 0
+    je .gti_dropped
+    push rax
+    push rdx
+    mov rdi, [rbp - GTI_EXC]
+    call obj_decref
+    pop rdx
+    pop rax
+.gti_dropped:
     test edx, edx
     jnz .gti_ret
 
@@ -2086,9 +2104,12 @@ DEF_FUNC _gen_throw_impl, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     jmp eval_exception_unwind
 
-.gti_error:
-    RAISE exc_TypeError_type, "throw() takes exactly one argument"
 END_FUNC _gen_throw_impl
+
+section .rodata
+gti_name: db "throw", 0
+gti_deprecated: db "the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead.", 0
+section .text
 
 ;; Lazy-init helpers for gen method builtins
 ;; ============================================================================
