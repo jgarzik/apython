@@ -104,11 +104,12 @@ def upper(m):
 assert bp.sub(upper, b"hello world hello") == b"HELLO world HELLO"
 print("callable sub OK")
 
-# --- a replacement of the wrong kind is refused
+# --- a replacement of the wrong kind is refused -- by the join that
+# assembles the result, so only once a match is substituted
 try:
     bp.sub("HI", b"hello")
 except TypeError as e:
-    assert "expected str instance" in str(e), e
+    assert "expected a bytes-like object, str found" in str(e), e
 else:
     raise AssertionError("a str replacement was accepted for a bytes pattern")
 try:
