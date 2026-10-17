@@ -2174,7 +2174,28 @@ OBO_FRAME equ 48            ; + 0 pushes = 48
 extern binary_op_offsets
 extern binop_dunder_table
 extern binop_rdunder_table
+extern notimpl_singleton
 extern dunder_call_2
+
+; After a slot, a sequence method or a dunder: a Value that is not
+; NotImplemented is the answer; NotImplemented is released and, like a NULL
+; with nothing raised, hands the pair to the next candidate.  The dunder arms
+; call Python-level methods by name, and `1.5 + Decimal(1)` reaches
+; Decimal.__radd__, which RETURNS NotImplemented -- sum(), math.prod and
+; math.sumprod all handed that object back as the sum.  Flags from a
+; `test rax, rax` on entry.
+%macro OBO_ANSWERED 0
+    jz %%null
+    lea rcx, [rel notimpl_singleton]
+    cmp rax, rcx
+    jne .obo_done
+    mov rdi, rax
+    call obj_decref
+    jmp %%next
+%%null:
+    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+%%next:
+%endmacro
 
 DEF_FUNC obj_binary_op, OBO_FRAME
     mov [rbp - OBO_LEFT], rdi
@@ -2233,8 +2254,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     mov rsi, [rbp - OBO_RIGHT]
     call rax
     test rax, rax
-    jnz .obo_done               ; a non-NULL Value is the answer
-    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+    OBO_ANSWERED
 
 .obo_right_slot:
     ; The left slot declined.  The right type gets the same slot with the
@@ -2255,8 +2275,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     mov rsi, [rbp - OBO_RIGHT]
     call rax
     test rax, rax
-    jnz .obo_done
-    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+    OBO_ANSWERED
 
 .obo_seq:
     ; sq_concat for +, sq_repeat for *, off the left operand -- what makes
@@ -2288,8 +2307,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     mov rsi, [rbp - OBO_RIGHT]
     call rax
     test rax, rax
-    jnz .obo_done
-    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+    OBO_ANSWERED
 
 .obo_dunder:
     ; __add__ on the left, then __radd__ on the right.  A heaptype's binary
@@ -2312,8 +2330,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     mov ecx, TAG_PTR
     call dunder_call_2
     test rax, rax
-    jnz .obo_done
-    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+    OBO_ANSWERED
 
 .obo_rdunder:
     mov rdi, [rbp - OBO_RIGHT]
@@ -2331,10 +2348,52 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     mov ecx, TAG_PTR
     call dunder_call_2
     test rax, rax
-    jnz .obo_done
-    DUNDER_RAISED [rbp - OBO_EXC], .obo_error
+    OBO_ANSWERED
 
 .obo_unsupported:
+    ; Multiplication still has PyNumber_Multiply's sequence tail.  A left
+    ; sequence was offered the right operand above and declined it, so the
+    ; right was not a count; a right sequence has not been asked at all, and
+    ; `1 * "ab"` -- math.prod(["ab"]) starts from the int 1 -- is its repeat.
+    cmp qword [rbp - OBO_OP], 5  ; NB_MULTIPLY
+    jne .obo_unsupported_msg
+    mov rdi, [rbp - OBO_LEFT]
+    call obo_sq_repeat
+    test rax, rax
+    jnz .obo_right_not_count
+    mov rdi, [rbp - OBO_RIGHT]
+    call obo_sq_repeat
+    test rax, rax
+    jz .obo_unsupported_msg
+    mov [rbp - OBO_OFF], rax    ; the offset slot is finished with
+    mov rdi, [rbp - OBO_LEFT]
+    call binop_is_count
+    test eax, eax
+    jz .obo_left_not_count
+    mov rdi, [rbp - OBO_RIGHT]  ; sq_repeat(sequence, count)
+    mov rsi, [rbp - OBO_LEFT]
+    call [rbp - OBO_OFF]
+    test rax, rax
+    OBO_ANSWERED
+    jmp .obo_unsupported_msg
+.obo_right_not_count:
+    mov rdi, [rbp - OBO_RIGHT]
+    jmp .obo_not_count
+.obo_left_not_count:
+    mov rdi, [rbp - OBO_LEFT]
+.obo_not_count:
+    ; CPython's sequence_repeat wording, set rather than raised for the same
+    ; reason as below.
+    call value_type
+    mov rsi, rax
+    CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
+    call type_name_message
+    mov rsi, rax
+    lea rdi, [rel exc_TypeError_type]
+    call set_exception
+    jmp .obo_error
+
+.obo_unsupported_msg:
     ; SET_EXC, not RAISE: .obo_done below still has to release both operands,
     ; and an unwind from here would never reach it.  The message names the
     ; operator and both types, as CPython's does -- it was the bare prefix,
@@ -2380,6 +2439,20 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     leave
     ret
 END_FUNC obj_binary_op
+
+;; obo_sq_repeat(rdi = a Value) -> rax = its type's sq_repeat, or 0
+DEF_FUNC_LOCAL obo_sq_repeat
+    call value_type
+    test rax, rax
+    jz .osr_done
+    mov rax, [rax + PyTypeObject.tp_as_sequence]
+    test rax, rax
+    jz .osr_done
+    mov rax, [rax + PySequenceMethods.sq_repeat]
+.osr_done:
+    leave
+    ret
+END_FUNC obo_sq_repeat
 
 section .rodata
 align 8

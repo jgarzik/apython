@@ -353,9 +353,9 @@ reasoning that chose them and what changing one would cost.
   the half-float, is the one native `memoryview.cast()` format in the same
   position.
 
-  `math`'s `gamma`, `lgamma`, the n-ary `hypot` and `sumprod` round
-  differently from CPython's, which uses its own Lanczos approximation and
-  double-double arithmetic where these use glibc and a Neumaier sum.  `dist`
+  `math`'s `gamma`, `lgamma` and the n-ary `hypot` round differently from
+  CPython's, which uses its own Lanczos approximation and Veltkamp-Dekker
+  splitting where these use glibc and a Neumaier sum.  `dist`
   shares `hypot`'s routine and so shares the note.  `fsum` is exact: it is
   Shewchuk's algorithm, as CPython's is.  `tests/test_math.py` says which is
   which.
