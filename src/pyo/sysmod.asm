@@ -208,116 +208,72 @@ SMI_ARGC  equ 8
 SMI_ARGV  equ 16
 SMI_TMP   equ 24            ; whichever object is being installed just now
 
-; One prefix name from SME_DIR, keeping the reference for the next.
-%macro SME_ADD_DIR 1
-    mov rdi, [rbp - SME_DIR]
-    INCREF rdi
-    CSTRING rdi, %1
-    mov rsi, [rbp - SME_DIR]
-    mov rdx, [rbp - SME_DICT]
-    call sm_add_owned
-%endmacro
 
 ;; ============================================================================
-;; sm_add_exe_paths(rdi = the sys module dict) -> nothing; six names installed
+;; sm_add_exe_paths(rdi = the sys module dict) -> nothing; seven names installed
 ;;
-;; sys.executable, sys._base_executable, and the four prefix names, all from
-;; /proc/self/exe.  These were the empty string, and script_helper's
-;; interpreter_requires_environment() spawns `[sys.executable, '-E', '-c', ...]`
-;; and catches only CalledProcessError -- so an empty one was an uncaught
-;; FileNotFoundError raised while test.support was still being imported, and
-;; forty of CPython's test modules died before their first test.
+;; sys.executable, sys._base_executable, the four prefix names and
+;; sys._stdlib_dir, all as pathconfig.asm worked them out: the executable
+;; as it was invoked (a venv's bin/python, not what it links to), and the
+;; prefix of the installation or build tree the binary belongs to.  site.py
+;; moves sys.prefix and sys.exec_prefix to a venv's directory when it finds
+;; a pyvenv.cfg; the base_ pair stays where the standard library is.
 ;;
-;; prefix, exec_prefix and the base_ pair name the interpreter's own directory:
-;; there is no virtualenv here for them to differ across, and no installation
-;; layout for them to point above.
+;; sys.executable must be a real path: script_helper's
+;; interpreter_requires_environment() spawns `[sys.executable, '-E', ...]`
+;; and an empty one killed forty of CPython's test modules at import.
 ;; ============================================================================
 SME_DICT  equ 8
-SME_EXE   equ 16            ; the executable path, as a str
-SME_DIR   equ 24            ; its directory, likewise
-SME_LEN   equ 32            ; the path length, across the calls that clobber rax
-SME_BUF   equ 4152          ; 4096 bytes of path, [rbp-4152, rbp-56)
-SME_FRAME equ 4152          ; + 1 push = 4160, 16-aligned
+SME_STR   equ 16            ; the string being installed under several names
+SME_FRAME equ 16
 DEF_FUNC_LOCAL sm_add_exe_paths, SME_FRAME
-    push rbx
     mov [rbp - SME_DICT], rdi
+    extern pc_executable, pc_prefix, pc_stdlib
 
-    lea rbx, [rbp - SME_BUF]
-    mov rdi, rbx
-    mov esi, 4090               ; readlink writes no NUL; leave room for ours
-    extern exe_path
-    extern str_new_heap
-    call exe_path
-    mov [rbp - SME_LEN], rax
-    mov byte [rbx + rax], 0
-
-    mov rdi, rbx
-    mov rsi, rax
-    call str_new_heap
-    mov [rbp - SME_EXE], rax
-
-    ; The directory, cut at the last '/' with the slash dropped, so
-    ; "/a/b/apython" becomes "/a/b".  A path with no slash at all -- and the
-    ; empty one /proc gives when it is not mounted -- both come out empty,
-    ; which is what all four names held before and is still the honest answer.
-    mov rcx, [rbp - SME_LEN]
-.sme_trim:
-    test rcx, rcx
-    jz .sme_have_dir
-    dec rcx
-    cmp byte [rbx + rcx], '/'
-    jne .sme_trim
-.sme_have_dir:
-    mov rdi, rbx
-    mov rsi, rcx
-    call str_new_heap
-    mov [rbp - SME_DIR], rax
-
+    lea rdi, [rel pc_executable]
+    call str_from_cstr_heap
+    mov [rbp - SME_STR], rax
     ; sm_add_owned takes the reference it is handed, so every use but the last
     ; of each string needs one of its own.
-    mov rdi, [rbp - SME_EXE]
+    mov rdi, rax
     INCREF rdi
     CSTRING rdi, "executable"
-    mov rsi, [rbp - SME_EXE]
+    mov rsi, [rbp - SME_STR]
     mov rdx, [rbp - SME_DICT]
     call sm_add_owned
-
     CSTRING rdi, "_base_executable"
-    mov rsi, [rbp - SME_EXE]
+    mov rsi, [rbp - SME_STR]
     mov rdx, [rbp - SME_DICT]
     call sm_add_owned
 
-    SME_ADD_DIR "prefix"
-    SME_ADD_DIR "exec_prefix"
-    SME_ADD_DIR "base_prefix"
-    SME_ADD_DIR "base_exec_prefix"
+    lea rdi, [rel pc_prefix]
+    call str_from_cstr_heap
+    mov [rbp - SME_STR], rax
+    add qword [rax + PyObject.ob_refcnt], 3
+    CSTRING rdi, "prefix"
+    mov rsi, [rbp - SME_STR]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+    CSTRING rdi, "exec_prefix"
+    mov rsi, [rbp - SME_STR]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+    CSTRING rdi, "base_prefix"
+    mov rsi, [rbp - SME_STR]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
+    CSTRING rdi, "base_exec_prefix"
+    mov rsi, [rbp - SME_STR]
+    mov rdx, [rbp - SME_DICT]
+    call sm_add_owned
 
-    ; sys._stdlib_dir is where the modules this interpreter SHIPS live, which
-    ; is lib/ beside the binary -- the same directory import_init appends to
-    ; sys.path.  CPython's names the installed stdlib and platform reads it.
-    mov rsi, [rbp - SME_DIR]
-    mov rdx, [rsi + PyStrObject.ob_size]
-    lea rsi, [rsi + PyStrObject.data]
-    lea rdi, [rbp - SME_BUF]
-    extern ap_memcpy
-    call ap_memcpy
-    mov rax, [rbp - SME_DIR]
-    mov rax, [rax + PyStrObject.ob_size]
-    lea rcx, [rbp - SME_BUF]
-    mov byte [rcx + rax], '/'
-    mov byte [rcx + rax + 1], 'l'
-    mov byte [rcx + rax + 2], 'i'
-    mov byte [rcx + rax + 3], 'b'
-    mov byte [rcx + rax + 4], 0
-    lea rdi, [rbp - SME_BUF]
-    lea rsi, [rax + 4]
-    call str_new_heap
+    ; CPython's names the standard library, and platform reads it.
+    lea rdi, [rel pc_stdlib]
+    call str_from_cstr_heap
     mov rsi, rax
     CSTRING rdi, "_stdlib_dir"
     mov rdx, [rbp - SME_DICT]
     call sm_add_owned
-
-    pop rbx
     leave
     ret
 END_FUNC sm_add_exe_paths
@@ -448,8 +404,11 @@ DEF_FUNC sys_module_init, 40
     mov [rel sys_path_list], rax
     mov r12, rax                ; r12 = sys.path list
 
-    ; Add script directory to sys.path (computed from argv[1] later)
-    ; For now, add empty string (current dir) as fallback
+    ; A placeholder for the script's directory, which main fills in once the
+    ; script is known.  Under -P or -I there is none (sys.flags.safe_path).
+    extern main_sysflags
+    cmp byte [rel main_sysflags + SF_SAFE_PATH], 0
+    jne .path_no_placeholder
     lea rdi, [rel sm_empty]
     call str_from_cstr_heap
     push rax
@@ -458,6 +417,7 @@ DEF_FUNC sys_module_init, 40
     call list_append
     pop rdi
     call obj_decref
+.path_no_placeholder:
 
     ; Store sys.path
     lea rdi, [rel sm_path]
@@ -647,14 +607,12 @@ DEF_FUNC sys_module_init, 40
     call structseq_new
     mov rbx, rax                ; rbx = the version_info object
 
-    ; (3, 12, 0, 'final', 0)
+    ; (3, 12, 9, 'final', 0): the release the vendored stdlib/ is, and so
+    ; the behaviour this interpreter answers for.  version and hexversion say
+    ; the same; pyvenv.cfg and every version gate in the stdlib read them.
     SS_SET 0, V_INT(3)
     SS_SET 1, V_INT(12)
-    mov rdi, rbx
-    mov esi, 2
-    xor edx, edx
-    V_PACK_I64 rdx, rcx
-    call structseq_set
+    SS_SET 2, V_INT(9)
     lea rdi, [rel sm_final]
     call str_from_cstr_heap
     mov rdx, rax                ; structseq_set takes over the reference
@@ -1026,31 +984,36 @@ DEF_FUNC sys_module_init, 40
     lea rdi, [rel flags_type]
     call structseq_new
     mov rbx, rax
-    SS_SET 0, V_INT(0)
-    SS_SET 1, V_INT(0)
-    SS_SET 2, V_INT(0)
-    SS_SET 3, V_INT(0)
-    SS_SET 4, V_INT(0)
-    SS_SET 5, V_INT(0)
-    SS_SET 6, V_INT(0)
-    SS_SET 7, V_INT(0)
-    SS_SET 8, V_INT(0)
-    SS_SET 9, V_INT(0)
-    SS_SET 10, V_INT(0)
-    SS_SET 11, V_INT(0)
-    SS_SET 12, V_INT(0)
+    ; Every field but the two bools and int_max_str_digits is a count main
+    ; recorded while it read the command line.
+    xor r12d, r12d
+.flags_field:
+    cmp r12d, SF_DEV_MODE
+    je .flags_bool
+    cmp r12d, SF_SAFE_PATH
+    je .flags_bool
+    lea rax, [rel main_sysflags]
+    movzx edx, byte [rax + r12]
+    V_PACK_I64 rdx, rax
     mov rdi, rbx
-    mov esi, 13
-    lea rdx, [rel bool_false]
-    inc qword [rdx + PyObject.ob_refcnt]
+    mov esi, r12d
     call structseq_set
-    SS_SET 14, V_INT(0)
-    SS_SET 15, V_INT(0)
+    jmp .flags_next
+.flags_bool:
+    lea rax, [rel main_sysflags]
+    lea rdx, [rel bool_false]
+    cmp byte [rax + r12], 0
+    je .flags_have_bool
+    lea rdx, [rel bool_true]
+.flags_have_bool:
+    inc qword [rdx + PyObject.ob_refcnt]
     mov rdi, rbx
-    mov esi, 16
-    lea rdx, [rel bool_false]
-    inc qword [rdx + PyObject.ob_refcnt]
+    mov esi, r12d
     call structseq_set
+.flags_next:
+    inc r12d
+    cmp r12d, SYSFLAGS_COUNT
+    jb .flags_field
     SS_SET 17, V_INT(4300)
     lea rdi, [rel sm_flags]
     call str_from_cstr_heap
@@ -1286,7 +1249,7 @@ DEF_FUNC sys_module_init, 40
 
     ; Constants CPython has had since 2.x and code reads without asking.
     ; hexversion is the one a version test is usually written against.
-    SYS_ADD_INT sm_hexversion, 0x030C00F0
+    SYS_ADD_INT sm_hexversion, 0x030C09F0
     SYS_ADD_INT sm_maxunicode, 0x10FFFF
     ; "short" is true: src/dtoa.asm computes the shortest round-tripping
     ; decimal rather than searching for it.
@@ -1925,6 +1888,17 @@ DEF_FUNC sys_path_add_script_dir
 
     mov rbx, rdi                ; pyc_path
 
+    ; -P and -I: sys.path gets no entry for the script at all.
+    cmp byte [rel main_sysflags + SF_SAFE_PATH], 0
+    jne .spa_out
+    ; An empty path is -c or stdin, whose entry CPython leaves as ''.
+    cmp byte [rbx], 0
+    jne .find_last
+    lea rdi, [rel sm_empty]
+    call str_from_cstr_heap
+    jmp .set_path
+
+.find_last:
     ; Find last '/' in path
     mov rdi, rbx
     call ap_strlen
@@ -1975,6 +1949,7 @@ DEF_FUNC sys_path_add_script_dir
     mov rcx, [rdi + PyListObject.ob_item]
     mov [rcx], rax
 
+.spa_out:
     pop r12
     pop rbx
     leave
@@ -2078,7 +2053,7 @@ sm_version:      db "version", 0
 ; the implementation is sys.implementation.name, which is "apython";
 ; platform.python_implementation() has no hook for one and answers "CPython".
 ; DIVERGENCES.md records that.
-sm_version_val:  db "3.12.0 (apython ", VERSION_STR, ") [NASM x86-64]", 0
+sm_version_val:  db "3.12.9 (apython ", VERSION_STR, ") [NASM x86-64]", 0
 sm_version_info: db "version_info", 0
 sm_float_info:   db "float_info", 0
 sm_flags:        db "flags", 0

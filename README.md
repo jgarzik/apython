@@ -47,7 +47,7 @@ liblzma-dev, libssl-dev, libexpat1-dev, python3.12
 make                # build ./apython
 ./apython --version # show version
 
-# run a Python script
+# run a Python script -- the standard library is CPython 3.12's own, in stdlib/
 ./apython script.py
 
 # or hand it bytecode CPython produced
@@ -351,7 +351,18 @@ step.
 | `make check` | Run the test suite |
 | `make check-cpython` | Run the CPython stdlib test corpus |
 | `make INT_STRESS=1` | Build with every integer of magnitude ≥ 8 heap-boxed |
+| `make install` | Install under `$(PREFIX)`, default `/usr/local/apython` |
 | `make clean` | Remove build artifacts |
+
+**Installing.**  `make install` lays the interpreter out the way CPython is
+laid out -- `bin/apython`, the standard library in `lib/python3.12/`, the
+modules that stand in for CPython's C ones in `lib/python3.12/lib-dynload/`,
+and `lib/python3.12/site-packages/` -- because `site`, `sysconfig`, `venv`
+and pip all build paths from those names.  The default prefix is a directory
+of its own so that it cannot land on top of a real CPython.  `./apython` in
+the build tree finds `stdlib/` and `lib/` beside itself; an installed one finds
+its library from its own location, and `apython -m venv DIR` makes a virtual
+environment the ordinary way.
 
 ## License
 

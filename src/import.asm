@@ -245,67 +245,21 @@ DEF_FUNC exe_path               ; + 0 pushes, 16-aligned at the call below
 END_FUNC exe_path
 
 ;; ============================================================================
-IAR_SUFFIX equ 8
-IAR_BUF    equ 4128            ; 4096 bytes of path, [rbp-4128, rbp-32)
-IAR_FRAME  equ 4144         ; + 2 pushes = 4160
-DEF_FUNC_LOCAL import_add_exe_relative_path, IAR_FRAME
-    push rbx
-    push r12
-    mov [rbp - IAR_SUFFIX], rdi
-
-    lea rbx, [rbp - IAR_BUF]
-    CSTRING rdi, "/proc/self/exe"
-    mov rsi, rbx
-    mov edx, 4000
-    extern readlink
-    call readlink
-    test rax, rax
-    jle .iar_relative
-    mov r12, rax                ; length of the resolved path
-
-    ; Cut back to the last '/', keeping it, so "…/apython" becomes "…/".
-.iar_trim:
-    test r12, r12
-    jz .iar_relative
-    dec r12
-    cmp byte [rbx + r12], '/'
-    jne .iar_trim
-    inc r12
-
-    ; Append the suffix.
-    mov rsi, [rbp - IAR_SUFFIX]
-.iar_copy:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .iar_done
-    cmp r12, 4090
-    jae .iar_relative
-    mov [rbx + r12], al
-    inc r12
-    inc rsi
-    jmp .iar_copy
-.iar_done:
-    mov rdi, rbx
-    mov rsi, r12
-    call str_new_heap
-    jmp .iar_append
-
-.iar_relative:
-    mov rdi, [rbp - IAR_SUFFIX]
+;; import_add_path_cstr(rdi = C string) -> nothing; appended to sys.path
+;; ============================================================================
+DEF_FUNC_LOCAL import_add_path_cstr
     call str_from_cstr_heap
-
-.iar_append:
     push rax
+    sub rsp, 8
     mov rdi, [rel sys_path_list]
     mov rsi, rax
     call list_append
+    add rsp, 8
     pop rdi
     call obj_decref
-    pop r12
-    pop rbx
     leave
     ret
-END_FUNC import_add_exe_relative_path
+END_FUNC import_add_path_cstr
 
 ;; ============================================================================
 DEF_FUNC import_init
@@ -313,6 +267,10 @@ DEF_FUNC import_init
     push r12
     mov rbx, rdi                ; argc
     mov r12, rsi                ; argv
+
+    ; Where this interpreter's library is, before sys exists to report it.
+    extern pathconfig_init
+    call pathconfig_init
 
     ; Initialize sys module
     mov rdi, rbx
@@ -396,6 +354,10 @@ DEF_FUNC import_init
     ; a failing module body stopped being swallowed, was turn "module not
     ; available" into "module half-imports and then raises from inside
     ; types.py".  A stdlib on the path has to be the caller's decision.
+    ; Under -E or -I the environment is not consulted.
+    extern main_sysflags
+    cmp byte [rel main_sysflags + SF_IGNORE_ENV], 0
+    jne .no_pythonpath
     CSTRING rdi, "PYTHONPATH"
     extern getenv
     call getenv
@@ -450,12 +412,18 @@ DEF_FUNC import_init
     ; lib/ can shadow a CPython module of the same name: a module that needs
     ; to differ from CPython's is a bug or a C module, and either way it does
     ; not belong ahead of the real one.
-    lea rdi, [rel im_stdlib_path]
-    call import_add_exe_relative_path
-    lea rdi, [rel im_lib_path]
-    call import_add_exe_relative_path
-    lea rdi, [rel im_tests_cpython_path]
-    call import_add_exe_relative_path
+    ; Their locations come from pathconfig.asm, which knows the build tree
+    ; from an installation.
+    extern pc_stdlib, pc_dynload, pc_extra
+    lea rdi, [rel pc_stdlib]
+    call import_add_path_cstr
+    lea rdi, [rel pc_dynload]
+    call import_add_path_cstr
+    cmp byte [rel pc_extra], 0
+    je .ii_paths_done
+    lea rdi, [rel pc_extra]
+    call import_add_path_cstr
+.ii_paths_done:
 
     pop r12
     pop rbx
@@ -3079,9 +3047,6 @@ im_not_pkg_tail:    db "' is not a package", 0
 im_halted_prefix:    db "import of ", 0
 im_halted_suffix:    db " halted; None in sys.modules", 0
 irr_package_key:    db "__package__", 0
-im_stdlib_path:     db "stdlib", 0
-im_lib_path:        db "lib", 0
-im_tests_cpython_path: db "tests/cpython", 0
 im_builtins:        db "builtins", 0
 im_dunder_name:     db "__name__", 0
 im_dunder_file:     db "__file__", 0

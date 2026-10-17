@@ -91,7 +91,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
+.PHONY: all install clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
 
 all: $(TARGET) lib-pyc
 
@@ -134,6 +134,30 @@ $(TARGET): $(OBJS)
 lib-pyc:
 	@find lib -name '*.py' -exec $(PYTHON) -m py_compile {} \; 2>/dev/null || true
 	@$(PYTHON) -m compileall -q -j0 stdlib >/dev/null 2>&1 || true
+
+# An installation in CPython's own layout, so that site.py, sysconfig, venv
+# and pip -- each of which builds paths from these names -- find everything
+# where they look:
+#
+#   $(PREFIX)/bin/apython
+#   $(PREFIX)/lib/python3.12/              stdlib/, CPython's Lib/
+#   $(PREFIX)/lib/python3.12/lib-dynload/  lib/, the stand-ins for C modules
+#   $(PREFIX)/lib/python3.12/site-packages/
+#
+# The default prefix is a directory of its own rather than /usr/local, where
+# lib/python3.12 may already be a real CPython's.  src/pathconfig.asm is the
+# other half of this: it recognises the layout from the binary's location.
+PREFIX ?= /usr/local/apython
+INSTLIB = $(DESTDIR)$(PREFIX)/lib/python3.12
+
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin $(INSTLIB)/lib-dynload $(INSTLIB)/site-packages
+	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/apython
+	cd stdlib && find . -name __pycache__ -prune -o -type f -print \
+	    | cpio -pdm --quiet $(INSTLIB)
+	cd lib && find . -path ./test -prune -o -name __pycache__ -prune -o -type f -print \
+	    | cpio -pdm --quiet $(INSTLIB)/lib-dynload
+	@$(PYTHON) -m compileall -q -j0 $(INSTLIB) >/dev/null 2>&1 || true
 
 # One rule for every source directory: the stem carries the subdirectory, so
 # src/pyo/dict.asm and src/methods/dict.asm land in different objects.

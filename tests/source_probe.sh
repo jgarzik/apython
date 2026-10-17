@@ -61,6 +61,12 @@ for test_py in "$TESTDIR"/test_*.py; do
 
     actual=$(timeout 60 $APYTHON "$test_py" 2>&1)
     status=$?
+    # A recorded oracle is a transcript of the .pyc run, whose co_filename is
+    # the relative path py_compile was given.  Run from source, the script is
+    # named by its absolute path, as CPython names it -- so map that back.
+    if [ -f "$TESTDIR/expected/$name.txt" ]; then
+        actual=${actual//"$PWD/$TESTDIR/"/"$TESTDIR/"}
+    fi
 
     if [ $status -ge 128 ]; then
         crashed="$crashed $name"

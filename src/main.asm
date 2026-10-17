@@ -254,11 +254,10 @@ DEF_FUNC main, 8
     ;   arguments, which are usually '-c' and a command.  Forty of CPython's
     ;   test modules cannot reach their first test without it.
     ;
-    ; Accepting and IGNORING -E/-I/-S/-B/-u and their friends is the correct
-    ; behaviour here rather than a stub: apython has no site machinery and no
-    ; environment-driven configuration for them to switch off, and sys.flags
-    ; already reports every one of them as off.  Unknown flags are still
-    ; refused -- a lenient scan would swallow a filename beginning with '-'.
+    ; The single-letter flags are recorded in main_sysflags, which becomes
+    ; sys.flags; -E, -s, -S, -I and -P are acted on further down.  Unknown
+    ; flags are refused -- a lenient scan would swallow a filename beginning
+    ; with '-'.
     mov qword [rel cmd_source], 0
 .flag_loop:
     cmp r14d, 2
@@ -338,8 +337,32 @@ DEF_FUNC main, 8
     inc rsi
     jmp .flag_char_scan
 .flag_char_next:
-    ; -B is the one flag in that string that is not quite a no-op: it is the
-    ; initial value of sys.dont_write_bytecode, which pyc_write_cache reads.
+    ; Each flag is a count in main_sysflags, at its sys.flags index; -I is
+    ; -E -s -P as well as itself, and -B also seeds sys.dont_write_bytecode,
+    ; which pyc_write_cache reads.  -u and -R are accepted and change nothing.
+    lea rsi, [rel main_flag_chars]
+    xor edi, edi
+.flag_index:
+    movzx eax, byte [rsi + rdi]
+    test al, al
+    jz .flag_specials
+    cmp al, dl
+    je .flag_count
+    inc edi
+    jmp .flag_index
+.flag_count:
+    lea rsi, [rel main_flag_index]
+    movzx eax, byte [rsi + rdi]
+    lea rsi, [rel main_sysflags]
+    inc byte [rsi + rax]
+.flag_specials:
+    cmp dl, 'I'
+    jne .flag_not_isolated
+    mov byte [rel main_sysflags + SF_ISOLATED], 1
+    mov byte [rel main_sysflags + SF_IGNORE_ENV], 1
+    mov byte [rel main_sysflags + SF_NO_USER_SITE], 1
+    mov byte [rel main_sysflags + SF_SAFE_PATH], 1
+.flag_not_isolated:
     cmp dl, 'B'
     jne .flag_char_step
     mov byte [rel main_no_bytecode], 1
@@ -372,9 +395,21 @@ DEF_FUNC main, 8
     jmp .flags_done
 
 .flags_done:
+    call main_env_flags
 
     ; Save argv[1] (the .pyc filename, or "-c", after any shift)
     mov rbx, [r15 + 8]         ; rbx = argv[1]
+
+    ; A script is named by its absolute path from here on, as CPython has
+    ; done since 3.9: it is __file__, every traceback's co_filename, and what
+    ; sys.path[0] is the directory of.  sys.argv[0] keeps the path as given.
+    cmp qword [rel cmd_source], 0
+    jne .script_named
+    mov rdi, rbx
+    extern pathconfig_script
+    call pathconfig_script
+    mov rbx, rax
+.script_named:
 
     ; Initialize subsystems
     call bool_init
@@ -441,10 +476,6 @@ DEF_FUNC main, 8
     ; builtins_init and import_init, so nothing could be imported then.
     extern comp_flush_warnings
     call comp_flush_warnings
-
-    ; Set sys.path[0] to script directory
-    mov rdi, rbx                ; pyc filename
-    call sys_path_add_script_dir
 
     ; Create globals dict
     call dict_new
@@ -543,6 +574,33 @@ DEF_FUNC main, 8
     pop rdi                     ; "__main__" str
     call obj_decref
 
+    ; site, unless -S: it is what adds site-packages, the user site and the
+    ; .pth files, and sets up a venv.  CPython imports it after __main__
+    ; exists and before sys.path[0] is the script's directory, and a failure
+    ; is fatal there as it is here.
+    cmp byte [rel main_sysflags + SF_NO_SITE], 0
+    jne .site_done
+    call main_import_site
+    test eax, eax
+    jnz .check_uncaught
+.site_done:
+
+    ; sys.path[0]: the script's directory, '' for -c and stdin, and the
+    ; working directory for -m -- which a trailing slash on it gives.
+    mov rdi, rbx
+    mov rax, [rel cmd_source]
+    test rax, rax
+    jz .path0_have
+    CSTRING rdi, ""
+    lea rcx, [rel main_runmodule_cmd]
+    cmp rax, rcx
+    jne .path0_have
+    extern pathconfig_cwd_dir
+    call pathconfig_cwd_dir
+    mov rdi, rax
+.path0_have:
+    call sys_path_add_script_dir
+
     ; Create execution frame
     ; frame_new(code, globals, builtins, locals)
     ; For module-level code, locals == globals
@@ -564,6 +622,7 @@ DEF_FUNC main, 8
     call frame_free
 
     ; Check for unhandled exception
+.check_uncaught:
     extern current_exception
     mov rdi, [rel current_exception]
     test rdi, rdi
@@ -944,19 +1003,140 @@ DEF_FUNC_LOCAL main_read_stdin, MRS_FRAME
     ret
 END_FUNC main_read_stdin
 
+;; ============================================================================
+;; main_env_flags() -> nothing; main_sysflags updated from the environment
+;;
+;; PYTHONNOUSERSITE, PYTHONSAFEPATH and PYTHONDONTWRITEBYTECODE, each set
+;; when the variable is set and not empty -- unless -E or -I said the
+;; environment is not to be consulted.
+;; ============================================================================
+DEF_FUNC main_env_flags
+    cmp byte [rel main_sysflags + SF_IGNORE_ENV], 0
+    jne .mef_out
+    CSTRING rdi, "PYTHONNOUSERSITE"
+    call main_env_set
+    jz .mef_safe
+    mov byte [rel main_sysflags + SF_NO_USER_SITE], 1
+.mef_safe:
+    CSTRING rdi, "PYTHONSAFEPATH"
+    call main_env_set
+    jz .mef_bc
+    mov byte [rel main_sysflags + SF_SAFE_PATH], 1
+.mef_bc:
+    CSTRING rdi, "PYTHONDONTWRITEBYTECODE"
+    call main_env_set
+    jz .mef_out
+    mov byte [rel main_sysflags + SF_DONT_WRITE_BC], 1
+    mov byte [rel main_no_bytecode], 1
+.mef_out:
+    leave
+    ret
+END_FUNC main_env_flags
+
+;; ============================================================================
+;; main_env_set(rdi = variable name) -> ZF clear when it is set and non-empty
+;; ============================================================================
+DEF_FUNC main_env_set
+    extern getenv
+    call getenv
+    test rax, rax
+    jz .mes_out
+    cmp byte [rax], 0
+.mes_out:
+    leave
+    ret
+END_FUNC main_env_set
+
+;; ============================================================================
+;; main_import_site() -> eax = 0, or 1 with the exception in current_exception
+;;
+;; `import site`, compiled and run in a frame of its own with a namespace of
+;; its own, so that the binding lands nowhere a program can see -- CPython
+;; imports it from C and binds no name at all.
+;; ============================================================================
+MIS_CODE  equ 8
+MIS_DICT  equ 16
+MIS_FRAME equ 16
+DEF_FUNC main_import_site, MIS_FRAME
+    extern str_from_cstr_heap
+    CSTRING rdi, "<site>"
+    call str_from_cstr_heap
+    mov [rbp - MIS_DICT], rax         ; the filename, briefly
+    CSTRING rdi, "import site"
+    mov esi, 11
+    mov rdx, rax
+    mov ecx, CMODE_EXEC
+    extern compile_source
+    call compile_source
+    mov [rbp - MIS_CODE], rax
+    mov rdi, [rbp - MIS_DICT]
+    call obj_decref
+    cmp qword [rbp - MIS_CODE], 0
+    je .mis_failed
+
+    call dict_new
+    mov [rbp - MIS_DICT], rax
+    extern builtins_dict_global
+    lea rdi, [rel __builtins__cstr]
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MIS_DICT]
+    mov rsi, rax
+    mov rdx, [rel builtins_dict_global]
+    call dict_set
+    add rsp, 8
+    pop rdi
+    call obj_decref
+
+    mov rdi, [rbp - MIS_CODE]
+    mov rsi, [rbp - MIS_DICT]
+    mov rdx, [rel builtins_dict_global]
+    mov rcx, [rbp - MIS_DICT]
+    call frame_new
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call eval_frame
+    V_UNPACK rax, rdx
+    add rsp, 8
+    pop rdi
+    call frame_free
+    mov rdi, [rbp - MIS_DICT]
+    call obj_decref
+    mov rdi, [rbp - MIS_CODE]
+    call obj_decref
+
+    extern current_exception
+    xor eax, eax
+    cmp qword [rel current_exception], 0
+    je .mis_out
+.mis_failed:
+    mov eax, 1
+.mis_out:
+    leave
+    ret
+END_FUNC main_import_site
+
 section .rodata
-; The single-letter flags accepted and ignored: -E -I -S -B -u -b -d -q -v -O
-; -P -R, and any repetition of them (-OO, -bb, -vv).  Every one of these
-; switches off machinery apython does not have, so ignoring them is the answer
-; rather than a stub -- and sys.flags already reports each as off.  -P and -R
-; joined the list because script_helper and subprocess invocations in the wild
-; pass them and an unknown flag is refused outright.
-main_noop_flags: db "EISBubdqvOPR", 0
+; The single-letter flags accepted: -E -I -S -s -B -u -b -d -q -v -O -P -R,
+; and any repetition of them (-OO, -bb, -vv).  Each that has a field in
+; sys.flags is counted there (main_flag_chars below); -E, -s, -S, -I and -P
+; change what startup does, and the rest are reported but switch off
+; machinery apython does not have.  An unknown flag is refused outright.
+main_noop_flags: db "EISBubdqvOPRs", 0
+; The flags that are a field of sys.flags, and that field's index.
+main_flag_chars: db "dOBsSEvbqP", 0
+main_flag_index: db SF_DEBUG, SF_OPTIMIZE, SF_DONT_WRITE_BC, SF_NO_USER_SITE
+                 db SF_NO_SITE, SF_IGNORE_ENV, SF_VERBOSE, SF_BYTES_WARNING
+                 db SF_QUIET, SF_SAFE_PATH
 main_nl: db 10
 
 section .bss
 global main_no_bytecode
 main_no_bytecode: resb 1
+global main_sysflags
+main_sysflags: resb SYSFLAGS_COUNT     ; sys.flags, by SF_ index (macros.inc)
 
 section .rodata
 

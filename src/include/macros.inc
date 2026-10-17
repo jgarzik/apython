@@ -1185,3 +1185,24 @@ ASM_INIT
     cmp qword [%1 + PyStrObject.ob_hash], -1
     jne %2
 %endmacro
+
+; Indices into main_sysflags (src/main.asm), one byte per field, in the order
+; of sys.flags itself -- sys_module_init copies them across by index.
+SF_DEBUG          equ 0
+SF_INSPECT        equ 1
+SF_INTERACTIVE    equ 2
+SF_OPTIMIZE       equ 3
+SF_DONT_WRITE_BC  equ 4
+SF_NO_USER_SITE   equ 5
+SF_NO_SITE        equ 6
+SF_IGNORE_ENV     equ 7
+SF_VERBOSE        equ 8
+SF_BYTES_WARNING  equ 9
+SF_QUIET          equ 10
+SF_HASH_RANDOM    equ 11
+SF_ISOLATED       equ 12
+SF_DEV_MODE       equ 13
+SF_UTF8_MODE      equ 14
+SF_WARN_DEF_ENC   equ 15
+SF_SAFE_PATH      equ 16
+SYSFLAGS_COUNT    equ 17

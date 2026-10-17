@@ -354,6 +354,7 @@ test_generic_alias_value
 test_gen_exc_info
 test_gen_return2
 test_gen_return
+test_gen_throw_signature
 test_getattr_descriptors
 test_getattr_generic_order
 test_getattribute_hook_flag
