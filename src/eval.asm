@@ -703,11 +703,28 @@ DEF_FUNC_BARE eval_exception_unwind
     mov qword [gs:ThreadState.kw_names_pending], 0
 
     ; repr_depth is bracketed by repr_push/repr_pop around a container repr,
-    ; and the pop is skipped by any raise from inside a nested __repr__.  It
-    ; saturates at 64 and then every container repr in the process raises,
-    ; and repr_stack keeps 64 dangling pointers that repr_check_active
-    ; compares by address.
-    mov qword [gs:ThreadState.repr_depth], 0
+    ; and the pop is skipped by any raise from inside a nested __repr__.
+    ; Drop the entries of the reprs this unwind discarded -- those recorded at
+    ; an rsp below the landing point -- and no others.  Zeroing the count
+    ; outright also forgot the reprs the unwind landed INSIDE: a __repr__ that
+    ; caught a KeyError made a self-referential list recurse until the machine
+    ; stack ran out, because the outer list was no longer on the guard.
+    mov rcx, [gs:ThreadState.repr_depth]
+    test rcx, rcx
+    jz .repr_trimmed
+    mov rdx, [gs:ThreadState.repr_stack]
+.repr_trim:
+    mov rax, rcx
+    dec rax
+    shl rax, 4                  ; two words an entry; the rsp is the second
+    mov rax, [rdx + rax + 8]
+    cmp rax, rsp
+    ja .repr_trim_done          ; recorded above the landing: still running
+    dec rcx
+    jnz .repr_trim
+.repr_trim_done:
+    mov [gs:ThreadState.repr_depth], rcx
+.repr_trimmed:
     mov qword [gs:ThreadState.c_recursion_depth], 0
 
     ; gc_collecting is set for the duration of a collection and cleared at
