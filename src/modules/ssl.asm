@@ -59,7 +59,6 @@
 
 ASM_INIT
 
-extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern module_new

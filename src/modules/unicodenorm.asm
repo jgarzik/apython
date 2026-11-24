@@ -53,7 +53,6 @@ extern obj_incref
 extern obj_decref
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_exception
 extern set_exception
 
 extern udn_index
