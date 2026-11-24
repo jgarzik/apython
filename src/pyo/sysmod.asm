@@ -1238,6 +1238,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC_ALIAS sys_excepthook_func, sm_excepthook, sm_dunder_excepthook
     SYS_ADD_FUNC_ALIAS sys_displayhook_func, sm_displayhook, sm_dunder_displayhook
     SYS_ADD_FUNC sys_getrefcount_func, sm_getrefcount
+    SYS_ADD_FUNC sys_getallocatedblocks_func, sm_getallocatedblocks
     SYS_ADD_FUNC sys_is_finalizing_func, sm_is_finalizing
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
@@ -2150,6 +2151,7 @@ sm_finalizer:    db "finalizer", 0
 sm_displayhook:  db "displayhook", 0
 sm_dunder_displayhook: db "__displayhook__", 0
 sm_getrefcount:  db "getrefcount", 0
+sm_getallocatedblocks: db "getallocatedblocks", 0
 sm_is_finalizing: db "is_finalizing", 0
 sm_underscore:   db "_", 0
 sm_dunder_stdout: db "__stdout__", 0
@@ -2283,6 +2285,30 @@ DEF_FUNC sys_getrefcount_func
 .sgr_args:
     RAISE exc_TypeError_type, "getrefcount() takes exactly one argument"
 END_FUNC sys_getrefcount_func
+
+;; ============================================================================
+;; sys_getallocatedblocks_func(args, nargs) -> Value: live allocator blocks
+;;
+;; CPython's sys.getallocatedblocks(): how many blocks the allocator has out.
+;; The absolute number means little; that it does not CLIMB across repeats of
+;; one operation is what tests/raise_probe.py measures.
+;; Fails: 0
+;; ============================================================================
+DEF_FUNC sys_getallocatedblocks_func
+    test rsi, rsi
+    jnz .sgab_args
+    extern ap_live_blocks
+    extern set_exception
+    call ap_live_blocks
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+.sgab_args:
+    SET_EXC exc_TypeError_type, "sys.getallocatedblocks() takes no arguments (1 given)"
+    xor eax, eax
+    leave
+    ret
+END_FUNC sys_getallocatedblocks_func
 
 ;; ============================================================================
 ;; sys_is_finalizing_func(args, nargs) -> Value: True during teardown

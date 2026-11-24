@@ -399,7 +399,8 @@ DEF_FUNC_BARE ap_malloc
     cmp r9, [rdx + rax*8]
     ja .aml_newpool                         ; also the uninitialised case
     mov [rcx], r9
-    mov rax, r8
+    inc qword [rel ap_carved]               ; once per block, ever: see
+    mov rax, r8                             ; ap_live_blocks
     ret
 
 .aml_newpool:
@@ -433,6 +434,7 @@ DEF_FUNC_BARE ap_malloc
     call malloc wrt ..plt
     test rax, rax
     jz .aml_oom
+    inc qword [rel ap_libc_live]
     pop rbp
     ret
 .aml_oom:
@@ -468,10 +470,42 @@ DEF_FUNC_BARE ap_free
     ret
 .afr_libc:
 %endif
+    dec qword [rel ap_libc_live]
     jmp free wrt ..plt
 .afr_done:
     ret
 END_FUNC ap_free
+
+;; ============================================================================
+;; ap_live_blocks() -> rax = blocks handed out and not yet freed
+;;
+;; sys.getallocatedblocks().  What a leak test reads: run an operation in a
+;; loop and the number must not climb.  It costs the allocator's fast paths
+;; nothing -- the count is DERIVED: every pool block ever carved, less the
+;; ones sitting on a free list (walked here, which is the whole cost), plus
+;; the blocks libc is holding for us.  A block parked on a freelist above
+;; the allocator -- the int freelist, a frame region -- counts as live, which
+;; is why a test warms up before it takes its first reading.
+;; ============================================================================
+DEF_FUNC_BARE ap_live_blocks
+    mov rax, [rel ap_carved]
+    add rax, [rel ap_libc_live]
+    lea rcx, [rel ap_sc_free]
+    xor edx, edx
+.alb_class:
+    mov rsi, [rcx + rdx*8]
+.alb_walk:
+    test rsi, rsi
+    jz .alb_next
+    dec rax
+    mov rsi, [rsi]
+    jmp .alb_walk
+.alb_next:
+    inc edx
+    cmp edx, AP_NCLASSES
+    jb .alb_class
+    ret
+END_FUNC ap_live_blocks
 
 ;; ============================================================================
 ;; ap_realloc(rdi = ptr, rsi = size) -> rax = the resized block
@@ -587,3 +621,5 @@ ap_sc_bump_end:  resq AP_NCLASSES
 ;; are dense, because pools are carved in address order.
 align 64
 ap_pool_szidx:   resb AP_NPOOLS_MAX
+ap_carved:       resq 1                     ; pool blocks carved, ever
+ap_libc_live:    resq 1                     ; libc blocks out now
