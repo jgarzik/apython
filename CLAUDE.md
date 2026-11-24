@@ -391,7 +391,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   class's attributes, `type_getattr` included.  Split off when `class.asm`
   reached the 100k cap a second time.  `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
-  builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
+  builtin needs; `method.asm` is the bound method; `descriptors.asm` is
+  staticmethod, classmethod, property and the getset and member descriptors
+  as DESCRIPTORS -- the constructors, `__get__` / `__set__` / `__delete__`
+  and the type objects -- while `descr_attr.asm` is what the three wrappers
+  answer by name: property's `fget` / `fset` / `fdel` and its `getter()` /
+  `setter()` / `deleter()` copies, `__func__` and the names forwarded to it,
+  and `__isabstractmethod__`.  Split off when `descriptors.asm` reached the
+  100k cap; `str_mod.asm` is the `%`
   operator, for str and for bytes both -- the conversion is only known there,
   so the argument is converted there.  `asyncgen.asm` is the three objects an
   async generator hands out -- the asend and athrow awaitables and the box each
