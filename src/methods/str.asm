@@ -33,7 +33,8 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
-extern raise_exception
+extern set_exception
+extern set_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_IndexError_type
@@ -302,6 +303,7 @@ END_FUNC str_cp_matches
 ;; ============================================================================
 ;; str_strip_impl(rdi = args, rsi = nargs, edx = mode) -> Value
 ;; mode: bit 0 = strip the left, bit 1 = strip the right.
+;; Fails: 0
 ;; ============================================================================
 SSI_CHARS equ 8
 SSI_CLEN  equ 16
@@ -477,8 +479,15 @@ DEF_FUNC_LOCAL str_strip_impl, SSI_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     mov rsi, rsp
-    extern raise_exception
-    call raise_exception
+    call set_exception
+    add rsp, 128
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_strip_impl
 
 ;; ============================================================================
@@ -501,6 +510,7 @@ END_FUNC str_method_strip
 ;; startswith and endswith accept a tuple of candidates in Python.  Only a
 ;; single str was accepted here, so "He".startswith(("X", "He")) raised
 ;; TypeError.
+;; Fails: 0
 ;; ============================================================================
 SAD_ARGS  equ 8
 SAD_NARGS equ 16
@@ -535,8 +545,10 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     mov rsi, [rbp - SAD_ARGS]
     mov rsi, [rsi + 8]
     mov rdi, [rbp - SAD_NAME]
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .sad_have_tuple:
 
     mov [rbp - SAD_TUP], rax
@@ -570,7 +582,7 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     mov rsi, [rbp - SAD_NARGS]
     call [rbp - SAD_FN]
     add rsp, 64
-    ERR_NULL .sad_failed
+    ERR_NULL .sad_fail                  ; a candidate that is not a str
 
     V_UNPACK rax, rdx
     lea rcx, [rel bool_true]
@@ -587,10 +599,6 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     leave
     ret
 
-.sad_failed:
-    leave
-    ret
-
 .sad_true:
     RET_TRUE
     leave
@@ -601,6 +609,10 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     RET_FALSE
     leave
     V_PACK rax, rdx
+    ret
+.sad_fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC str_affix_dispatch
 
@@ -613,6 +625,8 @@ AFF_FRAME equ 64            ; + 4 pushes = 96, 16-aligned
 ; startswith keeps three callee-saved registers where endswith keeps four,
 ; so it needs one more word of frame to land on the same boundary.
 AFF_FRAME3 equ 72           ; + 3 pushes = 96, 16-aligned
+;; str_startswith_one(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME3
     push rbx
     push r12
@@ -697,8 +711,14 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME3
     mov rsi, [rbp - AFF_ARGS]
     mov rsi, [rsi + 8]
     CSTRING rdi, `tuple for startswith must only contain str, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.sw_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_startswith_one
 
 DEF_FUNC_BARE str_method_startswith
@@ -715,6 +735,7 @@ section .text
 ;; ============================================================================
 ;; str_method_endswith(args, nargs) -> bool_true/bool_false
 ;; args[0]=self, args[1]=suffix
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     push rbx
@@ -800,8 +821,15 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     mov rsi, [rbp - AFF_ARGS]
     mov rsi, [rsi + 8]
     CSTRING rdi, `tuple for endswith must only contain str, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.ew_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_endswith_one
 
 DEF_FUNC_BARE str_method_endswith
@@ -823,6 +851,7 @@ END_FUNC str_method_endswith
 ;; edx on entry is a bitmask: bit 0 = scan in reverse, bit 1 = raise
 ;; ValueError on a miss instead of returning -1.  So 0 = find, 1 = rfind,
 ;; 2 = index, 3 = rindex.
+;; Fails: 0
 ;; ============================================================================
 extern str_search_window
 extern ap_memfind
@@ -896,14 +925,19 @@ DEF_FUNC str_find_impl, FND_FRAME
     ret
 
 .find_missing:
-    RAISE exc_ValueError_type, "substring not found"
+    SET_EXC exc_ValueError_type, "substring not found"
+    xor eax, eax
+    leave
+    ret
 
 .find_type_error:
     mov rsi, [rbp - AFF_ARGS]
     mov rsi, [rsi + 8]
     CSTRING rdi, `must be str, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 END_FUNC str_find_impl
 
 DEF_FUNC_BARE str_method_find
@@ -915,6 +949,7 @@ END_FUNC str_method_find
 ;; str_method_replace(args, nargs) -> new string with replacements
 ;; args[0]=self, args[1]=old, args[2]=new
 ;; Uses callee-saved regs for key state, stack locals for buffer management.
+;; Fails: 0
 ;; ============================================================================
 RPL_BUF    equ 48           ; the growing result buffer
 RPL_ALLOC  equ 56           ; its allocated size
@@ -955,7 +990,7 @@ DEF_FUNC str_method_replace
     mov rdi, [rdi + 24]         ; args[3]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .repl_fail
     mov rdi, [rbp - RPL_ARGS]
     test rax, rax
     js .repl_count_done
@@ -1207,12 +1242,22 @@ DEF_FUNC str_method_replace
     ; argument.
     mov rsi, rax
     CSTRING rdi, `replace() argument 1 must be str, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .repl_fail
 .repl_type_error2:
     mov rsi, rax
     CSTRING rdi, `replace() argument 2 must be str, not \x01`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.repl_fail:
+    xor eax, eax
+    add rsp, RPL_LOCALS
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_replace
 
 ;; ============================================================================
@@ -1240,6 +1285,8 @@ SJ_POS   equ 64
 SJ_TMP   equ 72         ; materialised sequence, owned, or 0
 SJ_CPLEN equ 80         ; code points in the result, summed rather than rescanned
 SJ_RESULT equ 88        ; the PyStrObject being built
+;; str_method_join(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC str_method_join
     push rbx
     push r12
@@ -1455,6 +1502,7 @@ DEF_FUNC str_method_join
     ; hands back the NULL that says so.
     mov rdi, rbx
     call obj_decref             ; the separator this borrowed
+.join_fail:
     xor eax, eax
     xor edx, edx
     add rsp, 56
@@ -1469,13 +1517,14 @@ DEF_FUNC str_method_join
 .join_not_iterable:
     mov rdi, rbx
     call obj_decref             ; the separator this borrowed
-    RAISE exc_TypeError_type, "can only join an iterable"
+    SET_EXC exc_TypeError_type, "can only join an iterable"
+    jmp .join_fail
 
 .join_type_error:
     ; "sequence item 0: expected str instance, int found" -- CPython names the
     ; item AND its type, and this said neither.  The item's Value is in rax
     ; and the index on the machine stack; the tail is composed first, into a
-    ; buffer raise_type_error_counted does not use.
+    ; buffer set_type_error_counted does not use.
     pop rcx                 ; the pushed index from len_loop
     ; The item as it is STORED -- a Value -- read back through the index,
     ; because the unpacked pair is gone and the temporary tuple is about to
@@ -1488,16 +1537,13 @@ DEF_FUNC str_method_join
     ; released.  The temporary sequence holds the only one when the argument
     ; was a generator -- `"".join(C() for _ in range(1))` -- and the message
     ; names the item's TYPE, so releasing it first read ob_type out of the
-    ; block just freed.  It is not given back: this path ends in a raise that
-    ; does not return, and there is no moment between reading the type and
-    ; unwinding at which a decref would be safe.  One object on a path that
-    ; raises, as GET_AWAITABLE's own non-iterator arm says.
+    ; block just freed.  It is given back once the exception is recorded.
     mov rdi, rax
     INCREF_V rdi, rdx
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
     JOIN_RELEASE_TMP
-    pop rdi                 ; the offending item, held by the count above
+    mov rdi, [rsp]          ; the offending item, held by the count above
     extern value_type
     call value_type
     mov rsi, rax
@@ -1505,10 +1551,14 @@ DEF_FUNC str_method_join
     extern type_name_message
     call type_name_message
     mov rdx, rax
-    pop rsi                 ; the index
+    mov rsi, [rsp + 8]      ; the index
     CSTRING rdi, "sequence item "
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    pop rdi                 ; the item, and the reference taken above
+    DECREF_V rdi, rcx
+    add rsp, 8              ; the index
+    jmp .join_fail
 END_FUNC str_method_join
 
 ;; ============================================================================
@@ -1526,6 +1576,7 @@ END_FUNC str_method_join
 ;; With no separator the split is on runs of whitespace and leading and
 ;; trailing whitespace produce no empty pieces; with one, every occurrence
 ;; separates, so "a,,b".split(",") is three pieces.
+;; Fails: 0
 ;; ============================================================================
 SPI_SELF   equ 8
 SPI_SEP    equ 16        ; separator data, or 0 for whitespace
@@ -1576,7 +1627,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .spi_fail_pop
     pop rdi
     test rax, rax
     js .spi_ready                   ; a negative maxsplit means no limit
@@ -1818,13 +1869,24 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     ret
 
 .spi_empty_sep:
-    RAISE exc_ValueError_type, "empty separator"
+    SET_EXC exc_ValueError_type, "empty separator"
+    jmp .spi_fail
 
 .spi_type_error:
     mov rsi, rax
     CSTRING rdi, `must be str or None, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .spi_fail
+.spi_fail_pop:
+    add rsp, 8                  ; the argument pointer, parked across the conversion
+.spi_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ;; Append a piece (rdi = data, rsi = length) to the result list.
 ;; A piece, as a new str.  rdi = its bytes, rsi = its length.
@@ -1945,6 +2007,7 @@ END_FUNC fmtbuf_append
 ;; f-string uses.  Only {} and {N} were understood before, and anything else
 ;; made the function bail and return whatever it had accumulated -- so
 ;; "{:>6}".format("ab") was the empty string.
+;; Fails: 0
 ;; ============================================================================
 SF_STATE  equ 24            ; {buf, used, cap} as three consecutive qwords
 SF_ARGS   equ 32
@@ -2129,6 +2192,7 @@ DEF_FUNC str_method_format, SF_FRAME
     sub r8, [rbp - SF_FSTART]
     lea r9, [rbp - SF_AUTO]
     call fm_resolve_full
+    ERR_NULL .fm_fail
     mov [rbp - SF_VALUE], rax
 
     ; !r and !a render the repr; !s the str.  Anything else is left alone.
@@ -2153,6 +2217,8 @@ DEF_FUNC str_method_format, SF_FRAME
     DECREF_V rdi, rcx
     pop rax
     mov [rbp - SF_VALUE], rax
+    test rax, rax
+    jz .fm_fail                 ; the conversion raised
 .fm_no_conv:
 
     ; The spec, as a str, handed to the formatter f-strings use.
@@ -2174,6 +2240,7 @@ DEF_FUNC str_method_format, SF_FRAME
     mov rcx, [rbp - SF_KWN]
     lea r8, [rbp - SF_AUTO]
     call fm_expand_spec
+    ERR_PENDING .fm_fail_spec
     test rax, rax
     jz .fm_spec_plain
     mov rdi, [rsp]
@@ -2224,7 +2291,11 @@ DEF_FUNC str_method_format, SF_FRAME
     mov rdi, [rbp - SF_VALUE]
     DECREF_V rdi, rcx
     test r14, r14
-    jz .fm_loop
+    jnz .fm_text_ok
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .fm_fail                ; __format__ raised
+    jmp .fm_loop
+.fm_text_ok:
     lea rdi, [rbp - SF_STATE]
     lea rsi, [r14 + PyStrObject.data]
     mov rdx, [r14 + PyStrObject.ob_size]
@@ -2234,10 +2305,29 @@ DEF_FUNC str_method_format, SF_FRAME
     jmp .fm_loop
 
 .fm_lone_brace:
-    RAISE exc_ValueError_type, "Single '}' encountered in format string"
+    SET_EXC exc_ValueError_type, "Single '}' encountered in format string"
+    jmp .fm_fail
 
 .fm_unterminated:
-    RAISE exc_ValueError_type, "Single '{' encountered in format string"
+    SET_EXC exc_ValueError_type, "Single '{' encountered in format string"
+    jmp .fm_fail
+
+.fm_fail_spec:
+    pop rdi                     ; the spec str
+    call obj_decref
+    mov rdi, [rbp - SF_VALUE]
+    DECREF_V rdi, rcx
+.fm_fail:
+    mov rdi, [rbp - SF_STATE]   ; the output buffer
+    call ap_free
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .fm_done:
     mov rdi, [rbp - SF_STATE]
@@ -2264,6 +2354,7 @@ END_FUNC str_method_format
 ;;   -> rax = the argument the field names, a new reference
 ;; Empty means the next positional, all digits an explicit one, anything else
 ;; a keyword.
+;; Fails: 0
 ;; ============================================================================
 RF_ARGS  equ 8
 RF_NPOS  equ 16
@@ -2353,9 +2444,16 @@ DEF_FUNC_LOCAL fm_resolve_field, RF_FRAME
     ret
 
 .rf_index_error:
-    RAISE exc_IndexError_type, "Replacement index out of range for positional args tuple"
+    SET_EXC exc_IndexError_type, "Replacement index out of range for positional args tuple"
+    jmp .rf_fail
 .rf_key_error:
-    RAISE exc_KeyError_type, "format() got no such keyword argument"
+    SET_EXC exc_KeyError_type, "format() got no such keyword argument"
+.rf_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC fm_resolve_field
 
 ;; ============================================================================
@@ -2368,6 +2466,7 @@ END_FUNC fm_resolve_field
 ;; text as one name and raised KeyError for any of them; the scanner above
 ;; already counts bracket depth so that a ':' inside [] is not a spec, so the
 ;; text arrived here intact and unread.
+;; Fails: 0
 ;; ============================================================================
 FRF_ARGS  equ 8
 FRF_NPOS  equ 16
@@ -2412,13 +2511,15 @@ DEF_FUNC_LOCAL fm_resolve_full, FRF_FRAME
     mov rcx, [rbp - FRF_NAME]
     mov r9, [rbp - FRF_AUTO]
     call fm_resolve_field
+    ERR_NULL .frf_out
 
     ; The suffixes, if any, are the same walk format_map needs.
     mov rdi, rax
     mov rsi, [rbp - FRF_NAME]
     mov rdx, [rbp - FRF_LEN]
     mov rcx, [rbp - FRF_POS]
-    call fm_apply_suffix
+    call fm_apply_suffix        ; err: its 0 is this function's own
+.frf_out:
     pop r12
     pop rbx
     leave
@@ -2432,6 +2533,7 @@ END_FUNC fm_resolve_full
 ;;
 ;; ".name" and "[key]", repeated: "{0.a[1].b}".  Shared by format() and
 ;; format_map(), which parse the field id differently and the suffix the same.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
     push rbx
@@ -2562,11 +2664,21 @@ DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
     ret
 
 .frf_no_attr:
-    RAISE exc_AttributeError_type, "no such attribute in a format field"
+    SET_EXC exc_AttributeError_type, "no such attribute in a format field"
+    jmp .frf_fail
 .frf_not_subscriptable:
-    RAISE exc_TypeError_type, "object is not subscriptable"
+    SET_EXC exc_TypeError_type, "object is not subscriptable"
+    jmp .frf_fail
 .frf_bad_item:
-    RAISE exc_KeyError_type, "no such item in a format field"
+    SET_EXC exc_KeyError_type, "no such item in a format field"
+.frf_fail:
+    DECREF_V rbx, rcx           ; the object so far, which this owned
+.frf_fail_out:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC fm_apply_suffix
 
 ;; ============================================================================
@@ -2603,6 +2715,7 @@ END_FUNC fm_subscript
 ;;
 ;; "{:{}}" and "{:>{width}}": the spec is itself a format string, formatted
 ;; with the same arguments one level down.
+;; Fails: 0?
 ;; ============================================================================
 FES_SPEC  equ 8
 FES_ARGS  equ 16
@@ -2681,13 +2794,15 @@ DEF_FUNC_LOCAL fm_expand_spec, FES_FRAME
     sub r8, [rbp - FES_START]
     mov r9, [rbp - FES_AUTO]
     call fm_resolve_full
+    ERR_NULL .fes_fail
     push rax
     mov rdi, rax
     call obj_str
     mov r12, rax
     pop rdi
     DECREF_V rdi, rcx
-    mov r12, r12
+    test r12, r12
+    jz .fes_fail                ; str() of the field raised
     lea rdi, [rbp - FES_STATE]
     lea rsi, [r12 + PyStrObject.data]
     mov rdx, [r12 + PyStrObject.ob_size]
@@ -2716,7 +2831,18 @@ DEF_FUNC_LOCAL fm_expand_spec, FES_FRAME
     ret
 
 .fes_unterminated:
-    RAISE exc_ValueError_type, "unmatched '{' in format spec"
+    SET_EXC exc_ValueError_type, "unmatched '{' in format spec"
+.fes_fail:
+    mov rdi, [rbp - FES_STATE]
+    test rdi, rdi
+    jz .fes_fail_out
+    call ap_free
+.fes_fail_out:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC fm_expand_spec
 
 ;; fm_name_equals(rdi = NUL-terminated name, rsi = bytes, rdx = length) -> eax
@@ -2829,6 +2955,7 @@ END_FUNC fm_lookup
 ;; str_method_format_map(rdi = args, rsi = nargs) -> rax = a formatted str
 ;; args[0] = self (the format string), args[1] = the mapping.
 ;; Replaces {key} with mapping[key].
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_method_format_map, FM_FRAME
     push rbx
@@ -2912,20 +3039,32 @@ DEF_FUNC str_method_format_map, FM_FRAME
 .fmap_base_done:
     ret
 
-.fmap_key_error:
-    RAISE exc_KeyError_type, "format_map() got no such key"
-
 .fmap_lookup_failed:
+    pop rdi                     ; the key str, which nothing else releases
+    call obj_decref
     ; A dict miss answers a NULL Value with nothing pending, and the KeyError
     ; is ours to raise.  A mapping of its own has already raised -- the
     ; IndexError a match object gives for an unknown group, say -- and that
     ; exception is the answer.
     cmp qword [gs:ThreadState.current_exception], 0
-    je .fmap_key_error
-    ; Reached with the two source-position pushes of .fmap_have_key still on
-    ; the stack, so the pops below would have handed the caller its callee-
-    ; saved registers shifted by two -- r12 among them, which op_call then
-    ; wrote through on its way to the unwinder.  Cut back to the five pushes.
+    jne .fmap_fail
+    SET_EXC exc_KeyError_type, "format_map() got no such key"
+    jmp .fmap_fail
+
+.fmap_fail_value:
+    ; The chain or its str() raised.  fm_apply_suffix released the reference
+    ; it was given; what the lookup handed over is still ours when it was
+    ; owned.
+    lea rsp, [rbp - FM_FRAME - 40]
+    cmp qword [rbp - FM_OWNED], 0
+    je .fmap_fail
+    mov rdi, [rbp - FM_VALUE]
+    DECREF_V rdi, rcx
+.fmap_fail:
+    ; Reached with the source-position pushes of .fmap_have_key still on the
+    ; stack, so the pops below would have handed the caller its callee-saved
+    ; registers shifted -- r12 among them, which op_call then wrote through
+    ; on its way to the unwinder.  Cut back to the five pushes.
     lea rsp, [rbp - FM_FRAME - 40]
     mov rdi, [rbp - FM_BUF]
     call ap_free
@@ -2996,6 +3135,7 @@ DEF_FUNC str_method_format_map, FM_FRAME
     push rax
     call fm_apply_suffix
     pop rcx
+    ERR_NULL .fmap_fail_value
     push rax
     mov rdi, rax
     call obj_str
@@ -3007,6 +3147,8 @@ DEF_FUNC str_method_format_map, FM_FRAME
 .fmap_no_suffix:
     call obj_str
 .fmap_have_text:
+    test rax, rax
+    jz .fmap_fail_value         ; str() of the value raised
     ; rax = result payload, edx = tag
     push rax                    ; save str obj for DECREF
 
@@ -3104,7 +3246,16 @@ DEF_FUNC str_method_format_map, FM_FRAME
     ret
 
 .fmap_error:
-    RAISE exc_TypeError_type, "format_map() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "format_map() takes exactly one argument"
+.fmap_fail_out:
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_format_map
 
 ;; ============================================================================

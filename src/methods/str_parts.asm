@@ -1190,7 +1190,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov [rsp + 8], rax
     mov rdi, rsp
     mov esi, 2
-    call str_method_join
+    call str_method_join        ; err: its 0 is translate's own, after the releases
     add rsp, 16
     mov r12, rax
     mov rdi, rbx

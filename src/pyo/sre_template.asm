@@ -989,6 +989,7 @@ DEF_FUNC sre_template_expand, TE_FRAME
     cmp qword [rbp - TE_ISBYTES], 0
     jne .te_join_bytes
     call str_method_join
+    ERR_NULL_JUMP
     jmp .te_joined
 .te_join_bytes:
     extern bytes_method_join
