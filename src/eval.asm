@@ -1011,11 +1011,14 @@ END_FUNC exc_install
 ;; that tried leaked.  A helper whose contract already says "0 (or -1) with an
 ;; exception pending" uses this instead and returns normally, leaving the
 ;; unwinding to the interpreter frame that called it.
+;;
+;; -> rax = 0, always: the value most callers are about to return.
 ;; ============================================================================
 DEF_FUNC set_exception
     call exc_from_cstr
     mov rdi, rax
     call exc_install
+    xor eax, eax                ; so `SET_EXC ... / leave / ret` IS "Fails: 0"
     leave
     ret
 END_FUNC set_exception

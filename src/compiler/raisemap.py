@@ -30,12 +30,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SEEDS = frozenset(('raise_exception', 'raise_exception_obj',
                    'eval_exception_unwind'))
 
-# Macros that expand to a jump-style raise.  ERR_NULL_JUMP / ERR_M1_JUMP are
-# the TRANSITIONAL propagation: "my callee returned an error and I cannot
-# return one yet".  They count, so converting the caller is what clears them.
+# Macros that expand to a jump-style raise.
 RAISE_MACROS = ('RAISE', 'NO_KEYWORDS', 'NO_KEYWORDS_TP_INIT',
-                'POSIX_PATH_CHECK', 'ERR_NULL_JUMP', 'ERR_M1_JUMP',
-                'ERR_PENDING_JUMP')
+                'POSIX_PATH_CHECK')
+# The transitional propagation: counted apart from the raises themselves,
+# because converting ONE callee adds one of these at each caller that cannot
+# return an error yet.  Both numbers end at zero outside the handlers.
+JUMP_RE = re.compile(r'^\s*ERR_(?:NULL|M1|PENDING)_JUMP\b')
 MACRO_RE = re.compile(r'^\s*(%s)\b' % '|'.join(RAISE_MACROS))
 BRANCH_RE = re.compile(r'^\s*(call|jmp|j[a-z]{1,3})\s+([A-Za-z_][\w.]*)\s*$')
 DEF_RE = re.compile(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+(\w+)')
@@ -207,7 +208,8 @@ def classify(funcs, byfile):
                 f.sites.append((n, '%s %s' % (m.group(1), m.group(2))))
 
     # May-jump: has a site of its own, or calls something that does.
-    may = set(f.name for f in every if f.sites) | noret
+    may = set(f.name for f in every
+              if f.sites or any(JUMP_RE.match(c) for _, c in f.body)) | noret
     changed = True
     while changed:
         changed = False
@@ -222,6 +224,12 @@ def classify(funcs, byfile):
 
 def file_counts(byfile):
     return {p: sum(len(f.sites) for f in fs) for p, fs in byfile.items()}
+
+
+def jump_counts(byfile):
+    """ERR_*_JUMP per file: callers still waiting to return an error."""
+    return {p: sum(1 for f in fs for _, c in f.body if JUMP_RE.match(c))
+            for p, fs in byfile.items()}
 
 
 def load():
@@ -300,6 +308,9 @@ def main(argv):
     for p, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         if n:
             print("%5d  %s" % (n, p))
+    jumps = sum(n for p, n in jump_counts(byfile).items()
+                if not is_handler_file(p))
+    print("%d transitional ERR_*_JUMP outside the handlers" % jumps)
     print("\n%d site(s): %d in the handlers, %d elsewhere; %d never-returning"
           " raiser(s); %d of %d functions can reach one"
           % (hand + rest, hand, rest, len(noret) - len(SEEDS),
