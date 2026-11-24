@@ -161,6 +161,11 @@ for name, body in (
 sys.path.insert(0, MODDIR)
 sys.dont_write_bytecode = True
 
+class DocProp(property):
+    def __setattr__(self, name, value):
+        boom("setattr " + name)
+
+
 HASH = Hash()
 HASHCALL = HashCall()
 
@@ -321,6 +326,8 @@ check("reversed(1)", lambda: reversed(1))
 check("reversed(Rev)", lambda: reversed(Rev()))
 check("reversed(Len-only seq)", lambda: reversed(LenSeq()))
 check("reversed()", lambda: reversed(), message=False)
+check("list.extend(Iter)", lambda: [].extend(Iter()))
+check("property subclass, doc store", lambda: DocProp(None, None, None, "doc"))
 check("sorted(Iter)", lambda: sorted(Iter()))
 check("sorted(1)", lambda: sorted(1))
 check("sorted(Next)", lambda: sorted(Next()))

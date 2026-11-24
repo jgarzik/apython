@@ -235,7 +235,7 @@ DEF_FUNC property_method_init, PMI_FRAME
     mov rdx, r13                            ; the doc, a Value
     call rax
     movsxd rax, eax
-    ERR_M1_JUMP
+    ERR_M1 .pmi_store_failed
 .pmi_done:
 
     mov rdi, r12                            ; the throwaway, now emptied
@@ -247,6 +247,10 @@ DEF_FUNC property_method_init, PMI_FRAME
     leave
     V_PACK rax, rdx
     ret
+.pmi_store_failed:                          ; a subclass's __setattr__ raised
+    mov rdi, r12                            ; the throwaway goes all the same
+    call obj_decref
+    jmp .pmi_fail
 .pmi_bad:
     SET_EXC exc_TypeError_type, "property.__init__() needs an instance"
 .pmi_fail:

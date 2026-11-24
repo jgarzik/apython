@@ -1367,7 +1367,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .extend_iter_raised     ; __iter__ raised; nothing is held yet
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_ITER], rax
