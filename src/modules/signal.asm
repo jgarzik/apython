@@ -25,7 +25,6 @@
 
 ASM_INIT
 
-extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern module_new
@@ -40,8 +39,8 @@ extern obj_as_index
 extern builtin_func_new
 extern none_singleton
 extern obj_call_n
-extern raise_exception
-extern raise_oserror
+extern set_exception
+extern set_oserror
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_KeyboardInterrupt_type
@@ -254,7 +253,8 @@ DEF_FUNC signal_run_pending, SRP_FRAME
 END_FUNC signal_run_pending
 
 ;; ============================================================================
-;; signal_arg(rdi = a Value) -> rax = the signal number, or raises
+;; signal_arg(rdi = a Value) -> rax = the signal number
+;; Fails: 0
 ;;
 ;; Every entry point takes one, and every one of them has to refuse a number
 ;; outside 1..NSIG-1 rather than index the tables with it.
@@ -265,7 +265,7 @@ DEF_FUNC_LOCAL signal_arg
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .sa_fail
     test rax, rax
     js .sa_range
     cmp rax, SIG_NSIG
@@ -275,7 +275,11 @@ DEF_FUNC_LOCAL signal_arg
     leave
     ret
 .sa_range:
-    RAISE exc_ValueError_type, "signal number out of range"
+    SET_EXC exc_ValueError_type, "signal number out of range"
+.sa_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC signal_arg
 
 ;; ============================================================================
@@ -283,6 +287,7 @@ END_FUNC signal_arg
 ;;
 ;; signal(signum, handler).  `handler` is SIG_DFL (0), SIG_IGN (1) or a
 ;; callable; anything else is a TypeError, as CPython has it.
+;; Fails: 0
 ;; ============================================================================
 SS_NUM   equ 8
 SS_OLD   equ 16
@@ -295,6 +300,7 @@ DEF_FUNC signal_method_signal, 24           ; + 1 push = 32, 16-aligned
     mov rbx, rdi
     mov rdi, [rbx]
     call signal_arg
+    ERR_NULL .ss_fail
     mov [rbp - SS_NUM], rax
 
     ; What was there before, so it can be handed back.
@@ -383,13 +389,18 @@ DEF_FUNC signal_method_signal, 24           ; + 1 push = 32, 16-aligned
     DECREF_V rax, rcx
     mov edi, 22                             ; EINVAL
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+.ss_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 .ss_typeerr:
     mov rax, [rbp - SS_OLD]
     DECREF_V rax, rcx
-    RAISE exc_TypeError_type, "signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object"
+    FAIL exc_TypeError_type, "signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object", .ss_fail
 .ss_argerr:
-    RAISE exc_TypeError_type, "signal() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "signal() takes exactly 2 arguments", .ss_fail
 END_FUNC signal_method_signal
 
 ;; ============================================================================
@@ -399,6 +410,7 @@ END_FUNC signal_method_signal
 ;; answers None for a handler installed outside Python; this cannot tell that
 ;; apart from SIG_DFL and says SIG_DFL, which is what it was before anything
 ;; touched it.
+;; Fails: 0
 ;; ============================================================================
 global signal_method_getsignal
 DEF_FUNC signal_method_getsignal, 16
@@ -406,6 +418,7 @@ DEF_FUNC signal_method_getsignal, 16
     jne .sg_argerr
     mov rdi, [rdi]
     call signal_arg
+    ERR_NULL .sg_fail
     lea rcx, [rel signal_handlers]
     mov rax, [rcx + rax*8]
     test rax, rax
@@ -420,21 +433,29 @@ DEF_FUNC signal_method_getsignal, 16
     V_PACK rax, rdx
     ret
 .sg_argerr:
-    RAISE exc_TypeError_type, "getsignal() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "getsignal() takes exactly 1 argument"
+.sg_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC signal_method_getsignal
 
 ;; ============================================================================
-;; signal_method_default_int_handler(args, nargs) -> never returns normally
-;; The handler SIGINT starts with: it raises KeyboardInterrupt.
+;; signal_method_default_int_handler(args, nargs) -> rax = 0, always
+;; Fails: 0
+;; The handler SIGINT starts with: KeyboardInterrupt, pending.
 ;; ============================================================================
 global signal_method_default_int_handler
 DEF_FUNC signal_method_default_int_handler
-    RAISE exc_KeyboardInterrupt_type, ""
+    SET_EXC exc_KeyboardInterrupt_type, ""
+    leave
+    ret
 END_FUNC signal_method_default_int_handler
 
 ;; ============================================================================
 ;; signal_method_raise_signal(args, nargs) -> None
 ;; raise_signal(signum): send the signal to this process.
+;; Fails: 0
 ;; ============================================================================
 global signal_method_raise_signal
 DEF_FUNC signal_method_raise_signal, 16
@@ -442,6 +463,7 @@ DEF_FUNC signal_method_raise_signal, 16
     jne .sr_argerr
     mov rdi, [rdi]
     call signal_arg
+    ERR_NULL .sr_fail
     push rax
     extern sys_getpid
     call sys_getpid
@@ -461,13 +483,19 @@ DEF_FUNC signal_method_raise_signal, 16
     neg rax
     mov rdi, rax
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .sr_fail
 .sr_argerr:
-    RAISE exc_TypeError_type, "raise_signal() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "raise_signal() takes exactly 1 argument"
+.sr_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC signal_method_raise_signal
 
 ;; ============================================================================
 ;; signal_method_alarm(args, nargs) -> the seconds left on the previous alarm
+;; Fails: 0
 ;; ============================================================================
 global signal_method_alarm
 DEF_FUNC signal_method_alarm, 16
@@ -486,7 +514,9 @@ DEF_FUNC signal_method_alarm, 16
     V_PACK rax, rdx
     ret
 .sal_argerr:
-    RAISE exc_TypeError_type, "alarm() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "alarm() takes exactly 1 argument"
+    leave
+    ret
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -511,6 +541,7 @@ END_FUNC signal_method_pause
 
 ;; ============================================================================
 ;; signal_method_strsignal(args, nargs) -> the platform's description, or None
+;; Fails: 0
 ;; ============================================================================
 global signal_method_strsignal
 DEF_FUNC signal_method_strsignal, 16
@@ -542,7 +573,9 @@ DEF_FUNC signal_method_strsignal, 16
     V_PACK rax, rdx
     ret
 .sts_argerr:
-    RAISE exc_TypeError_type, "strsignal() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "strsignal() takes exactly 1 argument"
+    leave
+    ret
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -662,7 +695,8 @@ END_FUNC signal_module_create
 
 ;; ============================================================================
 ;; sig_seconds_to_timeval(rdi = a Value in seconds, rsi = where the timeval
-;;                        goes) -> void, or raises
+;;                        goes) -> rax = 0
+;; Fails: -1
 ;;
 ;; The whole seconds and the microseconds, as setitimer wants them.  A
 ;; negative or non-numeric value is CPython's ValueError/TypeError.
@@ -699,16 +733,22 @@ DEF_FUNC_LOCAL sig_seconds_to_timeval, STV_FRAME
     mulsd xmm0, [rel sig_1e6]
     cvttsd2si rax, xmm0
     mov [rcx + 8], rax          ; tv_usec
+    xor eax, eax
     leave
     ret
 .stv_type:
     ; CPython's wording, from the same conversion an index goes through.
     mov rsi, [rbp - STV_ARG]
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .stv_fail
 .stv_value:
-    RAISE exc_ValueError_type, "Invalid value NaN (not a number)"
+    SET_EXC exc_ValueError_type, "Invalid value NaN (not a number)"
+.stv_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC sig_seconds_to_timeval
 
 ;; ============================================================================
@@ -771,6 +811,7 @@ END_FUNC sig_timeval_seconds
 ;; signal.alarm takes whole seconds and nothing else, so a test that wants a
 ;; sub-second alarm -- which is most of the ones that test signal delivery at
 ;; all -- had nothing to reach for.
+;; Fails: 0
 ;; ============================================================================
 SSI_NEW   equ 32            ; struct itimerval: interval, then value
 SSI_OLD   equ 64
@@ -794,6 +835,7 @@ DEF_FUNC signal_method_setitimer, SSI_FRAME
     mov rdi, [rdi + 16]
     lea rsi, [rbp - SSI_NEW]
     call sig_seconds_to_timeval
+    ERR_M1 .ssi_fail
 .ssi_have_interval:
 
     ; it_value, args[1]
@@ -801,12 +843,13 @@ DEF_FUNC signal_method_setitimer, SSI_FRAME
     mov rdi, [rdi + 8]
     lea rsi, [rbp - SSI_NEW + 16]
     call sig_seconds_to_timeval
+    ERR_M1 .ssi_fail
 
     mov rdi, [rsp]
     mov rdi, [rdi]              ; which
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .ssi_fail
     mov rdi, rax
     add rsp, 16
 
@@ -827,24 +870,31 @@ DEF_FUNC signal_method_setitimer, SSI_FRAME
 .ssi_oserror:
     neg rax
     mov rdi, rax
-    xor esi, esi                ; no filename: raise_oserror reads one
-    call raise_oserror
+    xor esi, esi                ; no filename: set_oserror reads one
+    call set_oserror
+.ssi_fail:
+    xor eax, eax                ; leave drops the two parked arguments
+    leave
+    ret
 .ssi_argerr:
     ; CPython's two, which name the bound that was missed and the count.
     cmp rsi, 2
     jge .ssi_too_many
-    extern raise_type_error_counted
+    extern set_type_error_counted
     CSTRING rdi, "setitimer expected at least 2 arguments, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .ssi_fail
 .ssi_too_many:
     CSTRING rdi, "setitimer expected at most 3 arguments, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .ssi_fail
 END_FUNC signal_method_setitimer
 
 ;; ============================================================================
 ;; signal_method_getitimer(args, nargs) -> (delay, interval) for one timer
+;; Fails: 0
 ;; ============================================================================
 SGI_CUR   equ 32
 SGI_FRAME equ 48            ; + 0 pushes = 48
@@ -871,13 +921,13 @@ DEF_FUNC signal_method_getitimer, SGI_FRAME
 .sgi_oserror:
     neg rax
     mov rdi, rax
-    xor esi, esi                ; no filename: raise_oserror reads one
-    call raise_oserror
+    xor esi, esi                ; no filename: set_oserror reads one
+    call set_oserror
+    jmp .idx_fail
 .sgi_argerr:
-    extern raise_type_error_counted
     CSTRING rdi, "_signal.getitimer() takes exactly one argument ("
     CSTRING rdx, " given)"
-    jmp raise_type_error_counted
+    call set_type_error_counted
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
