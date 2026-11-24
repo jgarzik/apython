@@ -45,6 +45,36 @@ def err(label, fn, *args, **kw):
     print(label, "steady" if climbed < 50 else "CLIMBED")
 
 
+def core(label, modname, fnname, *args):
+    """The same for a function of one of OUR private core modules, which
+    CPython does not have: there the two lines are printed without a call,
+    so the output still compares."""
+    try:
+        mod = __import__(modname)
+    except ImportError:
+        print(label, "-> refused")
+        print(label, "steady")
+        return
+    fn = getattr(mod, fnname)
+    try:
+        fn(*args)
+        print(label, "-> no error")
+    except Exception:
+        print(label, "-> refused")
+    climbed = None
+    for _round in range(3):
+        before = sys.getallocatedblocks()
+        for _ in range(200):
+            try:
+                fn(*args)
+            except Exception:
+                pass
+        grew = sys.getallocatedblocks() - before
+        if climbed is None or grew < climbed:
+            climbed = grew
+    print(label, "steady" if climbed < 50 else "CLIMBED")
+
+
 class RaisesFloat:
     def __float__(self):
         raise ValueError("from __float__")
@@ -111,3 +141,31 @@ err("cmath.isclose(negative tol)", cmath.isclose, 1, 1, rel_tol=-1.0, _msg=True)
 err("cmath.isclose(str tol)", cmath.isclose, 1, 1, abs_tol="x")
 err("cmath.isclose(__complex__ raises)", cmath.isclose, RaisesComplex(), 1, _msg=True)
 err("cmath.isclose(bad keyword)", cmath.isclose, 1, 1, tol=1)
+
+# --- ssl -----------------------------------------------------------------
+import ssl
+
+print("== ssl")
+core("_sslcore.free()", "_sslcore", "free")
+core("_sslcore.free(str)", "_sslcore", "free", "x")
+core("_sslcore.set_password(int)", "_sslcore", "set_password", 1)
+core("_sslcore.set_password(long)", "_sslcore", "set_password", b"x" * 2000)
+core("_sslcore.set_alpn_server(1 arg)", "_sslcore", "set_alpn_server", 1)
+core("_sslcore.set_alpn_server(dead handle)", "_sslcore", "set_alpn_server", 99999, b"a")
+core("_sslcore.set_alpn_server(str handle)", "_sslcore", "set_alpn_server", "x", b"a")
+core("_sslcore.set_alpn_server(int list)", "_sslcore", "set_alpn_server", 1, 2)
+core("_sslcore.BIO_read()", "_sslcore", "BIO_read")
+core("_sslcore.BIO_read(dead handle)", "_sslcore", "BIO_read", 99999, 10)
+core("_sslcore.BIO_read(str handle)", "_sslcore", "BIO_read", "x", 10)
+core("_sslcore.BIO_read(negative)", "_sslcore", "BIO_read", 99999, -5)
+core("_sslcore.BIO_write(int data)", "_sslcore", "BIO_write", 99999, 5)
+core("_sslcore.OBJ_txt2nid(int)", "_sslcore", "OBJ_txt2nid", 5)
+core("_sslcore.SSL_CTX_new(bad method)", "_sslcore", "SSL_CTX_new", 9999)
+core("_sslcore.SSL_CTX_new(str)", "_sslcore", "SSL_CTX_new", "x")
+
+_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+err("ctx.set_ciphers(bogus)", _ctx.set_ciphers, "no-such-cipher")
+err("ctx.load_cert_chain(missing)", _ctx.load_cert_chain, "/nonexistent/cert.pem")
+err("ctx.load_verify_locations()", _ctx.load_verify_locations)
+err("ctx.set_alpn_protocols(long)", _ctx.set_alpn_protocols, ["x" * 300])
+err("MemoryBIO.write(str)", ssl.MemoryBIO().write, "text")

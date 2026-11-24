@@ -80,7 +80,7 @@ extern ap_memcpy
 extern ap_memset
 extern ap_strlen
 extern obj_as_index
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_MemoryError_type
@@ -269,24 +269,26 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
 END_FUNC ssl_handle_alloc
 
 ;; ============================================================================
-;; ssl_val_int(rdi = a Value) -> rax = int64; raises TypeError for a non-index
+;; ssl_val_int(rdi = a Value) -> rax = int64; TypeError for a non-index
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE ssl_val_int
     V_UNPACK rdi, rdx
     sub rsp, 8                  ; a call, so the refusal can be seen
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and its exception are this one's
     add rsp, 8
-    ERR_M1_JUMP
     ret
 END_FUNC ssl_val_int
 
 ;; ============================================================================
-;; ssl_val_handle(rdi = a Value) -> rax = SslHandle*; raises ValueError for an
+;; ssl_val_handle(rdi = a Value) -> rax = SslHandle*; ValueError for an
 ;;   index that is not a live handle
+;; Fails: 0
 ;; ============================================================================
 VH_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL ssl_val_handle, VH_FRAME
     call ssl_val_int
+    ERR_M1 .vh_fail
     mov rdi, rax
     call ssl_handle_at
     test rax, rax
@@ -294,7 +296,11 @@ DEF_FUNC_LOCAL ssl_val_handle, VH_FRAME
     leave
     ret
 .vh_bad:
-    RAISE exc_ValueError_type, "_sslcore: invalid handle"
+    SET_EXC exc_ValueError_type, "_sslcore: invalid handle"
+.vh_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC ssl_val_handle
 
 ;; ============================================================================
@@ -341,12 +347,13 @@ END_FUNC ssl_val_data
 
 ;; ============================================================================
 ;; ssl_call(rdi = args, rsi = nargs, rax = the SslFn row) -> rax = a Value
+;; Fails: 0
 ;;
 ;; The engine every row's builtin jumps to.  Converts each argument the row's
 ;; letters name, calls the C function with errno cleared, records errno, and
-;; converts the result.  Every conversion that can raise runs BEFORE anything
-;; is allocated, so a TypeError leaves nothing behind; the one allocation, the
-;; 'o' buffer, is freed on the way out.
+;; converts the result.  Every conversion that can fail runs BEFORE anything
+;; is allocated, so a TypeError has nothing to release; the one allocation,
+;; the 'o' buffer, is freed on the way out.
 ;; ============================================================================
 SC_DESC  equ 8
 SC_NARGS equ 16
@@ -440,7 +447,7 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     je .sc_m
     cmp al, 'F'
     je .sc_f
-    RAISE exc_TypeError_type, "_sslcore: bad argument letter"
+    FAIL exc_TypeError_type, "_sslcore: bad argument letter", .sc_fail
 
 .sc_q:
     lea rax, [rbp - SC_SQ]
@@ -450,23 +457,28 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     jmp .sc_put
 .sc_i:
     call ssl_val_int
+    ERR_M1 .sc_fail
     jmp .sc_put
 .sc_h:
     call ssl_val_handle
+    ERR_NULL .sc_fail
     mov rax, [rax + SslHandle.ptr]
     jmp .sc_put
 .sc_p:
     call ssl_val_handle
+    ERR_NULL .sc_fail
     mov rdi, [rax + SslHandle.ptr]
     call SSL_CTX_get0_param wrt ..plt
     jmp .sc_put
 .sc_r_param:
     call ssl_val_handle
+    ERR_NULL .sc_fail
     mov rdi, [rax + SslHandle.ptr]
     call SSL_get0_param wrt ..plt
     jmp .sc_put
 .sc_t:
     call ssl_val_handle
+    ERR_NULL .sc_fail
     mov rdi, [rax + SslHandle.ptr]
     call SSL_CTX_get_cert_store wrt ..plt
     jmp .sc_put
@@ -502,6 +514,7 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     jmp .sc_put
 .sc_o:
     call ssl_val_int
+    ERR_M1 .sc_fail
     test rax, rax
     js .sc_neg
     mov [rbp - SC_OLEN], rax
@@ -510,6 +523,7 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     jmp .sc_put
 .sc_m:
     call ssl_val_int
+    ERR_M1 .sc_fail
     cmp rax, SSL_N_METHODS
     jae .sc_bad_index
     lea rcx, [rel ssl_methods]
@@ -517,6 +531,7 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     jmp .sc_put
 .sc_f:
     call ssl_val_int
+    ERR_M1 .sc_fail
     cmp rax, -1
     je .sc_put_zero
     cmp rax, SSL_N_CALLBACKS
@@ -766,15 +781,25 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     jz .sc_nomem
     call ap_free
 .sc_nomem:
-    RAISE exc_MemoryError_type, "_sslcore: out of memory"
+    FAIL exc_MemoryError_type, "_sslcore: out of memory", .sc_fail
 .sc_nargs:
-    RAISE exc_TypeError_type, "_sslcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_sslcore: wrong number of arguments", .sc_fail
 .sc_type:
-    RAISE exc_TypeError_type, "_sslcore: a str or bytes-like object is required"
+    FAIL exc_TypeError_type, "_sslcore: a str or bytes-like object is required", .sc_fail
 .sc_neg:
-    RAISE exc_ValueError_type, "_sslcore: negative buffer size"
+    FAIL exc_ValueError_type, "_sslcore: negative buffer size", .sc_fail
 .sc_bad_index:
-    RAISE exc_ValueError_type, "_sslcore: index out of range"
+    SET_EXC exc_ValueError_type, "_sslcore: index out of range"
+.sc_fail:
+    ; Nothing is held here: the buffer does not exist until every argument
+    ; has converted, and .sc_nomem_after has already freed it.
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC ssl_call
 
 ;; ============================================================================
@@ -807,6 +832,7 @@ DEF_FUNC ssl_free, SF_FRAME
     jne .sf_nargs
     mov rdi, [rdi]
     call ssl_val_int
+    ERR_M1 .sf_fail
     mov rdi, rax
     call ssl_handle_at
     test rax, rax
@@ -836,7 +862,11 @@ DEF_FUNC ssl_free, SF_FRAME
     leave
     ret
 .sf_nargs:
-    RAISE exc_TypeError_type, "_sslcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_sslcore: wrong number of arguments"
+.sf_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC ssl_free
 
 ;; ============================================================================
@@ -878,11 +908,15 @@ DEF_FUNC ssl_set_password, SP_FRAME
     leave
     ret
 .sp_nargs:
-    RAISE exc_TypeError_type, "_sslcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_sslcore: wrong number of arguments", .sp_fail
 .sp_type:
-    RAISE exc_TypeError_type, "password should be a string or bytes"
+    FAIL exc_TypeError_type, "password should be a string or bytes", .sp_fail
 .sp_long:
-    RAISE exc_ValueError_type, "password cannot be longer than 1023 bytes"
+    SET_EXC exc_ValueError_type, "password cannot be longer than 1023 bytes"
+.sp_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC ssl_set_password
 
 ;; ============================================================================
@@ -945,6 +979,7 @@ DEF_FUNC ssl_set_alpn_server, SL_FRAME
     mov [rbp - SL_LEN], rdx
     mov rdi, [rdi]
     call ssl_val_handle
+    ERR_NULL .sl_fail
     mov [rbp - SL_H], rax
 
     mov rdi, [rbp - SL_LEN]
@@ -976,11 +1011,15 @@ DEF_FUNC ssl_set_alpn_server, SL_FRAME
     leave
     ret
 .sl_nargs:
-    RAISE exc_TypeError_type, "_sslcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_sslcore: wrong number of arguments", .sl_fail
 .sl_type:
-    RAISE exc_TypeError_type, "_sslcore: a bytes-like object is required"
+    FAIL exc_TypeError_type, "_sslcore: a bytes-like object is required", .sl_fail
 .sl_nomem:
-    RAISE exc_MemoryError_type, "_sslcore: out of memory"
+    SET_EXC exc_MemoryError_type, "_sslcore: out of memory"
+.sl_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC ssl_set_alpn_server
 
 ;; ============================================================================
