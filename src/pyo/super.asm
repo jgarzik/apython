@@ -250,6 +250,7 @@ DEF_FUNC super_check, SC_FRAME
     mov rdi, [rbp - SC_OBJ]
     extern obj_declared_class
     call obj_declared_class
+    ERR_PENDING .sc_fail
     test rax, rax
     jz .sc_bad
     mov [rbp - SC_DECL], rax
@@ -269,6 +270,7 @@ DEF_FUNC super_check, SC_FRAME
 
 .sc_bad:
     SET_EXC exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
+.sc_fail:
     xor eax, eax
     xor edx, edx
     leave

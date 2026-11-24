@@ -557,7 +557,7 @@ DEF_FUNC_LOCAL abc_call_issubclass, 24
     extern builtin_issubclass
     mov rdi, rsp
     mov esi, 2
-    call builtin_issubclass
+    call builtin_issubclass     ; err: .err, two lines down
     add rsp, 16
     test rax, rax
     jz .err

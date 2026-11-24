@@ -228,6 +228,8 @@ DEF_FUNC type_method_instancecheck, TIC_FRAME
     mov rdi, [rbp - TIC_OBJ]
     extern obj_declared_class
     call obj_declared_class
+    extern eval_exception_unwind
+    ERR_PENDING_JUMP
     test rax, rax
     jz .tic_false
     mov rbx, rax

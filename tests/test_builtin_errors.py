@@ -1,0 +1,180 @@
+# The error paths of the builtin functions: wrong counts, wrong types, bad
+# keywords, and callbacks that raise.
+#
+# Each case runs 200 times with sys.getallocatedblocks() read before and
+# after, and prints the exception's type and whether the count stayed put.
+# A builtin that raises by jumping out of its own frame gets the exception
+# right and leaves behind whatever that frame held; only the count shows it.
+#
+# Messages are not printed: the wording is tests/arity_probe.sh's business,
+# and half of it differs from CPython's on purpose.
+import sys
+import types
+
+
+class Boom(Exception):
+    pass
+
+
+def boom(*a, **k):
+    raise Boom("boom")
+
+
+def check(name, fn):
+    seen = "ok"
+    before = sys.getallocatedblocks()
+    for _ in range(200):
+        try:
+            fn()
+        except Exception as e:
+            seen = type(e).__name__
+    after = sys.getallocatedblocks()
+    print(name, seen, after - before < 50)
+
+
+# --- str() -----------------------------------------------------------------
+class StrSub(str):
+    pass
+
+
+check("str bad keyword", lambda: str(b"a", bogus=1))
+check("str encoding int", lambda: str(b"a", 5))
+check("str errors int", lambda: str(b"a", "utf-8", 5))
+check("str errors only", lambda: str(b"abc", errors="strict"))
+check("str errors only, not bytes", lambda: str(5, errors="strict"))
+check("str decoding str", lambda: str("a", "utf-8"))
+check("str four", lambda: str(1, 2, 3, 4))
+check("str subclass errors int", lambda: StrSub(b"a", "utf-8", 5))
+check("str.__new__ encoding int", lambda: str.__new__(str, b"a", 5))
+
+# --- getattr, hasattr, setattr, delattr --------------------------------------
+o = object()
+check("getattr one", lambda: getattr(o))
+check("getattr four", lambda: getattr(o, "a", 1, 2))
+check("getattr name int", lambda: getattr(o, 1))
+check("getattr missing", lambda: getattr(o, "zz"))
+check("hasattr one", lambda: hasattr(o))
+check("hasattr name int", lambda: hasattr(o, 1))
+check("setattr two", lambda: setattr(o, "a"))
+check("setattr name int", lambda: setattr(o, 1, 2))
+check("setattr on int", lambda: setattr(5, "x", 2))
+check("delattr one", lambda: delattr(o))
+check("delattr name int", lambda: delattr(o, 1))
+check("delattr on int", lambda: delattr(5, "x"))
+check("object.__setattr__ short", lambda: o.__setattr__("x"))
+check("object.__delattr__ name int", lambda: o.__delattr__(3))
+check("object.__getattribute__ name int", lambda: o.__getattribute__(3))
+check("object.__getattribute__ missing", lambda: o.__getattribute__("zz"))
+
+
+class GetterRaises:
+    @property
+    def p(self):
+        raise Boom()
+
+    def __getattr__(self, name):
+        raise Boom()
+
+
+check("getattr getter raises", lambda: getattr(GetterRaises(), "p", 1))
+check("hasattr __getattr__ raises", lambda: hasattr(GetterRaises(), "q"))
+
+# --- pow() -----------------------------------------------------------------
+check("pow one", lambda: pow(1))
+check("pow four", lambda: pow(1, 2, 3, 4))
+check("pow float with modulus", lambda: pow(2.0, 2, 3))
+check("pow zero modulus", lambda: pow(2, 3, 0))
+check("pow not invertible", lambda: pow(2, -1, 4))
+check("pow complex modulus", lambda: pow(1j, 2, 3))
+check("pow big zero modulus", lambda: pow(10 ** 30, 10 ** 20, 0))
+check("int.__pow__ zero modulus", lambda: (2).__pow__(3, 0))
+check("pow str", lambda: pow("a", 2))
+
+
+class PowRaises:
+    def __pow__(self, other, mod=None):
+        raise Boom()
+
+
+check("pow three-argument __pow__ raises", lambda: pow(PowRaises(), 2, 3))
+
+# --- isinstance, issubclass ---------------------------------------------------
+class ClassRaises:
+    @property
+    def __class__(self):
+        raise Boom()
+
+
+class NoAttributes:
+    def __getattribute__(self, name):
+        raise AttributeError(name)
+
+
+class HookMeta(type):
+    def __instancecheck__(cls, obj):
+        raise Boom()
+
+    def __subclasscheck__(cls, sub):
+        raise Boom()
+
+
+class Hooked(metaclass=HookMeta):
+    pass
+
+
+# A module with a PEP 562 __getattr__ is asked for __class__ through the
+# hook, which raises AttributeError, before its type answers.  isinstance()
+# must not take the hook's exception for a failure of its own: unittest's
+# loader calls it on every name in a test module, `unittest` among them.
+def module_hook(name):
+    raise AttributeError(name)
+
+
+hooked = types.ModuleType("hooked")
+hooked.__getattr__ = module_hook
+print("hooked module", isinstance(hooked, int), isinstance(hooked, (str, int)),
+      isinstance(hooked, types.ModuleType), hasattr(hooked, "__class__"),
+      getattr(hooked, "__class__", None) is types.ModuleType,
+      isinstance(hooked, int))
+check("isinstance hooked module", lambda: isinstance(hooked, int))
+check("getattr hooked module", lambda: getattr(hooked, "__class__"))
+check("getattr hooked module, missing", lambda: getattr(hooked, "zz"))
+
+check("isinstance one", lambda: isinstance(1))
+check("isinstance arg 2 int", lambda: isinstance(1, 1))
+check("isinstance tuple with int", lambda: isinstance(1, (str, 1)))
+check("isinstance nested generic", lambda: isinstance(1, (str, (bytes, (list[int],)))))
+check("isinstance generic", lambda: isinstance(1, list[int]))
+check("isinstance __class__ raises", lambda: isinstance(ClassRaises(), int))
+check("isinstance __class__ raises, tuple", lambda: isinstance(ClassRaises(), (str, int)))
+check("isinstance no __class__", lambda: isinstance(NoAttributes(), int))
+check("isinstance hook raises", lambda: isinstance(1, Hooked))
+check("isinstance hook raises, tuple", lambda: isinstance(1, (str, Hooked)))
+check("issubclass one", lambda: issubclass(int))
+check("issubclass arg 1 int", lambda: issubclass(1, int))
+check("issubclass arg 2 int", lambda: issubclass(int, 1))
+check("issubclass tuple with int", lambda: issubclass(int, (str, 1)))
+check("issubclass generic", lambda: issubclass(int, list[int]))
+check("issubclass hook raises", lambda: issubclass(int, Hooked))
+check("issubclass hook raises, tuple", lambda: issubclass(int, (str, Hooked)))
+check("type.__instancecheck__ __class__ raises",
+      lambda: type.__instancecheck__(int, ClassRaises()))
+
+
+# super(C, proxy).name asks the proxy for its __class__.  One that raised
+# released the three operands twice, and the third call freed super_type.
+class SuperUser:
+    def attr(self):
+        return super(int, ClassRaises()).real
+
+    def call(self):
+        return super(int, ClassRaises()).bit_length()
+
+    def built(self):
+        s = super
+        return s(int, ClassRaises())
+
+
+check("super attr, __class__ raises", lambda: SuperUser().attr())
+check("super method, __class__ raises", lambda: SuperUser().call())
+check("super object, __class__ raises", lambda: SuperUser().built())

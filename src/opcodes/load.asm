@@ -1658,6 +1658,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     je .lsa_unbound                 ; super(C, None) is CPython's UNBOUND super
     extern obj_declared_class
     call obj_declared_class
+    ERR_PENDING .lsa_declared_raised
     test rax, rax
     jz .lsa_bad_self
     push rax
@@ -1878,6 +1879,20 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     ; DISPATCH saved the stack top from before the three operands were popped.
     PUBLISH_SP
     RAISE exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
+
+.lsa_declared_raised:
+    ; A __class__ that raised.  The three operands are already off the stack
+    ; and global_super is already released, so unwinding from DISPATCH's
+    ; stack top -- which is what a jump out of obj_declared_class did --
+    ; released all three again: three `super(C, proxy).x` with such a proxy
+    ; freed super_type.  Release the two still held and say where the stack is.
+    mov rdi, [rbp - LSA_SELF]
+    DECREF_V rdi, rsi
+    mov rdi, [rbp - LSA_CLASS]
+    call obj_decref
+    PUBLISH_SP
+    leave
+    jmp eval_exception_unwind
 
 .lsa_not_found:
     ; DECREF class and self
