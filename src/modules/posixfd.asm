@@ -17,6 +17,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 %include "value.inc"
 
 section .text
@@ -172,7 +173,7 @@ DEF_FUNC posix_flock, PFL_FRAME
     call posix_int_arg
     mov rsi, rax
     pop rdi
-    call sys_flock
+    BLOCKING_CALL sys_flock
     test rax, rax
     js .pfl_failed
     lea rax, [rel none_singleton]

@@ -48,6 +48,7 @@ extern zlib_module_create
 extern hashlib_module_create
 extern ssl_module_create
 extern pyexpat_module_create
+extern thread_module_create
 
 section .rodata
 
@@ -79,6 +80,7 @@ bm_n_hashlib:  db "_hashlibcore", 0
 bm_n_ssl:      db "_sslcore", 0
 bm_n_impcore:  db "_impcore", 0
 bm_n_pyexpat:  db "_pyexpatcore", 0
+bm_n_thread:   db "_threadcore", 0
 
 align 8
 global builtin_module_table
@@ -102,6 +104,7 @@ builtin_module_table:
     dq bm_n_signal,   signal_module_create
     dq bm_n_sre,      sre_module_create
     dq bm_n_ssl,      ssl_module_create
+    dq bm_n_thread,   thread_module_create
     dq bm_n_weakref,  weakref_module_create
     dq bm_n_zlib,     zlib_module_create
     dq bm_n_builtins, 0                 ; wraps builtins_dict_global

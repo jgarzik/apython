@@ -80,6 +80,12 @@ struc ThreadState
     .asyncgen_firstiter_hook: resq 1
     .asyncgen_finalizer_hook: resq 1
     .gc_collect_rsp:      resq 1  ; rsp of the collection THIS thread runs
+    .ts_next:             resq 1  ; the list of every thread's state, which
+    .ts_prev:             resq 1  ;   tstate_list_head anchors (src/gil.asm)
+    .ts_ident:            resq 1  ; pthread_self(), what get_ident() answers
+    .ts_native_id:        resq 1  ; gettid()
+    .ts_dict:             resq 1  ; this thread's own dict, or NULL: where
+                                  ;   _thread._local keeps its namespaces
     .import_path_override: resq 1 ; search path for one import, or NULL
     .comp_inherit_future: resq 1  ; PEP 563 inherited by the next compile
     .tb_seen_n:           resq 1  ; traceback printing: cycle guard count

@@ -18,6 +18,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 %include "value.inc"
 %include "eventloop.inc"
 
@@ -306,7 +307,12 @@ DEF_FUNC_LOCAL sock_bind_like, SBL_FRAME
     mov rsi, rbp
     sub rsi, SBL_BUF
     mov rdx, [rbp - SBL_LEN]
-    call [rbp - SBL_FN]
+    ; connect() can block for as long as the peer takes; bind() never does,
+    ; and gives the GIL up for a few microseconds it did not need to.  The
+    ; address is in this frame.
+    mov rax, [rbp - SBL_FN]
+    extern gil_blocking_call
+    call gil_blocking_call
     pop rbx
     leave
     ret
@@ -439,7 +445,7 @@ DEF_FUNC sock_accept_fn, SAC_FRAME
     mov rdx, rbp
     sub rdx, SAC_LEN
     mov ecx, SOCK_CLOEXEC
-    call sys_accept4
+    BLOCKING_CALL sys_accept4
     SOCK_CHECK rax
     mov [rbp - SAC_FD], rax
 
@@ -586,7 +592,7 @@ DEF_FUNC sock_send_fn, SSD_FRAME
     mov rsi, [rbp - SSD_DATA]
     mov rdx, [rbp - SSD_LEN]
     mov rcx, [rbp - SSD_FLAGS]
-    call sys_sendto
+    BLOCKING_CALL sys_sendto
     SOCK_CHECK rax
     mov rdi, rax
     pop rbx
@@ -653,7 +659,7 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     mov rsi, [rbp - SRC_BUF]
     mov rdx, [rbp - SRC_N]
     mov rcx, [rbp - SRC_FLAGS]
-    call sys_recvfrom
+    BLOCKING_CALL sys_recvfrom
     cmp rax, -4095
     jb .src_ok
     push rax
@@ -753,7 +759,7 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     sub r8, SRF_FROM
     mov r9, rbp
     sub r9, SRF_ALEN
-    call sys_recvfrom
+    BLOCKING_CALL sys_recvfrom
     cmp rax, -4095
     jb .srf_ok
     push rax
@@ -856,7 +862,7 @@ DEF_FUNC sock_recv_into_fn, 40
     mov rdx, [rbp - SRI_N]
     xor r8d, r8d
     xor r9d, r9d
-    call sys_recvfrom
+    BLOCKING_CALL sys_recvfrom
     SOCK_CHECK rax
     mov rdi, rax
     pop rbx
@@ -1221,7 +1227,7 @@ DEF_FUNC sock_poll_fn, 56
     mov rdi, [rbp - SPL_FDS]
     mov rsi, [rbp - SPL_N]
     mov edx, [rbp - SPL_TMO]
-    call sys_poll
+    BLOCKING_CALL sys_poll
     cmp rax, -4095
     jb .spl_polled
 
@@ -1232,9 +1238,9 @@ DEF_FUNC sock_poll_fn, 56
     ; exactly this.
     cmp rax, -4
     jne .spl_failed
-    cmp qword [rel signal_any_pending], 0
-    je .spl_remaining
-    extern signal_any_pending
+    test qword [rel eval_breaker], EB_SIGNAL
+    jz .spl_remaining
+    extern eval_breaker
     extern signal_run_pending
     call signal_run_pending
     test eax, eax
@@ -1458,13 +1464,13 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     mov rsi, [rbp - SEW_EVS]
     mov rdx, [rbp - SEW_MAX]
     mov rcx, [rbp - SEW_TMO]
-    call sys_epoll_wait
+    BLOCKING_CALL sys_epoll_wait
     cmp rax, -4095
     jb .sew_waited
     cmp rax, -4
     jne .sew_failed
-    cmp qword [rel signal_any_pending], 0
-    je .sew_remaining
+    test qword [rel eval_breaker], EB_SIGNAL
+    jz .sew_remaining
     call signal_run_pending
     test eax, eax
     jnz .sew_handler_raised

@@ -54,7 +54,7 @@ CC = cc
 # src/pyo/complex.asm calls for the general complex power and for abs().
 # float.asm avoids libm by doing its own x87 sequence; complex does not, since
 # the polar form needs all seven and hand-rolling them would be a worse bargain.
-LDFLAGS = -no-pie -lc -lm -lgmp -lz -lssl -lcrypto -lexpat -lbz2 -llzma -lffi -ldl
+LDFLAGS = -no-pie -lc -lm -lgmp -lz -lssl -lcrypto -lexpat -lbz2 -llzma -lffi -ldl -lpthread
 TARGET = apython
 
 # Source files.  Everything the interpreter is built from lives under src/:

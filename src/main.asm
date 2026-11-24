@@ -55,6 +55,8 @@ DEF_FUNC main, 8
     mov r15, rsi
     lea rdi, [rel main_tstate]
     call tstate_install
+    extern gil_init
+    call gil_init               ; this thread is the main one, and holds the GIL
     mov edi, r14d
     mov rsi, r15
 
@@ -789,6 +791,12 @@ DEF_FUNC main, 8
     xor ebx, ebx
 
 .exit_cleanup:
+    ; While it is still whole: wait for the non-daemon threads and run the
+    ; atexit callbacks, as Py_FinalizeEx does first.  After this no other
+    ; thread runs Python again.
+    extern interp_shutdown
+    call interp_shutdown
+
     ; From here on the interpreter is coming apart, and the Python that still
     ; runs -- every __del__ the collection below fires -- is entitled to know
     ; it.  asyncio's loop.close() asks before touching its selector, and

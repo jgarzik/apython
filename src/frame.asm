@@ -48,6 +48,7 @@ extern obj_decref
 ;; and the .pyc probes are full of them -- pays nothing.
 ;; ============================================================================
 FRAME_DATASTACK_BYTES equ 4 * 1024 * 1024
+FRAME_DATASTACK_THREAD equ 256 * 1024   ; a thread other than the main one
 
 ;; ============================================================================
 ;; frame_alloc_inline(rdi = size) -> rax = a block of at least that size
@@ -74,16 +75,28 @@ DEF_FUNC frame_alloc_inline
 
 .fai_create:
     push rdi
-    push rdi                    ; twice: rsp keeps its alignment
-    mov edi, FRAME_DATASTACK_BYTES
+    push rbx                    ; two pushes: rsp keeps its alignment
+    ; The main thread gets the full region.  Any other gets a smaller one:
+    ; a program may start hundreds of threads, most of them shallow, and a
+    ; thread that does recurse deeply falls back to the pool like any other
+    ; overflow.
+    mov ebx, FRAME_DATASTACK_BYTES
+    mov rax, [gs:ThreadState.ts_self]
+    extern tstate_main_ptr
+    cmp rax, [rel tstate_main_ptr]
+    je .fai_sized
+    mov ebx, FRAME_DATASTACK_THREAD
+.fai_sized:
+    mov rdi, rbx
     call ap_malloc
-    pop rdi
+    mov rcx, rbx                ; the size that was asked for
+    pop rbx
     pop rdi
     test rax, rax
     jz .fai_pool                ; no region, ever: the pool does the work
     mov [gs:ThreadState.frame_datastack_base], rax
     mov [gs:ThreadState.frame_datastack_top], rax
-    add rax, FRAME_DATASTACK_BYTES
+    add rax, rcx
     mov [gs:ThreadState.frame_datastack_end], rax
     jmp .fai_have_region
 END_FUNC frame_alloc_inline

@@ -19,25 +19,27 @@ few lines after some other import that appeared to be the blocker.
 import sys
 import _impcore
 
-# The GIL is not a thing here: there is one thread, so the lock is a counter
-# that records the nesting importlib expects to see balanced.
-_lock_count = 0
+# The global import lock importlib takes around its own bookkeeping.  It is
+# reentrant and owned by a thread, as CPython's is: two threads importing at
+# once are serialised here, and the per-module locks importlib builds on
+# _thread sort out the rest.
+import _thread
+
+_lock = _thread.RLock()
 
 
 def acquire_lock():
-    global _lock_count
-    _lock_count += 1
+    _lock.acquire()
 
 
 def release_lock():
-    global _lock_count
-    if _lock_count <= 0:
+    if not _lock._is_owned():
         raise RuntimeError("not holding the import lock")
-    _lock_count -= 1
+    _lock.release()
 
 
 def lock_held():
-    return _lock_count > 0
+    return _lock._is_owned()
 
 
 # The two the interpreter wires up itself rather than through the module

@@ -199,13 +199,13 @@
 ; top: both are published for the unwinder, exactly as DISPATCH publishes
 ; them.
 %macro CHECK_EVAL_SIGNALS 0
-    extern signal_any_pending
-    cmp qword [rel signal_any_pending], 0
+    extern eval_breaker
+    cmp qword [rel eval_breaker], 0
     je %%no_signals
     mov [r12 + PyFrame.disp_ip], rbx
     mov [r12 + PyFrame.disp_sp], r13
-    extern signal_run_pending
-    call signal_run_pending
+    extern eval_breaker_slow
+    call eval_breaker_slow
     test eax, eax
     jz %%no_signals
     extern eval_exception_unwind
