@@ -255,3 +255,90 @@ for _name in ("category", "bidirectional", "east_asian_width", "combining", "mir
 # A default is handed back, not raised over.
 print(unicodedata.name("\n", "dflt"), unicodedata.decimal("a", -1),
       unicodedata.digit("a", None), unicodedata.numeric("a", 2.5))
+
+# --- pyexpat -------------------------------------------------------------
+import pyexpat
+
+print("== pyexpat")
+_ph = None
+try:
+    import _pyexpatcore
+    _ph = _pyexpatcore.parser_new(None, None, None)
+except ImportError:
+    pass
+
+
+class RaisesBool:
+    def __bool__(self):
+        raise ValueError("from __bool__")
+
+
+core("parser_new()", "_pyexpatcore", "parser_new")
+core("parser_new(int encoding)", "_pyexpatcore", "parser_new", 1, None, None)
+core("parser_new(int sep)", "_pyexpatcore", "parser_new", None, 1, None)
+core("parser_new(long sep)", "_pyexpatcore", "parser_new", None, "ab", None)
+core("parser_new(list intern)", "_pyexpatcore", "parser_new", None, None, [])
+core("parser_free()", "_pyexpatcore", "parser_free")
+core("parser_free(str)", "_pyexpatcore", "parser_free", "x")
+core("parser_status()", "_pyexpatcore", "parser_status")
+core("parser_status(str)", "_pyexpatcore", "parser_status", "x")
+core("parser_status(dead)", "_pyexpatcore", "parser_status", 99999)
+core("ErrorString()", "_pyexpatcore", "ErrorString")
+core("ErrorString(str)", "_pyexpatcore", "ErrorString", "x")
+core("parser_set_handler(2 args)", "_pyexpatcore", "parser_set_handler", _ph, 0)
+core("parser_set_handler(dead)", "_pyexpatcore", "parser_set_handler", 99999, 0, None)
+core("parser_set_handler(str handle)", "_pyexpatcore", "parser_set_handler", "x", 0, None)
+core("parser_set_handler(bad index)", "_pyexpatcore", "parser_set_handler", _ph, 9999, None)
+core("parser_set_handler(str index)", "_pyexpatcore", "parser_set_handler", _ph, "x", None)
+core("parser_parse(2 args)", "_pyexpatcore", "parser_parse", _ph, b"")
+core("parser_parse(dead)", "_pyexpatcore", "parser_parse", 99999, b"", False)
+core("parser_parse(str handle)", "_pyexpatcore", "parser_parse", "x", b"", False)
+core("parser_parse(int data)", "_pyexpatcore", "parser_parse", _ph, 5, False)
+core("parser_parse(__bool__ raises)", "_pyexpatcore", "parser_parse", _ph, b"", RaisesBool())
+core("parser_set_flag(2 args)", "_pyexpatcore", "parser_set_flag", _ph, 0)
+core("parser_set_flag(dead)", "_pyexpatcore", "parser_set_flag", 99999, 0, 1)
+core("parser_set_flag(bad flag)", "_pyexpatcore", "parser_set_flag", _ph, 9999, 1)
+core("parser_set_flag(str flag)", "_pyexpatcore", "parser_set_flag", _ph, "x", 1)
+core("parser_set_flag(str value)", "_pyexpatcore", "parser_set_flag", _ph, 0, "x")
+
+
+def _parse_bad():
+    pyexpat.ParserCreate().Parse(b"<a><b></a>", True)
+
+
+def _parse_handler_raises():
+    p = pyexpat.ParserCreate()
+
+    def start(name, attrs):
+        raise KeyError(name)
+
+    p.StartElementHandler = start
+    p.Parse(b"<a><b/></a>", True)
+
+
+def _parse_text_handler_raises():
+    p = pyexpat.ParserCreate()
+    p.buffer_text = True
+
+    def text(data):
+        raise IndexError(data)
+
+    p.CharacterDataHandler = text
+    p.Parse(b"<a>some text<b/></a>", True)
+
+
+def _parse_twice():
+    p = pyexpat.ParserCreate()
+    p.Parse(b"<a/>", True)
+    p.Parse(b"<a/>", True)
+
+
+err("ParserCreate(int)", pyexpat.ParserCreate, 5)
+err("ParserCreate(long separator)", pyexpat.ParserCreate, None, "ab")
+err("Parse(malformed)", _parse_bad)
+err("Parse(int)", pyexpat.ParserCreate().Parse, 5)
+err("Parse(handler raises)", _parse_handler_raises, _msg=True)
+err("Parse(text handler raises)", _parse_text_handler_raises, _msg=True)
+err("Parse(after final)", _parse_twice)
+err("Parse(isfinal __bool__ raises)", pyexpat.ParserCreate().Parse, b"", RaisesBool(), _msg=True)
+err("ErrorString(str)", pyexpat.ErrorString, "x")
