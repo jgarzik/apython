@@ -227,3 +227,31 @@ err("randrange(0)", _rng.randrange, 0)
 # The generator still works, and still gives CPython's sequence.
 _rng.seed(12345)
 print(_rng.getrandbits(32), _rng.getrandbits(70), _rng.random())
+
+# --- unicodedata: names and properties -----------------------------------
+print("== unicodedata")
+err("lookup()", unicodedata.lookup)
+err("lookup(int)", unicodedata.lookup, 5)
+err("lookup(unknown)", unicodedata.lookup, "NO SUCH CHARACTER NAME")
+err("name()", unicodedata.name)
+err("name(3 args)", unicodedata.name, "a", 1, 2)
+err("name(int)", unicodedata.name, 5)
+err("name(two chars)", unicodedata.name, "ab")
+err("name(unnamed)", unicodedata.name, "\n", _msg=True)
+err("decimal()", unicodedata.decimal)
+err("decimal(int)", unicodedata.decimal, 5)
+err("decimal(letter)", unicodedata.decimal, "a", _msg=True)
+err("digit()", unicodedata.digit)
+err("digit(int)", unicodedata.digit, 5)
+err("digit(letter)", unicodedata.digit, "a", _msg=True)
+err("numeric()", unicodedata.numeric)
+err("numeric(int)", unicodedata.numeric, 5)
+err("numeric(letter)", unicodedata.numeric, "a", _msg=True)
+for _name in ("category", "bidirectional", "east_asian_width", "combining", "mirrored"):
+    _fn = getattr(unicodedata, _name)
+    err(_name + "()", _fn)
+    err(_name + "(int)", _fn, 5)
+    err(_name + "(two chars)", _fn, "ab")
+# A default is handed back, not raised over.
+print(unicodedata.name("\n", "dflt"), unicodedata.decimal("a", -1),
+      unicodedata.digit("a", None), unicodedata.numeric("a", 2.5))
