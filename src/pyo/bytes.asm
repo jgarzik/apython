@@ -2218,7 +2218,7 @@ extern str_set_length
     push rax
     sub rsp, 8
     mov rdi, rax
-    call memoryview_as_bytes
+    call memoryview_as_bytes  ; err: tested below, once the view is released
     add rsp, 8
     pop rdi
     push rax
@@ -2227,7 +2227,7 @@ extern str_set_length
     add rsp, 8
     pop rax
     test rax, rax
-    jz .bls_empty
+    jz .bls_fail                ; __buffer__ answered a released view
     mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
     mov rbx, [rax + PyBytesObject.ob_size]
     lea r12, [rax + PyBytesObject.data]
@@ -2325,8 +2325,7 @@ extern str_set_length
     ; both: it lays the items out end to end, which is what bytes() means.
     extern memoryview_as_bytes
     call memoryview_as_bytes
-    test rax, rax
-    jz .bls_empty
+    ERR_NULL .bls_fail          ; a released view
     mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
     mov rbx, [rax + PyBytesObject.ob_size]
     lea r12, [rax + PyBytesObject.data]
