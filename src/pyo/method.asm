@@ -34,8 +34,8 @@ extern builtin_func_type
 extern type_type
 extern none_singleton
 extern exc_TypeError_type
-extern raise_exception
-extern raise_type_error_counted
+extern set_exception
+extern set_type_error_counted
 
 global method_new
 global method_construct
@@ -86,7 +86,9 @@ END_FUNC method_new
 
 ;; ============================================================================
 ;; method_construct(rdi = the class, rsi = args, rdx = nargs)
-;;   -> rax = the bound method, edx = TAG_PTR
+;;   -> rax = the bound method, edx = TAG_PTR; (0, 0) with the exception
+;;      pending for a refused argument
+;; Fails: 0
 ;;
 ;; tp_new for method_type -- `types.MethodType(func, obj)`.  There was none,
 ;; so type_call fell through to .normal_type_call and TC_REFUSE_EXTRA_ARGS
@@ -144,29 +146,38 @@ DEF_FUNC method_construct, MTN_FRAME
     mov qword [gs:ThreadState.kw_names_pending], 0   ; consumed, however this ends
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "method() takes no keyword arguments"
-    call raise_exception
+    call set_exception
+    jmp .mtn_fail
 
 .mtn_arity:
     mov rsi, [rbp - MTN_NARGS]
     CSTRING rdi, "method expected 2 arguments, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .mtn_fail
 
 .mtn_not_callable:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "first argument must be callable"
-    call raise_exception
+    call set_exception
+    jmp .mtn_fail
 
 .mtn_none:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "instance must not be None"
-    call raise_exception
+    call set_exception
+.mtn_fail:
+    RET_NULL
+    pop rbx
+    leave
+    ret
 END_FUNC method_construct
 
 ;; ============================================================================
 ;; method_call(self_method, args, nargs) -> rax = Value
 ;; Call a bound method: prepend im_self to args, dispatch to im_func's tp_call.
 ;; rdi = PyMethodObject*, rsi = args, rdx = nargs
+;; Fails: 0
 ;; ============================================================================
 ;; The argument array method_call has to build -- im_self and then the
 ;; caller's arguments -- lives in this frame for the sizes real code uses, and
@@ -244,6 +255,7 @@ DEF_FUNC_LOCAL method_call, MC_FRAME
     lea rdx, [r13 + 1]
     call rax
     V_UNPACK rax, rdx           ; tp_call returns a Value
+.mc_called:
     push rax                    ; save result payload
     push rdx                    ; save result tag
 
@@ -265,21 +277,15 @@ DEF_FUNC_LOCAL method_call, MC_FRAME
     ret
 
 .mc_not_callable:
-    ; The temporary argument array, if there was one, is left to the raise:
-    ; this path does not return, and the unwinder frees the frame it sits in.
-    mov rdi, [rbp - MC_FREE]
-    test rdi, rdi
-    jz .mc_nc_named
-    push rdi
-    push rdi
-    call ap_free
-    pop rdi
-    pop rdi
-.mc_nc_named:
+    ; The refusal first, then out through the exit a failed call takes: the
+    ; temporary argument array is released there and the 0 goes back.
     mov rsi, [rbx + PyMethodObject.im_func]
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    xor edx, edx
+    jmp .mc_called
 END_FUNC method_call
 
 ;; ============================================================================
@@ -966,6 +972,7 @@ END_FUNC method_clear
 ;; there.  It matters because that is how inspect, enum and dataclasses ask
 ;; whether something is a descriptor, and a bound method stored in a class body
 ;; must stay the method it already is.
+;; Fails: 0
 ;; ============================================================================
 global method_dunder_get
 DEF_FUNC method_dunder_get
@@ -979,7 +986,9 @@ DEF_FUNC method_dunder_get
     leave
     ret
 .mdg_arity:
-    RAISE exc_TypeError_type, "__get__() takes 2 or 3 arguments"
+    SET_EXC exc_TypeError_type, "__get__() takes 2 or 3 arguments"
+    leave
+    ret
 END_FUNC method_dunder_get
 
 extern new_from_slot
