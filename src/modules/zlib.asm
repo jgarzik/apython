@@ -22,7 +22,6 @@
 
 ASM_INIT
 
-extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern module_new
@@ -40,10 +39,10 @@ extern ap_free
 extern ap_memcpy
 extern ap_memset
 extern obj_as_index
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern rbt_append_cstr
 extern tuple_new
 extern bool_true
@@ -147,7 +146,8 @@ zc_e_nargs:      db "_zlibcore: wrong number of arguments", 0
 section .text
 
 ;; ============================================================================
-;; zc_raise_z(rdi = the ZHandle*, esi = libz's return code) -> does not return
+;; zc_set_z(rdi = the ZHandle*, esi = libz's return code) -> rax = 0, with
+;;   the ValueError pending
 ;;
 ;; CPython's wording, which programs match on:
 ;;   Error -3 while decompressing data: incorrect header check
@@ -157,7 +157,7 @@ section .text
 ZE_H     equ 8
 ZE_CODE  equ 16
 ZE_FRAME equ 32             ; + 0 pushes = 32
-DEF_FUNC_LOCAL zc_raise_z, ZE_FRAME
+DEF_FUNC_LOCAL zc_set_z, ZE_FRAME
     mov [rbp - ZE_H], rdi
     movsxd rsi, esi
     mov [rbp - ZE_CODE], rsi
@@ -190,9 +190,10 @@ DEF_FUNC_LOCAL zc_raise_z, ZE_FRAME
 .zez_raise:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel zc_msgbuf]
+    call set_exception
     leave
-    jmp raise_exception
-END_FUNC zc_raise_z
+    ret
+END_FUNC zc_set_z
 
 ;; ============================================================================
 ;; zc_append_i64(rdi = where to write, rsi = the number) -> rax = the new NUL
@@ -300,16 +301,15 @@ DEF_FUNC_BARE zc_handle_at
 END_FUNC zc_handle_at
 
 ;; ============================================================================
-;; zc_arg_int(rdi = args, rsi = index) -> rax = the int, or 0 with a TypeError
-;;   pending; ecx = 1 on success
+;; zc_arg_int(rdi = args, rsi = index) -> rax = the int
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE zc_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     sub rsp, 8                  ; a call, so the refusal can be seen
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and its exception are this one's
     add rsp, 8
-    ERR_M1_JUMP
     ret
 END_FUNC zc_arg_int
 
@@ -332,6 +332,7 @@ DEF_FUNC zc_crc32, ZK_FRAME
     sub rsp, 8
     mov esi, 1
     call zc_arg_int
+    ERR_M1 .zk_fail             ; leave drops what was pushed
     add rsp, 8
     pop rdi
     mov [rbp - ZK_SEED], rax
@@ -356,10 +357,14 @@ DEF_FUNC zc_crc32, ZK_FRAME
 .zk_type:
     lea rdi, [rel zc_e_notbytes]
     mov rsi, [rbp - ZK_ARG]
-    leave
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .zk_fail
 .zk_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_zlibcore: wrong number of arguments"
+.zk_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC zc_crc32
 
 ;; ============================================================================
@@ -372,6 +377,7 @@ DEF_FUNC zc_adler32, ZK_FRAME
     sub rsp, 8
     mov esi, 1
     call zc_arg_int
+    ERR_M1 .za_fail             ; leave drops what was pushed
     add rsp, 8
     pop rdi
     mov [rbp - ZK_SEED], rax
@@ -395,10 +401,14 @@ DEF_FUNC zc_adler32, ZK_FRAME
 .za_type:
     lea rdi, [rel zc_e_notbytes]
     mov rsi, [rbp - ZK_ARG]
-    leave
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .za_fail
 .za_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_zlibcore: wrong number of arguments"
+.za_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC zc_adler32
 
 ;; ============================================================================
@@ -434,6 +444,7 @@ DEF_FUNC zc_stream_new, ZN_FRAME
     mov rdi, [rsp + 8]
     mov rsi, i
     call zc_arg_int
+    ERR_M1 .zn_fail
     mov [rbp - ZN_MODE - i*8], rax
 %assign i i+1
 %endrep
@@ -509,14 +520,20 @@ DEF_FUNC zc_stream_new, ZN_FRAME
 .zn_init_failed:
     mov rdi, [rbp - ZN_H]
     call ap_free
-    RAISE exc_ValueError_type, "failed to initialise the compression stream"
+    FAIL exc_ValueError_type, "failed to initialise the compression stream", .zn_fail
 .zn_table_failed:
     mov rdi, [rbp - ZN_H]
     call ap_free
 .zn_mem:
-    RAISE exc_ValueError_type, "out of memory while compressing"
+    FAIL exc_ValueError_type, "out of memory while compressing", .zn_fail
 .zn_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_zlibcore: wrong number of arguments"
+.zn_fail:
+    xor eax, eax
+    mov rsp, r12                ; r12 is the interpreter's frame: it goes back
+    pop r12
+    leave
+    ret
 END_FUNC zc_stream_new
 
 ;; ============================================================================
@@ -629,6 +646,7 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
 
     xor esi, esi
     call zc_arg_int
+    ERR_M1 .zf_fail
     mov rdi, rax
     call zc_handle_at
     test rax, rax
@@ -640,10 +658,12 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
     mov rdi, [rbp - ZF_ARGS]
     mov esi, 2
     call zc_arg_int
+    ERR_M1 .zf_fail
     mov [rbp - ZF_FLUSH], rax
     mov rdi, [rbp - ZF_ARGS]
     mov esi, 3
     call zc_arg_int
+    ERR_M1 .zf_fail
     mov [rbp - ZF_MAX], rax
 
     ; --- the input: the handle's leftover, then what was handed in ---------
@@ -859,27 +879,36 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
     ret
 
 .zf_zerror:
-    mov [rbp - ZF_OUTLEN], r9   ; the code; release_buffers clobbers registers
-    call zc_release_buffers
     mov rdi, rbx
-    mov esi, [rbp - ZF_OUTLEN]
-    leave
-    jmp zc_raise_z
+    mov esi, r9d                ; the code
+    call zc_set_z
+    jmp .zf_fail
 .zf_mem:
-    call zc_release_buffers
-    RAISE exc_ValueError_type, "out of memory while compressing"
+    FAIL exc_ValueError_type, "out of memory while compressing", .zf_fail
 .zf_type:
     lea rdi, [rel zc_e_notbytes]
     mov rsi, [rbp - ZF_ARGS]
     mov rsi, [rsi + 8]
-    leave
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .zf_fail
 .zf_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .zf_fail
 .zf_ended:
-    RAISE exc_ValueError_type, "stream is already finished"
+    FAIL exc_ValueError_type, "stream is already finished", .zf_fail
 .zf_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    ; Before the two buffer slots are initialised, so not through the release.
+    FAIL exc_TypeError_type, "_zlibcore: wrong number of arguments", .zf_fail_bare
+.zf_fail:
+    ; The one error exit: the exception is pending, and the input copy and
+    ; the output buffer -- whichever exist -- are this call's to free.
+    call zc_release_buffers
+.zf_fail_bare:
+    xor eax, eax
+    mov rsp, r12
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ;; The two malloc'd buffers this call owns, released on every way out.  A
 ;; local label rather than a function, because it reads the caller's frame.
@@ -922,6 +951,7 @@ DEF_FUNC zc_stream_state, ZS_FRAME
     jne .zs_nargs
     xor esi, esi
     call zc_arg_int
+    ERR_M1 .zs_fail
     mov rdi, rax
     call zc_handle_at
     test rax, rax
@@ -977,11 +1007,15 @@ DEF_FUNC zc_stream_state, ZS_FRAME
     ret
 
 .zs_mem:
-    RAISE exc_ValueError_type, "out of memory while compressing"
+    FAIL exc_ValueError_type, "out of memory while compressing", .zs_fail
 .zs_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .zs_fail
 .zs_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_zlibcore: wrong number of arguments"
+.zs_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC zc_stream_state
 
 ;; ============================================================================
@@ -1008,6 +1042,7 @@ DEF_FUNC zc_stream_drop_tail, ZD_FRAME
     jne .zd_nargs
     xor esi, esi
     call zc_arg_int
+    ERR_M1 .zd_fail
     mov rdi, rax
     call zc_handle_at
     test rax, rax
@@ -1025,9 +1060,13 @@ DEF_FUNC zc_stream_drop_tail, ZD_FRAME
     ret
 
 .zd_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .zd_fail
 .zd_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_zlibcore: wrong number of arguments"
+.zd_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC zc_stream_drop_tail
 
 ;; ============================================================================
@@ -1062,6 +1101,7 @@ DEF_FUNC zc_stream_free, ZR_FRAME
     jne .zr_nargs
     xor esi, esi
     call zc_arg_int
+    ERR_M1 .zr_fail
     mov [rbp - ZR_IDX], rax
     mov rdi, rax
     call zc_handle_at
@@ -1115,7 +1155,13 @@ DEF_FUNC zc_stream_free, ZR_FRAME
     V_PACK rax, rdx
     ret
 .zr_nargs:
-    RAISE exc_TypeError_type, "_zlibcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_zlibcore: wrong number of arguments"
+.zr_fail:
+    xor eax, eax
+    mov rsp, r12
+    pop r12
+    leave
+    ret
 END_FUNC zc_stream_free
 
 ;; ============================================================================

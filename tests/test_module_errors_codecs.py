@@ -409,3 +409,94 @@ def _cmp(a, b):
 _arr = (ctypes.c_int * 5)(5, 1, 4, 2, 3)
 _libc.qsort(_arr, 5, ctypes.sizeof(ctypes.c_int), _CMP(_cmp))
 print(list(_arr))
+
+# --- zlib ----------------------------------------------------------------
+import zlib
+
+print("== zlib")
+_zh = None
+try:
+    import _zlibcore
+    _zh = _zlibcore.stream_new(1, 6, 15, 8, 0)
+except ImportError:
+    pass
+core("crc32(1 arg)", "_zlibcore", "crc32", b"")
+core("crc32(str seed)", "_zlibcore", "crc32", b"", "x")
+core("crc32(int data)", "_zlibcore", "crc32", 5, 0)
+core("adler32(1 arg)", "_zlibcore", "adler32", b"")
+core("adler32(str seed)", "_zlibcore", "adler32", b"", "x")
+core("adler32(int data)", "_zlibcore", "adler32", 5, 1)
+core("stream_new(4 args)", "_zlibcore", "stream_new", 0, 6, 15, 8)
+core("stream_new(str)", "_zlibcore", "stream_new", 0, 6, "x", 8, 0)
+core("stream_new(bad wbits)", "_zlibcore", "stream_new", 0, 6, 99, 8, 0)
+core("stream_new(bad level)", "_zlibcore", "stream_new", 0, 99, 15, 8, 0)
+core("stream_feed(3 args)", "_zlibcore", "stream_feed", _zh, b"", 0)
+core("stream_feed(dead)", "_zlibcore", "stream_feed", 99999, b"", 0, 0)
+core("stream_feed(str handle)", "_zlibcore", "stream_feed", "x", b"", 0, 0)
+core("stream_feed(str flush)", "_zlibcore", "stream_feed", _zh, b"", "x", 0)
+core("stream_feed(str max)", "_zlibcore", "stream_feed", _zh, b"", 0, "x")
+core("stream_feed(int data)", "_zlibcore", "stream_feed", _zh, 5, 0, 0)
+core("stream_feed(garbage)", "_zlibcore", "stream_feed", _zh, b"this is not a zlib stream" * 40, 0, 0)
+core("stream_state()", "_zlibcore", "stream_state")
+core("stream_state(dead)", "_zlibcore", "stream_state", 99999)
+core("stream_state(str)", "_zlibcore", "stream_state", "x")
+core("stream_drop_tail()", "_zlibcore", "stream_drop_tail")
+core("stream_drop_tail(dead)", "_zlibcore", "stream_drop_tail", 99999)
+core("stream_drop_tail(str)", "_zlibcore", "stream_drop_tail", "x")
+core("stream_free()", "_zlibcore", "stream_free")
+core("stream_free(str)", "_zlibcore", "stream_free", "x")
+
+_zdata = zlib.compress(b"some data to compress " * 50)
+
+
+def _z_truncated():
+    zlib.decompress(_zdata[:20])
+
+
+def _z_corrupt():
+    zlib.decompress(_zdata[:10] + b"\xff\xff\xff\xff" + _zdata[14:])
+
+
+def _z_corrupt_obj():
+    d = zlib.decompressobj()
+    d.decompress(b"\x00" * 1000)
+
+
+def _z_after_flush():
+    c = zlib.compressobj()
+    c.compress(b"abc")
+    c.flush()
+    c.compress(b"more")
+
+
+def _z_flush_twice():
+    c = zlib.compressobj()
+    c.flush()
+    c.flush()
+
+
+err("crc32()", zlib.crc32)
+err("crc32(str)", zlib.crc32, "text")
+err("crc32(bytes, str)", zlib.crc32, b"", "x")
+err("adler32(int)", zlib.adler32, 5)
+err("compress()", zlib.compress)
+err("compress(str)", zlib.compress, "text")
+err("compress(bad level)", zlib.compress, b"abc", 99)
+err("compress(str level)", zlib.compress, b"abc", "x")
+err("decompress(garbage)", zlib.decompress, b"not a zlib stream at all", _msg=True)
+err("decompress(empty)", zlib.decompress, b"")
+err("decompress(truncated)", _z_truncated, _msg=True)
+err("decompress(corrupt)", _z_corrupt)
+err("decompress(str)", zlib.decompress, "text")
+err("decompress(bad wbits)", zlib.decompress, _zdata, 99)
+err("decompress(wrong wbits)", zlib.decompress, _zdata, -15, _msg=True)
+err("compressobj(str)", zlib.compressobj, "x")
+err("compressobj.compress(str)", zlib.compressobj().compress, "text")
+err("compressobj.compress(after flush)", _z_after_flush)
+err("compressobj.flush(twice)", _z_flush_twice)
+err("compressobj.flush(str)", zlib.compressobj().flush, "x")
+err("decompressobj.decompress(str)", zlib.decompressobj().decompress, "text")
+err("decompressobj.decompress(garbage)", _z_corrupt_obj, _msg=True)
+err("decompressobj.decompress(str max)", zlib.decompressobj().decompress, _zdata, "x")
+# And the stream still works after all of that.
+print(zlib.decompress(_zdata) == b"some data to compress " * 50, zlib.crc32(b"abc"), zlib.adler32(b"abc"))
