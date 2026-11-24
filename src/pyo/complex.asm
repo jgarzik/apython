@@ -193,8 +193,9 @@ END_FUNC complex_to_parts
 ;; by reporting that nothing was consumed -- which is how the grammar above
 ;; already says "this is not a <float>".
 ;;
-;; Does not return on a parse error.  Nothing it holds is owned except the
-;; underscore buffer, which it frees first.
+;; A parse error is 0 with the ValueError pending.  Nothing it holds is owned
+;; except the underscore buffer, which it frees first.
+;; Fails: 0
 ;; ============================================================================
 CPS_OBJ   equ 8             ; the PyStrObject, for the underscore message
 CPS_OUT   equ 16            ; &double[2]
@@ -476,7 +477,10 @@ DEF_FUNC complex_parse_string, CPS_FRAME
     jz .cps_malformed_raise
     call ap_free
 .cps_malformed_raise:
-    RAISE exc_ValueError_type, "complex() arg is a malformed string"
+    extern set_exception
+    SET_EXC exc_ValueError_type, "complex() arg is a malformed string"
+    leave
+    ret
 
 .cps_underscore_error:
     mov rdi, [rbp - CPS_BUF]
@@ -491,7 +495,10 @@ DEF_FUNC complex_parse_string, CPS_FRAME
 .cps_underscore_raise:
     mov rsi, [rbp - CPS_OBJ]
     CSTRING rdi, "could not convert string to complex: "
-    call raise_value_error_with_repr
+    extern set_value_error_with_repr
+    call set_value_error_with_repr
+    leave
+    ret
 END_FUNC complex_parse_string
 
 ;; cps_skip_space(rdi = s) -> rax = s advanced past ASCII whitespace.
@@ -656,6 +663,7 @@ END_FUNC complex_mul
 ;; _Py_c_quot, Smith's algorithm verbatim.  Not the (a*conj(b))/|b|^2 form: the
 ;; last bits of (1+2j)/(3-4j) differ between the two, and this is the one
 ;; CPython computes.
+;; Fails: 0?
 DEF_FUNC complex_truediv, CB_FRAME
     COMPLEX_BINOP_SETUP
     movsd xmm2, [rbp - CB_B]        ; br
@@ -725,7 +733,9 @@ DEF_FUNC complex_truediv, CB_FRAME
     ret
 
 .ctd_zero:
-    RAISE exc_ZeroDivisionError_type, "complex division by zero"
+    SET_EXC exc_ZeroDivisionError_type, "complex division by zero"
+    leave
+    ret
 END_FUNC complex_truediv
 
 DEF_FUNC complex_neg, CB_FRAME
@@ -817,6 +827,7 @@ END_FUNC complex_bool
 ;;
 ;; _Py_c_abs: an infinite part wins over a NaN one (C99), and a finite pair
 ;; whose hypot overflows is an OverflowError rather than an inf.
+;; Fails: 0?
 ;; ============================================================================
 CA_RE    equ 16              ; real at [rbp-16], imag at [rbp-8]
 CA_FRAME equ 32              ; + 0 pushes = 32
@@ -854,7 +865,9 @@ DEF_FUNC complex_abs, CA_FRAME
     leave
     ret
 .cab_overflow:
-    RAISE exc_OverflowError_type, "absolute value too large"
+    SET_EXC exc_OverflowError_type, "absolute value too large"
+    leave
+    ret
 .cab_decline:
     xor eax, eax
     leave
@@ -867,6 +880,7 @@ END_FUNC complex_abs
 ;; CPython takes a repeated-squaring path when the exponent is real, integral
 ;; and within +-100, and the general exp/log form otherwise.  The boundary is
 ;; exact: 100 and -100 use the integer path, 101 and -101 do not.
+;; Fails: 0?
 ;; ============================================================================
 CPW_A     equ 16             ; base:     real at [rbp-16], imag at [rbp-8]
 CPW_B     equ 32             ; exponent: real at [rbp-32], imag at [rbp-24]
@@ -1086,9 +1100,13 @@ DEF_FUNC complex_pow, CPW_FRAME
     jmp .cpw_finish
 
 .cpw_zero_neg_power:
-    RAISE exc_ZeroDivisionError_type, "0.0 to a negative or complex power"
+    SET_EXC exc_ZeroDivisionError_type, "0.0 to a negative or complex power"
+    leave
+    ret
 .cpw_overflow:
-    RAISE exc_OverflowError_type, "complex exponentiation"
+    SET_EXC exc_OverflowError_type, "complex exponentiation"
+    leave
+    ret
 .cpw_decline:
     xor eax, eax
     leave

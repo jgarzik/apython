@@ -2115,7 +2115,8 @@ DEF_FUNC builtin_complex, BCX_FRAME
     mov rdi, [rdi]
     lea rsi, [rbp - BCX_A]
     extern complex_parse_string
-    call complex_parse_string    ; raises rather than returning on a bad parse
+    call complex_parse_string    ; a bad parse is its ValueError, returned
+    ERR_NULL .bcx_fail
     jmp .bcx_one_build
 
 .bcx_bad_type:
