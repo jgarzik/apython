@@ -45,6 +45,7 @@ extern pthread_cond_timedwait
 extern clock_gettime
 extern pause
 extern mallopt
+extern pthread_self
 extern fork
 extern __errno_location
 extern sigemptyset
@@ -114,6 +115,8 @@ DEF_FUNC gil_init
     mov edi, M_ARENA_MAX
     mov esi, 1
     call mallopt
+    call pthread_self
+    mov [gs:ThreadState.ts_ident], rax
     mov rax, [gs:ThreadState.ts_self]
     mov [rel tstate_main_ptr], rax
     mov [rel gil_last_holder], rax
