@@ -458,7 +458,9 @@ END_FUNC none_bool
 
 ;; ============================================================================
 ;; singleton_type_call(rdi = the type, rsi = args, rdx = nargs)
-;;   -> (rax = the singleton, rdx = TAG_PTR), or does not return
+;;   -> (rax = the singleton, rdx = TAG_PTR), or (0, 0) with a TypeError
+;;      pending for any argument at all
+;; Fails: 0
 ;;
 ;; `NoneType()`, `EllipsisType()` and `NotImplementedType()` answer their own
 ;; singleton -- `type(None)() is None` -- and take no arguments at all.
@@ -498,9 +500,11 @@ DEF_FUNC singleton_type_call
     mov rsi, r8
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
-    extern raise_exception
+    extern set_exception
+    call set_exception
+    RET_NULL
     leave
-    jmp raise_exception         ; does not return
+    ret
 section .rodata
 stc_none_msg:     db "NoneType takes no arguments", 0
 stc_notimpl_msg:  db "NotImplementedType takes no arguments", 0
