@@ -29,14 +29,15 @@ extern bytes_from_data
 extern bytes_type
 extern bytearray_type
 extern ap_memcpy
-extern raise_oserror
-extern raise_exception
+extern set_oserror
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern none_singleton
 
 ;; ============================================================================
 ;; posix.fcntl(fd, cmd, arg=0) -> int, or bytes when arg was bytes-like
+;; Fails: 0
 ;;
 ;; CPython's fcntl.fcntl, minus the constants.  An integer argument is passed
 ;; by value and the call's own result comes back; a bytes-like one is a struct
@@ -67,9 +68,11 @@ DEF_FUNC posix_fcntl, PFC_FRAME
 
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pfc_fail
     mov [rbp - PFC_FD], rax         ; the fd, across the next conversion
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pfc_fail
     mov r11, rax                    ; the command
 
     cmp r12, 3
@@ -124,6 +127,7 @@ DEF_FUNC posix_fcntl, PFC_FRAME
     jb .pfc_call
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pfc_fail
     mov rdx, rax
 .pfc_call:
     mov rdi, [rbp - PFC_FD]
@@ -142,17 +146,24 @@ DEF_FUNC posix_fcntl, PFC_FRAME
     neg eax
     mov edi, eax
     xor esi, esi
-    call raise_oserror
-.pfc_too_big:
+    call set_oserror
+.pfc_fail:
+    xor eax, eax
     pop r12
     pop rbx
-    RAISE exc_ValueError_type, "fcntl string arg too long"
+    leave
+    ret
+.pfc_too_big:
+    FAIL exc_ValueError_type, "fcntl string arg too long", .pfc_fail
 .pfc_argerr:
-    RAISE exc_TypeError_type, "fcntl() takes 2 or 3 arguments"
+    SET_EXC exc_TypeError_type, "fcntl() takes 2 or 3 arguments"
+    leave                           ; nothing pushed yet; rax = 0
+    ret
 END_FUNC posix_fcntl
 
 ;; ============================================================================
 ;; posix.flock(fd, operation) -> None
+;; Fails: 0
 ;;
 ;; BSD advisory locking, which is a syscall of its own rather than an fcntl
 ;; command: the two lock families do not see each other, and a program that
@@ -167,10 +178,12 @@ DEF_FUNC posix_flock, PFL_FRAME
     push rdi
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pfl_fail
     pop rdi
     push rax
     mov rdi, [rdi + 8]
     call posix_int_arg
+    ERR_M1 .pfl_fail
     mov rsi, rax
     pop rdi
     BLOCKING_CALL sys_flock
@@ -185,7 +198,12 @@ DEF_FUNC posix_flock, PFL_FRAME
     neg eax
     mov edi, eax
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .pfl_fail
 .pfl_argerr:
-    RAISE exc_TypeError_type, "flock() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "flock() takes exactly 2 arguments"
+.pfl_fail:
+    xor eax, eax                    ; leave drops whatever was pushed
+    leave
+    ret
 END_FUNC posix_flock
