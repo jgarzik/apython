@@ -524,18 +524,14 @@ DEF_FUNC gen_dealloc, GD_FRAME
     je .gd_just_free
 
     inc qword [rbx + PyObject.ob_refcnt]
-    ; The pending exception is held in a register across the cleanup, and
-    ; DUNDER_EXC_SAVE only borrows.  raise_exception_obj takes over its
-    ; caller's reference rather than adding one, so the global's is often the
-    ; only one there is -- and gen_dealloc_close runs arbitrary Python, which
-    ; can free anything nothing else holds.  Take a reference for the
-    ; register's own copy; .gd_close_done gives it back to the global.
+    ; The pending exception is TAKEN OUT for the cleanup: the global is
+    ; cleared, so its reference is the register's now, and .gd_close_done
+    ; puts the same one back.  This used to take a second reference as well,
+    ; from when the global was left set across the close -- and once the
+    ; global was cleared here that second one was never given back, so every
+    ; generator collected while an exception was in flight leaked the
+    ; exception, its arguments and its traceback.
     DUNDER_EXC_SAVE r12
-    test r12, r12
-    jz .gd_no_pending
-    mov rdi, r12
-    call obj_incref
-.gd_no_pending:
     mov qword [gs:ThreadState.current_exception], 0
 
     ; An async generator with a finalizer is HANDED OVER rather than closed.
@@ -586,7 +582,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     pop rdi
     call obj_decref
 .gd_close_done:
-    ; Hand the reference taken above back to the global.
+    ; Put back the exception taken out above, reference and all.
     mov [gs:ThreadState.current_exception], r12
     dec qword [rbx + PyObject.ob_refcnt]
     jnz .gd_resurrected         ; someone kept it: free nothing
