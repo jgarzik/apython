@@ -52,12 +52,20 @@ def once(f):
     except BaseException:
         return 1
     return 0
-def measure(f):
+# The collector runs only when this says so.  Left automatic, a collection
+# landing inside the window frees garbage from EARLIER cases and cancels a
+# leak out, so whether a case was flagged depended on what ran before it.
+gc.disable()
+def measure(f, collect):
     for _ in range(6):
         once(f)
+    if collect:
+        gc.collect()
     a = g()
     for _ in range(N):
         once(f)
+    if collect:
+        gc.collect()        # a cycle is garbage, not a leak
     return (g() - a) // N
 
 # ---- refusals ------------------------------------------------------------
@@ -69,7 +77,7 @@ SKIP = {'__init_subclass__', '__subclasshook__', '__del__', '__class__',
         'help', 'input', 'copyright', 'credits', 'license',
         'sleep', 'settrace', 'setprofile', 'setswitchinterval',
         'setrecursionlimit', '_settraceallthreads', '_setprofileallthreads',
-        'set_debug', 'set_threshold', 'freeze', 'disable', 'pthread_kill',
+        'set_debug', 'set_threshold', 'freeze', 'disable', 'enable', 'pthread_kill',
         'excepthook', 'unraisablehook', 'displayhook', 'exit', '_exit',
         'abort', 'fork', 'kill', 'pause', 'alarm', 'setitimer', 'open',
         'print', 'exec', 'eval', '__import__', 'globals', 'locals', 'vars',
@@ -236,13 +244,15 @@ def run():
             if idx < START or (FILT and FILT not in name):
                 continue
             say('@ %d %s' % (idx, name))
+            if idx % 500 == 0:
+                gc.collect()
             if not once(f):
                 continue            # it ran: not a failure path
             raised += 1
             say('!')
-            d = measure(f)
+            d = measure(f, False)
             if d >= 1:
-                d = measure(f)
+                d = measure(f, True)
             if d >= 1:
                 say('LEAK %d %s' % (d, name))
     say('DONE %d' % raised)

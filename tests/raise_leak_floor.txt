@@ -4,6 +4,7 @@
 # re-record with
 #   bash tests/raise_probe.sh --record
 # in the commit that fixes it.
+cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=1
 cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=3
 cb | bytearray | c[2:5] = [E(1), E(2)] | index | nth=1
 cb | dict | c == other | eq | nth=1
@@ -14,6 +15,7 @@ cb | dict | c | other | eq | nth=1
 cb | dict | c | other | eq | nth=3
 cb | dict | c | other | hash | nth=1
 cb | dict | c | other | hash | nth=3
+cb | dict | c.__init__(other) | eq | nth=1
 cb | dict | c.__init__(other) | eq | nth=3
 cb | dict | c.__init__(other) | hash | nth=1
 cb | dict | c.__init__(other) | hash | nth=3
@@ -87,6 +89,7 @@ cb | set | c.__init__(gen(5)) | eq | nth=1
 cb | set | c.__init__(gen(5)) | eq | nth=3
 cb | set | c.__init__(gen(5)) | hash | nth=1
 cb | set | c.__init__(gen(5)) | hash | nth=3
+cb | set | c.difference_update(gen(8)) | eq | nth=1
 cb | set | c.difference_update(gen(8)) | eq | nth=3
 cb | set | c.difference_update(gen(8)) | hash | nth=1
 cb | set | c.difference_update(gen(8)) | hash | nth=3
@@ -106,6 +109,7 @@ cb | set | c.symmetric_difference_update(other) | eq | nth=1
 cb | set | c.symmetric_difference_update(other) | eq | nth=3
 cb | set | c.symmetric_difference_update(other) | hash | nth=1
 cb | set | c.symmetric_difference_update(other) | hash | nth=3
+cb | set | c.update(gen(8)) | eq | nth=1
 cb | set | c.update(gen(8)) | eq | nth=3
 cb | set | c.update(gen(8)) | hash | nth=1
 cb | set | c.update(gen(8)) | hash | nth=3
@@ -314,6 +318,7 @@ meth | set.update(None, 1, 2, 3, 4, 5, 6, 7)
 meth | set.update(None,)
 new | _io.StringIO('s',) **kw
 new | _io.StringIO() **kw
+new | _io.StringIO(-1,) **kw
 new | _io.StringIO(1.5,) **kw
 new | _io.StringIO(<class 'object'>,) **kw
 new | _io.StringIO(None, 1, 2, 3, 4, 5, 6, 7)
