@@ -5,16 +5,9 @@
 # in the commit that earns it; a row at zero is dropped.
 src/buildclass.asm                     14
 src/buildclass_stmt.asm                9
-src/compiler/compile.asm               11
-src/import.asm                         8
-src/itertools.asm                      8
-src/marshal.asm                        5
-src/marshalw.asm                       5
 src/mro.asm                            1
-src/object.asm                         12
-src/objerr.asm                         14
+src/object.asm                         5
+src/objerr.asm                         7
 src/pyo/dict.asm                       3
 src/pyo/exception.asm                  2
-src/repr.asm                           4
 src/runtime.asm                        1
-src/systrace.asm                       2

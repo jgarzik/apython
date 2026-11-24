@@ -4,23 +4,12 @@
 # re-record with
 #   bash tests/raise_probe.sh --record
 # in the commit that fixes it.
-cb | dict | c == other | hash | nth=1
-cb | dict | c == other | hash | nth=3
-cb | dict | c | other | hash | nth=1
-cb | dict | c | other | hash | nth=3
 cb | dict | c.__init__(other) | eq | nth=1
 cb | dict | c.__init__(other) | eq | nth=3
 cb | dict | c.__init__(other) | hash | nth=1
 cb | dict | c.__init__(other) | hash | nth=3
-cb | dict | c.items() == other.items() | hash | nth=1
-cb | dict | c.items() == other.items() | hash | nth=3
 cb | dict | c.keys() & other.keys() | eq | nth=1
 cb | dict | c.keys() & other.keys() | eq | nth=3
-cb | dict | c.keys() & other.keys() | hash | nth=1
-cb | dict | c.keys() & other.keys() | hash | nth=3
-cb | dict | c.keys() == other.keys() | hash | nth=1
-cb | dict | c.keys() == other.keys() | hash | nth=3
-cb | dict | c.popitem() | hash | nth=1
 cb | dict | c.update((e, 1) for e in gen(8)) | eq | nth=1
 cb | dict | c.update((e, 1) for e in gen(8)) | eq | nth=3
 cb | dict | c.update((e, 1) for e in gen(8)) | hash | nth=1
@@ -34,42 +23,6 @@ cb | dict | dict.fromkeys(gen(8)) | hash | nth=3
 cb | dict | dict.fromkeys(gen(8)) | iter | nth=3
 cb | list | dict.fromkeys(c) | hash | nth=1
 cb | list | dict.fromkeys(c) | hash | nth=3
-cb | list | set(c) | hash | nth=1
-cb | list | set(c) | hash | nth=3
-cb | set | c & other | hash | nth=1
-cb | set | c & other | hash | nth=3
-cb | set | c &= other | hash | nth=1
-cb | set | c &= other | hash | nth=3
-cb | set | c - other | hash | nth=1
-cb | set | c - other | hash | nth=3
-cb | set | c -= other | hash | nth=1
-cb | set | c -= other | hash | nth=3
-cb | set | c <= other | hash | nth=1
-cb | set | c == other | hash | nth=1
-cb | set | c ^ other | hash | nth=1
-cb | set | c ^ other | hash | nth=3
-cb | set | c ^= other | hash | nth=1
-cb | set | c ^= other | hash | nth=3
-cb | set | c | other | hash | nth=1
-cb | set | c | other | hash | nth=3
-cb | set | c |= other | hash | nth=1
-cb | set | c |= other | hash | nth=3
-cb | set | c.__init__(gen(5)) | hash | nth=1
-cb | set | c.__init__(gen(5)) | hash | nth=3
-cb | set | c.difference_update(gen(8)) | hash | nth=1
-cb | set | c.difference_update(gen(8)) | hash | nth=3
-cb | set | c.intersection_update(other) | hash | nth=1
-cb | set | c.intersection_update(other) | hash | nth=3
-cb | set | c.isdisjoint(other) | hash | nth=1
-cb | set | c.isdisjoint(other) | hash | nth=3
-cb | set | c.issubset(other) | hash | nth=1
-cb | set | c.issuperset(other) | hash | nth=1
-cb | set | c.issuperset(other) | hash | nth=3
-cb | set | c.symmetric_difference_update(other) | hash | nth=1
-cb | set | c.symmetric_difference_update(other) | hash | nth=3
-cb | set | c.update(gen(8)) | hash | nth=1
-cb | set | c.update(gen(8)) | hash | nth=3
-cb | set | frozenset(c) == frozenset(other) | hash | nth=1
 func | math.gcd('s',)
 func | math.gcd(1.5,)
 func | math.gcd(<class 'object'>,)
@@ -95,22 +48,3 @@ new | dict(None,)
 new | dict(None,) **kw
 new | dict(b'b',)
 new | dict(b'b',) **kw
-new | map('s',) **kw
-new | map(-1,) **kw
-new | map(1.5,) **kw
-new | map(<class 'object'>,) **kw
-new | map(None, 1, 2, 3, 4, 5, 6, 7)
-new | map(None, 1, 2, 3, 4, 5, 6, 7) **kw
-new | map(None,) **kw
-new | map([],) **kw
-new | map(b'b',) **kw
-new | zip(-1,)
-new | zip(-1,) **kw
-new | zip(1.5,)
-new | zip(1.5,) **kw
-new | zip(<class 'object'>,)
-new | zip(<class 'object'>,) **kw
-new | zip(None, 1, 2, 3, 4, 5, 6, 7)
-new | zip(None, 1, 2, 3, 4, 5, 6, 7) **kw
-new | zip(None,)
-new | zip(None,) **kw
