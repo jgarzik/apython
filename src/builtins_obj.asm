@@ -2515,7 +2515,8 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     jz .vars_no_dict
     mov rsi, rax
     mov rdi, [rbp - VR_OBJ]
-    call obj_getattr_opt
+    extern obj_getattr_raw
+    call obj_getattr_raw
     test rax, rax
     jz .vars_ask_failed
     leave

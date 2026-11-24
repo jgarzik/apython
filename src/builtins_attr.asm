@@ -94,7 +94,8 @@ DEF_FUNC builtin_getattr, 32
     DUNDER_EXC_SAVE [rbp - GA_EXC]
     mov rdi, [rbx]                 ; args[0], as a Value
     mov rsi, [rbx + 8]             ; args[1], the name
-    call obj_getattr_opt
+    extern obj_getattr_raw
+    call obj_getattr_raw
     test rax, rax
     jz .getattr_missing
     pop r12
@@ -193,7 +194,8 @@ DEF_FUNC builtin_hasattr, 24
     DUNDER_EXC_SAVE [rbp - HA_EXC]
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
-    call obj_getattr_opt
+    extern obj_getattr_raw
+    call obj_getattr_raw
     test rax, rax
     jz .hasattr_missing
     mov rdi, rax

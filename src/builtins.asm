@@ -678,7 +678,8 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     mov rbx, rax
     mov rdi, [rbp - PSW_SINK]
     mov rsi, rbx
-    call obj_getattr_opt
+    extern obj_getattr_raw
+    call obj_getattr_raw
     mov [rbp - PSW_NAME], rax
     mov rdi, rbx
     call obj_decref             ; the name
@@ -784,7 +785,7 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     mov rbx, rax
     mov rdi, [rbp - PSF_SINK]
     mov rsi, rbx
-    call obj_getattr_opt
+    call obj_getattr_raw
     mov [rbp - PSF_NAME], rax
     mov rdi, rbx
     call obj_decref             ; the name

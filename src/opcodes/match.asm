@@ -1676,6 +1676,11 @@ DEF_FUNC op_match_class, MC_FRAME
     DISPATCH
 
 .mc_fail:
+    ; A subject whose __getattr__ said "absent" by raising AttributeError does
+    ; not match, and that AttributeError goes no further: left pending, it
+    ; outlived the match statement and was reported at the end of the program.
+    extern attr_miss_swallow
+    call attr_miss_swallow
     ; DECREF partial result tuple if allocated (tuple_new zeros items,
     ; tuple_dealloc skips NULLs, so partial is safe)
     mov rdi, [rbp - MC_RESULT]

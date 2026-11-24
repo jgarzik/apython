@@ -540,11 +540,8 @@ END_FUNC irnm_cat_n
 ;; ============================================================================
 global import_clear_attr_error
 DEF_FUNC import_clear_attr_error
-    cmp qword [gs:ThreadState.attr_error_pending], 0
-    je .ica_done
-    mov qword [gs:ThreadState.attr_error_pending], 0
-    mov qword [gs:ThreadState.current_exception], 0
-.ica_done:
+    extern attr_miss_swallow
+    call attr_miss_swallow      ; which RELEASES it; zeroing the word leaked it
     leave
     ret
 END_FUNC import_clear_attr_error

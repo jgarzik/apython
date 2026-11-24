@@ -2215,7 +2215,7 @@ GA_OWNMRO   equ 88          ; the attribute came from the CLASS's own MRO
 GA_FROMMETA equ 96          ; type_getattr_meta's out-parameter
 GA_FROMINST equ 104         ; instance_getattr_where's: instance storage
 GA_FRAME    equ 120         ; + 1 push = 128
-DEF_FUNC obj_getattr_opt, GA_FRAME
+DEF_FUNC obj_getattr_raw, GA_FRAME
     push rbx
     mov [rbp - GA_OBJ], rdi
     mov [rbp - GA_NAME], rsi
@@ -2574,7 +2574,53 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     pop rbx
     leave
     ret
+END_FUNC obj_getattr_raw
+
+;; ============================================================================
+;; obj_getattr_opt(rdi = obj, a Value, rsi = name) -> rax = the attribute,
+;;   a Value and a new reference, or 0 with NOTHING pending when there is none
+;;
+;; CPython's PyObject_GetOptionalAttr: "no such attribute" is an answer, and
+;; a __getattr__ hook gives it by raising AttributeError.  obj_getattr_raw
+;; leaves that exception pending, with attr_error_pending saying what it is,
+;; for the three callers that re-raise it under the hook's own wording --
+;; getattr(), and print() reaching for write and flush.  Every other caller
+;; asked a question whose answer may be no, carried on, and left the
+;; exception behind for whatever looked at current_exception next:
+;; `isinstance(m, C)` for a module with a PEP 562 hook ended the program with
+;; a traceback for an AttributeError nothing had raised at it.
+;; ============================================================================
+DEF_FUNC obj_getattr_opt
+    call obj_getattr_raw
+    test rax, rax
+    jnz .gao_out
+    call attr_miss_swallow
+    xor eax, eax
+.gao_out:
+    leave
+    ret
 END_FUNC obj_getattr_opt
+
+;; ============================================================================
+;; attr_miss_swallow() -> nothing
+;;
+;; After a lookup that answered 0: if what is pending is the AttributeError a
+;; __getattr__ hook raised to say "absent" (attr_error_pending), release it.
+;; Anything else pending is a real failure and is left alone.
+;; ============================================================================
+DEF_FUNC attr_miss_swallow
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .ams_done
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .ams_done
+    mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+.ams_done:
+    leave
+    ret
+END_FUNC attr_miss_swallow
 
 ;; ============================================================================
 ;; The pure stack shuffles.  Nothing below reads a name or touches a dict.
