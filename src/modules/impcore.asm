@@ -90,7 +90,7 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     mov rax, [rel icb_dirs]
     mov [gs:ThreadState.import_path_override], rax
     mov rdi, [rbp - ICB_NAME]
-    call import_find_and_load_asm
+    call import_find_and_load_asm   ; err: either 0 goes to .icb_failed, once the override is cleared
     mov qword [gs:ThreadState.import_path_override], 0
     test rax, rax
     jz .icb_failed

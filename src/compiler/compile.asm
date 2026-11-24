@@ -2472,7 +2472,7 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - CAB_MOD], rax
     mov rdi, [rbp - CAB_KEY]
     call obj_decref

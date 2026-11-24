@@ -11,6 +11,10 @@
 # the caller the first time, and whether the block count stayed put: a caller
 # that does not release what it held climbs by at least one block a round.
 import gc
+import importlib
+import os
+import shutil
+import tempfile
 import marshal
 import sys
 import weakref
@@ -34,10 +38,16 @@ def one(fn):
     return "no error (%r)" % (r,)
 
 
-def check(label, fn, message=True):
+def check(label, fn, message=True, leak=True):
     first = one(fn)
     if not message:
         first = first.split(":")[0]
+    if not leak:
+        # CPython's own import machinery allocates on a failed import, so
+        # only the exception is comparable; CHK_LEAKS=1 prints the rest.
+        if not os.environ.get("CHK_LEAKS"):
+            results.append("%-36s %s" % (label, first))
+            return
     for _ in range(20):
         one(fn)
     gc.collect()
@@ -138,6 +148,18 @@ class Index:
     def __index__(self):
         boom("index")
 
+
+MODDIR = tempfile.mkdtemp()
+for name, body in (
+    ("chk_raises", "raise ValueError('module body')\n"),
+    ("chk_syntax", "def (\n"),
+    ("chk_circ_a", "from chk_circ_b import b\na = 1\n"),
+    ("chk_circ_b", "from chk_circ_a import a\nb = 1\n"),
+):
+    with open(os.path.join(MODDIR, name + ".py"), "w") as f:
+        f.write(body)
+sys.path.insert(0, MODDIR)
+sys.dont_write_bytecode = True
 
 HASH = Hash()
 HASHCALL = HashCall()
@@ -336,6 +358,37 @@ check("marshal.load(1)", lambda: marshal.load(1), message=False)
 check("marshal.load, read raises", lambda: marshal.load(BadSink()))
 check("marshal.load()", lambda: marshal.load(), message=False)
 
+# ---- import ------------------------------------------------------------------
+def imp(src):
+    def run():
+        exec(src, {"__name__": "chk", "__package__": None})
+    return run
+
+
+def blocked():
+    sys.modules["chk_blocked"] = None
+    try:
+        import chk_blocked
+    finally:
+        del sys.modules["chk_blocked"]
+
+
+check("import missing", imp("import chk_no_such_module"), leak=False)
+check("import missing.sub", imp("import chk_no_such_module.sub"), leak=False)
+check("import sys.missing", imp("import sys.chk_missing"), leak=False)
+check("from missing import x", imp("from chk_no_such_module import x"), leak=False)
+check("from sys import missing", imp("from sys import chk_missing"), message=False, leak=False)
+check("from . import x, no package", imp("from . import x"), leak=False)
+check("import of a None entry", blocked, leak=False)
+check("import, body raises", imp("import chk_raises"), leak=False)
+check("from m import x, body raises", imp("from chk_raises import x"), leak=False)
+check("import, syntax error", imp("import chk_syntax"), message=False, leak=False)
+check("circular from-import", imp("import chk_circ_a"), message=False, leak=False)
+check("__import__(missing)", lambda: __import__("chk_no_such_module"), leak=False)
+check("__import__(1)", lambda: __import__(1), message=False, leak=False)
+check("__import__('a.b') missing", lambda: __import__("chk_no_such_module.b", None, None, ("x",)), leak=False)
+check("importlib.import_module", lambda: importlib.import_module("chk_no_such_module"), leak=False)
+
 # ---- compile(), exec() and eval() ---------------------------------------------
 check("compile(bad source)", lambda: compile("x = (", "<s>", "exec"), message=False)
 check("compile(1, ...)", lambda: compile(1, "<s>", "exec"), message=False)
@@ -399,6 +452,9 @@ check("bytes.__bytes__('a')", lambda: bytes.__bytes__("a"))
 check("memoryview.__len__(b'')", lambda: memoryview.__len__(b""))
 check("type(iter([])).__next__(1)", lambda: type(iter([])).__next__(1))
 check("type(len).__call__(1)", lambda: type(len).__call__(1))
+
+sys.path.remove(MODDIR)
+shutil.rmtree(MODDIR)
 
 for line in results:
     print(line)

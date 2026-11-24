@@ -697,7 +697,7 @@ DEF_FUNC codec_via_python, CVP_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov rbx, rax
     pop rdi
     call obj_decref

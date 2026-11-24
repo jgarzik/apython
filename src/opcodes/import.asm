@@ -72,6 +72,7 @@ DEF_FUNC_BARE op_import_name
     mov rsi, [r12 + PyFrame.globals]
     extern import_resolve_relative
     call import_resolve_relative
+    ERR_NULL_JUMP               ; no parent package, or one too many dots
     mov rdx, rax                ; the resolved name, owned
     add rsp, 8
     pop rax
@@ -94,6 +95,7 @@ DEF_FUNC_BARE op_import_name
     mov rsi, [rsp + 8]          ; fromlist
     ; rdx = level (already set)
     call import_module
+    ERR_NULL_JUMP               ; the import failed: its exception is pending
     ; rax = module (new reference)
 
     test r15d, r15d
@@ -299,7 +301,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     mov rdi, [rbp - IF2_MOD]
     mov rsi, [rbp - IF_ATTR]
     extern import_submodule_attr
-    call import_submodule_attr
+    call import_submodule_attr  ; err: 0 goes to .if_error, which hands on a pending exception first
     test rax, rax
     jz .if_error
     mov [rbp - IF2_SUB], rax

@@ -781,7 +781,7 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - CLW_MOD], rax
     mov rdi, [rbp - CLW_TMP]
     call obj_decref

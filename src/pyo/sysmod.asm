@@ -1660,7 +1660,7 @@ DEF_FUNC sys_breakpointhook_func
     push rdi
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     pop rdi
     push rax
     call obj_decref
@@ -1705,7 +1705,9 @@ DEF_FUNC sys_breakpointhook_func
 .sbh_none:
     ; No pdb, or it would not import.  Answer None rather than raising: a
     ; breakpoint() in a program with no debugger available should not stop it.
+    mov rdi, [gs:ThreadState.current_exception]
     mov qword [gs:ThreadState.current_exception], 0
+    XDECREF_V rdi, rcx          ; the import's own exception, dropped not leaked
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR

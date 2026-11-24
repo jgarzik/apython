@@ -526,7 +526,7 @@ DEF_FUNC_LOCAL al_prep_fn, ALP_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - ALP_MOD], rax
     mov rdi, [rbp - ALP_KEY]
     call obj_decref

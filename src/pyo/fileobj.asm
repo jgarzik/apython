@@ -950,7 +950,7 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
     xor esi, esi                    ; no fromlist
     xor edx, edx                    ; absolute
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - FBF_MOD], rax
     mov rdi, [rbp - FBF_NAME]
     call obj_decref

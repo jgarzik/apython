@@ -419,7 +419,7 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - ORI_MOD], rax
     mov rdi, [rbp - ORI_KEY]
     extern obj_decref

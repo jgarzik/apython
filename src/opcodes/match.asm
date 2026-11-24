@@ -509,7 +509,7 @@ extern obj_decref
     mov [rbp - IS_SUBNAME], rsi
     mov rdi, [rbp - IS_MOD]
     extern import_submodule_attr
-    call import_submodule_attr
+    call import_submodule_attr  ; err: 0 goes to .is_all_really_absent, which hands on a pending exception first
     test rax, rax
     jz .is_all_really_absent
     mov rdx, rax
@@ -2020,7 +2020,7 @@ DEF_FUNC_LOCAL typing_call, TYC_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov rbx, rax
     pop rdi
     extern obj_decref

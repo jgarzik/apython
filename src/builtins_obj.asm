@@ -2132,7 +2132,7 @@ DEF_FUNC builtin_open_fn
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: tested as r13 below, once the name is released
     mov r13, rax
     pop rdi
     call obj_decref
@@ -3063,7 +3063,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov rdi, [rbp - BIM_NAME]
     mov rsi, [rbp - BIM_FROMLIST]
     xor edx, edx                ; level = 0
-    call import_module
+    call import_module          ; err: tested four lines down, as .imp_failed
     ; import_module never sets rdx, so V_PACK was branching on whatever the
     ; last call left there -- re-encoding the module *pointer* as an int or a
     ; double, i.e. a Value whose payload is a pointer but whose tag says

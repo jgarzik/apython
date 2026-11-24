@@ -892,7 +892,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - TSP_MOD], rax
     mov rdi, [rbp - TSP_TMP]
     call obj_decref
@@ -962,6 +962,10 @@ DEF_FUNC time_strptime_func, TSP_FRAME
 .tsp_no_impl:
     mov rax, [rbp - TSP_KW]
     mov [gs:ThreadState.kw_names_pending], rax
+    ; An import that RAISED keeps its own exception; only a module that came
+    ; back without the function is ours to describe.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .tsp_fail
     SET_EXC exc_TypeError_type, "strptime() needs the _strptime module"
 .tsp_fail:
     xor eax, eax

@@ -2211,7 +2211,7 @@ DEF_FUNC deprecation_warn, DW_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - DW_ARGS], rax        ; the module, across the release
     mov rdi, [rbp - DW_TMP]
     call obj_decref
