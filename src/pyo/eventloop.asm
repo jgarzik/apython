@@ -40,12 +40,9 @@ extern none_singleton
 extern str_from_cstr
 extern type_type
 extern ap_strcmp
-extern raise_exception
-extern raise_exception_obj
 extern exc_new
 extern exc_RuntimeError_type
 extern exc_CancelledError_type
-extern eval_exception_unwind
 extern builtin_func_new
 extern getenv
 

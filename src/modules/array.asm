@@ -43,7 +43,6 @@ extern obj_as_slice_index
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
 extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -53,7 +52,6 @@ extern type_type
 extern str_type
 extern int_type
 extern int_promote_mpz
-extern eval_exception_unwind
 extern bool_type
 extern float_type
 extern bytes_type

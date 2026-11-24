@@ -23,8 +23,6 @@
 %include "object.inc"
 
 ASM_INIT
-
-extern eval_exception_unwind
 extern none_singleton
 extern ap_malloc
 extern ap_free

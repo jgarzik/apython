@@ -13,8 +13,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-
-extern eval_exception_unwind
 extern ap_free
 extern object_type
 extern ap_malloc
@@ -42,7 +40,6 @@ extern none_singleton
 extern obj_decref
 extern obj_dealloc
 extern obj_incref
-extern raise_exception
 extern set_exception
 extern tuple_new
 extern str_type

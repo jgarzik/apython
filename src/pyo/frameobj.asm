@@ -29,8 +29,6 @@
 %include "threadstate.inc"
 
 ASM_INIT
-
-extern eval_exception_unwind
 extern ap_malloc
 extern obj_decref
 extern obj_dealloc
@@ -45,7 +43,6 @@ extern int_from_i64
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
 extern exc_ValueError_type
 extern exc_TypeError_type
 extern exc_AttributeError_type

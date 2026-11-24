@@ -3,8 +3,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-
-extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -201,7 +199,6 @@ DEF_FUNC fileobj_write
     ret
 
 .write_error:
-    extern raise_exception
     extern exc_TypeError_type
     SET_EXC exc_TypeError_type, "write() takes exactly 1 argument"
     leave

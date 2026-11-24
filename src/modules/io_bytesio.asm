@@ -16,7 +16,6 @@
 ASM_INIT
 
 ; --- from io.asm, the half this came out of ---
-extern eval_exception_unwind
 extern io_bases1
 extern io_set_number
 extern io_append_i64
