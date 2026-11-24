@@ -90,6 +90,49 @@ class Func:
         self.has_ret = False
 
 
+def raising_macros(noret):
+    """Macros, in any .asm or .inc, whose body ends up in a jump-style raise:
+    SOCK_CHECK, POSIX_CHECK and their kind.  A use of one is a site like any
+    other, and without this a file full of them reads as clean."""
+    bodies = {}
+    for path in all_asm() + sorted(glob.glob('src/include/*.inc')) \
+            + ['src/compiler/compiler.inc']:
+        name = None
+        try:
+            lines = open(path, errors='replace').read().split('\n')
+        except FileNotFoundError:
+            continue
+        for raw in lines:
+            m = re.match(r'^\s*%macro\s+(\w+)', raw)
+            if m:
+                name = m.group(1)
+                bodies.setdefault(name, [])
+                continue
+            if re.match(r'^\s*%endmacro\b', raw):
+                name = None
+                continue
+            if name:
+                code = strip(raw)
+                if code.strip():
+                    bodies[name].append(code)
+    bad = set(RAISE_MACROS)
+    changed = True
+    while changed:
+        changed = False
+        for name, body in bodies.items():
+            if name in bad or JUMP_RE.match('    ' + name) \
+                    or name.startswith('ERR_'):
+                continue
+            for code in body:
+                m = BRANCH_RE.match(code)
+                w = re.match(r'^\s*(\w+)', code)
+                if (m and m.group(2) in noret) or (w and w.group(1) in bad):
+                    bad.add(name)
+                    changed = True
+                    break
+    return bad
+
+
 def parse(paths):
     """{name: Func} plus {path: [Func]}; a name defined twice keeps both."""
     funcs, byfile = {}, {}
@@ -193,11 +236,12 @@ def classify(funcs, byfile):
                 noret.add(f.name)
                 changed = True
 
+    macros = raising_macros(noret)
     for f in every:
         f.sites = []
         for n, code in f.body:
-            m = MACRO_RE.match(code)
-            if m:
+            m = re.match(r'^\s*(\w+)\b', code)
+            if m and m.group(1) in macros:
                 f.sites.append((n, m.group(1)))
                 continue
             m = BRANCH_RE.match(code)
