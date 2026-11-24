@@ -16,7 +16,7 @@ src/builtins_str.asm                   6
 src/builtins_type.asm                  8
 src/compiler/compile.asm               11
 src/dunder.asm                         10
-src/format.asm                         23
+src/format.asm                         22
 src/import.asm                         8
 src/itertools.asm                      11
 src/marshal.asm                        5
@@ -63,9 +63,9 @@ src/modules/unicodedata.asm            15
 src/modules/unicodenorm.asm            7
 src/modules/zlib.asm                   20
 src/mro.asm                            1
-src/object.asm                         23
-src/objerr.asm                         17
-src/pyo/abcmod.asm                     10
+src/object.asm                         15
+src/objerr.asm                         16
+src/pyo/abcmod.asm                     4
 src/pyo/asyncgen.asm                   30
 src/pyo/asyncmod.asm                   20
 src/pyo/bytearray.asm                  23
@@ -74,14 +74,14 @@ src/pyo/bytes_decode.asm               5
 src/pyo/class.asm                      12
 src/pyo/code.asm                       8
 src/pyo/complex.asm                    6
-src/pyo/descriptors.asm                31
+src/pyo/descriptors.asm                28
 src/pyo/dict.asm                       11
 src/pyo/dict_views.asm                 3
 src/pyo/eventloop.asm                  3
 src/pyo/exc_group.asm                  12
 src/pyo/exc_oserror.asm                3
 src/pyo/exception.asm                  21
-src/pyo/fileobj.asm                    5
+src/pyo/fileobj.asm                    4
 src/pyo/float.asm                      8
 src/pyo/frameobj.asm                   5
 src/pyo/func.asm                       19
@@ -108,7 +108,7 @@ src/pyo/str.asm                        5
 src/pyo/str_mod.asm                    8
 src/pyo/structseq.asm                  4
 src/pyo/subclasses.asm                 2
-src/pyo/sysmod.asm                     22
+src/pyo/sysmod.asm                     20
 src/pyo/timemod.asm                    32
 src/pyo/tracebackobj.asm               4
 src/pyo/tuple.asm                      8

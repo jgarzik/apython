@@ -4,34 +4,6 @@
 # re-record with
 #   bash tests/raise_probe.sh --record
 # in the commit that fixes it.
-CRASH func | _abc._abc_subclasscheck(None, 1, 2, 3, 4, 5, 6, 7)
-CRASH func | _abc._get_dump **kw
-CRASH func | _abc._get_dump('s',)
-CRASH func | _abc._get_dump(-1,)
-CRASH func | _abc._get_dump(1.5,)
-CRASH func | _abc._get_dump([],)
-CRASH func | _abc._get_dump(b'b',)
-CRASH func | _abc._reset_caches **kw
-CRASH func | _abc._reset_caches('s',)
-CRASH func | _abc._reset_caches(-1,)
-CRASH func | _abc._reset_caches(1.5,)
-CRASH func | _abc._reset_caches([],)
-CRASH func | _abc._reset_caches(b'b',)
-CRASH func | _abc._reset_registry **kw
-CRASH func | _abc._reset_registry('s',)
-CRASH func | _abc._reset_registry(-1,)
-CRASH func | _abc._reset_registry(1.5,)
-CRASH func | _abc._reset_registry([],)
-CRASH func | _abc._reset_registry(b'b',)
-CRASH func | _sre.compile(None, 1, 2, 3, 4, 5, 6, 7)
-CRASH func | _weakref._remove_dead_weakref(None, 1, 2, 3, 4, 5, 6, 7)
-CRASH func | sys.set_int_max_str_digits(1.5,)
-CRASH func | sys.set_int_max_str_digits([],)
-CRASH meth | module.set_int_max_str_digits(1.5,)
-CRASH meth | module.set_int_max_str_digits([],)
-CRASH meth | property.deleter **kw
-CRASH meth | property.getter **kw
-CRASH meth | property.setter **kw
 cb | bytearray | c.center(E(60)) | index | nth=1
 cb | bytearray | c.count(E(7)) | index | nth=1
 cb | bytearray | c.count(E(7)) | index | nth=3
@@ -89,6 +61,7 @@ cb | list | c[::2] = gen(6) | iter | nth=1
 cb | list | c[::2] = gen(6) | iter | nth=3
 cb | list | dict.fromkeys(c) | hash | nth=1
 cb | list | dict.fromkeys(c) | hash | nth=3
+cb | list | set(c) | hash | nth=1
 cb | list | set(c) | hash | nth=3
 cb | set | c & other | eq | nth=1
 cb | set | c & other | eq | nth=3
@@ -161,8 +134,6 @@ func | time.strptime(<class 'object'>,)
 func | time.strptime(None,)
 func | time.strptime([],)
 func | time.strptime(b'b',)
-meth | array.array.extend('s',)
-meth | array.array.fromlist('s',)
 meth | bytearray.__mod__('s',)
 meth | bytearray.__mod__(-1,)
 meth | bytearray.__mod__(1.5,)
@@ -499,7 +470,6 @@ meth | module.__loader__(b'b',)
 meth | set.__init__(-1,)
 meth | set.__init__(1.5,)
 meth | set.__init__(<class 'object'>,)
-meth | set.__init__(None, 1, 2, 3, 4, 5, 6, 7)
 meth | set.__init__(None,)
 meth | set.difference(None, 1, 2, 3, 4, 5, 6, 7)
 meth | set.difference_update(None, 1, 2, 3, 4, 5, 6, 7)
