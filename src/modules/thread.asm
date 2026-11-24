@@ -61,6 +61,8 @@ extern gil_drop
 extern gil_threaded
 extern signal_run_pending
 extern signal_mark_pending
+extern systrace_install
+extern sysprofile_install
 
 extern pthread_create
 extern pthread_self
@@ -195,6 +197,14 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     jz .te_no_repr
     call ap_free
 .te_no_repr:
+    ; Its trace and profile functions go back, and with the last tracing
+    ; thread the dispatch table goes back to the plain one.
+    mov rdi, [gs:ThreadState.ts_self]
+    xor esi, esi
+    call systrace_install
+    mov rdi, [gs:ThreadState.ts_self]
+    xor esi, esi
+    call sysprofile_install
     call tstate_unlink
     dec qword [rel tc_running]
 

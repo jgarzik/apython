@@ -1334,6 +1334,10 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC sys_settrace_func, sm_settrace
     SYS_ADD_FUNC sys_gettrace_func, sm_gettrace
     SYS_ADD_FUNC sys_setprofile_func, sm_setprofile
+    extern sys_settraceallthreads_func
+    extern sys_setprofileallthreads_func
+    SYS_ADD_FUNC sys_settraceallthreads_func, sm_settraceall
+    SYS_ADD_FUNC sys_setprofileallthreads_func, sm_setprofileall
     SYS_ADD_FUNC sys_getprofile_func, sm_getprofile
     SYS_ADD_FUNC sys_call_tracing_func, sm_call_tracing
 
@@ -2169,6 +2173,8 @@ sm_getframemodulename: db "_getframemodulename", 0
 sm_settrace:     db "settrace", 0
 sm_gettrace:     db "gettrace", 0
 sm_setprofile:   db "setprofile", 0
+sm_settraceall:  db "_settraceallthreads", 0
+sm_setprofileall: db "_setprofileallthreads", 0
 sm_getprofile:   db "getprofile", 0
 sm_call_tracing: db "call_tracing", 0
 sm_byteorder:    db "byteorder", 0
