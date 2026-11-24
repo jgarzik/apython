@@ -19,7 +19,7 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern raise_exception
+extern set_exception
 extern none_singleton
 extern obj_incref
 extern dict_new
@@ -33,7 +33,6 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
 extern dunder_lookup
@@ -104,6 +103,7 @@ IGA_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 ;; The same shape as type_getattr / type_getattr_meta, and for the same reason.
 ;; An out-parameter in the caller's frame is re-entrant; a global would be
 ;; clobbered by any lookup a descriptor makes on its way through.
+;; Fails: 0?
 ;; ============================================================================
 global instance_getattr_where
 DEF_FUNC instance_getattr_where, IGA_FRAME
@@ -116,6 +116,7 @@ END_FUNC instance_getattr_where
 ;; instance_getattr(rdi = self, rsi = name) -> rax = Value
 ;;
 ;; The tp_getattr slot: instance_getattr_where with nowhere to report.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC instance_getattr, IGA_FRAME
     mov qword [rbp - IGA_WHERE], 0
@@ -584,7 +585,10 @@ END_FUNC type_refresh_attr_flags
 ;; 5. If not found, __getattr__, then AttributeError
 ;;
 ;; rdi = instance, rsi = name (PyStrObject*)
-;; Returns: owned reference to attribute value, or NULL
+;; Returns: owned reference to attribute value, or NULL.  NULL with nothing
+;; pending is "absent"; with an AttributeError pending and attr_error_pending
+;; set it is a hook saying absent; with anything else pending it is a failure.
+;; Fails: 0?
 ;; ============================================================================
 IG_NAME   equ 8
 IG_ORIGIN equ 16        ; the type the MRO walk started from
@@ -782,13 +786,13 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; function always does, and a builtin does only when it is a method or a
     ; wrapper descriptor rather than a module-level function.  Types, classes
     ; and other callables are returned as they stand.  builtin_should_bind
-    ; also raises when a descriptor meets a receiver of the wrong class, which
+    ; also refuses a descriptor that meets a receiver of the wrong class, which
     ; is where CPython raises it -- at the access, not at the call.
     mov rdi, r13
     mov rsi, rbx
     extern builtin_should_bind
     call builtin_should_bind
-    ERR_M1_JUMP
+    ERR_M1 .getattr_unwind
     test eax, eax
     jnz .bind_method
     jmp .found_type_raw
@@ -985,8 +989,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; and a flag saying so; raise_no_attribute propagates it rather than
     ; replacing it, so `o.missing` still reports what __getattr__ raised.
     ;
-    ; Anything else is a genuine failure in the middle of a lookup and keeps
-    ; unwinding, which is what it did before.
+    ; Anything else is a genuine failure in the middle of a lookup, and goes
+    ; back as 0 with the exception pending and the flag clear.
     mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .getattr_unwind
@@ -1007,8 +1011,15 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     leave
     ret
 .getattr_unwind:
+    ; 0 with the exception pending and the flag clear: a failure, which every
+    ; reader of a tp_getattr tells from "absent" by exactly that.
+    RET_NULL
+    IG_RELEASE_HELD
+    pop r13
+    pop r12
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .really_not_found:
     ; A builtin base may answer through its own tp_getattr rather than a
@@ -1027,7 +1038,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rsi, [rbp - IG_NAME]
     call rax
     GETATTR_HOOK_SKIP .ig_base_ok
-    ERR_PENDING_JUMP
+    ERR_PENDING .getattr_unwind
 .ig_base_ok:
     V_UNPACK rax, rdx
     test edx, edx
@@ -1183,12 +1194,13 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
 END_FUNC attr_getattr_hook
 
 ;; ============================================================================
-;; instance_setattr(rdi = instance, rsi = name, rdx = value Value) -> nothing
+;; instance_setattr(rdi = instance, rsi = name, rdx = value Value)
+;;   -> rax = 0, or -1 with the exception pending
 ;;
 ;; tp_setattr for a heaptype instance.  Walks the MRO for a data descriptor
 ;; first, then falls back to the instance dict, creating it if this family
 ;; has one and it has not been made yet.  A value of 0 means DELETE_ATTR.
-;; Raises rather than returning a status.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC instance_setattr
     push rbx
@@ -1311,15 +1323,9 @@ DEF_FUNC instance_setattr
     extern obj_call_n
     call obj_call_n
     add rsp, 32
-    ERR_NULL .sa_heap_done
+    ERR_NULL .sa_fail
     DECREF_V rax, rcx
-.sa_heap_done:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    jmp .sa_ok
 
 .sa_member:
     ; The offset is into an instance of the descriptor's OWN class, and a
@@ -1357,20 +1363,15 @@ DEF_FUNC instance_setattr
     ; INCREF the new value and store it
     INCREF_V r13, r14
     mov [rdx], r13
-
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    jmp .sa_ok
 
 .sa_member_unset:
     mov rsi, [r9 + PyMemberDescrObject.md_name]
     lea rsi, [rsi + PyStrObject.data]
     extern exc_AttributeError_type
     lea rdi, [rel exc_AttributeError_type]
-    call raise_exception        ; does not return
+    call set_exception
+    jmp .sa_fail
 
 .sa_no_slot:
     ; __dict__ and __weakref__ are the two names that reach here and must NOT
@@ -1429,7 +1430,8 @@ DEF_FUNC instance_setattr
     mov rsi, r12                ; name
     mov rdx, r13                ; value
     call dict_set
-
+.sa_ok:
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -1443,18 +1445,14 @@ DEF_FUNC instance_setattr
     call dict_del_opt           ; -1 when it was never there
     test eax, eax
     jnz .sa_del_missing
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    jmp .sa_ok
 
 .sa_del_missing:
     mov rdi, rbx
     mov rsi, r12
-    mov edx, 1                  ; a delete: CPython fills in neither attribute
-    call raise_no_attribute     ; does not return
+    extern set_no_attribute_store
+    call set_no_attribute_store ; a delete: CPython fills in neither attribute
+    jmp .sa_fail
 
 .sa_layout_dict:
     ; Replace the instance dict outright.  CPython's subtype_setdict: only a
@@ -1484,12 +1482,7 @@ DEF_FUNC instance_setattr
     mov rdi, r14
     call obj_decref
 .sa_layout_done:
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    jmp .sa_ok
 
 .sa_layout_dict_bad:
     ; "not a 'int'" -- the quotes are CPython's, and so is naming the type of
@@ -1504,7 +1497,8 @@ DEF_FUNC instance_setattr
     mov rsi, rax
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
-    call raise_exception        ; does not return
+    call set_exception
+    jmp .sa_fail
 
 .sa_layout_weakref:
     ; CPython's __weakref__ getset has no setter at all, so both a store and a
@@ -1521,7 +1515,8 @@ DEF_FUNC instance_setattr
     call type_name_message
     mov rsi, rax
     lea rdi, [rel exc_AttributeError_type]
-    call raise_exception        ; does not return
+    call set_exception
+    jmp .sa_fail
 
 .sa_no_dict_error:
 .sa_no_dict_slot:
@@ -1531,9 +1526,15 @@ DEF_FUNC instance_setattr
     ; bare "object has no attribute" said neither.
     mov rdi, rbx
     mov rsi, r12
-    mov edx, 1                  ; only a store or a delete lands here
-    extern raise_no_attribute
-    call raise_no_attribute
+    call set_no_attribute_store ; only a store or a delete lands here
+.sa_fail:
+    mov rax, -1
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC instance_setattr
 
 section .rodata

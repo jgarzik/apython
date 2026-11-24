@@ -508,6 +508,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; getattr(c, 'm') must still answer a bound method.
     mov ecx, 1
     call instance_getattr_where
+    GETATTR_HOOK_SKIP .la_getattr_done_v
+    ERR_PENDING_JUMP
     jmp .la_getattr_done_v
 .la_call_type_getattr:
     mov qword [rbp - LA_FROMMETA], 0
@@ -2293,6 +2295,9 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     lea rdx, [rbp - GA_FROMINST]
     xor ecx, ecx                ; getattr() wants the bound method itself
     call instance_getattr_where
+    GETATTR_HOOK_SKIP .ga_where_answered
+    ERR_PENDING_JUMP
+.ga_where_answered:
     test rax, rax
     jnz .ga_where_found
     ; As op_load_attr: an AttributeError installed on the way is the answer.
