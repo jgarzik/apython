@@ -276,8 +276,7 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     call bytes_type_call
     pop rsi
     pop rdi
-    test rax, rax
-    jz .str_failed
+    ERR_NULL .str_failed
     mov [rbp - SB_ARGV], rax
     push rax
     sub rsp, 8

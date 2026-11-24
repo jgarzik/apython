@@ -71,6 +71,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     lea r8, [rel bytearray_arity_msg]
     lea r9, [rel bytearray_conv_msg]
     call byteslike_source
+    ERR_PENDING_JUMP
     mov [rbp - BA_BUF], rax
     mov [rbp - BA_LEN], rdx
 
@@ -658,6 +659,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     lea r8, [rel bytearray_arity_msg]
     lea r9, [rel bytearray_conv_msg]
     call byteslike_source
+    ERR_PENDING_JUMP
     mov [rbp - BAS_SRC], rax
     mov [rbp - BAS_SLEN], rdx
 
@@ -1022,6 +1024,7 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     lea r8, [rel bytearray_arity_msg]
     lea r9, [rel bytearray_conv_msg]
     call byteslike_source
+    ERR_PENDING_JUMP
     mov [rbp - BCT_SRC], rax
     mov [rbp - BCT_SLEN], rdx
 
@@ -1153,6 +1156,7 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     lea r8, [rel bytearray_arity_msg]
     lea r9, [rel bytearray_conv_msg]
     call byteslike_source
+    ERR_PENDING_JUMP
     mov [rbp - BAM_SRC], rax
     mov [rbp - BAM_SLEN], rdx
 
