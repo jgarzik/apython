@@ -1991,11 +1991,25 @@ TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
 TP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 TB_RECURSIVE_CUTOFF equ 3
-DEF_FUNC traceback_print
+TPR_EXC   equ 8
+TPR_SAVED equ 16
+DEF_FUNC traceback_print, 16
+    ; The report runs Python -- the exception's own __str__, a file's write --
+    ; and what is being reported is usually still the exception in flight.
+    ; It is taken out of the global for the duration, as everything that runs
+    ; Python under a pending exception does (exc_fetch, src/eval.asm); callers
+    ; that go on to release current_exception find it where they left it.
+    mov [rbp - TPR_EXC], rdi
+    extern exc_fetch
+    extern exc_restore
+    call exc_fetch
+    mov [rbp - TPR_SAVED], rax
     mov qword [gs:ThreadState.tb_seen_n], 0
-    mov rsi, rdi
+    mov rsi, [rbp - TPR_EXC]
     xor edi, edi
     call tb_print_one
+    mov rdi, [rbp - TPR_SAVED]
+    call exc_restore
     leave
     ret
 END_FUNC traceback_print

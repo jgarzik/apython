@@ -65,7 +65,8 @@ FILL = [(), (None,), (1.5,), ('s',), (b'b',), (-1,), ([],), (object,),
         (None, 1, 2, 3, 4, 5, 6, 7)]
 KW = {'zzz': 1}
 SKIP = {'__init_subclass__', '__subclasshook__', '__del__', '__class__',
-        'breakpoint', 'help', 'input', 'copyright', 'credits', 'license',
+        'breakpoint', 'breakpointhook', '__breakpointhook__',
+        'help', 'input', 'copyright', 'credits', 'license',
         'sleep', 'settrace', 'setprofile', 'setswitchinterval',
         'setrecursionlimit', '_settraceallthreads', '_setprofileallthreads',
         'set_debug', 'set_threshold', 'freeze', 'disable', 'pthread_kill',

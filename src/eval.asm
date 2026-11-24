@@ -450,6 +450,12 @@ DEF_FUNC_BARE eval_hook_thunk
     mov rdi, rbx
     extern systrace_line
     call systrace_line
+    ; A trace function that raises raises INTO the traced frame, at the
+    ; instruction it was told about -- which has not run, and whose IP and
+    ; stack top DISPATCH has just published.  The answer used to be dropped,
+    ; which left the exception pending while the frame carried on.
+    test eax, eax
+    js eval_exception_unwind
 .eht_done:
     pop rcx
     pop rax
@@ -481,6 +487,20 @@ DEF_FUNC_BARE eval_return
     mov rdi, rax
     extern systrace_return
     call systrace_return
+    ; A tracer that raised on the way OUT of a frame that was returning a
+    ; value: the exception is the outcome, as it is in CPython, so the value
+    ; is released and the frame leaves the way an unwinding one does.  Handing
+    ; back both -- a value AND a pending exception -- is the one state nothing
+    ; downstream can read.
+    cmp qword [r15 + ThreadState.current_exception], 0
+    je .er_traced
+    mov rdi, [rsp + 8]
+    test rdi, rdi
+    jz .er_traced
+    DECREF_V rdi, rcx
+    mov qword [rsp + 8], 0
+    mov qword [rsp], 0
+.er_traced:
     pop rdx
     pop rax
 .er_no_trace:
@@ -998,6 +1018,39 @@ DEF_FUNC exc_install, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC exc_install
+
+;; ============================================================================
+;; exc_fetch() -> rax = the exception in flight, or 0
+;; exc_restore(rdi = what exc_fetch answered) -> nothing
+;;
+;; CPython's PyErr_Fetch and PyErr_Restore.  Ordinary code runs with NOTHING
+;; pending: that is what lets "0 AND an exception pending" and "-1 AND an
+;; exception pending" mean failure (ERR_PENDING, ERR_M1).  So anything that
+;; runs Python -- or calls a slot -- while an exception is in flight takes it
+;; out of the global first and puts it back after: a finalizer, a weakref
+;; callback, a trace hook, print flushing what it had before str() raised.
+;;
+;; The reference moves with the pointer, so neither takes nor drops one.  If
+;; something else became pending in between, exc_restore releases it: the
+;; exception that was already in flight is the one that continues.
+;; ============================================================================
+DEF_FUNC_BARE exc_fetch
+    mov rax, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
+    ret
+END_FUNC exc_fetch
+
+DEF_FUNC exc_restore
+    mov rax, rdi
+    mov rdi, [gs:ThreadState.current_exception]
+    mov [gs:ThreadState.current_exception], rax
+    test rdi, rdi
+    jz .er_done
+    call obj_decref
+.er_done:
+    leave
+    ret
+END_FUNC exc_restore
 
 ;; ============================================================================
 ;; raise_exception(PyTypeObject *type, const char *msg_cstr)

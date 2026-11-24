@@ -1111,10 +1111,21 @@ align 16
     ; this one is already out; flush that much and propagate.
     test r15, r15
     jz .psf_return
+    ; write() is Python, and Python runs with nothing pending: the exception
+    ; str() raised is taken out for the flush and put back after it, so it is
+    ; the one that propagates whatever the sink does.
+    extern exc_fetch
+    extern exc_restore
+    call exc_fetch
+    push rax
+    push rax                    ; twice: rsp keeps its alignment
     mov rdi, [rbp - PR_SINK]
     lea rsi, [rbp - PR_FRAME]
     mov rdx, r15
     call print_sink_write
+    pop rdi
+    pop rdi
+    call exc_restore
 .psf_return:
     PRINT_DROP_SINK
     xor eax, eax

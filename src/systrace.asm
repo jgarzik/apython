@@ -181,6 +181,7 @@ END_FUNC systrace_active
 ;; caller already holds it for as long as the call lasts.
 ;; ============================================================================
 SI_FN    equ 8
+SI_SAVED equ 16             ; the exception in flight, parked across the call
 SI_ARGS  equ 40             ; three Values: frame, event, arg
 SI_EVENT equ 48
 SI_FRAME equ 72             ; + 0 pushes = 72; padded to 80 below
@@ -201,6 +202,16 @@ DEF_FUNC_LOCAL systrace_invoke, 80
     jz .si_fail
     mov [rbp - SI_ARGS + 8], rax
 
+    ; The 'exception' event and the 'return' of an unwinding frame arrive
+    ; with an exception in flight.  It is taken out of the global while the
+    ; callback runs, so that Python code never runs with one pending, and goes
+    ; back afterwards -- unless the callback raised, in which case its
+    ; exception is the one pending now, chained to the one it replaced exactly
+    ; as exc_install used to chain it.
+    mov rax, [gs:ThreadState.current_exception]
+    mov [rbp - SI_SAVED], rax
+    mov qword [gs:ThreadState.current_exception], 0
+
     inc qword [gs:ThreadState.tracing_depth]
     mov rdi, [rbp - SI_FN]
     lea rsi, [rbp - SI_ARGS]
@@ -209,6 +220,22 @@ DEF_FUNC_LOCAL systrace_invoke, 80
     dec qword [gs:ThreadState.tracing_depth]
 
     push rax
+    sub rsp, 8
+    mov rsi, [rbp - SI_SAVED]
+    test rsi, rsi
+    jz .si_exc_settled
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jnz .si_replaced
+    mov [gs:ThreadState.current_exception], rsi
+    jmp .si_exc_settled
+.si_replaced:
+    extern exc_set_context
+    call exc_set_context        ; rdi = the new one, rsi = what it replaced
+    mov rdi, [rbp - SI_SAVED]
+    call obj_decref
+.si_exc_settled:
+    add rsp, 8
     mov rdi, [rbp - SI_ARGS + 8]
     call obj_decref
     mov rdi, [rbp - SI_ARGS]
@@ -771,9 +798,19 @@ DEF_FUNC systrace_exception, STE_FRAME
 .ste_release:
     ; Whatever the callback did to current_exception, the unwind that was
     ; already running is the one that continues.
+    ; The reference taken above is spent one of two ways: dropped, when the
+    ; global still holds its own, or moved into the global, when the callback
+    ; raised and its exception took the place of the one in flight.  Setting
+    ; the global AND dropping the reference, as this used to, left the global
+    ; pointing at an object one reference short in the second case.
     mov rax, [rbp - STE_EXC]
+    mov rdi, [gs:ThreadState.current_exception]
+    cmp rdi, rax
+    je .ste_drop
     mov [gs:ThreadState.current_exception], rax
-    mov rdi, rax
+    test rdi, rdi
+    jz .ste_done
+.ste_drop:
     call obj_decref
 .ste_done:
     pop r12
