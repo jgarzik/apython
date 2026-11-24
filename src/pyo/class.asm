@@ -81,8 +81,7 @@ extern property_type
 ;; the reference it was just given.  The caller is what decides "once": the
 ;; FINALIZED bit in the object's GC head.
 ;; ============================================================================
-OCF_EXC   equ 8
-OCF_OWNED equ 16          ; whether the reference below is ours to drop
+OCF_EXC   equ 8           ; the fetched exception: the global's reference
 OCF_FRAME equ 24          ; + 1 push = 32
 DEF_FUNC obj_call_finalizer, OCF_FRAME
     push rbx
@@ -94,31 +93,21 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
     extern dunder_call_1
-    ; Snapshot what was pending, and hold a reference to it: if __del__ raises,
-    ; installing its exception releases the global's reference to this one, and
-    ; the saved pointer would be dangling by the time it is put back.
-    DUNDER_EXC_SAVE [rbp - OCF_EXC]
-    mov qword [rbp - OCF_OWNED], 0
-    mov rdi, [rbp - OCF_EXC]
-    test rdi, rdi
-    jz .del_nothing_pending
-    ; ...but only when the global's own reference is real.  The unwinder can
-    ; reach here with current_exception pointing at an object whose refcount
-    ; is already zero, and taking and dropping a reference on that one frees
-    ; an exception that is still being carried.
+    ; FETCH what was pending, as CPython's PyErr_Fetch does: the slot takes
+    ; over the global's reference and the global is cleared, so __del__ runs
+    ; with nothing pending.  It used to be a snapshot, with the exception left
+    ; in place -- and then every "-1 (or 0) AND an exception pending" answer
+    ; a callee gave inside __del__ read as a failure whenever the finalizer
+    ; was running under an unwind.  `with lock:` in a __del__ did exactly
+    ; that: acquire's timeout of -1 was taken for a refused argument, the
+    ; in-flight exception was raised a second time from inside __del__, and
+    ; the lock was never released.
     ;
-    ; No path produces that state today: the case bugs.md used to carry does
-    ; not reproduce, valgrind is clean over the async suite, and a watch here
-    ; gets no hits across the corpus.  The check stays anyway.  It is two
-    ; instructions, and the invariant behind it is genuinely fragile --
-    ; raise_exception_obj takes over its caller's reference rather than
-    ; adding one, so the global's is often the only reference there is, and
-    ; this function runs while the unwinder is releasing the value stack.
-    cmp qword [rdi + PyObject.ob_refcnt], 0
-    jle .del_nothing_pending
-    call obj_incref
-    mov qword [rbp - OCF_OWNED], 1
-.del_nothing_pending:
+    ; Moving the reference also retires the refcount juggling that was here:
+    ; nothing __del__ does can release an exception the global no longer
+    ; names.
+    DUNDER_EXC_SAVE [rbp - OCF_EXC]
+    mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rbx
     lea rsi, [rel dunder_del]
     call dunder_call_1
@@ -135,33 +124,17 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     ; the unwinder dropping the value stack, that the handler receives the
     ; wrong exception object.  CPython reports it and puts back what was there.
     ;
-    ; "Did it raise?" is EXC_RAISED_SINCE's three-way question and not a bare
-    ; inequality.  current_exception is also the exception being HANDLED, and a
-    ; __del__ that raises and catches internally leaves the global at 0: a
-    ; change, but not a raise.  DUNDER_RAISED read that as one, and this arm
-    ; then zeroed the global -- destroying the exception the interpreter was
-    ; carrying, so that a __del__ running during an unwind made the enclosing
-    ; except block never run.
-    EXC_RAISED_SINCE [rbp - OCF_EXC], rax, .del_report
+    ; "Did it raise?" is now simply "is anything pending": the global was
+    ; cleared on the way in.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .del_report
 
 .del_restore:
-    ; Whatever __del__ left behind, the pending exception goes back to what it
-    ; was.  The reference taken above is what the global gets; anything else
-    ; sitting there is released.
-    mov rax, [rbp - OCF_EXC]
-    cmp [gs:ThreadState.current_exception], rax
-    je .del_drop_saved
+    ; Whatever __del__ left behind is released, and the fetched reference
+    ; moves back into the global.
     mov rdi, [gs:ThreadState.current_exception]
-    mov [gs:ThreadState.current_exception], rax    ; the saved reference moves in here
-    test rdi, rdi
-    jz .del_cleared
-    call obj_decref
-    jmp .del_cleared
-.del_drop_saved:
-    ; Unchanged, so the global still owns its own; drop the extra one.
-    cmp qword [rbp - OCF_OWNED], 0
-    je .del_cleared
-    mov rdi, rax
+    mov rax, [rbp - OCF_EXC]
+    mov [gs:ThreadState.current_exception], rax
     test rdi, rdi
     jz .del_cleared
     call obj_decref

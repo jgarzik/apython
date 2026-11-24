@@ -277,8 +277,13 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jz .cb_loop
 
     ; A callback that raises has no caller to hand the exception to; report
-    ; nothing and put back whatever was being handled, as __del__ does.
+    ; nothing and put back whatever was in flight, as __del__ does.  It is
+    ; FETCHED, not snapshotted: the referent may be dying under an unwind,
+    ; and a callback run with that exception still pending has every "-1 AND
+    ; an exception pending" answer inside it read as a failure -- importlib's
+    ; module-lock callback takes a lock with a timeout of -1.
     DUNDER_EXC_SAVE [rbp - WC_EXC]
+    mov qword [gs:ThreadState.current_exception], 0
     inc qword [rbx + PyObject.ob_refcnt]
     sub rsp, 16
     mov [rsp], rbx
@@ -293,17 +298,15 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     DECREF_VAL rax, rdx
 .cb_no_result:
     dec qword [rbx + PyObject.ob_refcnt]
-    DUNDER_RAISED [rbp - WC_EXC], .cb_raised
-.cb_resume:
-    jmp .cb_loop
-
-.cb_raised:
+    ; Whatever the callback left pending is dropped, and the fetched
+    ; reference moves back.
     mov rdi, [gs:ThreadState.current_exception]
-    mov qword [gs:ThreadState.current_exception], 0
-    call obj_decref
     mov rax, [rbp - WC_EXC]
     mov [gs:ThreadState.current_exception], rax
-    jmp .cb_resume
+    test rdi, rdi
+    jz .cb_loop
+    call obj_decref
+    jmp .cb_loop
 
 .cb_done:
     ; Give back what the hold loop took.  wr_object is zero on all of them by
