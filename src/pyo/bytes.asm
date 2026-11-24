@@ -1472,7 +1472,7 @@ DEF_FUNC bytes_mod, BM_FRAME
     mov edx, 1                 ; and this one is a BYTES format
     mov ecx, 1                 ; report by RETURNING: see below
     extern str_mod_impl
-    call str_mod_impl
+    call str_mod_impl         ; err: tested below, once the format copy is released
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
     ; DECREF temp fmt str.  This is the whole reason str_mod_impl is asked to

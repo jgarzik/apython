@@ -69,12 +69,9 @@ SM_OWNVAL  equ 168
 SM_ISMAP   equ 176       ; the right operand is a mapping: %(name)s, no arity check
 SM_SPECCH  equ 184       ; the conversion as format() spells it: i and u are d
 SM_ISBYTES equ 192       ; formatting a BYTES: %s means bytes, %r means b'x'
-; Report a failure by RETURNING 0 with the exception set, rather than by
-; raising.  bytes_mod asks for this: it holds a decoded copy of the format and
-; a raise abandons the C stack, so the copy was leaked once per malformed
-; `b"%d" % (1, 2)`.  The nb_remainder slot cannot use it -- a NULL from a
-; number slot means "declined", and the interpreter would then look for a
-; dunder instead of reporting the error.
+; Once "report by returning 0 rather than by raising", which only bytes_mod
+; could ask for.  Every failure is returned now; the slot is kept so the
+; frame does not move.
 SM_NORAISE equ 248
 SM_KEYOBJ  equ 200       ; the %(name)s key, for the message when it is missing
 SM_STARW   equ 208       ; a '*' width taken from the argument list
@@ -87,7 +84,9 @@ SM_FRAME   equ 272          ; + 0 pushes = 272; the five pushes below are
                             ; mid-body, which is why lint cannot see them
 
 ;; str_mod(rdi = the format, a Value; rsi = the argument, a Value)
-;;   -> (rax = the formatted str, rdx = TAG_PTR), or does not return
+;;   -> (rax = the formatted str, rdx = TAG_PTR), or (0, 0) with the
+;;      exception pending
+;; Fails: 0?
 ;;
 ;; str_mod is the nb_remainder slot.  str_mod_impl is what bytes_mod calls, with
 ;; the flag that changes what half the conversions mean: %s on a bytes REQUIRES
@@ -97,16 +96,17 @@ SM_FRAME   equ 272          ; + 0 pushes = 272; the five pushes below are
 ;; cannot express any of that -- the conversion is only known here, so the
 ;; argument is converted here.
 DEF_FUNC_BARE str_mod
-    xor ecx, ecx                ; the slot raises; only bytes_mod does not
+    xor ecx, ecx                ; unused now: every caller is answered 0
     xor edx, edx
     jmp str_mod_impl
 END_FUNC str_mod
 
 ;; ============================================================================
 ;; str_mod_impl(rdi = the format, a Value; rsi = the argument, a Value;
-;;              rcx = 1 to report by returning 0, rdx = 1 for a bytes format)
+;;              rcx = unused, rdx = 1 for a bytes format)
 ;;   -> (rax = the formatted object, rdx = TAG_PTR), or (0, 0) with the
-;;      exception set when rcx said so
+;;      exception pending
+;; Fails: 0?
 ;; ============================================================================
 global str_mod_impl
 DEF_FUNC str_mod_impl, SM_FRAME
@@ -130,6 +130,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     push r14
     push r15
 
+    mov qword [rbp-SM_SPECOBJ], 0   ; what the error exit gives back, when
+    mov qword [rbp-SM_OWNVAL], 0    ; a directive was part way through
     mov [rbp-SM_FMT], rdi      ; fmt
     mov [rbp-SM_ARGS], rsi     ; args
     mov [rbp-SM_ATAG], rcx     ; args tag
@@ -306,6 +308,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rdi, [rbp-SM_ARGS]
     mov rsi, rax
     call str_mod_subscript
+    ERR_PENDING .sm_key_raised
     mov r9, rax
     pop rdi
     pop rcx
@@ -982,33 +985,31 @@ DEF_FUNC str_mod_impl, SM_FRAME
     lea rsi, [rel sm_convbuf]
     jmp .sm_error
 
+.sm_key_raised:
+    ; The mapping's own __getitem__ raised; the key is still ours.
+    lea rsp, [rbp - SM_FRAME - 40]
+    mov rdi, [rbp-SM_KEYOBJ]
+    call obj_decref
+    jmp .sm_conv_failed
+
 .sm_key_error:
     ; CPython names the key that was missing, as an ordinary dict lookup does.
-    ; A fixed message said only that one was.  The key object was released
-    ; just above, so this re-reads it -- it is still allocated, and its only
-    ; use here is the message.
+    ; A fixed message said only that one was.  The key is still ours here --
+    ; the success path releases it, this one did not -- so it goes back once
+    ; the exception has taken its own reference.
     lea rsp, [rbp - SM_FRAME - 40]      ; as .sm_error does, and for the same
     mov rdi, [rbp-SM_KEYOBJ]           ; reason
     extern set_key_error
     call set_key_error
+    mov rdi, [rbp-SM_KEYOBJ]           ; the exception holds its own now
+    call obj_decref
     mov rdi, [rbp-SM_BUF]
     test rdi, rdi
     jz .sm_ke_freed
     mov qword [rbp-SM_BUF], 0
     call ap_free
 .sm_ke_freed:
-    cmp qword [rbp-SM_NORAISE], 0
-    jne .sm_error_ret           ; the caller reads the pending exception
-    mov rdi, [gs:ThreadState.current_exception]
-    mov qword [gs:ThreadState.current_exception], 0
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    extern raise_exception_obj
-    jmp raise_exception_obj     ; takes the reference, does not return
+    jmp .sm_error_ret           ; the caller reads the pending exception
 
 ;; A conversion's own call raised, and its exception is already pending.
 ;;
@@ -1018,10 +1019,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
 ;; nothing to raise -- only the buffer to give back and the pending exception
 ;; to hand on.
 ;;
-;; It has to hand it on by RAISING rather than by returning NULL: op_binary_op
-;; reads a NULL Value from an nb_ slot as "this pair is not mine" and carries
-;; on to the right operand's slot and then to a TypeError, which would bury
-;; the exception the conversion actually raised.
+;; It hands it on by returning 0 with it pending, which a number slot's caller
+;; tells from "this pair is not mine" by the pending exception.
 .sm_conv_failed:
     lea rsp, [rbp - SM_FRAME - 40]      ; the five pushes, and nothing else
     mov rdi, [rbp-SM_BUF]
@@ -1030,43 +1029,16 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov qword [rbp-SM_BUF], 0
     call ap_free
 .sm_cf_freed:
-    cmp qword [rbp-SM_NORAISE], 0
-    jne .sm_error_ret           ; the caller reads the pending exception
-    mov rdi, [gs:ThreadState.current_exception]
-    mov qword [gs:ThreadState.current_exception], 0
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    jmp raise_exception_obj     ; takes the reference, does not return
+    jmp .sm_error_ret           ; the caller reads the pending exception
 
 ;; The one way out.  rdi = the exception type, rsi = the message; the buffer
-;; goes back either way, because a raise abandons this frame and the free
-;; below with it.
+;; goes back, and the answer is (0, 0) with the exception pending.
 .sm_error:
     ; Some of these sites are subroutines of this function, reached with a
     ; `call` -- so the return address is still on the stack, and popping the
     ; five saved registers over it put a return address in r15.  RAISE could
     ; ignore that, because it abandoned the whole stack; returning cannot.
     lea rsp, [rbp - SM_FRAME - 40]      ; the five pushes, and nothing else
-    cmp qword [rbp-SM_NORAISE], 0
-    jne .sm_error_set
-    push rdi
-    push rsi
-    mov rdi, [rbp-SM_BUF]
-    test rdi, rdi
-    jz .sm_error_freed
-    mov qword [rbp-SM_BUF], 0
-    call ap_free
-.sm_error_freed:
-    pop rsi
-    pop rdi
-    extern raise_exception
-    call raise_exception        ; does not return
-    ud2
-.sm_error_set:
     extern set_exception
     call set_exception
 .sm_error_installed:
@@ -1076,6 +1048,22 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov qword [rbp-SM_BUF], 0
     call ap_free
 .sm_error_ret:
+    ; A directive that failed part way still holds its spec, and its argument
+    ; when a conversion made a new one.  A raise used to leave both behind.
+    sub rsp, 8                  ; five pushes: these calls want rsp aligned
+    mov rdi, [rbp-SM_SPECOBJ]
+    test rdi, rdi
+    jz .sm_er_spec_done
+    mov qword [rbp-SM_SPECOBJ], 0
+    call obj_decref
+.sm_er_spec_done:
+    cmp qword [rbp-SM_OWNVAL], 0
+    je .sm_er_val_done
+    mov qword [rbp-SM_OWNVAL], 0
+    mov rdi, [rbp-SM_VALUE]
+    DECREF_V rdi, rsi
+.sm_er_val_done:
+    add rsp, 8
     xor eax, eax
     xor edx, edx
     pop r15
@@ -1427,9 +1415,13 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov qword [rbp-SM_OWNVAL], 1
     jmp .sm_sc_format
 .sm_sc_char_range:
-    RAISE exc_OverflowError_type, "%c arg not in range(0x110000)"
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "%c arg not in range(0x110000)"
+    jmp .sm_error
 .sm_sc_char_bad:
-    RAISE exc_TypeError_type, "%c requires int or char"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "%c requires int or char"
+    jmp .sm_error
 
 ;; %s and %b on a BYTES format: the argument must be bytes-like, and its bytes
 ;; go in unchanged.  Decoding it as latin-1 makes a str whose code points are
@@ -1447,8 +1439,10 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_sc_bytes_bad:
     mov rsi, [rbp-SM_VALUE]
     CSTRING rdi, `%b requires a bytes-like object, or an object that implements __bytes__, not '\x01'`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    lea rsp, [rbp - SM_FRAME - 40]      ; as .sm_error does
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .sm_error_installed
 
 ;; %c on a BYTES format: an integer in range(256), or a single byte.
 .sm_sc_bytes_char:
@@ -1496,9 +1490,13 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov qword [rbp-SM_OWNVAL], 1
     jmp .sm_sc_format
 .sm_sc_bc_bad:
-    RAISE exc_TypeError_type, "%c requires an integer in range(256) or a single byte"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "%c requires an integer in range(256) or a single byte"
+    jmp .sm_error
 .sm_sc_bc_range:
-    RAISE exc_OverflowError_type, "%c arg not in range(256)"
+    lea rdi, [rel exc_OverflowError_type]
+    CSTRING rsi, "%c arg not in range(256)"
+    jmp .sm_error
 
 .sm_sc_have_value_owned:
 
@@ -1513,9 +1511,11 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov [rbp-SM_PIECE], rax
 
     mov rdi, [rbp-SM_SPECOBJ]
+    mov qword [rbp-SM_SPECOBJ], 0
     call obj_decref
     cmp qword [rbp-SM_OWNVAL], 0
     je .sm_sc_no_own
+    mov qword [rbp-SM_OWNVAL], 0
     ; DECREF_V and not obj_decref: what the argument check hands back may be
     ; an int or a float IMMEDIATE -- "%d" % 3.9 truncates to one -- and
     ; obj_decref would dereference it as a pointer.
@@ -1555,6 +1555,7 @@ END_FUNC str_mod_impl
 
 ;; ============================================================================
 ;; str_mod_subscript(rdi = the mapping, rsi = the key str) -> rax = Value, or 0
+;; Fails: 0?
 ;;
 ;; `"%(a)s" % m` for any m with an mp_subscript, not only a dict -- the same
 ;; widening the operand classification got.  A dict keeps the direct lookup:
@@ -1586,8 +1587,7 @@ DEF_FUNC_LOCAL str_mod_subscript
     mov rax, [rax + PyMappingMethods.mp_subscript]
     test rax, rax
     jz .sms_none
-    call rax
-    ERR_PENDING_JUMP            ; __getitem__ raised
+    call rax                    ; 0 with it pending when __getitem__ raised
     leave
     ret
 .sms_none:
