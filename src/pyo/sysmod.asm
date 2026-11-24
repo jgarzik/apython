@@ -1133,11 +1133,9 @@ DEF_FUNC sys_module_init, 40
     call obj_decref
 
     ; --- sys.thread_info ---
-    ; Three fields, and the name is the honest one: `pthread-stubs` is what
-    ; CPython reports for a build whose threads do not start, which is what
-    ; lib/_thread.py is.  lock and version are None because there is nothing
-    ; to name, which is also how CPython leaves them when it cannot tell --
-    ; and it is what makes `if sys.thread_info.version:` guards skip.
+    ; What CPython reports on Linux: POSIX threads, locks that are
+    ; semaphores (src/modules/thread.asm), and the thread library's own
+    ; version string, which glibc answers through confstr.
     lea rdi, [rel thread_info_type]
     call structseq_init_type
     lea rdi, [rel thread_info_type]
@@ -1149,14 +1147,16 @@ DEF_FUNC sys_module_init, 40
     mov rdi, rbx
     xor esi, esi
     call structseq_set
-    ; structseq_set takes over the caller's reference, so None needs one each.
-    lea rdx, [rel none_singleton]
-    inc qword [rdx + PyObject.ob_refcnt]
+    extern thread_info_v1
+    extern thread_info_version
+    lea rdi, [rel thread_info_v1]
+    call str_from_cstr_heap
+    mov rdx, rax                ; structseq_set takes over the reference
     mov rdi, rbx
     mov esi, 1
     call structseq_set
-    lea rdx, [rel none_singleton]
-    inc qword [rdx + PyObject.ob_refcnt]
+    call thread_info_version    ; a str, or None when glibc will not say
+    mov rdx, rax
     mov rdi, rbx
     mov esi, 2
     call structseq_set

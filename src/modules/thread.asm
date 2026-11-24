@@ -80,6 +80,8 @@ extern sem_clockwait
 extern sem_post
 extern sem_getvalue
 extern clock_gettime
+extern confstr
+extern gil_interval_ns
 extern __errno_location
 
 SYS_gettid              equ 186
@@ -633,6 +635,65 @@ DEF_FUNC tc_lock_locked, LL_FRAME
 END_FUNC tc_lock_locked
 
 ;; ============================================================================
+;; thread_info_version() -> rax = a new str such as "NPTL 2.39", or None
+;;
+;; sys.thread_info.version: the thread library's own name for itself.
+;; ============================================================================
+CS_GNU_LIBPTHREAD_VERSION equ 3
+TIV_BUF   equ 64
+TIV_FRAME equ 64                ; + 0 pushes = 64, 16-aligned
+global thread_info_version
+DEF_FUNC thread_info_version, TIV_FRAME
+    mov edi, CS_GNU_LIBPTHREAD_VERSION
+    lea rsi, [rbp - TIV_BUF]
+    mov edx, TIV_BUF
+    call confstr
+    test rax, rax
+    jz .tiv_none
+    cmp rax, TIV_BUF
+    ja .tiv_none                ; longer than anything it has ever been
+    lea rdi, [rbp - TIV_BUF]
+    call str_from_cstr_heap
+    leave
+    ret
+.tiv_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    leave
+    ret
+END_FUNC thread_info_version
+
+;; ============================================================================
+;; _threadcore.get_interval() -> the GIL switch interval, in nanoseconds
+;; ============================================================================
+DEF_FUNC tc_get_interval
+    mov rdi, [rel gil_interval_ns]
+    call int_from_i64
+    V_PACK rax, rdx
+    leave
+    ret
+END_FUNC tc_get_interval
+
+;; ============================================================================
+;; _threadcore.set_interval(nanoseconds) -> None
+;;
+;; How long a thread waits for the GIL before asking its holder to let go.
+;; Validation is lib/_thread.py's; this only refuses to store less than one.
+;; ============================================================================
+DEF_FUNC tc_set_interval
+    xor esi, esi
+    call tc_int_arg
+    mov ecx, 1
+    cmp rax, 1
+    cmovl rax, rcx
+    mov [rel gil_interval_ns], rax
+    RET_NONE
+    leave
+    V_PACK rax, rdx
+    ret
+END_FUNC tc_set_interval
+
+;; ============================================================================
 ;; thread_module_create() -> rax = the `_threadcore` module
 ;; ============================================================================
 TMC_FRAME equ 16                ; + 2 pushes = 32, 16-aligned
@@ -656,6 +717,8 @@ DEF_FUNC thread_module_create, TMC_FRAME
     MODULE_ADD_FUNC tc_lock_acquire,   tc_n_lock_acquire
     MODULE_ADD_FUNC tc_lock_release,   tc_n_lock_release
     MODULE_ADD_FUNC tc_lock_locked,    tc_n_lock_locked
+    MODULE_ADD_FUNC tc_get_interval,   tc_n_get_interval
+    MODULE_ADD_FUNC tc_set_interval,   tc_n_set_interval
 
     lea rdi, [rel tc_name]
     call str_from_cstr_heap
@@ -687,3 +750,5 @@ tc_n_lock_reinit:     db "lock_reinit", 0
 tc_n_lock_acquire:    db "lock_acquire", 0
 tc_n_lock_release:    db "lock_release", 0
 tc_n_lock_locked:     db "lock_locked", 0
+tc_n_get_interval:    db "get_interval", 0
+tc_n_set_interval:    db "set_interval", 0

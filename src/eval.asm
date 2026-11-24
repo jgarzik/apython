@@ -1063,8 +1063,17 @@ op_cache:
 op_nop:
     DISPATCH
 
-; op_resume - RESUME opcode (151): no-op, just dispatch next
+; op_resume - RESUME opcode (151): the eval-breaker checkpoint at the top of
+; every function, as it is in CPython.
+;
+; The other checkpoints sit on a backward jump and on the RETURN from a call.
+; A program can run for ever between them: f() calling itself until
+; RecursionError and calling itself again from the handler leaves every call
+; by an exception, never by a return, and loops without a jump.  It then
+; never ran a signal handler and never gave the GIL to another thread --
+; CPython's own test for interrupt_main during exactly that hung.
 op_resume:
+    CHECK_EVAL_SIGNALS
     DISPATCH
 
 ; op_interpreter_exit - INTERPRETER_EXIT opcode (3)

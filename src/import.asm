@@ -714,6 +714,7 @@ DEF_FUNC import_module, IF_FRAME
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_cached
+.not_cached:
 
     ; For dotted names (a.b.c), import each component
     ; First, check if name contains a dot
@@ -922,6 +923,53 @@ DEF_FUNC import_module, IF_FRAME
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .cached_blocked
+
+    ; In sys.modules -- but perhaps only because ANOTHER THREAD is in the
+    ; middle of importing it.  A module is entered there before its body
+    ; runs, so a second thread that took it as it stands got a module with
+    ; half its names: `import json; json.dumps` raised AttributeError when
+    ; two threads imported json at once.  CPython's import_ensure_initialized
+    ; asks the spec and, if it is still initialising, waits on the module's
+    ; lock; _ensure_initialized (lib/_importlib_bootstrap.py) is that.  With
+    ; one thread there is nobody to wait for, and the same test would only
+    ; find this thread's own circular import, so it is skipped.
+    extern gil_threaded
+    cmp qword [rel gil_threaded], 0
+    je .cached_ready
+    push rax                    ; the module
+    push rax                    ; and a slot for the helper's one argument
+    CSTRING rdi, "_ensure_initialized"
+    call im_importlib_func
+    test rax, rax
+    jz .cached_waited           ; importlib is not up yet: nothing to wait on
+    mov rcx, [rbp - IF_NAME]
+    mov [rsp], rcx
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    test rax, rax
+    jz .cached_wait_raised
+    DECREF_V rax, rcx
+    ; The import this waited for may have FAILED and taken the module back
+    ; out, so ask sys.modules again rather than trust what was read before.
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - IF_NAME]
+    call dict_get
+    add rsp, 16
+    test rax, rax
+    jz .not_cached
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .cached_blocked
+    jmp .cached_ready
+.cached_wait_raised:
+    add rsp, 16
+    jmp .import_error
+.cached_waited:
+    pop rax
+    pop rax                     ; the module
+.cached_ready:
 
     ; Found in sys.modules.  With an empty fromlist a dotted import still
     ; evaluates to the *top* package -- `import a.b` binds `a` -- so a cache

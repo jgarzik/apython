@@ -93,6 +93,21 @@ def _find_and_load(name):
         raise
 
 
+def _ensure_initialized(name):
+    """Wait until `name`, found in sys.modules, has finished importing.
+
+    A module is put in sys.modules before its body runs.  If another thread
+    is still running that body, take and release the module's import lock,
+    which that thread holds until it is done -- CPython's
+    import_ensure_initialized.  The interpreter calls this on a sys.modules
+    hit once a second thread exists.
+    """
+    module = sys.modules.get(name)
+    spec = getattr(module, "__spec__", None)
+    if spec is not None and getattr(spec, "_initializing", False):
+        _bootstrap._lock_unlock_module(name)
+
+
 _NEEDS_LOADING = object()
 
 

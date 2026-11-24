@@ -401,3 +401,43 @@ def _local_ns(self):
             args, kw = object.__getattribute__(self, "_local__args")
             cls.__init__(self, *args, **kw)
     return ns
+
+
+# sys.getswitchinterval / sys.setswitchinterval.  They belong to sys, and
+# they are here because the thing they adjust is: the interval a thread
+# waits for the GIL before asking its holder to let go.  This module is
+# imported while the interpreter starts, so they are in place before any
+# program can ask.
+def _getswitchinterval():
+    """Return the current thread switch interval; see setswitchinterval()."""
+    return _core.get_interval() / 1e9
+
+
+def _setswitchinterval(interval):
+    """Set the ideal thread switching delay inside the Python interpreter.
+
+    The actual frequency of switching threads can be lower if the
+    interpreter executes long sequences of uninterruptible code (this is
+    implementation-specific and workload-dependent).
+
+    The parameter must represent the desired switching delay in seconds; a
+    typical value is 0.005 (5 milliseconds)."""
+    if not isinstance(interval, (int, float)):
+        raise TypeError("must be real number, not %s" % (type(interval).__name__,))
+    if interval <= 0:
+        raise ValueError("switch interval must be strictly positive")
+    _core.set_interval(int(interval * 1e9))
+
+
+_getswitchinterval.__name__ = _getswitchinterval.__qualname__ = "getswitchinterval"
+_setswitchinterval.__name__ = _setswitchinterval.__qualname__ = "setswitchinterval"
+
+
+def _install_sys():
+    import sys
+
+    sys.getswitchinterval = _getswitchinterval
+    sys.setswitchinterval = _setswitchinterval
+
+
+_install_sys()
