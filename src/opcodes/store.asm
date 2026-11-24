@@ -301,7 +301,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdx, [rbp - SA_VAL]      ; value
     mov ecx, [rbp - SA_VTAG]     ; value tag
     V_PACK rdx, rcx              ; property_descr_set takes a value Value
-    call property_descr_set
+    call property_descr_set     ; err: .sa_descr_cleanup asks whether anything was raised
     jmp .sa_descr_cleanup
 
 .sa_check_general_set:
@@ -368,6 +368,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov ecx, [rbp - SA_VTAG]
     V_PACK rdx, rcx             ; tp_setattr takes a value Value
     call rax
+    ERR_M1 .sa_stored           ; refused: nothing happened, so nothing to cache
 
     ; Specialize, now that the store has happened.
     ;
@@ -383,6 +384,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_NAME]
     mov rdx, rbx
     call sa_try_specialize
+.sa_stored:
 
     ; DECREF value (tag-aware)
     mov rdi, [rbp - SA_VAL]

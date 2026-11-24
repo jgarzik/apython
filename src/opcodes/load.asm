@@ -751,6 +751,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_OBJVAL]
     extern getset_descr_get
     call getset_descr_get       ; -> a Value
+    ERR_NULL_JUMP
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned
     mov rdi, [rbp - LA_ATTR]
@@ -1242,7 +1243,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Call property_descr_get(property, obj)
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
-    call property_descr_get
+    call property_descr_get    ; err: edx = 0 is offered to __getattr__ below
     ; A getter that raised an AttributeError has not failed -- it has said the
     ; attribute is absent, which is what __getattr__ is the hook for.  Asked
     ; here, before the object below is released, and before the tag says NULL.
@@ -2041,7 +2042,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_ATTR], rax
     mov rdi, rax
     mov rsi, [rbp - LSA_SELF]
-    call property_descr_get        ; -> (rax, rdx), owned
+    call property_descr_get        ; -> (rax, rdx), owned  ; err: edx = 0 goes to .lsa_propagate
     SAVE_FAT_RESULT
     mov rdi, [rbp - LSA_ATTR]
     call obj_decref
@@ -2473,6 +2474,7 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
     call getset_descr_get
+    ERR_NULL_JUMP
     mov [rbp - GA_SAVE], rax
     mov rdi, [rbp - GA_ATTR]
     call obj_decref
@@ -2539,7 +2541,7 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
 .ga_property_run:
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
-    call property_descr_get
+    call property_descr_get     ; err: edx = 0 is offered to __getattr__ below
     ; As in op_load_attr: an AttributeError out of the getter is the attribute
     ; saying it is absent, and a class with __getattr__ gets its chance at the
     ; name.  getattr(o, n, default) reaches the property through here.

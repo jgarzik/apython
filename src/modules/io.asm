@@ -2716,7 +2716,7 @@ DEF_FUNC io_add_property, IAP_FRAME
     lea rdi, [rel property_type]
     lea rsi, [rbp - IAP_ARG]
     mov edx, 1
-    call property_construct
+    call property_construct     ; err: one positional and no keywords, which it never refuses
     V_UNPACK rax, rdx
     mov [rbp - IAP_PROP], rax
 

@@ -75,8 +75,7 @@ DEF_FUNC prop_new_of, PNO_FRAME
     xor esi, esi
     xor edx, edx
     call property_construct
-    test rax, rax
-    jz .pno_out
+    ERR_NULL .pno_out
     mov rbx, rax
     mov [rbp - PNO_ARGS], rax               ; args[0] = self
 
@@ -203,8 +202,7 @@ DEF_FUNC property_method_init, PMI_FRAME
     lea rsi, [rdi + 8]
     lea rdi, [rel property_type]
     call property_construct                 ; -> rax = a parsed property
-    test rax, rax
-    jz .pmi_fail                            ; refused the arguments
+    ERR_NULL .pmi_fail                      ; refused the arguments
     mov r12, rax
 
     PMI_MOVE prop_get

@@ -626,7 +626,7 @@ DEF_FUNC add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-aligned
     lea rdi, [rel staticmethod_type]
     mov rsi, rsp
     mov edx, 1
-    call staticmethod_construct
+    call staticmethod_construct ; err: the exact type and one argument, which it never refuses
     push rax
 
     mov rdi, [rsp + 8]          ; the raw function

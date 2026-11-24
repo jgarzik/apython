@@ -1505,6 +1505,7 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     mov rdx, [rbp - TSM_VAL]    ; 0 is the deleter's
     extern property_descr_set
     call property_descr_set
+    ERR_M1 .tsm_raised
     jmp .tsm_yes
 .tsm_general:
     cmp qword [rbp - TSM_VAL], 0

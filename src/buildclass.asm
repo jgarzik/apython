@@ -1386,7 +1386,7 @@ TFP_ADDWEAK equ 112
     lea rdi, [rel staticmethod_type]
     mov rsi, rsp
     mov edx, 1
-    call staticmethod_construct
+    call staticmethod_construct ; err: rax is tested once the stack is back
     V_UNPACK rax, rdx
     add rsp, 16
     test rax, rax
@@ -2729,7 +2729,7 @@ DEF_FUNC_LOCAL type_wrap_implicit_classmethods, TWI_FRAME
     lea rdi, [rel classmethod_type]
     lea rsi, [rsp + 8]
     mov edx, 1
-    call classmethod_construct
+    call classmethod_construct  ; err: rax is tested once the stack is back
     add rsp, 8
     pop rcx
     test rax, rax

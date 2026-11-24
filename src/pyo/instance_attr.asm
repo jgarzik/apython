@@ -850,7 +850,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     extern member_check_receiver
     mov rdi, r13
     mov rsi, rbx
-    call member_check_receiver  ; raises when the layouts do not match
+    call member_check_receiver  ; refuses when the layouts do not match
+    ERR_NULL .getattr_unwind
     mov rcx, [r13 + PyMemberDescrObject.md_offset]
     SLOT_ADDR rdx, rbx, rcx
     mov rax, [rdx]             ; slot Value
@@ -867,12 +868,12 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ret
 
 .found_getset:
-    ; getset_descr_get answers a Value, or never returns when the attribute
-    ; has no getter at all.
+    ; getset_descr_get answers a Value, or 0 with the exception pending --
+    ; which, with the flag clear, is this lookup's own failure.
     mov rdi, r13
     mov rsi, rbx
     extern getset_descr_get
-    call getset_descr_get
+    call getset_descr_get       ; err: its 0, exception pending, is ours
     V_UNPACK rax, rdx
     IG_RELEASE_HELD
     pop r13
@@ -1253,7 +1254,7 @@ DEF_FUNC instance_setattr
     mov rsi, rbx
     mov rdx, r13                ; the value Value; 0 means delete
     extern property_descr_set
-    call property_descr_set
+    call property_descr_set     ; err: its status is this slot's own
     pop r14
     pop r13
     pop r12
@@ -1280,7 +1281,7 @@ DEF_FUNC instance_setattr
     mov rsi, rbx
     mov rdx, r13
     extern getset_descr_set
-    call getset_descr_set
+    call getset_descr_set       ; err: its status is this slot's own
     pop r14
     pop r13
     pop r12
@@ -1339,6 +1340,7 @@ DEF_FUNC instance_setattr
     call member_check_receiver
     pop r9
     pop r9
+    ERR_NULL .sa_fail
 
     ; Member descriptor! Write the value into the slot
     mov rcx, [r9 + PyMemberDescrObject.md_offset]

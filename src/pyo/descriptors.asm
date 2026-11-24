@@ -21,7 +21,7 @@ extern obj_incref
 extern obj_decref
 extern obj_dealloc
 extern type_type
-extern raise_exception
+extern set_exception
 extern rbt_typename
 extern rbt_append_cstr
 extern exc_TypeError_type
@@ -35,7 +35,8 @@ extern descr_func_attr
 
 ;; ============================================================================
 ;; staticmethod_construct(rdi = the class, rsi = args, rdx = nargs)
-;;   -> rax = the wrapper, edx = TAG_PTR
+;;   -> rax = the wrapper, edx = TAG_PTR; (0, 0) with a TypeError pending
+;; Fails: 0
 ;;
 ;; tp_new for staticmethod_type.  The class is NOT always staticmethod: see
 ;; descr_alloc above.
@@ -86,8 +87,12 @@ DEF_FUNC staticmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     mov rsi, rdx
     CSTRING rdi, "staticmethod expected 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    RET_NULL
+    pop rbx
+    leave
+    ret
 END_FUNC staticmethod_construct
 
 ;; ============================================================================
@@ -119,6 +124,7 @@ END_FUNC staticmethod_dealloc
 ;; staticmethod(1) is legal to build, and calling it must report the int the
 ;; way calling the int directly would.  That is what op_call does for the same
 ;; condition, with the same helper.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC staticmethod_call, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
@@ -143,14 +149,17 @@ DEF_FUNC staticmethod_call, 8            ; 1 pushes, so rsp is 16-aligned
 .smc_not_callable:
     mov rsi, rbx
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
-    ; does not return
+    extern set_type_error_with_name
+    call set_type_error_with_name       ; rax = 0
+    pop rbx
+    leave
+    ret
 END_FUNC staticmethod_call
 
 ;; ============================================================================
 ;; classmethod_construct(rdi = the class, rsi = args, rdx = nargs)
-;;   -> rax = the wrapper, edx = TAG_PTR
+;;   -> rax = the wrapper, edx = TAG_PTR; (0, 0) with a TypeError pending
+;; Fails: 0
 ;;
 ;; tp_new for classmethod_type.  The class is NOT always classmethod: see
 ;; descr_alloc above.
@@ -203,8 +212,11 @@ DEF_FUNC classmethod_construct, 8            ; 1 pushes, so rsp is 16-aligned
     mov rsi, rdx
     CSTRING rdi, "classmethod expected 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    RET_NULL
+    pop rbx
+    leave
+    ret
 END_FUNC classmethod_construct
 
 ;; ============================================================================
@@ -227,7 +239,8 @@ END_FUNC classmethod_dealloc
 
 ;; ============================================================================
 ;; property_construct(rdi = the class, rsi = args, rdx = nargs)
-;;   -> rax = the property, edx = TAG_PTR
+;;   -> rax = the property, edx = TAG_PTR; (0, 0) with a TypeError pending
+;; Fails: 0
 ;;
 ;; tp_new for property_type: property(fget), property(fget, fset), or with
 ;; fdel and doc.  The class is NOT always property -- see descr_alloc above --
@@ -471,14 +484,26 @@ DEF_FUNC property_construct, PC_FRAME
     mov rsi, r12
     CSTRING rdx, " given)"
     CSTRING rdi, "property() takes at most 4 arguments ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .pc_fail
 
 .pc_dup_error:
-    RAISE exc_TypeError_type, "property() got multiple values for an argument"
+    FAIL exc_TypeError_type, "property() got multiple values for an argument", .pc_fail
 
 .pc_kw_error:
-    RAISE exc_TypeError_type, "property() got an unexpected keyword argument"
+    SET_EXC exc_TypeError_type, "property() got an unexpected keyword argument"
+.pc_fail:
+    ; Reached with the four collected arguments on the stack, and from the
+    ; keyword loop with its own four above them: cut back to the saved
+    ; registers rather than count.
+    RET_NULL
+    lea rsp, [rbp - PC_FRAME - 32]
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC property_construct
 
 ;; ============================================================================
@@ -535,9 +560,9 @@ DEF_FUNC property_dunder_set_name, PSN_FRAME
 END_FUNC property_dunder_set_name
 
 ;; ============================================================================
-;; property_raise_no_accessor(rdi = the property, rsi = the receiver Value,
-;;                            rdx = "setter"/"deleter"/"getter")
-;;   -> does not return; raises AttributeError
+;; property_set_no_accessor(rdi = the property, rsi = the receiver Value,
+;;                          rdx = "setter"/"deleter"/"getter")
+;;   -> rax = 0, always, with the AttributeError pending
 ;;
 ;; "property 'r' of 'Plain' object has no setter", which is 3.12's wording.
 ;; The old message was 3.10's bare "can't set attribute" and named neither.
@@ -546,7 +571,7 @@ END_FUNC property_dunder_set_name
 PRN_RECV equ 8
 PRN_WHAT equ 16
 PRN_FRAME equ 40            ; + 1 push = 48, 16-aligned
-DEF_FUNC property_raise_no_accessor, PRN_FRAME
+DEF_FUNC property_set_no_accessor, PRN_FRAME
     push rbx
     mov [rbp - PRN_RECV], rsi
     mov [rbp - PRN_WHAT], rdx
@@ -585,9 +610,11 @@ DEF_FUNC property_raise_no_accessor, PRN_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
     lea rsi, [rel prop_msg_buf]
-    call raise_exception
-    ud2
-END_FUNC property_raise_no_accessor
+    call set_exception
+    pop rbx
+    leave
+    ret
+END_FUNC property_set_no_accessor
 
 section .rodata
 prop_msg_open:   db "property '", 0
@@ -648,7 +675,9 @@ END_FUNC property_dealloc
 ;; ============================================================================
 ;; property_descr_get(PyPropertyObject *prop, PyObject *obj) -> PyObject*
 ;; Called by LOAD_ATTR when a property is found in the type dict.
-;; Invokes prop.fget(obj). Returns result (owned ref).
+;; Invokes prop.fget(obj). Returns result (owned ref), as the (rax, edx) pair;
+;; (0, 0) with the exception pending when the getter raised or there is none.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC property_descr_get
     push rbx
@@ -682,13 +711,20 @@ DEF_FUNC property_descr_get
     mov rdi, rbx
     mov rsi, r12
     lea rdx, [rel prop_msg_getter]
-    call property_raise_no_accessor
+    call property_set_no_accessor
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC property_descr_get
 
 ;; ============================================================================
-;; property_descr_set(PyPropertyObject *prop, PyObject *obj, PyObject *value) -> void
+;; property_descr_set(PyPropertyObject *prop, PyObject *obj, PyObject *value)
+;;   -> rax = 0, or -1 with the exception pending
 ;; Called by STORE_ATTR when a property is found in the type dict.
-;; Invokes prop.fset(obj, value).
+;; Invokes prop.fset(obj, value), or fdel(obj) for a NULL value.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC property_descr_set
     push rbx
@@ -761,15 +797,15 @@ DEF_FUNC property_descr_set
     jmp .pds_done
 
 .pds_no_deleter:
-    mov rdi, rbx
-    mov rsi, r12
     lea rdx, [rel prop_msg_deleter]
-    call property_raise_no_accessor
+    jmp .pds_refuse
 .pds_no_setter:
+    lea rdx, [rel prop_msg_setter]
+.pds_refuse:
     mov rdi, rbx
     mov rsi, r12
-    lea rdx, [rel prop_msg_setter]
-    call property_raise_no_accessor
+    call property_set_no_accessor
+    jmp .pds_failed
 END_FUNC property_descr_set
 
 ;; ============================================================================
@@ -895,9 +931,10 @@ extern obj_incref
 ;; there.  enum's `__members__` is a MappingProxyType(...) call.  It goes in
 ;; tp_new, not tp_call: tp_call on a type is what makes that type's *instances*
 ;; callable.
+;;   -> (rax = the proxy, edx = TAG_PTR), or (0, 0) with a TypeError pending
+;; Fails: 0
 ;; ============================================================================
 extern type_is_subtype
-extern raise_type_error_with_name
 MPC_ARG   equ 8             ; the argument, kept across type_is_subtype
 MPC_FRAME equ 16            ; + 0 pushes = 16, and a call needs 8 more
 DEF_FUNC mappingproxy_construct, MPC_FRAME
@@ -934,9 +971,14 @@ DEF_FUNC mappingproxy_construct, MPC_FRAME
 .mpc_error:
     mov rsi, [rbp - MPC_ARG]
     CSTRING rdi, `mappingproxy() argument must be a mapping, not \x01`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mpc_fail
 .mpc_arity:
-    RAISE exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
+    SET_EXC exc_TypeError_type, "mappingproxy() argument must be a mapping, not a sequence"
+.mpc_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC mappingproxy_construct
 
 DEF_FUNC mappingproxy_new, 8            ; 1 pushes, so rsp is 16-aligned
@@ -1250,6 +1292,8 @@ END_FUNC getset_descr_repr
 ;; inspect.isdatadescriptor, and the enum and dataclasses classifiers, walk a
 ;; __dict__ and test hasattr(v, '__get__').  With no tp_dict on the type, the
 ;; answer was False for every getset in the tree.
+;;   -> rax = a Value, or 0 with the exception pending
+;; Fails: 0
 ;; ============================================================================
 global getset_descr_dunder_get
 DEF_FUNC getset_descr_dunder_get
@@ -1263,7 +1307,7 @@ DEF_FUNC getset_descr_dunder_get
     IS_NONE rsi, rcx
     je .gdg_self
     mov rdi, rax
-    call getset_descr_get
+    call getset_descr_get       ; err: its 0 is this __get__'s own
     leave
     ret
 .gdg_self:
@@ -1273,7 +1317,9 @@ DEF_FUNC getset_descr_dunder_get
     V_PACK rax, rdx
     ret
 .gdg_bad:
-    RAISE exc_TypeError_type, "expected 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "expected 1 or 2 arguments"
+    leave
+    ret
 END_FUNC getset_descr_dunder_get
 
 global getset_descr_dunder_set
@@ -1285,6 +1331,7 @@ DEF_FUNC getset_descr_dunder_set
     mov rdx, [rdi + 16]
     mov rdi, rax
     call getset_descr_set
+    ERR_M1 .gds_fail
     extern none_singleton
     lea rax, [rel none_singleton]
     INCREF rax
@@ -1293,12 +1340,18 @@ DEF_FUNC getset_descr_dunder_set
     V_PACK rax, rdx
     ret
 .gds_bad:
-    RAISE exc_TypeError_type, "expected 2 arguments"
+    SET_EXC exc_TypeError_type, "expected 2 arguments"
+.gds_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC getset_descr_dunder_set
 
 ;; getset_descr_dunder_delete(args, nargs) -- descriptor.__delete__(obj)
 ;; A getset is a DATA descriptor whether or not it has a setter, so all three
-;; names exist; a read-only one raises when either is called.
+;; names exist; a read-only one refuses when either is called.
+;;   -> rax = None, or 0 with the exception pending
+;; Fails: 0
 global getset_descr_dunder_delete
 DEF_FUNC getset_descr_dunder_delete
     cmp rsi, 2
@@ -1308,6 +1361,7 @@ DEF_FUNC getset_descr_dunder_delete
     xor edx, edx                ; a NULL Value: delete rather than assign
     mov rdi, rax
     call getset_descr_set
+    ERR_M1 .gdd_fail
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
@@ -1315,7 +1369,11 @@ DEF_FUNC getset_descr_dunder_delete
     V_PACK rax, rdx
     ret
 .gdd_bad:
-    RAISE exc_TypeError_type, "expected 1 argument"
+    SET_EXC exc_TypeError_type, "expected 1 argument"
+.gdd_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC getset_descr_dunder_delete
 
 ;; ============================================================================
@@ -1398,7 +1456,9 @@ section .text
 ;; thing a type's dict can hold.
 ;;
 ;; A NULL getter is a set-only attribute, which CPython reports as an
-;; AttributeError naming it.
+;; AttributeError naming it.  That, a receiver of the wrong type and a getter
+;; that fails all answer 0 with the exception pending.
+;; Fails: 0
 ;; ============================================================================
 GDG_DESC  equ 8
 GDG_SELF  equ 16
@@ -1407,6 +1467,7 @@ DEF_FUNC getset_descr_get, GDG_FRAME
     mov [rbp - GDG_DESC], rdi
     mov [rbp - GDG_SELF], rsi
     call getset_check_receiver  ; clobbers both argument registers
+    ERR_NULL .gdg_out
     mov rdi, [rbp - GDG_DESC]
     mov rsi, [rbp - GDG_SELF]
     mov rax, [rdi + PyGetSetDescrObject.gs_get]
@@ -1437,12 +1498,15 @@ DEF_FUNC getset_descr_get, GDG_FRAME
     leave
     ret
 .gdg_unreadable:
-    RAISE exc_AttributeError_type, "attribute is not readable"
+    SET_EXC exc_AttributeError_type, "attribute is not readable"
+    leave
+    ret
 END_FUNC getset_descr_get
 
 ;; ============================================================================
-;; getset_check_receiver(rdi = the descriptor, rsi = self Value) -- returns,
-;; or raises TypeError naming both types
+;; getset_check_receiver(rdi = the descriptor, rsi = self Value)
+;;   -> rax = 1, or 0 with a TypeError naming both types pending
+;; Fails: 0
 ;;
 ;; The getters are C functions that dereference their argument as an instance
 ;; of the type the descriptor belongs to, so reaching one UNBOUND --
@@ -1473,6 +1537,7 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     test eax, eax
     jz .gcr_bad
 .gcr_ok:
+    mov eax, 1
     leave
     ret
 .gcr_bad:
@@ -1507,12 +1572,15 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel gdr_buf]
-    call raise_exception        ; does not return
+    call set_exception          ; rax = 0
+    leave
+    ret
 END_FUNC getset_check_receiver
 
 ;; ============================================================================
 ;; member_check_receiver(rdi = the descriptor, rsi = self Value)
-;;   -> returns, or raises and does not
+;;   -> rax = 1, or 0 with a TypeError pending
+;; Fails: 0
 ;;
 ;; A __slots__ descriptor is an OFFSET into an instance of the class it was
 ;; made for.  Nothing stops a program from putting one in another class's body
@@ -1543,6 +1611,7 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     test eax, eax
     jz .mcr_bad
 .mcr_ok:
+    mov eax, 1
     leave
     ret
 
@@ -1590,13 +1659,16 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel gdr_buf]
-    call raise_exception        ; does not return
+    call set_exception          ; rax = 0
+    leave
+    ret
 END_FUNC member_check_receiver
 
 ;; ============================================================================
 ;; member_descr_get(rdi = the descriptor, rsi = the instance Value)
-;;   -> rax = the slot's Value, owned; raises and does not return when the
+;;   -> rax = the slot's Value, owned; 0 with the exception pending when the
 ;;      slot has never been assigned or the receiver is of the wrong layout
+;; Fails: 0
 ;;
 ;; The read half of a __slots__ descriptor, as a function rather than as five
 ;; lines inlined at each attribute-access site -- __get__ needs one to call.
@@ -1608,7 +1680,8 @@ global member_descr_get
 DEF_FUNC member_descr_get, MDG_FRAME
     mov [rbp - MDG_SELF], rdi
     mov [rbp - MDG_RECV], rsi
-    call member_check_receiver  ; raises when the layouts do not match
+    call member_check_receiver  ; refuses when the layouts do not match
+    ERR_NULL .mdg_fail
 
     mov rdi, [rbp - MDG_SELF]
     mov rsi, [rbp - MDG_RECV]
@@ -1627,13 +1700,18 @@ DEF_FUNC member_descr_get, MDG_FRAME
     mov rdi, [rbp - MDG_RECV]
     mov rcx, [rbp - MDG_SELF]
     mov rsi, [rcx + PyMemberDescrObject.md_name]
-    extern raise_no_attribute
-    call raise_no_attribute      ; does not return
+    extern set_no_attribute_store
+    call set_no_attribute_store ; rax = 0
+.mdg_fail:
+    leave
+    ret
 END_FUNC member_descr_get
 
 ;; ============================================================================
 ;; member_descr_set(rdi = the descriptor, rsi = the instance Value,
-;;                  rdx = the new Value, or 0 to DELETE) -> eax = 0
+;;                  rdx = the new Value, or 0 to DELETE)
+;;   -> rax = 0, or -1 with the exception pending
+;; Fails: -1
 ;;
 ;; The write half.  A delete of a slot that was never assigned is an
 ;; AttributeError naming the slot -- CPython's PyMember_SetOne for T_OBJECT_EX
@@ -1652,6 +1730,7 @@ DEF_FUNC member_descr_set, MDS_FRAME
     mov [rbp - MDS_RECV], rsi
     mov [rbp - MDS_VAL], rdx
     call member_check_receiver
+    ERR_NULL .mds_fail
 
     mov rdi, [rbp - MDS_SELF]
     mov rsi, [rbp - MDS_RECV]
@@ -1689,7 +1768,11 @@ DEF_FUNC member_descr_set, MDS_FRAME
     lea rdi, [rel exc_AttributeError_type]
     lea rsi, [rsi + PyStrObject.data]
     extern exc_AttributeError_type
-    call raise_exception        ; does not return
+    call set_exception
+.mds_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC member_descr_set
 
 ;; ============================================================================
@@ -1802,6 +1885,7 @@ END_FUNC member_descr_getattr
 ;; every program that reached for the protocol itself -- which
 ;; inspect.getattr_static, inspect.isdatadescriptor and anything walking
 ;; type.__dict__ do.
+;; Fails: 0
 ;; ============================================================================
 global member_descr_dunder_get
 DEF_FUNC member_descr_dunder_get
@@ -1825,19 +1909,24 @@ DEF_FUNC member_descr_dunder_get
     ret
 .mdg_go:
     mov rdi, rax
-    call member_descr_get
+    call member_descr_get       ; err: its 0 is this __get__'s own
     leave
     ret
 .mdg_none_none:
-    RAISE exc_TypeError_type, "__get__(None, None) is invalid"
+    SET_EXC exc_TypeError_type, "__get__(None, None) is invalid"
+    leave
+    ret
 .mdg_bad:
-    RAISE exc_TypeError_type, "expected 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "expected 1 or 2 arguments"
+    leave
+    ret
 END_FUNC member_descr_dunder_get
 
 ;; ============================================================================
 ;; member_descr_dunder_set(rdi = args, rsi = nargs) -> rax = None
 ;;
 ;; descr.__set__(obj, value).
+;; Fails: 0
 ;; ============================================================================
 global member_descr_dunder_set
 DEF_FUNC member_descr_dunder_set
@@ -1848,12 +1937,17 @@ DEF_FUNC member_descr_dunder_set
     mov rdx, [rdi + 16]
     mov rdi, rax
     call member_descr_set
+    ERR_M1 .mds_fail
     RET_NONE
     leave
     V_PACK rax, rdx
     ret
 .mds_bad:
-    RAISE exc_TypeError_type, "expected 2 arguments"
+    SET_EXC exc_TypeError_type, "expected 2 arguments"
+.mds_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC member_descr_dunder_set
 
 ;; ============================================================================
@@ -1861,6 +1955,7 @@ END_FUNC member_descr_dunder_set
 ;;
 ;; descr.__delete__(obj).  A __slots__ descriptor is a DATA descriptor
 ;; whether or not the slot has ever been assigned, so all three names exist.
+;; Fails: 0
 ;; ============================================================================
 global member_descr_dunder_delete
 DEF_FUNC member_descr_dunder_delete
@@ -1871,12 +1966,17 @@ DEF_FUNC member_descr_dunder_delete
     xor edx, edx                ; a NULL Value: delete rather than assign
     mov rdi, rax
     call member_descr_set
+    ERR_M1 .mdd_fail
     RET_NONE
     leave
     V_PACK rax, rdx
     ret
 .mdd_bad:
-    RAISE exc_TypeError_type, "expected 1 argument"
+    SET_EXC exc_TypeError_type, "expected 1 argument"
+.mdd_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC member_descr_dunder_delete
 
 section .rodata
@@ -1889,7 +1989,8 @@ section .text
 
 ;; ============================================================================
 ;; getset_descr_set(rdi = the descriptor, rsi = self Value, rdx = value Value)
-;;   -> eax = 0, or never returns
+;;   -> rax = 0, or -1 with the exception pending
+;; Fails: -1
 ;;
 ;; A NULL setter is a read-only attribute.  Every getset the tree registers
 ;; today has one, which is what makes `(5).real = 1` an AttributeError rather
@@ -1904,6 +2005,7 @@ DEF_FUNC getset_descr_set, GDS_FRAME
     mov [rbp - GDS_RECV], rsi
     mov [rbp - GDS_VALUE], rdx
     call getset_check_receiver  ; the setter dereferences it too
+    ERR_NULL .gds_fail
     mov rdi, [rbp - GDS_SELF]
     mov rsi, [rbp - GDS_RECV]
     mov rdx, [rbp - GDS_VALUE]
@@ -1927,8 +2029,11 @@ DEF_FUNC getset_descr_set, GDS_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
     lea rsi, [rel gdr_buf]
-    call raise_exception
-    ud2
+    call set_exception
+.gds_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC getset_descr_set
 
 DEF_FUNC_LOCAL getset_descr_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
@@ -2151,7 +2256,10 @@ DEF_FUNC classmethod_dunder_get, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 .cmg_bad_pair:
-    RAISE exc_TypeError_type, "__get__(None, None) is invalid"
+    SET_EXC exc_TypeError_type, "__get__(None, None) is invalid"
+    pop rbx
+    leave
+    ret
 .cmg_none:
     lea rax, [rel none_singleton]
     INCREF rax
@@ -2178,7 +2286,7 @@ DEF_FUNC property_dunder_get
     jz .pdg2_self
     mov rdi, rax
     mov rsi, rdx
-    call property_descr_get
+    call property_descr_get     ; err: (0, 0) packs to the 0 this __get__ answers
     V_PACK rax, rdx
     leave
     ret
@@ -2188,7 +2296,6 @@ DEF_FUNC property_dunder_get
     ret
 END_FUNC property_dunder_get
 
-PDS2_EXC   equ 8
 PDS2_FRAME equ 16
 
 DEF_FUNC property_dunder_set, PDS2_FRAME
@@ -2198,9 +2305,8 @@ DEF_FUNC property_dunder_set, PDS2_FRAME
     mov rdx, [rdi + 16]                 ; the value, already a Value
     mov rsi, [rdi + 8]                  ; the instance
     mov rdi, rax
-    DUNDER_EXC_SAVE [rbp - PDS2_EXC]
     call property_descr_set
-    DUNDER_RAISED [rbp - PDS2_EXC], .pds2_raised
+    ERR_M1 .pds2_raised
     lea rax, [rel none_singleton]
     INCREF rax
     leave
@@ -2210,7 +2316,9 @@ DEF_FUNC property_dunder_set, PDS2_FRAME
     leave
     ret
 .pds2_bad:
-    RAISE exc_TypeError_type, "__set__() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "__set__() takes exactly 2 arguments"
+    leave
+    ret
 END_FUNC property_dunder_set
 
 DEF_FUNC property_dunder_delete, 8            ; 1 pushes, so rsp is 16-aligned
@@ -2242,13 +2350,15 @@ DEF_FUNC property_dunder_delete, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 .pdd_no_deleter:
-    RAISE exc_AttributeError_type, "can't delete attribute"
+    FAIL exc_AttributeError_type, "can't delete attribute", .pdd_failed
 END_FUNC property_dunder_delete
 
 section .text
 
 ;; ============================================================================
 ;; property_setattr(rdi = self, rsi = name, rdx = value Value)
+;;   -> rax = 0, or -1 with the AttributeError pending
+;; Fails: -1
 ;;
 ;; Only __doc__ is writable, which is the one CPython allows -- fget, fset and
 ;; fdel are read-only there too.  dis.py opens with
@@ -2296,7 +2406,11 @@ DEF_FUNC_LOCAL property_setattr, PSA_FRAME
     jmp .psa_ok
 
 .psa_readonly:
-    RAISE exc_AttributeError_type, "readonly attribute"
+    SET_EXC exc_AttributeError_type, "readonly attribute"
+    mov rax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC property_setattr
 
 section .data

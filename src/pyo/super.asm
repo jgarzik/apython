@@ -463,7 +463,7 @@ DEF_FUNC super_lookup, SL_FRAME
     cmp rsi, [rbp - SL_OBJTYPE]
     je .sl_plain
     mov rdi, rax
-    call property_descr_get     ; -> (rax, rdx), owned
+    call property_descr_get     ; -> (rax, rdx), owned  ; err: (0, 0) is the caller's, as it stands
     mov [rbp - SL_BIND], rax
     mov [rbp - SL_TYPE], rdx    ; SL_TYPE is spent; reuse it for the tag
     mov rdi, [rbp - SL_ATTR]
