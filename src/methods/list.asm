@@ -17,6 +17,7 @@ extern obj_as_slice_index
 extern get_iterator_opt
 extern ap_malloc
 extern ap_free
+extern list_clear
 extern ap_realloc
 extern ap_memcpy
 extern ap_memmove
@@ -1148,15 +1149,9 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     ; self = args[0]
     mov rax, [rbx]          ; self (list)
 
-    ; Clear: DECREF all items, set size to 0
-    push rax
-    mov rcx, [rax + PyListObject.ob_size]
-    test rcx, rcx
-    jz .ldi_cleared
-    ; Simple clear: just set size to 0 (items leak but safe for now)
-    mov qword [rax + PyListObject.ob_size], 0
-.ldi_cleared:
-    pop rax
+    ; A second __init__ starts from empty, and releases what was there.
+    mov rdi, rax
+    call list_clear
 
     ; If nargs >= 2, use list_extend to add items from args[1]
     cmp r12, 2
@@ -1192,24 +1187,8 @@ DEF_FUNC list_method_clear, 8        ; rsp 16-aligned at the call the macros bel
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
     je list_sorting_error
-    mov r12, [rbx + PyListObject.ob_size]
-
-    ; DECREF all items (fat 16-byte slots)
-    xor r13d, r13d
-.clear_loop:
-    cmp r13, r12
-    jge .clear_done
-    mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r13 * 8]    ; payload
-    V_UNPACK rdi, rsi
-    push r13
-    DECREF_VAL rdi, rsi
-    pop r13
-    inc r13
-    jmp .clear_loop
-
-.clear_done:
-    mov qword [rbx + PyListObject.ob_size], 0
+    mov rdi, rbx
+    call list_clear                 ; detaches before it releases
 
     RET_NONE
     pop r13

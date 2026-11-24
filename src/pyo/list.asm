@@ -2154,23 +2154,8 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     jmp .lir_copy_outer
 
 .lir_clear:
-    ; DECREF all items, set size=0
-    mov r13, [rbx + PyListObject.ob_size]
-    xor ecx, ecx
-.lir_clear_loop:
-    cmp rcx, r13
-    jge .lir_clear_done
-    mov rax, [rbx + PyListObject.ob_item]
-    push rcx
-    push rcx                      ; twice: rsp keeps its alignment
-    mov rdi, [rax + rcx * 8]
-    DECREF_V rdi, rsi
-    pop rcx
-    pop rcx
-    inc rcx
-    jmp .lir_clear_loop
-.lir_clear_done:
-    mov qword [rbx + PyListObject.ob_size], 0
+    mov rdi, rbx
+    call list_clear                 ; detaches before it releases
 
 .lir_done:
     INCREF rbx
@@ -2749,6 +2734,19 @@ DEF_FUNC list_traverse
     ret
 END_FUNC list_traverse
 
+;; list_clear(rdi = list) -> void
+;; Empty a list and release everything it held.  tp_clear, and what clear(),
+;; __init__ and `l *= 0` all mean.
+;;
+;; The array is DETACHED first and only then walked.  Releasing an item runs
+;; its __del__, which is arbitrary Python: a second clear() that still found
+;; these items installed released every one of them again, and an append()
+;; could realloc the array out from under the walk.  CPython's list_clear
+;; takes the array away before it drops a single reference, for this reason;
+;; dict_clear_all (src/pyo/dict.asm) is the same function for dicts.
+;;
+;; A list being sorted has ob_size 0 and is left alone.
+LCL_MINCAP equ 8                ; what list_new gives an empty list
 DEF_FUNC list_clear
     push rbx
     push r12
@@ -2756,23 +2754,33 @@ DEF_FUNC list_clear
     push r15
 
     mov rbx, rdi
-    mov r12, [rbx + PyListObject.ob_item]       ; payloads
     mov r13, [rbx + PyListObject.ob_size]
-    mov qword [rbx + PyListObject.ob_size], 0
-
     test r13, r13
     jz .done
+
+    mov edi, LCL_MINCAP * 8
+    call ap_malloc
+    xor ecx, ecx
+.zero:
+    mov qword [rax + rcx*8], 0  ; slice operations can read ahead of ob_size
+    inc ecx
+    cmp ecx, LCL_MINCAP
+    jb .zero
+
+    mov r15, [rbx + PyListObject.ob_item]       ; the detached array
+    mov [rbx + PyListObject.ob_item], rax
+    mov qword [rbx + PyListObject.allocated], LCL_MINCAP
+    mov qword [rbx + PyListObject.ob_size], 0
+    mov r12, r15
 .loop:
-    dec r13
     mov rdi, [r12]
-    push r12
-    push r12
     DECREF_V rdi, rsi
-    pop r12
-    pop r12
     add r12, 8
-    test r13, r13
+    dec r13
     jnz .loop
+
+    mov rdi, r15
+    call ap_free
 .done:
     pop r15
     pop r13

@@ -2295,7 +2295,16 @@ DEF_FUNC set_traverse, 16       ; + 4 pushes = 48, 16-aligned
     ret
 END_FUNC set_traverse
 
-DEF_FUNC set_clear_gc, 16       ; + 4 pushes = 48, 16-aligned
+;; set_clear_gc(rdi = set) -> void
+;; Empty a set and release everything it held: tp_clear, and clear().
+;;
+;; The table is DETACHED first and only then walked, as dict_clear_all and
+;; list_clear do.  Releasing a key runs its __del__, and an add() from there
+;; used to resize -- freeing the table this walk was still reading.
+SCG_BASE  equ 8                 ; the detached table, to free
+SCG_FRAME equ 16                ; + 4 pushes = 48, 16-aligned
+global set_clear_gc
+DEF_FUNC set_clear_gc, SCG_FRAME
     push rbx
     push r12
     push r13
@@ -2305,28 +2314,33 @@ DEF_FUNC set_clear_gc, 16       ; + 4 pushes = 48, 16-aligned
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
     mov r14, [rbx + PyDictObject.ob_size]   ; live keys still to release
+    mov qword [rbx + PyDictObject.ob_size], 0
+    lea rax, [rel set_empty_entries]
+    cmp r12, rax
+    je .sc_done                             ; the shared table holds nothing
+    mov [rbp - SCG_BASE], r12
+    mov [rbx + PyDictObject.entries], rax
+    mov qword [rbx + PyDictObject.capacity], SET_EMPTY_CAP
+    mov qword [rbx + PyDictObject.dk_tombstones], 0
+    mov qword [rbx + SET_FINGER], 0
+    mov qword [rbx + SET_HASH], -1
 .sc_loop:
     test r14, r14
-    jz .sc_done
+    jz .sc_free
     test r13, r13
-    jz .sc_done
+    jz .sc_free
     dec r13
     mov rdi, [r12 + SET_ENTRY_KEY_GC]
-    test rdi, rdi                           ; empty or tombstone?
-    jz .sc_next
-    dec r14
-    mov qword [r12 + SET_ENTRY_KEY_GC], 0   ; before the DECREF, which calls out
-    push r12
-    push r13
-    DECREF_V rdi, rsi
-    pop r13
-    pop r12
-.sc_next:
     add r12, SET_ENTRY_SIZE_GC
+    test rdi, rdi                           ; empty or tombstone?
+    jz .sc_loop
+    dec r14
+    DECREF_V rdi, rsi
     jmp .sc_loop
+.sc_free:
+    mov rdi, [rbp - SCG_BASE]
+    call ap_free
 .sc_done:
-    mov qword [rbx + PyDictObject.ob_size], 0
-
     pop r14
     pop r13
     pop r12
