@@ -169,3 +169,61 @@ err("ctx.load_cert_chain(missing)", _ctx.load_cert_chain, "/nonexistent/cert.pem
 err("ctx.load_verify_locations()", _ctx.load_verify_locations)
 err("ctx.set_alpn_protocols(long)", _ctx.set_alpn_protocols, ["x" * 300])
 err("MemoryBIO.write(str)", ssl.MemoryBIO().write, "text")
+
+# --- random --------------------------------------------------------------
+import random
+
+
+class RaisesIndexKey:
+    def __index__(self):
+        raise KeyError("from __index__")
+
+
+print("== random")
+_rh = None
+try:
+    import _randomcore
+    _rh = _randomcore.new()
+except ImportError:
+    pass
+# A call with no argument at all used to read args[0] off the caller's stack.
+core("_randomcore.genrand()", "_randomcore", "genrand")
+core("_randomcore.random()", "_randomcore", "random")
+core("_randomcore.getstate()", "_randomcore", "getstate")
+core("_randomcore.free()", "_randomcore", "free")
+core("_randomcore.genrand(str)", "_randomcore", "genrand", "x")
+core("_randomcore.genrand(dead)", "_randomcore", "genrand", 99999)
+core("_randomcore.random(__index__ raises)", "_randomcore", "random", RaisesIndexKey())
+core("_randomcore.bits(1 arg)", "_randomcore", "bits", _rh)
+core("_randomcore.bits(negative)", "_randomcore", "bits", _rh, -1)
+core("_randomcore.bits(wide)", "_randomcore", "bits", _rh, 40)
+core("_randomcore.bits(str)", "_randomcore", "bits", _rh, "x")
+core("_randomcore.bits(dead)", "_randomcore", "bits", 99999, 1)
+core("_randomcore.words(1 arg)", "_randomcore", "words", _rh)
+core("_randomcore.words(negative)", "_randomcore", "words", _rh, -1)
+core("_randomcore.words(dead)", "_randomcore", "words", 99999, 1)
+core("_randomcore.words(__index__ raises)", "_randomcore", "words", _rh, RaisesIndexKey())
+core("_randomcore.seed_words(int)", "_randomcore", "seed_words", _rh, 5)
+core("_randomcore.seed_words(1 arg)", "_randomcore", "seed_words", _rh)
+core("_randomcore.seed_words(str item)", "_randomcore", "seed_words", _rh, [1, "x"])
+core("_randomcore.seed_words(__index__ raises)", "_randomcore", "seed_words", _rh, [1, RaisesIndexKey()])
+# An empty key used to read key[0] of an empty list.
+core("_randomcore.seed_words(empty)", "_randomcore", "seed_words", _rh, [])
+core("_randomcore.getstate(dead)", "_randomcore", "getstate", 99999)
+core("_randomcore.setstate(1 arg)", "_randomcore", "setstate", _rh)
+core("_randomcore.setstate(str)", "_randomcore", "setstate", _rh, "x")
+core("_randomcore.setstate(short)", "_randomcore", "setstate", _rh, b"x")
+core("_randomcore.setstate(bad cursor)", "_randomcore", "setstate", _rh, b"\xff" * 2500)
+
+_rng = random.Random(1)
+err("getrandbits(-1)", _rng.getrandbits, -1, _msg=True)
+err("getrandbits(str)", _rng.getrandbits, "x")
+err("getrandbits(__index__ raises)", _rng.getrandbits, RaisesIndexKey(), _msg=True)
+err("seed(list)", _rng.seed, [1])
+err("setstate(int)", _rng.setstate, 5)
+err("setstate(short tuple)", _rng.setstate, (3, (1, 2, 3), None))
+err("randbytes(-1)", _rng.randbytes, -1)
+err("randrange(0)", _rng.randrange, 0)
+# The generator still works, and still gives CPython's sequence.
+_rng.seed(12345)
+print(_rng.getrandbits(32), _rng.getrandbits(70), _rng.random())

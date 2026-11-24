@@ -42,7 +42,7 @@ extern int_from_i64
 extern obj_as_index
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_exception
+extern set_exception
 extern list_type
 extern tuple_type
 
@@ -93,14 +93,15 @@ END_FUNC rc_handle_at
 
 ;; ============================================================================
 ;; rc_state_arg(rdi = args, rsi = the index of the handle argument)
-;;   -> rax = MTState*; does not return when the handle is not live
+;;   -> rax = MTState*; ValueError when the handle is not live
+;; Fails: 0
 ;; ============================================================================
 RSA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL rc_state_arg, RSA_FRAME
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .rsa_fail
     mov rdi, rax
     call rc_handle_at
     test rax, rax
@@ -108,7 +109,11 @@ DEF_FUNC_LOCAL rc_state_arg, RSA_FRAME
     leave
     ret
 .rsa_bad:
-    RAISE exc_ValueError_type, "invalid _randomcore handle"
+    SET_EXC exc_ValueError_type, "invalid _randomcore handle"
+.rsa_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC rc_state_arg
 
 ;; ============================================================================
@@ -182,8 +187,11 @@ DEF_FUNC rc_new, RN_FRAME
     mov rdi, rbx
     call ap_free
 .rn_oom:
+    SET_EXC exc_ValueError_type, "out of memory"
+    xor eax, eax
     pop rbx
-    RAISE exc_ValueError_type, "out of memory"
+    leave
+    ret
 END_FUNC rc_new
 
 ;; ============================================================================
@@ -192,6 +200,8 @@ END_FUNC rc_new
 RF_IDX   equ 8
 RF_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
 DEF_FUNC rc_free, RF_FRAME
+    cmp rsi, 1
+    jne .rf_arity
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
@@ -212,6 +222,8 @@ DEF_FUNC rc_free, RF_FRAME
     leave
     V_PACK rax, rdx
     ret
+.rf_arity:
+    SET_EXC exc_TypeError_type, "free() takes exactly one argument"
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -359,13 +371,22 @@ END_FUNC rc_genrand
 ;; _randomcore.genrand(handle) -> the next 32-bit word, as an int
 ;; ============================================================================
 DEF_FUNC rc_genrand_fn
+    cmp rsi, 1
+    jne .rgf_arity
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .rgf_fail
     mov rdi, rax
     call rc_genrand
     mov edi, eax
     call int_from_i64
     V_PACK rax, rdx
+.rgf_fail:
+    leave
+    ret
+.rgf_arity:
+    ; With no argument at all args[0] is whatever the caller's stack held.
+    SET_EXC exc_TypeError_type, "genrand() takes exactly one argument"
     leave
     ret
 END_FUNC rc_genrand_fn
@@ -381,8 +402,11 @@ RR_A     equ 8
 RR_FRAME equ 24             ; + 1 push = 32, 16-aligned
 DEF_FUNC rc_random, RR_FRAME
     push rbx
+    cmp rsi, 1
+    jne .rr_arity
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .rr_fail
     mov rbx, rax
     mov rdi, rbx
     call rc_genrand
@@ -398,9 +422,13 @@ DEF_FUNC rc_random, RR_FRAME
     mulsd xmm0, [rel rc_inv_2_53]
     call float_from_f64
     V_PACK rax, rdx
+.rr_fail:
     pop rbx
     leave
     ret
+.rr_arity:
+    SET_EXC exc_TypeError_type, "random() takes exactly one argument"
+    jmp .rr_fail
 END_FUNC rc_random
 
 ;; ============================================================================
@@ -418,6 +446,7 @@ DEF_FUNC rc_bits, RI_FRAME
     sub rsp, 8
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .ri_fail           ; leave drops what was pushed
     add rsp, 8
     pop rdi
     mov rdi, [rdi + 8]
@@ -425,7 +454,7 @@ DEF_FUNC rc_bits, RI_FRAME
     sub rsp, 8
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .ri_fail
     add rsp, 8
     pop rdi                     ; the MTState*
     mov rcx, rax
@@ -455,11 +484,15 @@ DEF_FUNC rc_bits, RI_FRAME
     V_PACK rax, rdx
     ret
 .ri_negative:
-    RAISE exc_ValueError_type, "number of bits must be non-negative"
+    FAIL exc_ValueError_type, "number of bits must be non-negative", .ri_fail
 .ri_wide:
-    RAISE exc_ValueError_type, "bits() is limited to 32 bits"
+    FAIL exc_ValueError_type, "bits() is limited to 32 bits", .ri_fail
 .ri_arity:
-    RAISE exc_TypeError_type, "bits() takes exactly two arguments"
+    SET_EXC exc_TypeError_type, "bits() takes exactly two arguments"
+.ri_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC rc_bits
 
 ;; ============================================================================
@@ -490,11 +523,12 @@ DEF_FUNC rc_words, RW_FRAME
     mov rbx, rdi
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .rw_fail
     mov [rbp - RW_ST], rax
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .rw_fail
     test rax, rax
     js .rw_negative
     test rax, rax
@@ -562,11 +596,16 @@ DEF_FUNC rc_words, RW_FRAME
     V_PACK rax, rdx
     ret
 .rw_negative:
-    RAISE exc_ValueError_type, "number of bits must be non-negative"
+    FAIL exc_ValueError_type, "number of bits must be non-negative", .rw_fail
 .rw_oom:
-    RAISE exc_ValueError_type, "out of memory"
+    FAIL exc_ValueError_type, "out of memory", .rw_fail
 .rw_arity:
-    RAISE exc_TypeError_type, "words() takes exactly two arguments"
+    SET_EXC exc_TypeError_type, "words() takes exactly two arguments"
+.rw_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC rc_words
 
 ;; ============================================================================
@@ -591,6 +630,7 @@ DEF_FUNC rc_seed_words, RS_FRAME
     mov rbx, rdi
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .rs_fail
     mov [rbp - RS_ST], rax
 
     mov rax, [rbx + 8]
@@ -609,6 +649,10 @@ DEF_FUNC rc_seed_words, RS_FRAME
     mov [rbp - RS_KEY], rax
     mov rcx, [rax + PyListObject.ob_size]
     mov [rbp - RS_KLEN], rcx
+    ; init_by_array reads key[j] before it asks whether j has wrapped, so an
+    ; empty key is a read past an empty array.
+    test rcx, rcx
+    jz .rs_empty
 
     mov rdi, [rbp - RS_ST]
     mov esi, 19650218
@@ -643,7 +687,7 @@ DEF_FUNC rc_seed_words, RS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .rs_fail_pushed
     mov edx, eax
     pop rax
     add eax, edx
@@ -709,9 +753,18 @@ DEF_FUNC rc_seed_words, RS_FRAME
     ret
 
 .rs_type:
-    RAISE exc_TypeError_type, "seed_words() wants a list or tuple of ints"
+    FAIL exc_TypeError_type, "seed_words() wants a list or tuple of ints", .rs_fail
 .rs_arity:
-    RAISE exc_TypeError_type, "seed_words() takes exactly two arguments"
+    FAIL exc_TypeError_type, "seed_words() takes exactly two arguments", .rs_fail
+.rs_empty:
+    FAIL exc_ValueError_type, "seed_words() wants at least one word", .rs_fail
+.rs_fail_pushed:
+    pop rax                     ; the running word, parked across the call
+.rs_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC rc_seed_words
 
 ;; ============================================================================
@@ -723,8 +776,11 @@ END_FUNC rc_seed_words
 RG_FRAME equ 24             ; + 1 push = 32, 16-aligned
 DEF_FUNC rc_getstate, RG_FRAME
     push rbx
+    cmp rsi, 1
+    jne .rgs_arity
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .rgs_fail
     mov rbx, rax
     mov edi, (MT_N + 1) * 4
     call bytes_new
@@ -747,8 +803,15 @@ DEF_FUNC rc_getstate, RG_FRAME
     leave
     V_PACK rax, rdx
     ret
+.rgs_arity:
+    FAIL exc_TypeError_type, "getstate() takes exactly one argument", .rgs_fail
 .rgs_oom:
-    RAISE exc_ValueError_type, "out of memory"
+    SET_EXC exc_ValueError_type, "out of memory"
+.rgs_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC rc_getstate
 
 ;; ============================================================================
@@ -766,6 +829,7 @@ DEF_FUNC rc_setstate, RT_FRAME
     mov rbx, rdi
     xor esi, esi
     call rc_state_arg
+    ERR_NULL .rss_fail
     mov [rbp - RT_ST], rax
 
     mov rax, [rbx + 8]
@@ -802,13 +866,18 @@ DEF_FUNC rc_setstate, RT_FRAME
     ret
 
 .rss_value:
-    RAISE exc_ValueError_type, "invalid state"
+    FAIL exc_ValueError_type, "invalid state", .rss_fail
 .rss_size:
-    RAISE exc_ValueError_type, "state is the wrong size"
+    FAIL exc_ValueError_type, "state is the wrong size", .rss_fail
 .rss_type:
-    RAISE exc_TypeError_type, "setstate() wants bytes"
+    FAIL exc_TypeError_type, "setstate() wants bytes", .rss_fail
 .rss_arity:
-    RAISE exc_TypeError_type, "setstate() takes exactly two arguments"
+    SET_EXC exc_TypeError_type, "setstate() takes exactly two arguments"
+.rss_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC rc_setstate
 
 ;; ============================================================================
