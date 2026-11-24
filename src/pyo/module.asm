@@ -285,7 +285,7 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     ; Release it before returning.  The result -- or the 0 that says the hook
     ; raised -- goes to a frame slot across the DECREF, because obj_dealloc
     ; clobbers every caller-saved register, rax included.
@@ -408,7 +408,7 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rdi, rax
     lea rsi, [rbp - MG_NAME]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .mg_hook_raised, below
     ; Release it here, before anything branches: the hook is finished with,
     ; and one release point on the straight line is worth four on the exits --
     ; the unwind tail below abandons this frame into eval_exception_unwind and

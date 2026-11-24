@@ -1278,6 +1278,7 @@ DEF_FUNC str_method_join
     push rsi
     extern get_iterator_opt
     call get_iterator_opt       ; 0 when there is no iterator to be had
+    ERR_PENDING_JUMP
     pop rsi
     pop rdi
     test rax, rax

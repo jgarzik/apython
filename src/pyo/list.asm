@@ -722,6 +722,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov esi, TAG_PTR
     push rcx                    ; old_len; the call below clobbers rcx
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .las_type_error_pop
     push rax                    ; save iterator
@@ -1096,6 +1097,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .las_type_error
     push rax                    ; the iterator
@@ -2020,6 +2022,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .lic_type_error
     mov [rbp - LIC_ITER], rax
@@ -2347,6 +2350,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
+    ERR_NULL_JUMP
     mov [rbp - LTC_ITER], rax
 
     ; Iterate and append (call_iternext handles heaptype __next__)

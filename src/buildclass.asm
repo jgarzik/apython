@@ -418,7 +418,7 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     mov rdx, [rbp - TSN_NAME]           ; name
     lea rcx, [rel tsn_name]
     mov r8d, TAG_PTR
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .raised
     test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
     jz .raised
     mov rdi, rax
@@ -2851,7 +2851,7 @@ DEF_FUNC bc_call_kw, BCK_FRAME
     mov rdi, [rbp - BCK_FN]
     lea rsi, [rbp - BCK_ARGS]
     mov rdx, r12
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     mov qword [gs:ThreadState.kw_names_pending], 0
     pop r13
     pop r12

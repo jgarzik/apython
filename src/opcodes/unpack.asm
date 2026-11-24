@@ -625,6 +625,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rbp - UEX_IPAY]
     mov esi, TAG_PTR
     call get_iterator_opt       ; see the note in .extend_generic
+    ERR_PENDING_JUMP
     test rax, rax
     jz .ue_type_error
     mov [rbp - UEX_ITER], rax

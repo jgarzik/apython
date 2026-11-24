@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -843,6 +844,7 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator_opt
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .fwl_not_iterable
     V_UNPACK rax, rdx
@@ -983,7 +985,7 @@ DEF_FUNC fileobj_buffer, FBF_FRAME
     mov rsi, rsp
     mov edx, 3
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .fbf_fail, below
     add rsp, 32
     push rax
     push rax

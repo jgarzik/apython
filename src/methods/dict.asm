@@ -9,6 +9,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern eval_exception_unwind
 extern ap_memset
 extern obj_decref
 extern str_from_cstr_heap
@@ -414,11 +415,11 @@ DEF_FUNC dict_method_update, DU_FRAME
     xor esi, esi
     mov rdi, [rbp - DU_PAIR]
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: .du_propagate, below
     mov r14, rax
     mov rdi, [rbp - DU_PAIR]
     mov qword [rbp - DU_PAIR], 0
-    call obj_decref
+    DECREF_V rdi, rcx           ; a Value: `keys = 5` is an immediate
     test r14, r14
     jz .du_propagate                    ; keys() raised; it is already pending
 
@@ -558,6 +559,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .du_not_a_sequence
     mov rdi, rax
@@ -788,8 +790,7 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     V_UNPACK rdi, rsi             ; get_iterator takes a (payload, tag) pair
     extern get_iterator
     call get_iterator
-    test rax, rax
-    jz .dfk_no_iter
+    ERR_NULL .dfk_no_iter
     mov [rbp - DFK_ITER], rax
 
     ; The result must be of the class this was called ON: D.fromkeys() answers
@@ -807,8 +808,7 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     xor edx, edx
     extern obj_call_n
     call obj_call_n
-    test rax, rax
-    jz .dfk_ctor_failed
+    ERR_NULL .dfk_ctor_failed
     ; The keys go in with dict_set, which wants the dict layout.  A class that
     ; is not a dict subclass has no such layout, and would be written through
     ; as though it had.  (CPython reaches PyObject_SetItem here, so it also

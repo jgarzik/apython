@@ -557,8 +557,7 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     mov esi, TAG_PTR            ; a is always a set or a view, so a pointer
     extern get_iterator
     call get_iterator
-    test rax, rax
-    jz .dac_error
+    ERR_NULL .dac_error
     mov r12, rax
 
 .dac_loop:
@@ -935,8 +934,7 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
-    test rax, rax
-    jz .dvj_raised
+    ERR_NULL .dvj_raised
     mov [rbp - DVJ_ITER], rax
 
 .dvj_loop:

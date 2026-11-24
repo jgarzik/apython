@@ -342,7 +342,7 @@ DEF_FUNC object_method_reduce, ORX_FRAME
     lea rsi, [rbp - ORX_ARGS]
     mov edx, 2
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     push rax
     sub rsp, 8
     mov rdi, [rbp - ORX_ARGS + 8]

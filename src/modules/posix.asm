@@ -2673,7 +2673,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     je .pfs_self
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PFS_EXC]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .pfs_no_result
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .pfs_no_result
 

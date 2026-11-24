@@ -1802,7 +1802,7 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     lea rsi, [rbp - TPH_ARGV]
     mov edx, 1
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: a hook that raises is reported below
     push rax
     ; A hook that raises is reported against the HOOK, and the exception it
     ; was given is dropped -- CPython says "Exception ignored in

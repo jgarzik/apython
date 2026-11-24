@@ -261,7 +261,7 @@ DEF_FUNC_BARE op_load_name
 .locals_mapping:
     mov rsi, [rsp]             ; rsi = name
     extern mapping_getitem_opt
-    call mapping_getitem_opt
+    call mapping_getitem_opt    ; err: 0, absent or raised, falls through `jnz .found_owned`
     test rax, rax
     jnz .found_owned
     ; A miss RAISES for a mapping of its own, where a dict answers NULL.
@@ -707,7 +707,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR             ; both are always heap pointers
-    call dunder_call_3
+    call dunder_call_3          ; err: .la_propagate, once both are released
     V_UNPACK rax, rdx           ; returns a Value
 
     ; rax = result from __get__, rdx = result tag
@@ -2436,7 +2436,7 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
 .ga_user_call:
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR
-    call dunder_call_3
+    call dunder_call_3          ; err: 0 goes to the caller as it stands
     mov [rbp - GA_SAVE], rax
     mov rdi, [rbp - GA_ATTR]
     call obj_decref

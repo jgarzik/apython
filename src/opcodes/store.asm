@@ -326,7 +326,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdx, [rbp - SA_VAL]     ; value
     lea rcx, [rel dunder_set]
     mov r8d, [rbp - SA_VTAG]    ; value tag
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .sa_descr_cleanup
     V_UNPACK rax, rdx           ; returns a Value
     ; DECREF result if non-NULL
     test edx, edx

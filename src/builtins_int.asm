@@ -517,7 +517,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Call __int__(self), BOUND first -- see .int_call_dunder below.
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .int_bind_raised
     call int_dunder_invoke
@@ -615,7 +615,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; object worked.
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .int_bind_raised
     call int_dunder_invoke
@@ -702,7 +702,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; CPython 3.12: tries __index__ on result, but NOT __int__
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .int_bind_raised
     call int_dunder_invoke

@@ -853,7 +853,7 @@ DEF_FUNC_LOCAL intrinsic_display, ID_FRAME
     mov rsi, rsp
     mov edx, 1
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .id_raised, below
     add rsp, 16
     mov [rbp - ID_VAL], rax     ; the hook's result, or 0
     ; A Value: sys.displayhook is whatever a program put there, and obj_decref
@@ -1002,7 +1002,7 @@ DEF_FUNC op_setup_annotations
     mov rdi, rbx
     mov rsi, r13
     extern mapping_getitem_opt
-    call mapping_getitem_opt
+    call mapping_getitem_opt    ; err: 0, absent or raised, goes to .sa_map_missing
     test rax, rax
     jz .sa_map_missing
     mov rdi, rax

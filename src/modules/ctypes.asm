@@ -634,8 +634,7 @@ DEF_FUNC cx_tramp, CT_FRAME
     lea rsi, [rbp - CT_V0]
     mov edx, 2
     call obj_call_n
-    test rax, rax
-    jz .ct_raised
+    ERR_NULL .ct_raised
     DECREF_V rax, rcx
     jmp .ct_out
 .ct_raised:

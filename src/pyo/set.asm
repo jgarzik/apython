@@ -1483,6 +1483,7 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .stc_not_iterable_decref_set
     mov r12, rax            ; r12 = iterator
@@ -1785,6 +1786,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .ftc_not_iterable_decref
     mov r12, rax

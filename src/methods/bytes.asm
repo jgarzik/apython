@@ -508,7 +508,7 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     lea rsi, [rsp + 8]
     mov edx, 1
     extern type_call
-    call type_call
+    call type_call              ; err: 0 goes to the caller, once the bytes are released
     V_UNPACK rax, rdx
     mov rcx, rax
     add rsp, 8
@@ -2561,6 +2561,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .bj_not_iterable_pop
     V_UNPACK rax, rdx

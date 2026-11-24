@@ -945,8 +945,7 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, rsp
     mov edx, 1
     call obj_call_n
-    test rax, rax
-    jz .cached_wait_raised
+    ERR_NULL .cached_wait_raised
     DECREF_V rax, rcx
     ; The import this waited for may have FAILED and taken the module back
     ; out, so ask sys.modules again rather than trust what was read before.
@@ -1099,8 +1098,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     lea rsi, [rbp - ISA_T2]
     mov edx, 2
     call obj_call_n
-    test rax, rax
-    jz .isa_out_raw                ; it raised: 0 with the exception pending
+    ERR_NULL .isa_out_raw          ; it raised: 0 with the exception pending
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .isa_absent
@@ -1288,7 +1286,7 @@ DEF_FUNC import_find_and_load, IFL_FRAME
     mov rdi, rax
     lea rsi, [rbp - IFL_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     leave
     ret
 .ifl_own:

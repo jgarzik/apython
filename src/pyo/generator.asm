@@ -375,8 +375,7 @@ DEF_FUNC_LOCAL async_gen_init_hooks, AGIH_FRAME
     extern obj_call_n
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .agih_done               ; the hook raised; the exception stays pending
+    ERR_NULL .agih_done
     DECREF_V rax, rcx
 .agih_done:
     leave
@@ -561,8 +560,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     extern obj_call_n
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .gd_handed              ; it raised; reported below, as a close would be
+    ERR_NULL .gd_handed
     DECREF_V rax, rcx
 .gd_handed:
     ; Once.  The hook owns whatever it kept, and a second pass through this
@@ -916,10 +914,10 @@ DEF_FUNC_LOCAL gt_throw_by_name, GTBN_FRAME
     mov rdi, [rbp - GTBN_IT]
     lea rsi, [rbp - GTBN_EXC]       ; the one-Value argument array
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .gtbn_raised, below
     mov [rbp - GTBN_TMP], rax
     mov rdi, [rbp - GTBN_IT]
-    call obj_decref                 ; the bound method
+    DECREF_V rdi, rcx               ; the bound method, or whatever `throw` is
     mov rax, [rbp - GTBN_TMP]
     test rax, rax
     jz .gtbn_raised
@@ -1372,10 +1370,10 @@ DEF_FUNC gen_close_iter, GCI_FRAME
     xor esi, esi
     xor edx, edx
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .gci_raised, after the release
     mov [rbp - GCI_NAME], rax   ; whatever it answered, or 0 with a raise
     mov rdi, [rbp - GCI_IT]
-    call obj_decref             ; the bound method
+    DECREF_V rdi, rcx           ; the bound method, or whatever `close` is
     mov rdi, [rbp - GCI_NAME]
     test rdi, rdi
     jz .gci_raised              ; it raised; leave that pending

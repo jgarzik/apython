@@ -217,7 +217,7 @@ DEF_FUNC_LOCAL tp_error, TPE_FRAME
     mov rdi, rbx
     lea rsi, [rbp - TPE_ARGS]
     mov edx, 3
-    call obj_call_n
+    call obj_call_n             ; err: .tpe_plain, below
     push rax
     mov rdi, rbx
     call obj_decref             ; the error class

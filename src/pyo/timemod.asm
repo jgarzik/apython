@@ -898,7 +898,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, [rel tm_strptime_impl]
     lea rsi, [rbp - TSP_ARGS]
     mov edx, 2
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     mov [rbp - TSP_MOD], rax            ; the answer, across the release
     mov rdi, [rbp - TSP_TMP]
     test rdi, rdi

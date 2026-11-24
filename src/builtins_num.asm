@@ -1157,7 +1157,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     V_PACK rdi, rdx
     CSTRING rsi, "__round__"
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .rnd_type_error
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .rnd_type_error          ; no __round__, or it raised
     ; Already a Value.  The guard above was converted and this was not, so
@@ -1262,7 +1262,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     CSTRING rdx, "__round__"
     mov ecx, TAG_SMALLINT
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .rnd_type_error
     V_UNPACK rax, rdx
     test edx, edx
     jz .rnd_type_error
@@ -1859,7 +1859,7 @@ DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
 
     ; --- __complex__ ---
     CSTRING rsi, "__complex__"
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .bcc_try_float
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .bcc_try_float           ; absent, or it raised
     ; The result must be a complex.  Take its parts and release it: an exact
@@ -2175,7 +2175,7 @@ DEF_FUNC deprecation_warn, DW_FRAME
     mov rdi, [rel dw_warn_impl]
     lea rsi, [rbp - DW_ARGS]
     mov edx, 2
-    call obj_call_n
+    call obj_call_n             ; err: .dw_raised, below
     mov [rbp - DW_TMP], rax
 
     mov rdi, [rbp - DW_MSG]

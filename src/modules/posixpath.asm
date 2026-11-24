@@ -146,7 +146,7 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     jne .ppa_bad                ; already followed one
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PPA_EXC]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .ppa_got_fspath`
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jnz .ppa_got_fspath
     ; NULL means either "no __fspath__" or "__fspath__ raised", and reporting

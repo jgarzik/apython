@@ -1530,7 +1530,7 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     test rdi, rdi
     jz .sgs_immediate
     CSTRING rsi, "__sizeof__"
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .sgs_no_sizeof
     test rax, rax
     jz .sgs_no_sizeof
     ; CPython adds the collector's header when the object is tracked, and
@@ -1660,10 +1660,10 @@ DEF_FUNC sys_breakpointhook_func
     push rdi
     xor esi, esi
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: .sbh_raised, below
     pop rdi
     push rax
-    call obj_decref
+    DECREF_V rdi, rcx           ; a Value: pdb.set_trace may be anything
     pop rax
     test rax, rax
     jz .sbh_raised

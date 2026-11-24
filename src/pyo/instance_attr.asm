@@ -170,7 +170,7 @@ DEF_FUNC instance_getattr, IGA_FRAME
     mov rsi, [rbp - IGA_NAME]
     lea rdx, [rel ig_getattribute_name]
     mov ecx, TAG_PTR
-    call dunder_call_2          ; a (payload, tag) pair, not a Value
+    call dunder_call_2          ; a (payload, tag) pair, not a Value  ; err: 0, absent or raised, is tested below
     V_UNPACK rax, rdx
     test edx, edx
     jz .iga_raised
@@ -964,7 +964,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     lea rdx, [rel ig_getattr_name]
     mov ecx, TAG_PTR
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .getattr_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .getattr_raised          ; the slot is present, so NULL means it raised
@@ -1148,7 +1148,7 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     mov rsi, [rbp - AGH_NAME]
     lea rdx, [rel ig_getattr_name]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .agh_out`
     V_UNPACK rax, rdx
     test edx, edx
     jnz .agh_out
@@ -1310,8 +1310,7 @@ DEF_FUNC instance_setattr
     extern obj_call_n
     call obj_call_n
     add rsp, 32
-    test rax, rax
-    jz .sa_heap_done            ; it raised; the exception is pending
+    ERR_NULL .sa_heap_done
     DECREF_V rax, rcx
 .sa_heap_done:
     pop r14

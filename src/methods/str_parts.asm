@@ -1068,7 +1068,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     V_UNPACK rsi, rcx
     extern dunder_getitem
     lea rdx, [rel dunder_getitem]
-    call dunder_call_2          ; -> a Value, already packed
+    call dunder_call_2          ; -> a Value, already packed  ; err: 0, absent or raised, is tested below
     test rax, rax
     jz .trn_sub_null
     jmp .trn_have_value

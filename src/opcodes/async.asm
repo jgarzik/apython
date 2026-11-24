@@ -126,7 +126,7 @@ DEF_FUNC_LOCAL async_awaitable_iter, AAI_FRAME
 
     mov rdi, [rbp - AAI_OBJ]
     lea rsi, [rel gaw_await_name]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .aai_failed
     test rax, rax               ; 0 is absent-or-raised
     jz .aai_failed
     jmp .aai_check
@@ -293,7 +293,7 @@ DEF_FUNC_BARE op_get_aiter
     push rdi
     DUNDER_EXC_SAVE r15
     lea rsi, [rel dunder_aiter]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .gai_by_name`
     pop rdi
     add rsp, 8
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
@@ -418,7 +418,7 @@ DEF_FUNC_BARE op_get_anext
                                ; handler, so a call needs an even push list
     push rdi
     lea rsi, [rel dunder_anext]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .gan_by_name`
     pop rdi
     add rsp, 8
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
@@ -570,7 +570,7 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     xor esi, esi                    ; no args array
     xor edx, edx                    ; nargs = 0
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .baw_enter_raised, below
     V_UNPACK rax, rdx
     push rax
     push rdx

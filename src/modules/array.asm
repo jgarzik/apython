@@ -945,6 +945,7 @@ DEF_FUNC array_extend_iterable, 40
     mov rdi, rbx
     V_UNPACK rdi, rsi
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .aei_not_iterable
     mov [rbp - AEI_ITER], rax
@@ -1822,7 +1823,7 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     mov rdi, [rbp - AFF_FN]
     lea rsi, [rbp - AFF_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .aff_fail, below
     mov [rbp - AFF_BUF], rax
     mov rdi, [rbp - AFF_ARG]
     DECREF_V rdi, rcx           ; the count, which may have been a heap int
@@ -2013,7 +2014,7 @@ DEF_FUNC array_m_tofile, ATF_FRAME
     mov rdi, [rbp - ATF_FN]
     lea rsi, [rbp - ATF_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .atf_fail, below
     mov [rbp - ATF_RES], rax
     mov rdi, [rbp - ATF_ARG]
     DECREF_V rdi, rcx

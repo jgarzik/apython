@@ -187,7 +187,7 @@ DEF_FUNC builtin_iter_fn
 
     ; Use get_iterator which handles tp_iter, __iter__, __getitem__, validation
     extern get_iterator
-    call get_iterator
+    call get_iterator           ; err: 0 goes to the caller as it stands
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -339,7 +339,7 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     extern dunder_next
     lea rsi, [rel dunder_next]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .next_got_value`
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .next_got_value                ; got a Value -- NOT .next_got_val,
                                        ; which packs a (payload, tag) pair and
@@ -472,6 +472,7 @@ DEF_FUNC builtin_any, ANY_FRAME
     mov rdi, [rdi]
     mov esi, TAG_PTR
     call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
+    ERR_PENDING_JUMP
     test rax, rax               ; counts as iterable too
     jz .any_type_error
     V_UNPACK rax, rdx           ; tp_call returns a Value
@@ -582,6 +583,7 @@ DEF_FUNC builtin_all, ALL_FRAME
     mov rdi, [rdi]
     mov esi, TAG_PTR
     call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
+    ERR_PENDING_JUMP
     test rax, rax               ; counts as iterable too
     jz .all_type_error
     mov rbx, rax
@@ -778,6 +780,7 @@ DEF_FUNC builtin_sum, SM_FRAME
     ja .sum_not_iterable        ; an immediate is never iterable
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .sum_not_iterable
     mov rbx, rax                ; rbx = the iterator, owned
@@ -1290,6 +1293,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ja .mm_not_iterable         ; an immediate is never iterable
     mov esi, TAG_PTR
     call get_iterator_opt       ; see the note in builtin_sum
+    ERR_PENDING_JUMP
     test rax, rax
     jz .mm_not_iterable
     mov [rbp - MM_ITER], rax
@@ -1725,7 +1729,7 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
     mov rdi, rax
     lea rsi, [rel dunder_dir_name]
     extern dunder_call_1
-    call dunder_call_1          ; -> the Value __dir__ answered, or a NULL one
+    call dunder_call_1          ; -> the Value __dir__ answered, or a NULL one  ; err: 0, absent or raised, is tested below
     test rax, rax
     jnz .bd_have_dunder
     ; NULL means either "no __dir__ on the MRO" or "__dir__ raised".  A Python
@@ -2340,7 +2344,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     extern dunder_call_2
     lea rdx, [rel fmt_dunder_name]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .fmt_dunder_ok`
     V_UNPACK rax, rdx
     test edx, edx
     jnz .fmt_dunder_ok
@@ -3070,10 +3074,10 @@ DEF_FUNC builtin_breakpoint, BBP_FRAME
     mov rsi, [rbp - BBP_ARGS]
     mov rdx, [rbp - BBP_NARGS]
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .bbp_raised, below
     pop rdi
     push rax
-    call obj_decref
+    DECREF_V rdi, rcx           ; a Value: sys.breakpointhook may be anything
     pop rax
     test rax, rax
     jz .bbp_raised

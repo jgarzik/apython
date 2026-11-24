@@ -110,7 +110,7 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rbx
     lea rsi, [rel dunder_del]
-    call dunder_call_1
+    call dunder_call_1          ; err: a destructor reports its own error, below
     V_UNPACK rax, rdx           ; returns a Value
     ; Ignore return value — DECREF if non-NULL
     test edx, edx
@@ -580,7 +580,7 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
 .ir_call_dunder:
     mov rdi, rbx
     lea rsi, [rel dunder_repr]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .ir_dunder_none
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .ir_dunder_none
@@ -813,7 +813,7 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
 .is_call_dunder:
     mov rdi, rbx
     lea rsi, [rel dunder_str]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .is_dunder_none
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .is_dunder_none
@@ -980,8 +980,9 @@ TC_NO_SELF  equ 96
 %%refuse:
     mov rsi, rbx
     CSTRING rdi, `\x01() takes no arguments`
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename     ; does not return
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .tc_drop_instance       ; r14 is the instance, and it goes no further
 %%ok:
 %endmacro
 
@@ -1071,6 +1072,13 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
 END_FUNC tc_winner_metatype
 
 
+;; type_call(rdi = type, rsi = Value *args, rdx = nargs)
+;;   -> rax = the new instance, a Value, or 0 with the exception pending.
+;; Described in full above the frame constants and helpers it uses.  A __new__
+;; or an __init__ that fails -- by raising, or by RETURNING 0 with the
+;; exception set, which is what a builtin one does -- is absorbed here: the
+;; half-built instance is released and 0 goes to the caller.
+;; Fails: 0
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
     ; Returns x.__class__ (the type of x)
@@ -1142,7 +1150,7 @@ DEF_FUNC type_call
     test rax, rax
     jz .tta_plain
     mov rdi, rax
-    call type_call              ; the metatype's own tp_call, keywords and all
+    call type_call              ; err: the metatype's own tp_call; its 0 is ours
     leave
     ret
 
@@ -1643,7 +1651,7 @@ DEF_FUNC type_call
     mov rdx, [r14 + PyObject.ob_type]   ; arg2 = its type
     lea rcx, [rel dunder_get]           ; the dunder's name
     mov r8d, TAG_PTR                    ; arg2 is always a heap pointer
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .init_bind_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .init_bind_raised
@@ -1763,17 +1771,12 @@ DEF_FUNC type_call
     TC_RELEASE_BOUND_INIT
     CSTRING rdi, `__init__() should return None, not '\x01'`
     mov rsi, r15
-    extern raise_type_error_with_name
-    ; The argument carve is still on the stack.  The raise does not return and
-    ; eval_exception_unwind reloads rsp from eval_base_rsp, so there is nothing
-    ; to unwind here.
-    ;
-    ; And PyFrame.disp_sp is NOT republished: r13 is the argument count in this
-    ; function, not the value stack, and handing the unwinder that made it
-    ; zero words from an arbitrary address.  The caller published the right
-    ; one before it got here, which is why the other raises in this function
-    ; do not touch it either.
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    DECREF_V r15, rcx           ; what __init__ did return
+    ; ...and then exactly as if it had raised: the argument carve comes off
+    ; the stack and the instance is released.  This used to jump into the
+    ; unwinder from here, and the instance was never released at all.
 
 .init_raised:
     ; What __init__ returned was never looked at, so a raise inside it
@@ -1787,6 +1790,7 @@ DEF_FUNC type_call
     shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
     TC_RELEASE_BOUND_INIT
+.tc_drop_instance:
     mov rax, r14
     mov rsi, [rbp - TC_NEW_TAG]
     DECREF_VAL rax, rsi         ; the half-built instance goes no further
@@ -1855,7 +1859,7 @@ DEF_FUNC type_call
     mov rdi, [rbp - TC_NEW_FUNC]
     mov rsi, r15
     lea rdx, [r13 + 1]
-    call obj_call_n
+    call obj_call_n             ; err: r14 is tested once the stack is back
     mov r14, rax
     ; The stack goes back before anything branches, so every exit below is the
     ; ordinary one.
@@ -1920,10 +1924,23 @@ DEF_FUNC type_call
     mov rsi, r15
     lea rdx, [r13 + 1]
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    ; DECREF return value (should be None)
-    mov rsi, rdx
-    DECREF_VAL rax, rsi
+    ; A NULL is __init__ having raised.  This used to release "the result"
+    ; either way and hand back the instance, so `E()` for an exception class
+    ; whose __init__ raises answered an E -- with the real exception left
+    ; pending for whatever ran next.
+    mov r15, rax                ; the args array is done with
+    lea rax, [r13 + 2]
+    and rax, -2
+    shl rax, 3
+    add rsp, rax
+    test r15, r15
+    jz .exc_sub_init_raised
+    DECREF_V r15, rcx           ; __init__'s None
+    jmp .exc_sub_no_init
+.exc_sub_init_raised:
+    mov rdi, r14
+    call obj_decref             ; the half-built exception goes no further
+    jmp .exc_sub_new_failed
 .exc_sub_init_cleanup:
     lea rax, [r13 + 2]          ; nargs + 1 slots...
     and rax, -2                 ; ...rounded up to a pair, so rsp stays

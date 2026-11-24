@@ -2324,6 +2324,7 @@ extern str_set_length
     extern get_iterator_opt
     mov rsi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .bls_bad_type
     V_UNPACK rax, rdx
@@ -2560,7 +2561,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rdi, rax
     CSTRING rsi, "__bytes__"
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .btc_dunder_absent
     test rax, rax
     jz .btc_dunder_absent               ; absent, not callable, or it raised
     V_TEST_PTR rax, rcx

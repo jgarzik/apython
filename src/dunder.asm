@@ -276,6 +276,7 @@ END_FUNC dunder_lookup_after
 ;;   -> rax = the callable to use; edx = 0 when self is prepended to its
 ;;      arguments and rax is borrowed, 1 when self is NOT an argument and rax
 ;;      is OWNED, 2 when __get__ raised and rax is 0
+;; Fails: 0
 ;;
 ;; CPython's lookup_maybe_method.  It asks one question of what the type's
 ;; MRO answered with: is it a DESCRIPTOR?
@@ -340,7 +341,7 @@ DEF_FUNC dunder_bind, DB_FRAME
     mov rdx, [rsi + PyObject.ob_type]
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR            ; both are heap pointers
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .db_raised
     test rax, rax
     jz .db_raised
     mov edx, 1
@@ -392,7 +393,7 @@ DEF_FUNC dunder_lookup_special, DLS_FRAME
 
     mov rdi, rax
     mov rsi, [rbp - DLS_OBJ]
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .dls_raised
     test edx, edx
@@ -418,7 +419,10 @@ END_FUNC dunder_lookup_special
 ;; dunder_call_1(PyObject *self, const char *name) -> (rax=payload, rdx=tag)
 ;;
 ;; dunder_call_1(rdi = self, rsi = dunder name C string) -> rax = the result
-;;   Value, or 0 when the dunder is absent, is not callable, or raised.
+;;   Value, or 0.  0 with NOTHING pending means the type has no such dunder;
+;;   0 with an exception pending means it raised, or is there and cannot be
+;;   called ("'int' object is not callable").
+;; Fails: 0?
 ;;
 ;; This said "(rax=payload, rdx=tag)" and had not for some time; the code
 ;; already ended `V_PACK rax, rdx`.  A stale signature here is not cosmetic --
@@ -458,7 +462,7 @@ DEF_FUNC dunder_call_1
     ; Bind it, if it is a descriptor rather than a plain function.
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .bind_raised
     mov r12, rax            ; r12 = the callable
@@ -542,16 +546,24 @@ DEF_FUNC dunder_call_1
 .dc1_raise_composed:
     lea rdi, [rel exc_TypeError_type]
     mov rsi, r14
-    call raise_exception        ; does not return
+    extern set_exception
+    call set_exception
+    jmp .bind_raised
 .dc1_name_it:
     mov rsi, r12
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    test r13, r13
+    jz .bind_raised
+    mov rdi, r12
+    DECREF_V rdi, rcx
+    jmp .bind_raised
 
 .bind_raised:
-    ; __get__ raised.  A pending exception with a NULL answer is this
-    ; function's documented shape, so it is the caller's to propagate.
+    ; __get__ raised, or what was found cannot be called.  A pending exception
+    ; with a NULL answer is this function's documented shape, so it is the
+    ; caller's to propagate.
     RET_NULL
     pop r14
     pop r13
@@ -571,7 +583,8 @@ DEF_FUNC dunder_call_1
     ; only ones update_one_slot special-cases -- test for it before they get
     ; here, so "not iterable" and "unhashable type" still win.
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "'NoneType' object is not callable"
+    SET_EXC exc_TypeError_type, "'NoneType' object is not callable"
+    jmp .bind_raised
 
 .not_found:
     RET_NULL
@@ -585,7 +598,10 @@ END_FUNC dunder_call_1
 
 ;; ============================================================================
 ;; dunder_call_2(PyObject *self, PyObject *other, const char *name, int other_tag)
-;;   -> rax = the result Value, or a NULL one when there is no such dunder
+;;   -> rax = the result Value, or a NULL one when there is no such dunder,
+;;      or a NULL one with an exception pending when it raised or cannot be
+;;      called
+;; Fails: 0?
 ;;
 ;; Look up dunder on self's type, call with (self, other).
 ;; rdi = self (heap ptr), rsi = other payload, rdx = dunder name, ecx = other_tag
@@ -629,7 +645,7 @@ DEF_FUNC dunder_call_2
     ; Bind it, if it is a descriptor rather than a plain function.
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .bind_raised
     mov r13, rax            ; r13 = the callable
@@ -724,16 +740,22 @@ DEF_FUNC dunder_call_2
 .dc2_raise_composed:
     lea rdi, [rel exc_TypeError_type]
     mov rsi, r14
-    call raise_exception        ; does not return
+    call set_exception
+    jmp .bind_raised
 .dc2_name_it:
+    mov r14, rcx                ; the owned flag, across the call
     mov rsi, r13
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    test r14, r14
+    jz .bind_raised
+    mov rdi, r13
+    DECREF_V rdi, rcx
+    jmp .bind_raised
 
 .bind_raised:
-    ; __get__ raised; a pending exception with a NULL answer is this
-    ; function's documented shape.
+    ; __get__ raised, or what was found cannot be called; a pending exception
+    ; with a NULL answer is this function's documented shape.
     RET_NULL
     pop r14
     pop r13
@@ -753,7 +775,8 @@ DEF_FUNC dunder_call_2
     ; only ones update_one_slot special-cases -- test for it before they get
     ; here, so "not iterable" and "unhashable type" still win.
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "'NoneType' object is not callable"
+    SET_EXC exc_TypeError_type, "'NoneType' object is not callable"
+    jmp .bind_raised
 
 .not_found:
     RET_NULL
@@ -772,20 +795,21 @@ END_FUNC dunder_call_2
 ;; `m[key]` for a mapping that is not a dict, asked in a way the CALLER can
 ;; recover from.
 ;;
-;; A heaptype's mp_subscript is slot_mp_subscript, which does NOT return when
-;; __getitem__ raises: it tail-jumps into the unwinder.  So the opcodes that
-;; have to absorb a miss -- LOAD_NAME's probe of a custom locals, and
-;; SETUP_ANNOTATIONS -- cannot go through the slot at all.  The dunder itself
-;; answers a NULL Value and leaves the exception pending, which is what
-;; CPython's PyObject_GetItem does for them.
+;; Written when a heaptype's mp_subscript, slot_mp_subscript, did not return
+;; from a __getitem__ that raised, so the opcodes that have to absorb a miss
+;; -- LOAD_NAME's probe of a custom locals, and SETUP_ANNOTATIONS -- could not
+;; go through the slot at all.  The slot returns now; this stays because it
+;; also answers for a type with no mp_subscript, and tells "no __getitem__"
+;; from "it raised" in one call.
 ;;
 ;; A NULL answer with NOTHING pending means there is no __getitem__ at all.
+;; Fails: 0?
 ;; ============================================================================
 global mapping_getitem_opt
 DEF_FUNC mapping_getitem_opt
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_PTR            ; the key is a pointer; its Value is itself
-    call dunder_call_2
+    call dunder_call_2          ; err: 0 goes to the caller as it stands
     leave
     ret
 END_FUNC mapping_getitem_opt
@@ -793,9 +817,11 @@ END_FUNC mapping_getitem_opt
 ;; ============================================================================
 ;; dunder_call_3(PyObject *self, PyObject *arg1, PyObject *arg2, const char *name,
 ;;               int arg2_tag)
-;;   -> rax = the result Value, or 0 when the dunder is absent, is not
-;;      callable, or raised.  As in dunder_call_1: this said "(rax=payload,
-;;      rdx=tag)" and did not mean it.
+;;   -> rax = the result Value, or 0: with nothing pending the dunder is
+;;      absent, with an exception pending it raised or cannot be called.  As
+;;      in dunder_call_1: this said "(rax=payload, rdx=tag)" and did not mean
+;;      it.
+;; Fails: 0?
 ;;
 ;; Look up dunder on self's type, call with (self, arg1, arg2).
 ;; rdi = self (heap), rsi = arg1 (heap), rdx = arg2, rcx = dunder name,
@@ -845,7 +871,7 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     mov [rbp - DC3_ARG2], r13
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .bind_raised
     mov r14, rax            ; r14 = the callable
@@ -927,16 +953,21 @@ DEF_FUNC dunder_call_3, DC3_FRAME
 .dc3_raise_composed:
     lea rdi, [rel exc_TypeError_type]
     mov rsi, r15
-    call raise_exception        ; does not return
+    call set_exception
+    jmp .bind_raised
 .dc3_name_it:
     mov rsi, r14
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    cmp qword [rbp - DC3_BOUND], 0
+    je .bind_raised
+    mov rdi, r14
+    DECREF_V rdi, rcx
+    jmp .bind_raised
 
 .bind_raised:
-    ; __get__ raised; a pending exception with a NULL answer is this
-    ; function's documented shape.
+    ; __get__ raised, or what was found cannot be called; a pending exception
+    ; with a NULL answer is this function's documented shape.
     RET_NULL
     pop r15
     pop r14
@@ -957,7 +988,8 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     ; only ones update_one_slot special-cases -- test for it before they get
     ; here, so "not iterable" and "unhashable type" still win.
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "'NoneType' object is not callable"
+    SET_EXC exc_TypeError_type, "'NoneType' object is not callable"
+    jmp .bind_raised
 
 .not_found:
     RET_NULL
@@ -979,9 +1011,11 @@ END_FUNC dunder_call_3
 ;; look there -- so a property whose getter was an operator.itemgetter reported
 ;; "unreadable attribute" rather than calling it.
 ;;
-;; Returns 0 with a TypeError pending when the object is not callable.  nargs
-;; is bounded because the self-prepended copy lives in this frame; every
+;; Returns 0 with a TypeError pending when the object is not callable, and 0
+;; with the callee's own exception pending when the call raised.  nargs is
+;; bounded because the self-prepended copy lives in this frame; every
 ;; descriptor use passes one or two.
+;; Fails: 0
 ;; ============================================================================
 OCN_MAX equ 8
 
@@ -1057,8 +1091,7 @@ DEF_FUNC obj_call_n, OCN_FRAME
     ; caller WHICH of its values was not a function.
     mov rsi, rbx
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name   ; answers 0, which is the result
 .ret:
     pop r13
     pop r12

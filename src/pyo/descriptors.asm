@@ -993,7 +993,7 @@ DEF_FUNC property_descr_get
     mov rdi, rax
     mov rsi, rsp
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     add rsp, 16
     V_UNPACK rax, rdx           ; the pair the callers of this expect
 
@@ -2778,8 +2778,7 @@ DEF_FUNC property_dunder_delete, 8            ; 1 pushes, so rsp is 16-aligned
     mov edx, 1
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .pdd_failed
+    ERR_NULL .pdd_failed
     V_UNPACK rax, rdx
     DECREF_VAL rax, edx
     lea rax, [rel none_singleton]

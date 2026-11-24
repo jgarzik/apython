@@ -557,7 +557,7 @@ DEF_FUNC comp_emit_warnings, CEW_FRAME
     lea rsi, [rbp - CEW_ARGS]
     mov edx, 4
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .cew_raised, below
     push rax
     mov rdi, [rbp - CEW_ARGS]
     extern obj_decref
@@ -736,7 +736,7 @@ DEF_FUNC comp_flush_warnings, CFW_FRAME
     mov rdi, [rbp - CFW_FN]
     lea rsi, [rbp - CFW_ARGS]
     mov edx, 4
-    call obj_call_n
+    call obj_call_n             ; err: .cfw_drop, below
     push rax
     mov rdi, [rbp - CFW_ARGS]
     call obj_decref

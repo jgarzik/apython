@@ -226,7 +226,7 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     mov rdi, [rbp - SRP_FN]
     lea rsi, [rbp - SRP_ARGS]
     mov edx, 2
-    call obj_call_n
+    call obj_call_n             ; err: .srp_raised, below
     push rax
     mov rax, [rbp - SRP_ARGS]
     DECREF_V rax, rcx

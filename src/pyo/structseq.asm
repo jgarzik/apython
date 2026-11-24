@@ -516,6 +516,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     mov rdi, [rsi]
     V_UNPACK rdi, rsi           ; get_iterator still takes (payload, tag), not
     call get_iterator_opt       ; a Value; passing only the payload left the
+    ERR_PENDING_JUMP
                                 ; tag register holding whatever was in it
     test rax, rax
     jz .ssc_not_sequence

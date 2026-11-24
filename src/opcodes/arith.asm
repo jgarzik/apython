@@ -325,7 +325,7 @@ DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov rdx, [rbp - BSF_RNAME]
     mov ecx, [rbp - BSF_LTAG]
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .bsf_none_or_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .bsf_none_or_raised
@@ -469,7 +469,7 @@ DEF_FUNC_LOCAL cmp_subclass_first, CSF_FRAME
     mov rsi, [rbp - CSF_LEFT]
     mov ecx, [rbp - CSF_LTAG]
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .csf_none_or_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .csf_none_or_raised
@@ -1556,7 +1556,7 @@ DEF_FUNC_BARE op_binary_op
     mov rdi, [rsp + 8 + BO_LEFT]
     mov rsi, [rsp + 8 + BO_RIGHT]
     mov rcx, [rsp + 8 + BO_RTAG]
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .binop_idunder_null
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
@@ -1581,7 +1581,7 @@ DEF_FUNC_BARE op_binary_op
     mov rdi, [rsp + 8 + BO_LEFT]
     mov rsi, [rsp + 8 + BO_RIGHT]
     mov rcx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .binop_ldunder_null
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
@@ -1616,7 +1616,7 @@ DEF_FUNC_BARE op_binary_op
     mov rdi, [rsp + BO_RIGHT]
     mov rsi, [rsp + BO_LEFT]
     mov rcx, [rsp + BO_LTAG]       ; other_tag = left's tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .binop_rdunder_null
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .binop_rdunder_null
@@ -2134,7 +2134,7 @@ DEF_FUNC_BARE op_compare_op
     ; rdi = left (still set from above)
     ; rsi = right (still set)
     mov ecx, [rsp + 16]            ; right_tag from stack
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .cmp_have_dunder_result`
     V_UNPACK rax, rdx           ; returns a Value
     pop rcx
 
@@ -2183,7 +2183,7 @@ DEF_FUNC_BARE op_compare_op
     mov rdx, [rax + PY_EQ*8]   ; rdx = "__eq__" name
     push rcx
     mov ecx, [rsp + 8 + BO_RTAG]  ; right_tag (+8 for push rcx)
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .cmp_ne_from_eq_have`
     V_UNPACK rax, rdx           ; returns a Value
     pop rcx
     test edx, edx
@@ -2370,7 +2370,7 @@ DEF_FUNC_BARE op_compare_op
                                    ; dunder_call_2 dispatches into Python
     mov rsi, [rsp + 16 + BO_LEFT]  ; other = left payload
     mov ecx, [rsp + 16 + BO_LTAG]  ; other_tag = left's tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .cmp_right_dunder_have`
     V_UNPACK rax, rdx           ; returns a Value
     add rsp, 8
     pop rcx

@@ -616,7 +616,7 @@ DEF_FUNC compile_ast_input, CAI_FRAME
     mov rdi, [rbp - CAI_FN]
     lea rsi, [rbp - CAI_ARGS]
     mov edx, 3
-    call obj_call_n
+    call obj_call_n             ; err: .cai_fail, below
     mov [rbp - CAI_RES], rax
     mov rdi, [rbp - CAI_ARGS + 16]
     DECREF_V rdi, rcx           ; the flags, ours

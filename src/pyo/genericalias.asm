@@ -218,6 +218,7 @@ DEF_FUNC generic_alias_iter, GAI_FRAME
     mov esi, TAG_PTR
     extern get_iterator
     call get_iterator
+    ERR_NULL_JUMP
     push rax
     mov rdi, [rbp - GAI_TUP]
     call obj_decref             ; the iterator holds it now
@@ -1332,7 +1333,7 @@ DEF_FUNC_LOCAL gas_call_1, GC1_FRAME
     mov [rbp - GC1_FN], rdi             ; the bound method, ours to release
     lea rsi, [rbp - GC1_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     mov [rbp - GC1_TMP], rax
     mov rdi, [rbp - GC1_FN]
     DECREF_V rdi, rcx
@@ -1509,7 +1510,7 @@ DEF_FUNC gas_subscript_any
     leave
     ret
 .gsa_dunder:
-    call mapping_getitem_opt
+    call mapping_getitem_opt    ; err: 0 goes to the caller as it stands
     leave
     ret
 END_FUNC gas_subscript_any

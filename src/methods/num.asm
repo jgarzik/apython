@@ -877,8 +877,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     extern obj_call_n
     call obj_call_n
     mov rsi, [rbp - IFB_NARGS]
-    test rax, rax
-    jz .ifb_failed
+    ERR_NULL .ifb_failed
     mov [rbp - IFB_OWNED], rax
 .ifb_have_bytes:
     mov [rbp - IFB_BYTES], rax
@@ -1979,7 +1978,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     mov rdi, [rbp - FFH_CLS]
     lea rsi, [rbp - FFH_RES]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     pop r13
     pop r12
     pop rbx

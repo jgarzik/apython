@@ -83,7 +83,7 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     mov rdi, [rbp - SC_FN]
     xor esi, esi
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: .sc_raised, after the release
     mov [rbp - SC_NAME], rax    ; the result, or NULL
     mov rdi, [rbp - SC_FN]
     DECREF_V rdi, rcx

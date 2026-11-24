@@ -85,7 +85,7 @@ DEF_FUNC_LOCAL cm_to_parts, CM1_FRAME
     mov rdi, [rbp - CM1_ARG]
     CSTRING rsi, "__complex__"
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .ctp_try_real
     test rax, rax
     jz .ctp_try_real
     mov [rbp - CM1_TMP], rax

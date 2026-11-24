@@ -1495,7 +1495,7 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     extern dunder_set
     lea rcx, [rel dunder_set]
     extern dunder_call_3
-    call dunder_call_3
+    call dunder_call_3          ; err: a raise stays pending for tp_setattr's caller
     jmp .tsm_result
 .tsm_delete:
     mov rdi, [rbp - TSM_DESC]
@@ -1503,7 +1503,7 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     CSTRING rdx, "__delete__"
     mov ecx, TAG_PTR
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: as __set__ above
 .tsm_result:
     DECREF_V rax, rcx           ; the answer is None, or 0 when it raised
 .tsm_yes:

@@ -750,7 +750,7 @@ DEF_FUNC math_trunc, MTR_FRAME
     jz .mtr_type
     mov rdi, [rbp - MTR_VAL]
     lea rsi, [rel mm_d_trunc]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0 goes to the caller as it stands
     leave
     ret
 
@@ -1689,7 +1689,7 @@ DEF_FUNC math_prod, MPR_FRAME
     V_TEST_PTR rdi, rax
     ja .mpr_not_iterable
     mov esi, TAG_PTR
-    call get_iterator_opt
+    call get_iterator_opt       ; err: .mpr_not_iterable asks whether it raised
     test rax, rax
     jz .mpr_not_iterable
     mov [rbp - MPR_ITER], rax
@@ -2517,8 +2517,7 @@ DEF_FUNC math_fsum, FSM_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rsi           ; get_iterator wants (payload, tag)
     call get_iterator
-    test rax, rax
-    jz .fsm_propagate
+    ERR_NULL .fsm_propagate
     mov [rbp - FSM_ITER], rax
 
     mov qword [rbp - FSM_N], 0
@@ -3064,7 +3063,7 @@ DEF_FUNC math_sumprod, MSP_FRAME
     V_TEST_PTR rdi, rax
     ja .msp_p_not_iter
     mov esi, TAG_PTR
-    call get_iterator_opt
+    call get_iterator_opt       ; err: .msp_p_not_iter asks whether it raised
     test rax, rax
     jz .msp_p_not_iter
     mov [rbp - MSP_IP], rax
@@ -3073,7 +3072,7 @@ DEF_FUNC math_sumprod, MSP_FRAME
     V_TEST_PTR rdi, rax
     ja .msp_q_not_iter
     mov esi, TAG_PTR
-    call get_iterator_opt
+    call get_iterator_opt       ; err: .msp_q_not_iter asks whether it raised
     test rax, rax
     jz .msp_q_not_iter
     mov [rbp - MSP_IQ], rax

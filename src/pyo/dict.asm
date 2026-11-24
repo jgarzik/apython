@@ -1293,7 +1293,7 @@ DEF_FUNC dict_subscript, DSUB_FRAME
     V_UNPACK rsi, rcx           ; dunder_call_2 wants (payload, tag)
     CSTRING rdx, "__missing__"
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .ds_missing_answered`
     test rax, rax
     jnz .ds_missing_answered
     ; 0 is "no __missing__" or "it raised"; only the first falls through to

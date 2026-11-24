@@ -216,7 +216,7 @@ DEF_FUNC_LOCAL systrace_invoke, 80
     mov rdi, [rbp - SI_FN]
     lea rsi, [rbp - SI_ARGS]
     mov edx, 3
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     dec qword [gs:ThreadState.tracing_depth]
 
     push rax
@@ -1084,7 +1084,7 @@ DEF_FUNC sys_call_tracing_func, SCT_FRAME
     mov qword [gs:ThreadState.tracing_depth], 0
     mov rsi, [rdx + PyTupleObject.ob_item]
     mov rdx, [rdx + PyTupleObject.ob_size]
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     push rax
     mov rcx, [rbp - SCT_SAVED]
     mov [gs:ThreadState.tracing_depth], rcx

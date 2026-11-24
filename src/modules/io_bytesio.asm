@@ -214,6 +214,9 @@ END_FUNC bytesio_reserve
 
 ;; ============================================================================
 ;; BytesIO.__init__(self, initial_bytes=b'')
+;;   -> rax = None, or 0 with the exception pending -- which is what lets
+;;      type_call release the instance a refused BytesIO() was building
+;; Fails: 0
 ;; ============================================================================
 BI_SELF   equ 8
 BI_ARG    equ 16
@@ -303,14 +306,20 @@ DEF_FUNC bytesio_init_fn, BI_FRAME
 .bi_nomem_pop:
     add rsp, 16
 .bi_nomem:
-    RAISE exc_OSError_type, "out of memory"
+    FAIL exc_OSError_type, "out of memory", .bi_fail
 .bi_type:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_byteslike]
     mov rdx, [rbp - BI_ARG]
-    call io_raise_typename_q
+    extern io_set_typename_q
+    call io_set_typename_q
+.bi_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 .bi_argerr:
-    RAISE exc_TypeError_type, "BytesIO() missing self"
+    FAIL exc_TypeError_type, "BytesIO() missing self", .bi_fail
 END_FUNC bytesio_init_fn
 
 ;; ============================================================================

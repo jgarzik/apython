@@ -6,6 +6,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -84,7 +85,7 @@ DEF_FUNC call_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     test rdx, TYPE_FLAG_HEAPTYPE
     jz .ci_null
     lea rsi, [rel dunder_next]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .ci_ret`
     test rax, rax
     jnz .ci_ret               ; got a value, return it
 
@@ -139,14 +140,18 @@ DEF_FUNC clear_stopiteration
 END_FUNC clear_stopiteration
 
 ;; ============================================================================
-;; get_iterator(rdi = obj payload, esi = obj tag) -> rax = iterator, owned
-;;   Raises TypeError when the object is not iterable.
-;; get_iterator_opt(same) -> rax = iterator, or 0 with NO exception set
+;; get_iterator(rdi = obj payload, esi = obj tag) -> rax = iterator, owned,
+;;   or 0 with an exception pending: the TypeError that says the object is
+;;   not iterable, or whatever its __iter__ raised.
+;;
+;; get_iterator_opt, below, is the same walk for a caller with a message of
+;; its own: 0 with NOTHING pending means "not iterable", and 0 with an
+;; exception pending means __iter__ raised or answered a non-iterator.
 ;;
 ;; Both consult tp_iter, then __iter__ on a heaptype, then the legacy
 ;; __getitem__ sequence protocol -- an object with __getitem__ and no
 ;; __iter__ is iterable, and iter() synthesises a counter that stops at
-;; IndexError.  An __iter__ that RAISES propagates from either.
+;; IndexError.
 ;;
 ;; The _opt form exists because every caller that iterates a user-supplied
 ;; argument has its own message: "set() argument is not iterable",
@@ -157,6 +162,7 @@ END_FUNC clear_stopiteration
 ;; __len__ and no __iter__.
 ;;
 ;; Clobbers caller-saved regs.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC get_iterator
     push rbx
@@ -164,8 +170,10 @@ DEF_FUNC get_iterator
     mov rbx, rdi                ; the payload and tag, kept for the message
     mov r12d, esi
     call get_iterator_opt
+    ERR_PENDING .gi_out         ; __iter__ raised: 0, as it stands
     test rax, rax
     jz .gi_not_iterable
+.gi_out:
     pop r12
     pop rbx
     leave
@@ -194,14 +202,20 @@ DEF_FUNC get_iterator
     xor esi, esi                ; no type: the helper says "object"
 .gi_raise:
     lea rdi, [rel gi_not_iterable_msg]
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename   ; answers 0, which is the result
+    jmp .gi_out
 END_FUNC get_iterator
 
 section .rodata
 gi_not_iterable_msg: db "'", 1, "' object is not iterable", 0
 section .text
 
+;; ============================================================================
+;; get_iterator_opt(rdi = obj payload, esi = obj tag) -> rax = iterator,
+;;   owned, or 0.  See get_iterator, above.
+;; Fails: 0?
+;; ============================================================================
 DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     ; rdi = obj payload, esi = obj tag
@@ -233,7 +247,7 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     DUNDER_EXC_SAVE r10
     push r10
     sub rsp, 8
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .validate_iter`
     add rsp, 8
     pop r10
     V_UNPACK rax, rdx           ; returns a Value
@@ -249,12 +263,17 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
 
 .have_iter:
     call rax
+    ERR_NULL .iter_failed       ; tp_iter raised
     ; rax = iterator — validate it has iternext
     jmp .validate_iter
 
 .validate_iter:
     ; rax = iterator object. Validate it has tp_iternext or __next__.
     mov rbx, rax                   ; save iterator
+    ; __iter__ can answer anything, an immediate included, and an immediate
+    ; has no ob_type to read: `__iter__ = lambda s: 5` was a segfault here.
+    V_TEST_PTR rax, rcx
+    ja .iter_bad_value
     mov rcx, [rax + PyObject.ob_type]
     mov rdx, [rcx + PyTypeObject.tp_iternext]
     test rdx, rdx
@@ -292,9 +311,18 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     call obj_decref
     pop rsi
     pop rsi
-    extern raise_type_error_with_typename
     CSTRING rdi, `iter() returned non-iterator of type '\x01'`
-    call raise_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .iter_failed
+
+.iter_bad_value:
+    mov rdi, rbx
+    extern value_type
+    call value_type             ; int or float; there is nothing to release
+    mov rsi, rax
+    CSTRING rdi, `iter() returned non-iterator of type '\x01'`
+    call set_type_error_with_typename
+    jmp .iter_failed
 
 .try_getitem:
     ; rdi = original object. Check if it has __getitem__ on heaptype.
@@ -324,12 +352,13 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .iter_exc_pending:
-    ; Exception was raised by __iter__. Propagate it via eval_exception_unwind.
-    extern eval_exception_unwind
-    PUBLISH_SP
+.iter_failed:
+    ; __iter__ raised, or handed back something that is not an iterator.  The
+    ; exception is pending, and 0 with one pending is this function's failure.
+    xor eax, eax
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC get_iterator_opt
 
 ;; ============================================================================
@@ -532,6 +561,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov rdi, [rbp - EN_ITER]
     mov rsi, [rbp - EN_ITERTAG]
     call get_iterator
+    ERR_NULL_JUMP
     mov rbx, rax                  ; rbx = underlying iterator
 
     ; Allocate EnumerateIterObject
@@ -574,6 +604,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov rdi, [rbp - EN_ITER]
     mov rsi, [rbp - EN_ITERTAG]
     call get_iterator                   ; raises if it is not one
+    ERR_NULL_JUMP
     mov rdi, rax
     V_UNPACK rdi, rdx
     call obj_decref
@@ -946,6 +977,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     push r13
     push r14
     call get_iterator
+    ERR_NULL_JUMP
     pop r14
     pop r13
     mov [r13 + r14 * 8], rax    ; store iterator
@@ -1268,6 +1300,7 @@ DEF_FUNC builtin_map
     V_UNPACK rdi, rsi
     push rcx
     call get_iterator
+    ERR_NULL_JUMP
     pop rcx
     mov rdx, [rsp]              ; iters array ptr
     mov [rdx + rcx * 8], rax    ; store iterator
@@ -1361,7 +1394,7 @@ DEF_FUNC_LOCAL map_iternext, MI_FRAME
     mov rsi, [rbp - MI_ARGS]         ; args pointer
     mov rdx, r14                     ; nargs = count
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: the 0 falls through `jnz .map_called` below
     test rax, rax
     jnz .map_called
     call clear_stopiteration         ; func raised StopIteration: map ends
@@ -1512,6 +1545,7 @@ DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rsi       ; args[1]
     call get_iterator
+    ERR_NULL_JUMP
     mov rbx, rax             ; rbx = underlying iterator
 
     ; Allocate FilterIterObject
@@ -1586,8 +1620,7 @@ DEF_FUNC_LOCAL filter_iternext
     extern obj_call_n
     call obj_call_n
     add rsp, 16             ; pop args
-    test rax, rax
-    jz .filter_call_failed
+    ERR_NULL .filter_call_failed
     V_UNPACK rax, rdx
     mov r14, rax             ; r14 = result payload
     mov r15, rdx             ; r15 = result tag
@@ -1742,7 +1775,7 @@ DEF_FUNC builtin_reversed, 8            ; 3 pushes, so rsp is 16-aligned
     ; Call __reversed__ via dunder_call_1
     mov rdi, r12
     lea rsi, [rel .dunder_reversed_name]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .rev_dunder_ok`
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .rev_dunder_ok      ; got a result
@@ -1826,6 +1859,7 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    ERR_PENDING_JUMP            ; __len__ raised
     V_UNPACK rax, rdx           ; returns a Value
     ; rax = length (SmallInt payload), edx = TAG_SMALLINT
     jmp .rev_have_len
@@ -1917,7 +1951,7 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_SMALLINT
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .revi_exhausted
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .revi_exhausted           ; __getitem__ failed
@@ -2009,6 +2043,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, [rax]              ; args[0]
     V_UNPACK rdi, rsi
     call get_iterator
+    ERR_NULL_JUMP
     mov rbx, rax               ; rbx = iterator
 
     ; Create new empty list
@@ -2393,7 +2428,7 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_SMALLINT          ; other_tag for index
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .si_check_exc
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .si_check_exc               ; NULL — check for IndexError

@@ -13,12 +13,17 @@
 ; correct with no edit -- including the 23 readers of tp_iter across 11 files
 ; -- and the ad-hoc fallbacks become dead weight rather than load-bearing.
 ;
-; A wrapper cannot signal failure the way CPython's can, because most callers
-; here do not check the result: get_iterator does `call rax` and immediately
-; dereferences what comes back.  So a wrapper whose dunder raises re-enters
-; the interpreter's unwinder directly, exactly as raise_exception does, and
-; never returns to its caller.  The one exception is tp_iternext, where NULL
-; is the ordinary "exhausted" answer and every caller already handles it.
+; A wrapper reports failure the way CPython's does: it leaves the exception
+; pending and RETURNS the slot's error value -- 0 where the slot answers an
+; object, -1 where it answers a number, a truth value or nothing.  Where 0 or
+; -1 is also an answer (a binary slot declining, a hash of -1, exhaustion) the
+; pending exception is what tells the two apart, which is why ordinary code
+; never runs with one pending.  Every caller of a slot checks; the table of
+; which value belongs to which slot is in CLAUDE.md, "Errors return".
+;
+; They used to jump into the unwinder instead, because most callers did not
+; look -- and a jump abandons every native frame between the wrapper and the
+; eval loop, with whatever those frames held.
 
 %include "macros.inc"
 %include "object.inc"
@@ -216,6 +221,7 @@ END_FUNC slot_current
 
 ;; ============================================================================
 ;; slot_tp_hash(rdi = self, edx = tag) -> rax = i64 hash
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     ; `__hash__ = None` makes the type unhashable -- the one None case
@@ -235,7 +241,7 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
 
 .sth_go:
     lea rsi, [rel sl_hash_name]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .failed
@@ -249,17 +255,25 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     leave
     ret
 .failed:
-    call slot_reraise
+    call slot_failed
+    mov rax, -1
+    leave
+    ret
 .sth_unhashable:
     mov rsi, rdi
     CSTRING rdi, `unhashable type: '\x01'`
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 END_FUNC slot_tp_hash
 
 ;; ============================================================================
 ;; Unary numeric slots.  Each is called as nb_xxx(rdi = operand Value) and
-;; returns a Value.  Before this, -obj and ~obj on a user class dereferenced
-;; a NULL tp_as_number, and +obj and abs(obj) were simply ignored.
+;; returns a Value, or 0 with the exception pending.  Before this, -obj and
+;; ~obj on a user class dereferenced a NULL tp_as_number, and +obj and
+;; abs(obj) were simply ignored.
 ;; ============================================================================
 %macro DEF_UNARY_SLOT 2         ; %1 = function name, %2 = dunder name symbol
 DEF_FUNC %1
@@ -272,20 +286,23 @@ DEF_FUNC %1
     leave
     ret
 %%failed:
-    call slot_reraise
+    call slot_failed            ; answers 0, which is the result
+    leave
+    ret
 END_FUNC %1
 %endmacro
 
 ;; ============================================================================
-;; slot_nb_bool(rdi = self) -> eax = 0 or 1
+;; slot_nb_bool(rdi = self) -> eax = 0 or 1, or rax = -1 with it raised
 ;;
 ;; obj_is_true consults nb_bool, then sq_length, then mp_length, and only then
 ;; the __bool__ dunder -- so once __len__ reached a length slot it shadowed
 ;; __bool__, which is the wrong priority.  Installing nb_bool puts it back.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC slot_nb_bool
     lea rsi, [rel sl_bool_name]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .failed
@@ -319,15 +336,25 @@ DEF_FUNC slot_nb_bool
     ; CPython names what came back -- "returned int" is what tells the author
     ; which of their returns was the wrong one.  The Value is rebuilt from the
     ; pair because value_type classifies a Value, and an immediate has no
-    ; ob_type to read; the reference it still holds dies with the unwind.
-    pop rdx
-    pop rsi
+    ; ob_type to read; it stays on the stack across the message and is
+    ; released after it.
+    mov rsi, [rsp + 8]
+    mov rdx, [rsp]
     V_PACK rsi, rdx
+    mov [rsp + 8], rsi
     CSTRING rdi, `__bool__ should return bool, returned \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    pop rdx
+    pop rdi
+    DECREF_V rdi, rsi
+    mov rax, -1
+    leave
+    ret
 .failed:
-    call slot_reraise
+    call slot_failed
+    mov rax, -1
+    leave
+    ret
 END_FUNC slot_nb_bool
 
 ;; ============================================================================
@@ -343,7 +370,9 @@ DEF_UNARY_SLOT slot_nb_float, sl_float_name
 ;; NULL means NotImplemented, which is what every caller of tp_richcompare
 ;; already expects.  Installed when the class defines any of the six
 ;; comparison dunders, so dict and set key lookup -- which consult
-;; tp_richcompare -- start seeing a user class's __eq__.
+;; tp_richcompare -- start seeing a user class's __eq__.  A dunder that raised
+;; answers NULL as well, with its exception pending.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC slot_tp_richcompare
     push rbx
@@ -364,7 +393,7 @@ DEF_FUNC slot_tp_richcompare
     extern dunder_call_3
     extern obj_dealloc
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .rc_notimplemented
     V_UNPACK rax, rdx
     test edx, edx
     jz .rc_notimplemented
@@ -395,16 +424,15 @@ END_FUNC slot_tp_richcompare
 
 
 ;; ============================================================================
-;; slot_sq_contains(rdi = self, rsi = the value Value) -> eax = 0 or 1
+;; slot_sq_contains(rdi = self, rsi = the value Value) -> eax = 0 or 1, or
+;;   rax = -1 with the exception pending
 ;;
 ;; `x in obj` for a class that defines __contains__.  The one SEQUENCE slot
 ;; with a real dispatcher: unlike sq_concat and sq_repeat, CPython fills this
 ;; one in on a subclass, and so must we -- `class L(list)` with a
 ;; __contains__ answered list's membership test and never called the method.
 ;;
-;; sq_contains has no error channel, only 0 or 1, so a raising __contains__
-;; cannot be reported through the return value: it goes to slot_reraise like
-;; every other wrapper here, and the exception reaches the `in` that asked.
+;; Fails: -1
 ;; ============================================================================
 SC_EXC   equ 8
 SC_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
@@ -412,7 +440,7 @@ DEF_FUNC slot_sq_contains, SC_FRAME
     DUNDER_EXC_SAVE [rbp - SC_EXC]
     V_UNPACK rsi, rcx           ; dunder_call_2 wants (payload, tag)
     lea rdx, [rel sl_contains_name]
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .sc_failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .sc_failed
@@ -438,9 +466,12 @@ DEF_FUNC slot_sq_contains, SC_FRAME
 
 .sc_failed:
     ; Missing, or it raised.  Missing cannot happen -- the wrapper is only
-    ; installed when the class defines the name -- so slot_reraise's no-exception
-    ; arm is the honest answer for it rather than a silent False.
-    call slot_reraise           ; does not return
+    ; installed when the class defines the name -- so slot_failed's
+    ; no-exception arm is the honest answer for it rather than a silent False.
+    call slot_failed
+    mov rax, -1
+    leave
+    ret
 END_FUNC slot_sq_contains
 
 ;; ============================================================================
@@ -449,12 +480,11 @@ END_FUNC slot_sq_contains
 ;; The generic dispatcher for a binary operator slot:
 ;;   (rdi = left Value, rsi = right Value) -> rax = result Value, or NULL
 ;;
-;; A NULL Value means NotImplemented.  That is already what a declining nb_
-;; slot means to op_binary_op and obj_binary_op, so the protocol carries on
-;; to the right operand and then to the reflected dunder.  A dunder that
-;; RAISES cannot be reported that way -- a NULL would read as a decline and
-;; the exception would surface later at an unrelated instruction -- so it goes
-;; to slot_reraise, like every other wrapper here.
+;; A NULL Value with nothing pending means NotImplemented.  That is already
+;; what a declining nb_ slot means to op_binary_op and obj_binary_op, so the
+;; protocol carries on to the right operand and then to the reflected dunder.
+;; A dunder that RAISES answers NULL too, with its exception pending -- and
+;; every caller of a binary slot asks which it was before it carries on.
 ;;
 ;; The wrapper speaks for BOTH operands, as CPython's SLOT1BINFULL does, and
 ;; the identity tests are what tell it which one it is speaking for.
@@ -616,7 +646,9 @@ DEF_FUNC %1, SB_FRAME
     leave
     ret
 %%raised:
-    call slot_reraise           ; does not return
+    xor eax, eax                ; NULL, and the exception is pending
+    leave
+    ret
 END_FUNC %1
 %endmacro
 
@@ -709,7 +741,7 @@ DEF_FUNC slot_binop_reflect_first, SBR_FRAME
     V_UNPACK rsi, rcx
     mov rdx, [rbp - SBR_NAME]
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .sbr_none_or_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .sbr_none_or_raised
@@ -784,14 +816,15 @@ DEF_BINARY_SLOT slot_nb_itruediv, sl_itruediv_name, nb_itrue_divide
 DEF_BINARY_SLOT slot_nb_imatmul, sl_imatmul_name, nb_imatmul
 
 ;; ============================================================================
-;; slot_length(rdi = self) -> rax = i64
+;; slot_length(rdi = self) -> rax = i64, or -1 with the exception pending
 ;;
 ;; Serves both mp_length and sq_length; builtin_len tries mapping first, and
 ;; GET_LEN in a match statement tries sequence first.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC slot_length
     lea rsi, [rel sl_len_name]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .failed
@@ -807,14 +840,20 @@ DEF_FUNC slot_length
     ret
 .negative:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "__len__() should return >= 0"
+    SET_EXC exc_ValueError_type, "__len__() should return >= 0"
+    mov rax, -1
+    leave
+    ret
 .failed:
-    call slot_reraise
+    call slot_failed
+    mov rax, -1
+    leave
+    ret
 END_FUNC slot_length
 
 ;; ============================================================================
 ;; slot_tp_setattr(rdi = self, rsi = name, rdx = the value Value, or 0)
-;;   -> eax = 0, or does not return
+;;   -> eax = 0, or rax = -1 with the exception pending
 ;;
 ;; tp_setattr for a class that defines __setattr__ or __delattr__.  A NULL
 ;; value is a deletion, the same convention instance_setattr and
@@ -829,6 +868,7 @@ END_FUNC slot_length
 ;; object supplies both names, so type_install_slots' slot_is_object_default
 ;; check is what keeps an ordinary class -- which merely inherits them -- from
 ;; getting this wrapper and recursing into itself.
+;; Fails: -1
 ;; ============================================================================
 STA_SELF  equ 8
 STA_NAME  equ 16
@@ -848,7 +888,7 @@ DEF_FUNC slot_tp_setattr, STA_FRAME
     lea rcx, [rel sl_setattr_name]
     mov r8d, TAG_PTR
     V_UNPACK rdx, r8
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .sta_failed
     test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
     jz .sta_failed
     mov rdi, rax
@@ -864,7 +904,7 @@ DEF_FUNC slot_tp_setattr, STA_FRAME
     mov rsi, [rbp - STA_NAME]
     lea rdx, [rel sl_delattr_name]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .sta_failed
     test rax, rax               ; dunder_call_2 answers with a Value; 0 is the miss
     jz .sta_failed
     mov rdi, rax
@@ -875,12 +915,18 @@ DEF_FUNC slot_tp_setattr, STA_FRAME
     ret
 
 .sta_failed:
-    call slot_reraise                   ; does not return
+    call slot_failed
+    mov rax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC slot_tp_setattr
 
 ;; ============================================================================
-;; slot_mp_subscript(rdi = self, rsi = key Value) -> Value
+;; slot_mp_subscript(rdi = self, rsi = key Value) -> Value, or 0 with the
+;;   exception pending
 ;; slot_mp_ass_subscript(rdi = self, rsi = key Value, rdx = value Value)
+;;   -> eax = 0, or rax = -1 with the exception pending
 ;;
 ;; type_from_parts hands a builtin subclass its base's method table by pointer,
 ;; so a dict subclass that defines __setitem__ inherits dict's slot and the
@@ -896,7 +942,7 @@ DEF_FUNC slot_mp_subscript
     V_UNPACK rdx, rcx
     mov rsi, rdx
     lea rdx, [rel sl_getitem_name]
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .failed
@@ -904,7 +950,9 @@ DEF_FUNC slot_mp_subscript
     V_PACK rax, rdx
     ret
 .failed:
-    call slot_reraise           ; does not return
+    call slot_failed            ; answers 0, which is the result
+    leave
+    ret
 END_FUNC slot_mp_subscript
 
 SAS_SELF  equ 8
@@ -924,7 +972,7 @@ DEF_FUNC slot_mp_ass_subscript, SAS_FRAME
     lea rcx, [rel sl_setitem_name]
     mov r8d, TAG_PTR                    ; dunder_call_3 packs arg2 with this
     V_UNPACK rdx, r8
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .failed
     test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
     jz .failed
     mov rdi, rax
@@ -939,7 +987,7 @@ DEF_FUNC slot_mp_ass_subscript, SAS_FRAME
     mov rsi, [rbp - SAS_KEY]
     V_UNPACK rsi, rcx
     lea rdx, [rel sl_delitem_name]
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .failed
     test rax, rax               ; dunder_call_2 answers with a Value; 0 is the miss
     jz .failed
     mov rdi, rax
@@ -949,31 +997,38 @@ DEF_FUNC slot_mp_ass_subscript, SAS_FRAME
     leave
     ret
 .failed:
-    call slot_reraise           ; does not return
+    call slot_failed
+    mov rax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC slot_mp_ass_subscript
 
 ;; ============================================================================
-;; slot_reraise - resume unwinding with the exception the dunder left pending.
+;; slot_failed() -> rax = 0, with an exception pending
 ;;
-;; Does not return.  If somehow nothing is pending, there is no coherent value
-;; to hand back either, so report it rather than continue with a NULL.
+;; What a wrapper calls when its dunder answered NULL, before it returns the
+;; slot's error value.  The dunder raised, almost always, and then there is
+;; nothing to do.  If somehow nothing is pending -- the dunder has gone
+;; missing since the slot was installed -- there is no coherent value to hand
+;; back either, so say so rather than return an error nobody set.
 ;; ============================================================================
-DEF_FUNC_LOCAL slot_reraise
+DEF_FUNC_LOCAL slot_failed
     cmp qword [gs:ThreadState.current_exception], 0
-    je .no_exc
-    leave
-    jmp eval_exception_unwind
-.no_exc:
-    extern raise_exception
+    jne .have_exc
+    extern set_exception
     extern exc_RuntimeError_type
-    RAISE exc_RuntimeError_type, "slot wrapper failed without an exception"
-END_FUNC slot_reraise
+    SET_EXC exc_RuntimeError_type, "slot wrapper failed without an exception"
+.have_exc:
+    xor eax, eax
+    leave
+    ret
+END_FUNC slot_failed
 
 ;; ============================================================================
-;; slot_tp_iter(rdi = self) -> rax = iterator, a raw pointer
-;;
-;; get_iterator does `call rax` and then reads ob_type off the result without
-;; a NULL check, so this must either return an object or not return.
+;; slot_tp_iter(rdi = self) -> rax = iterator, a raw pointer, or 0 with the
+;;   exception pending
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC slot_tp_iter, 8    ; + 1 push = 16, 16-aligned
     ; `__iter__ = None` disables iteration, and says so in the type's own
@@ -994,19 +1049,23 @@ DEF_FUNC slot_tp_iter, 8    ; + 1 push = 16, 16-aligned
 
 .sti_go:
     lea rsi, [rel dunder_iter]
-    call dunder_call_1
-    V_UNPACK rax, rdx
-    test edx, edx
+    call dunder_call_1          ; err: 0, absent or raised, goes to .failed
+    ; The VALUE goes back, not its payload: __iter__ may answer an int, and
+    ; unpacked that is a small number get_iterator_opt would read ob_type off.
+    test rax, rax
     jz .failed
     leave
     ret
 .failed:
-    call slot_reraise           ; does not return
+    call slot_failed            ; answers 0, which is the result
+    leave
+    ret
 .sti_disabled:
     mov rsi, rdi
     CSTRING rdi, `'\x01' object is not iterable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name   ; answers 0
+    leave
+    ret
 END_FUNC slot_tp_iter
 
 ;; ============================================================================
@@ -1015,10 +1074,11 @@ END_FUNC slot_tp_iter
 ;; NULL is the ordinary answer here, so this mirrors call_iternext: a
 ;; StopIteration is swallowed and reported as exhaustion, and any other
 ;; exception is left pending for the caller to notice.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC slot_tp_iternext
     lea rsi, [rel dunder_next]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .got_value`
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is the miss
     jnz .got_value
 
@@ -1068,6 +1128,7 @@ END_FUNC slot_tp_iternext
 ;; obj_call_n is the model, but its OCN_MAX of 8 cannot be inherited: this is
 ;; the general call path, and `c(*range(100))` is ordinary.  Small arities use
 ;; the frame buffer, anything larger takes a heap one.
+;; Fails: 0
 ;; ============================================================================
 STC_MAX   equ 16              ; args held in the frame; above this, ap_malloc
 STC_SELF  equ 8
@@ -1133,7 +1194,7 @@ DEF_FUNC slot_tp_call, STC_FRAME
     mov rdi, rax
     mov rsi, [rbp - STC_SELF]
     extern dunder_bind
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .stc_get_raised
     mov [rbp - STC_FUNC], rax

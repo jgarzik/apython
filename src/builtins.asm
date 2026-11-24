@@ -694,7 +694,7 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     mov rsi, rsp
     mov edx, 1
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .psw_raised, below
     add rsp, 16
     push rax
     push rax
@@ -796,7 +796,7 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     mov rdi, rbx
     xor esi, esi
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: .psf_failed, below
     push rax
     push rax
     mov rdi, rbx
@@ -1336,7 +1336,7 @@ DEF_FUNC builtin_len, LEN_FRAME
     mov rdi, rbx
     DUNDER_EXC_SAVE [rbp - LEN_EXC]
     lea rsi, [rel dunder_len]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .no_dunder_len
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .no_dunder_len

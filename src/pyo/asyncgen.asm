@@ -779,8 +779,7 @@ DEF_FUNC throw_args_exc, TA_FRAME
     mov edx, 1
 .build:
     call type_call
-    test rax, rax
-    jz .raised
+    ERR_NULL .raised
     mov edx, 1                  ; ours: the caller drops it
     leave
     ret

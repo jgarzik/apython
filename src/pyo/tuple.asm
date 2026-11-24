@@ -1010,6 +1010,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
+    ERR_NULL_JUMP
     mov [rbp - TTC_ITER], rax
 
     ; Iterate and append to list

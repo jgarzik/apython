@@ -570,12 +570,17 @@ END_FUNC fileio_check
 
 
 ;; ============================================================================
-;; io_raise_typename(rdi = exception type, rsi = prefix cstr, rdx = an object)
+;; io_set_typename(rdi = exception type, rsi = prefix cstr, rdx = an object)
+;;   -> rax = 0, with the exception pending
 ;;
-;; Builds "<prefix>, not <typename>" and raises it.  CPython names the type it
-;; was handed in every one of these messages, and the name is the useful half:
-;; "must be read-write bytes-like object" leaves the caller guessing what was
-;; wrong with what they passed.
+;; Builds "<prefix>, not <typename>" and makes it the pending exception.
+;; CPython names the type it was handed in every one of these messages, and
+;; the name is the useful half: "must be read-write bytes-like object" leaves
+;; the caller guessing what was wrong with what they passed.
+;;
+;; io_raise_typename and io_raise_typename_q, below, are the same two that
+;; then jump into the unwinder, for the callers that have not been taught to
+;; return an error yet.
 ;; ============================================================================
 section .bss
 global io_msgbuf
@@ -584,27 +589,30 @@ io_numbuf: resb 32
 
 section .text
 
-DEF_FUNC io_raise_typename
+global io_set_typename
+DEF_FUNC io_set_typename, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
     mov rbx, rdi                ; the exception type
     mov r12, rdx                ; the object
     xor r13d, r13d              ; plain
-    jmp io_raise_typename_common
-END_FUNC io_raise_typename
+    jmp io_set_typename_common
+END_FUNC io_set_typename
 
 ;; The same, with the name in quotes.  CPython is not consistent about it --
 ;; "must be str, not int" but "a bytes-like object is required, not 'str'" --
 ;; and the wording is what a caller sees, so both forms are here.
-DEF_FUNC io_raise_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
+;; io_set_typename_q(the same three) -> rax = 0, with the exception pending
+global io_set_typename_q
+DEF_FUNC io_set_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
     mov rbx, rdi
     mov r12, rdx
     mov r13d, 1
-io_raise_typename_common:
+io_set_typename_common:
 
     lea rdi, [rel io_msgbuf]
     mov edx, 200
@@ -647,8 +655,30 @@ io_raise_typename_common:
 
     mov rdi, rbx
     lea rsi, [rel io_msgbuf]
-    call raise_exception
-    ud2
+    extern set_exception
+    call set_exception
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC io_set_typename_q
+
+;; io_raise_typename(rdi = exception type, rsi = prefix cstr, rdx = an object)
+;;   -> does not return
+DEF_FUNC io_raise_typename
+    call io_set_typename
+    jmp io_raise_unwind
+END_FUNC io_raise_typename
+
+;; io_raise_typename_q(the same three) -> does not return
+DEF_FUNC io_raise_typename_q
+    call io_set_typename_q
+io_raise_unwind:
+    leave
+    extern eval_exception_unwind
+    jmp eval_exception_unwind
 END_FUNC io_raise_typename_q
 
 ;; io_copy_bounded(rdi = dest, rsi = src cstr, rdx = max) -> rax = the NUL
@@ -888,6 +918,12 @@ END_FUNC fileio_mode_flags
 ;;
 ;; `file` is a path or an already-open descriptor.  An int means adopt it,
 ;; which is how the buffered layer wraps stdin and stdout.
+;;
+;; -> rax = None, or 0 with the exception pending.  It is reached through
+;; type_call, which releases the instance it was building when this answers 0;
+;; while these refusals jumped into the unwinder instead, every refused
+;; FileIO() leaked the object.
+;; Fails: 0
 ;; ============================================================================
 FI_SELF   equ 8
 FI_FILE   equ 16
@@ -904,9 +940,9 @@ FI_PATHOBJ equ 80           ; what posix_path_arg wants released, or 0
 FI_STAT   equ 88 + StatBuf_size
 FI_FRAME  equ FI_STAT       ; 224, + 0 pushes, 16-aligned
 
-; Every error exit below owns the mode string -- allocated for the default, or
-; INCREF'd from the argument -- and RAISE and raise_exception both abandon the
-; C stack.  Two of them leaked it: a bad mode letter, and a failed open.
+; Every error exit below but one owns the mode string -- allocated for the
+; default, or INCREF'd from the argument -- and drops it before it sets the
+; exception and leaves through .fi_fail.
 %macro FI_DROP_MODE 0
     mov rdi, [rbp - FI_MODE]
     test rdi, rdi
@@ -1212,30 +1248,30 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     ret
 
 .fi_is_dir:
+    ; The descriptor is closed here, so the object must not think it holds
+    ; one: it is released by type_call now that this returns, and a dealloc
+    ; that still saw FIO_OPEN would close the number a second time.
     mov rax, [rbp - FI_SELF]
+    and qword [rax + PyFileIOObject.fio_flags], ~FIO_OPEN
     mov rdi, [rax + PyFileIOObject.fio_fd]
     call sys_close
+    FI_DROP_MODE
     mov edi, EISDIR
     mov rsi, [rbp - FI_FILE]
-    call raise_oserror
-    ud2
-
+    extern set_oserror
+    call set_oserror
+    jmp .fi_fail
 .fi_closefd_path:
     FI_DROP_MODE
-    RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
-
+    FAIL exc_ValueError_type, "Cannot use closefd=False with file name", .fi_fail
 .fi_path_refused:
-    ; posix_path_arg answered 0 and left the exception pending, so this is the
-    ; one place the mode string can still be released -- which is what the
-    ; whole returning contract buys.  Nothing is pushed here: the frame is the
-    ; one DEF_FUNC carved.
     FI_DROP_MODE
+.fi_fail:
+    ; The exception is pending, and nothing this frame owned is still held.
     xor eax, eax
     xor edx, edx
     leave
     ret
-
-
 .fi_open_failed:
     neg rax
     push rax
@@ -1245,14 +1281,14 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     pop rax
     mov rdi, rax
     mov rsi, [rbp - FI_FILE]
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fi_fail
 .fi_mode_bad:
     FI_DROP_MODE
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msg_onemode]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fi_fail
 .fi_mode_letter:
     FI_DROP_MODE
     lea rdi, [rel io_badmode_msg]
@@ -1264,27 +1300,31 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov byte [rax + 1], 0
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_badmode_msg]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fi_fail
 .fi_fd_bad:
     FI_DROP_MODE
-    RAISE exc_ValueError_type, "negative file descriptor"
+    FAIL exc_ValueError_type, "negative file descriptor", .fi_fail
 .fi_file_type:
     FI_DROP_MODE
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_filetype]
     mov rdx, [rbp - FI_FILE]
-    call io_raise_typename
+    call io_set_typename
+    jmp .fi_fail
 .fi_mode_type:
+    ; The mode is still the caller's here -- it is INCREF'd only once it is
+    ; known to be a str -- so there is nothing to drop.
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_modetype]
     mov rdx, [rbp - FI_MODE]
-    call io_raise_typename
+    call io_set_typename
+    jmp .fi_fail
 .fi_argerr:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "FileIO() missing required argument 'file' (pos 1)"
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fi_fail
 END_FUNC fileio_init_fn
 
 ;; ============================================================================
@@ -2502,7 +2542,7 @@ DEF_FUNC iobase_exit_fn
     ja .ibx_none
     lea rsi, [rel im_n_close]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .ibx_maybe_raised
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .ibx_maybe_raised
     ; Already a Value; packing it again read rdx as a tag and handed

@@ -155,8 +155,7 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     lea rsi, [rbx + ThreadStart.argv]
     mov edx, 3
     call obj_call_n
-    test rax, rax
-    jz .te_raised
+    ERR_NULL .te_raised
     DECREF_V rax, rcx
     jmp .te_finished
 .te_raised:

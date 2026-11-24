@@ -353,8 +353,7 @@ DEF_FUNC memoryview_from_dunder_buffer, MDB_FRAME
     mov edx, 2
     extern obj_call_n
     call obj_call_n
-    test rax, rax
-    jz .mdb_raised
+    ERR_NULL .mdb_raised
     V_TEST_PTR rax, rcx
     ja .mdb_wrong
     lea rcx, [rel memoryview_type]

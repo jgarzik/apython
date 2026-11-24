@@ -14,6 +14,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern ap_free
 extern object_type
 extern ap_malloc
@@ -266,6 +267,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     extern get_iterator_opt
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .bad_excs
     V_UNPACK rax, rdx
@@ -1120,7 +1122,7 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     mov rdi, rbx
     mov rsi, rsp
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .egd_fail, below
     add rsp, 16
     mov [rbp - EGDV_NEW], rax
     push rax
@@ -1235,8 +1237,7 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     mov edx, 1
     call obj_call_n
     mov [rbp - EGDV_COPY], rax
-    test rax, rax
-    jz .egd_notes_raised
+    ERR_NULL .egd_notes_raised
     mov rdi, [rbp - EGDV_NEW]
     mov rsi, rbx
     mov rdx, rax

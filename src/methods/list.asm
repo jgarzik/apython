@@ -501,8 +501,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov edx, 1                     ; nargs = 1
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .ls_failed
+    ERR_NULL .ls_failed
     mov rcx, [rbp - LS_KEYS]
     mov [rcx + r15*8], rax
     inc r15
@@ -632,8 +631,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov edx, 1
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .ls_error_return
+    ERR_NULL .ls_error_return
     XDECREF_V rax, rcx             ; only whether it could be computed
 .ls_trivial_done:
     RET_NONE
@@ -1277,6 +1275,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_ITER], rax

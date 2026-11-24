@@ -1036,11 +1036,11 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
     mov rdi, rax
     lea rsi, [rbp - MDP_ARGS]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .mdp_propagate, below
     push rax
     push rax
     mov rdi, [rbp - MDP_FILE]
-    call obj_decref
+    DECREF_V rdi, rcx                   ; a Value: `write = 5` is an immediate
     mov rdi, [rbp - MDP_BYTES]
     call obj_decref
     pop rax
@@ -1133,11 +1133,11 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
     xor edx, edx
     push rdi
     push rdi
-    call obj_call_n
+    call obj_call_n             ; err: .mdl_fail, below
     pop rdi
     pop rcx
     mov [rbp - MDL_DATA], rax
-    call obj_decref                     ; the bound method
+    DECREF_V rdi, rcx                   ; the bound method, or whatever `read` is
     mov rax, [rbp - MDL_DATA]
     test rax, rax
     jz .mdl_fail

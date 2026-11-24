@@ -367,7 +367,7 @@ DEF_FUNC op_format_value, FV_FRAME
     lea rdx, [rel fv_format_name]
     mov ecx, TAG_PTR
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .fv_spec_dunder_none
     V_UNPACK rax, rdx
     test edx, edx
     jz .fv_spec_dunder_none
@@ -447,7 +447,7 @@ DEF_FUNC op_format_value, FV_FRAME
     push rsi
     lea rdx, [rel fv_format_name]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .fv_bare_dunder_none
     V_UNPACK rax, rdx
     pop rdi
     pop rdi                    ; the empty spec, ours to release
@@ -1056,6 +1056,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
     ; __iter__ is iterable, and `yield from` rejected it.
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .gyfi_error
     push rax                   ; save iterator

@@ -2383,7 +2383,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     jz .obo_rdunder
     mov rsi, [rbp - OBO_RIGHT]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: OBO_ANSWERED tells a miss from a raise
     test rax, rax
     OBO_ANSWERED
 
@@ -2401,7 +2401,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     jz .obo_unsupported
     mov rsi, [rbp - OBO_LEFT]   ; reflected: the right operand is self
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: OBO_ANSWERED tells a miss from a raise
     test rax, rax
     OBO_ANSWERED
 
@@ -2786,8 +2786,9 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_bool]
     call dunder_call_1
+    ERR_PENDING_JUMP            ; __bool__ raised (transitional, as the slots above)
     V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx              ; TAG_NULL = call failed
+    test edx, edx              ; TAG_NULL = there is no __bool__
     jz .check_dunder_len
 
     ; __bool__ returned a result — must be bool
@@ -2837,6 +2838,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    ERR_PENDING_JUMP            ; __len__ raised
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx              ; TAG_NULL = not found
     jz .true                ; no __len__ → truthy by default

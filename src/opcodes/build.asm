@@ -236,7 +236,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rsi, [rsp]            ; key = other
     lea rdx, [rel dunder_getitem]
     mov ecx, [rsp + 16]      ; key tag = other_tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .subscr_done`
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .subscr_done
@@ -841,7 +841,7 @@ DEF_FUNC_BARE op_get_iter
     extern dunder_iter
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .have_iter_result`
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .have_iter_result
@@ -940,7 +940,7 @@ DEF_FUNC_BARE op_for_iter
     extern dunder_next
     lea rsi, [rel dunder_next]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .check_next_result`
     test rax, rax
     jnz .check_next_result     ; got a value
     jmp .next_null
@@ -1146,6 +1146,7 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     mov rdi, [rbp - LE_ITERABLE]         ; iterable
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_CURSOR], rax          ; save iterator (reusing locals slot)
@@ -1406,7 +1407,7 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, [rsp+8]          ; value = other
     lea rdx, [rel dunder_contains]
     mov rcx, [rsp+24]         ; value tag = other_tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .contains_check_blocked
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx             ; TAG_NULL = not found
     jz .contains_check_blocked
@@ -1634,7 +1635,7 @@ DEF_FUNC_BARE op_contains_op
     extern dunder_getitem
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_SMALLINT           ; index is SmallInt
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .contains_gi_null_result
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .contains_gi_null_result
@@ -1942,7 +1943,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     mov rsi, [rbp - BSLC_SLICE]
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .bslc_not_subscriptable
     V_UNPACK rax, rdx
     test edx, edx
     jz .bslc_not_subscriptable
@@ -2038,6 +2039,7 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     extern dunder_call_3
     lea rcx, [rel dunder_setitem]
     call dunder_call_3
+    ERR_PENDING_JUMP
     jmp .sslc_stored
 
 .sslc_no_ass:
@@ -2757,6 +2759,7 @@ DEF_FUNC op_set_update
     mov rdi, rsi
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .su_type_error
     mov [rbp - SU_CAP], rax          ; save iterator

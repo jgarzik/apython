@@ -284,7 +284,7 @@ DEF_FUNC px_call, 56
     mov rdi, rax
     mov rsi, [rbp - PC_ARGS]
     mov rdx, [rbp - PC_NARGS]
-    call obj_call_n
+    call obj_call_n             ; err: .raised, below
 
     mov rcx, [rbp - PC_H]
     mov qword [rcx + PxHandle.in_callback], 0

@@ -1649,8 +1649,7 @@ DEF_FUNC set_method_reduce, SRD_FRAME
     lea rsi, [rbp - SRD_SELF]           ; the one-Value argument array
     mov edx, 1
     call obj_call_n
-    test rax, rax
-    jz .srd_failed
+    ERR_NULL .srd_failed
     mov [rbp - SRD_LIST], rax
 
     mov rdi, rax

@@ -2801,7 +2801,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov [rbp - CO_RAW], rsi
     lea rsi, [rbp - CO_RAW]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .propagate, below
     push rax
     mov rdi, [rbp - CO_RAW]
     call obj_decref
