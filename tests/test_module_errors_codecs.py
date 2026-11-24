@@ -242,6 +242,18 @@ err("setstate(int)", _rng.setstate, 5)
 err("setstate(short tuple)", _rng.setstate, (3, (1, 2, 3), None))
 err("randbytes(-1)", _rng.randbytes, -1)
 err("randrange(0)", _rng.randrange, 0)
+
+
+class AbsIsNone(int):
+    def __abs__(self):
+        return None
+
+
+# bpo-31478: seeding asks the int for its magnitude, not the subclass.
+_rng.seed(AbsIsNone(7))
+_first = _rng.random()
+_rng.seed(7)
+print(_first == _rng.random())
 # The generator still works, and still gives CPython's sequence.
 _rng.seed(12345)
 print(_rng.getrandbits(32), _rng.getrandbits(70), _rng.random())
