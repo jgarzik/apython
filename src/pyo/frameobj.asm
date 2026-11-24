@@ -1175,6 +1175,7 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
     mov rdi, rcx
     extern gen_close
     call gen_close
+    ERR_NULL_JUMP
     mov rax, [rbp - FMC_SELF]
     mov qword [rax + PyFrameObject.f_frame], 0
 .fmc_detached:

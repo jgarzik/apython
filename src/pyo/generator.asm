@@ -22,8 +22,7 @@ extern str_from_cstr
 extern obj_dealloc
 extern type_type
 extern ap_strcmp
-extern raise_exception
-extern raise_exception_obj
+extern set_exception
 extern exc_new
 extern exc_TypeError_type
 extern exc_StopIteration_type
@@ -1248,8 +1247,9 @@ DEF_FUNC gen_throw, GT_FRAME
     call exc_new
     mov rdi, rax
 .gt_exh_raise:
-    call raise_exception_obj
-    RET_NULL
+    extern exc_install
+    call exc_install            ; pending; the (0, 0) below is how a caller
+    RET_NULL                    ; is told the throw came straight back out
     pop r13
     pop r12
     pop rbx
@@ -1406,8 +1406,9 @@ END_FUNC gen_close_iter
 ;; ============================================================================
 ;; gen_close(PyGenObject *gen) -> rax = None, as a Value
 ;;
-;; The Python-facing close(): an exception out of the cleanup propagates the
-;; only way this interpreter can propagate, by jumping into the unwinder.
+;; The Python-facing close(): an exception out of the cleanup is left pending
+;; and the answer is 0.
+;; Fails: 0
 ;; ============================================================================
 GCW_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC gen_close, GCW_FRAME
@@ -1422,11 +1423,9 @@ DEF_FUNC gen_close, GCW_FRAME
     leave
     ret
 .gcw_propagate:
-    ; As in _gen_throw_impl's .gti_propagate below: PyFrame.disp_sp is not
-    ; republished, because r13 here is whatever the caller left in it and a
-    ; bound method leaves nargs.  eval_dispatch published the right one.
+    RET_NULL
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC gen_close
 
 ;; ============================================================================
@@ -1942,6 +1941,9 @@ END_FUNC async_gen_getattr
 ;; ============================================================================
 
 ;; _gen_send_impl(args, nargs) — gen.send(value)
+;; Exhaustion is a StopIteration carrying the return value, set and returned
+;; like any other failure.
+;; Fails: 0
 global _gen_send_impl
 DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
@@ -1981,12 +1983,13 @@ DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
 .gsi_have_val:
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
 
 .gsi_propagate:
-    extern eval_exception_unwind
+    xor eax, eax
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .gsi_ret:
     pop rbx
@@ -1995,15 +1998,17 @@ DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .gsi_error:
-    RAISE exc_TypeError_type, "send() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "send() takes exactly one argument"
+    jmp .gsi_propagate
 END_FUNC _gen_send_impl
 
 
 ;; _gen_close_impl(args, nargs) — gen.close()
+;; Fails: 0
 global _gen_close_impl
 DEF_FUNC _gen_close_impl
     mov rdi, [rdi]             ; gen = args[0]
-    call gen_close
+    call gen_close              ; err: its 0 is this method's own
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -2012,6 +2017,7 @@ END_FUNC _gen_close_impl
 ;; _gen_throw_impl(args, nargs) — gen.throw(typ[, val[, tb]]), and
 ;; coroutine.throw(), which is the same method.  throw_args_exc in asyncgen.asm
 ;; settles the arguments, for agen.athrow() as well.
+;; Fails: 0
 GTI_EXC   equ 8             ; what throw_args_exc answered
 GTI_OWNED equ 16            ; non-zero when GTI_EXC is a reference of ours
 GTI_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -2026,6 +2032,7 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
     lea rcx, [rel gti_deprecated]
     extern throw_args_exc
     call throw_args_exc
+    ERR_NULL .gti_propagate
     mov [rbp - GTI_EXC], rax
     mov [rbp - GTI_OWNED], rdx
     mov rdi, rbx
@@ -2068,7 +2075,8 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
 .gti_have_val:
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
+    jmp .gti_propagate
 
 .gti_ret:
     pop rbx
@@ -2077,25 +2085,12 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
     ret
 
 .gti_propagate:
-    ; The generator did not handle it, so the exception leaves throw().
-    ;
-    ; PyFrame.disp_sp is NOT republished here.  r13 is the value stack only
-    ; when this is reached straight from the eval loop, which is what
-    ; LOAD_ATTR's method fast path does; through a bound method it is
-    ; method_call's copy of nargs, and publishing that sent the unwinder
-    ; walking from address 1.  `t = gen.throw` and then `t(ValueError())`
-    ; inside a try/except was a SIGSEGV in eval_exception_unwind itself --
-    ; and `addCleanup(coro.close)` is the same shape, which is how
-    ; test_asyncio found it.
-    ;
-    ; The right value is already published: eval_dispatch writes all three of
-    ; eval_saved_r12 and the frame's disp_ip/disp_sp for the frame whose opcode is running, and that
-    ; is the frame this exception is leaving into.  src/pyo/class.asm's
-    ; .init_raised carries the same note for the same reason.
-    extern eval_exception_unwind
+    ; The generator did not handle it, so the exception leaves throw(): it
+    ; is pending, and the 0 says so.
+    xor eax, eax
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 END_FUNC _gen_throw_impl
 
@@ -2489,6 +2484,7 @@ section .text
 ;; aiter()/anext() and `async for` all ask for them.  This type had a getattr
 ;; of its own and no tp_dict at all, so `hasattr(g, "__aiter__")` was False
 ;; and aiter(g) refused a genuine async generator.
+;; Fails: 0
 ;; ============================================================================
 global async_gen_dunder_aiter
 DEF_FUNC async_gen_dunder_aiter
@@ -2504,12 +2500,15 @@ DEF_FUNC async_gen_dunder_aiter
     V_PACK rax, rdx
     ret
 .agda_error:
-    RAISE exc_TypeError_type, "__aiter__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__aiter__() takes exactly one argument"
+    leave
+    ret
 END_FUNC async_gen_dunder_aiter
 
 ;; ============================================================================
 ;; async_gen_dunder_anext(rdi = args Value[], rsi = nargs)
 ;;   -> the awaitable the next value comes from, as tp_iternext gives it
+;; Fails: 0
 ;; ============================================================================
 global async_gen_dunder_anext
 DEF_FUNC async_gen_dunder_anext
@@ -2521,7 +2520,9 @@ DEF_FUNC async_gen_dunder_anext
     V_PACK rax, rdx
     ret
 .agdn_error:
-    RAISE exc_TypeError_type, "__anext__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__anext__() takes exactly one argument"
+    leave
+    ret
 END_FUNC async_gen_dunder_anext
 
 ;; ============================================================================
