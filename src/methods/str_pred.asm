@@ -379,7 +379,7 @@ DEF_FUNC str_method_title
     mov rdi, rax
     mov esi, 2
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -397,7 +397,7 @@ DEF_FUNC str_method_capitalize
     mov rdi, rax
     mov esi, 3
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -415,7 +415,7 @@ DEF_FUNC str_method_swapcase
     mov rdi, rax
     mov esi, 4
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -433,7 +433,7 @@ DEF_FUNC str_method_casefold
     mov rdi, rax
     mov esi, 5
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value

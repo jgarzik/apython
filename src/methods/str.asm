@@ -63,7 +63,7 @@ DEF_FUNC str_method_upper
     mov rdi, rax
     xor esi, esi
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -80,7 +80,7 @@ DEF_FUNC str_method_lower
     mov rdi, rax
     mov esi, 1
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
