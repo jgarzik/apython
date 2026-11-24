@@ -13,6 +13,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 %include "value.inc"
 
 extern sys_fork
@@ -112,7 +113,8 @@ DEF_FUNC posix_fork, 24                 ; + 1 push = 32, 16-aligned
     mov esi, 1
     call posix_run_fork_hooks
 
-    call sys_fork
+    extern gil_fork
+    call gil_fork               ; glibc's fork, and the GIL reset in the child
     mov [rbp - PFK_PID], rax
     test rax, rax
     jl .pfk_failed
@@ -979,7 +981,7 @@ DEF_FUNC posix_waitpid, PWP_FRAME   ; lint: pushes=1 -- see PWP_FRAME above
     lea rsi, [rbp - PWP_STATUS]
     mov qword [rbp - PWP_STATUS], 0
     xor ecx, ecx                    ; no rusage
-    call sys_wait4
+    BLOCKING_CALL sys_wait4
     POSIX_CHECK rax, 0
     push rax
     push rax

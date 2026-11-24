@@ -26,6 +26,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "threadstate.inc"
 
 ASM_INIT
 
@@ -803,40 +804,45 @@ END_FUNC sys_getframe_func
 ;; ============================================================================
 ;; sys._current_frames() -> {thread ident: frame}
 ;;
-;; One thread, so one entry: the frame the caller is running in, under the
-;; ident lib/_thread.py answers for it.  CPython's is how a monitor or a
-;; profiler takes a stack sample of every thread, and threading, faulthandler
-;; and test.support all reach for it.
+;; One entry for every thread that is running Python: its ident, as
+;; _thread.get_ident() answers it, and the frame it is in.  CPython's is how
+;; a monitor or a profiler takes a stack sample of every thread, and
+;; threading, faulthandler and test.support all reach for it.
 ;;
-;; The frame is the same snapshot sys._getframe(0) hands out, because f_back
-;; has to keep working after the live frames are gone.
+;; The caller holds the GIL, so every other thread is stopped at a
+;; checkpoint or inside a blocking call, and the frame its ThreadState names
+;; is whole.  Each frame is the same snapshot sys._getframe(0) hands out,
+;; because f_back has to keep working after the live frames are gone.
 ;; ============================================================================
 SCF_DICT  equ 8
 SCF_VIEW  equ 16
 SCF_KEY   equ 24
-SCF_FRAME equ 32            ; + 1 push = 40... one word more to land right
-DEF_FUNC sys_current_frames_func, 40    ; + 1 push = 48, 16-aligned
+SCF_NEXT  equ 32            ; the next ThreadState, read before Python can run
+SCF_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC sys_current_frames_func, SCF_FRAME
     push rbx
-    mov qword [rbp - SCF_VIEW], 0
-    mov qword [rbp - SCF_KEY], 0
     extern dict_new
     call dict_new
     test rax, rax
     jz .scf_fail
     mov [rbp - SCF_DICT], rax
 
-    mov rbx, [gs:ThreadState.eval_saved_r12]
+    extern tstate_list_head
+    mov rbx, [rel tstate_list_head]
+.scf_thread:
     test rbx, rbx
-    jz .scf_done                ; no Python frame: an empty mapping
-
-    mov rdi, rbx
+    jz .scf_done
+    mov rax, [rbx + ThreadState.ts_next]
+    mov [rbp - SCF_NEXT], rax
+    mov rdi, [rbx + ThreadState.eval_saved_r12]
+    test rdi, rdi
+    jz .scf_next                ; a thread with no Python frame yet, or left
     call frameobj_for
     test rax, rax
     jz .scf_drop
     mov [rbp - SCF_VIEW], rax
 
-    ; The ident lib/_thread.py hands out for the only thread there is.
-    mov edi, 1
+    mov rdi, [rbx + ThreadState.ts_ident]
     extern int_from_i64
     call int_from_i64
     V_PACK rax, rdx             ; an immediate int is its own Value
@@ -847,24 +853,23 @@ DEF_FUNC sys_current_frames_func, 40    ; + 1 push = 48, 16-aligned
     mov rdx, [rbp - SCF_VIEW]
     extern dict_set
     call dict_set               ; takes its own references
-
     mov rax, [rbp - SCF_KEY]
     DECREF_V rax, rcx
     mov rdi, [rbp - SCF_VIEW]
     call obj_decref
+.scf_next:
+    mov rbx, [rbp - SCF_NEXT]
+    jmp .scf_thread
 .scf_done:
     mov rax, [rbp - SCF_DICT]
-    mov edx, TAG_PTR
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
 .scf_drop:
     mov rdi, [rbp - SCF_DICT]
     call obj_decref
 .scf_fail:
     xor eax, eax
-    xor edx, edx
     pop rbx
     leave
     ret

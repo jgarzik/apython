@@ -3,6 +3,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 
 extern ap_malloc
 extern obj_decref
@@ -727,10 +728,14 @@ DEF_FUNC time_sleep_func, TSL_FRAME
     ; handler did not run either, because nothing on the way out looked at
     ; the pending flag.
 .sleep_again:
+    ; The GIL is given up for the sleep: other threads run while this one
+    ; waits.  Everything the syscall touches is in this frame.
+    ALLOW_THREADS_BEGIN
     mov eax, 35                 ; __NR_nanosleep
     lea rdi, [rbp - TSL_SEC]
     lea rsi, [rbp - TSL_REM]
     syscall
+    ALLOW_THREADS_END           ; rax survives
     cmp rax, -4                 ; -EINTR
     jne .sleep_finished
     extern signal_run_pending

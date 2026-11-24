@@ -7,6 +7,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 
 ; External symbols used
 extern get_iterator_opt
@@ -1907,7 +1908,7 @@ DEF_FUNC builtin_input_fn, INP_FRAME
     add rsi, r8
     mov edx, 1
     xor edi, edi                ; stdin
-    call sys_read
+    BLOCKING_CALL sys_read      ; the buffer is this frame's
     add rsp, 8
     pop r8
     test rax, rax

@@ -55,6 +55,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 
 ASM_INIT
 
@@ -352,8 +353,10 @@ SC_SN    equ 56             ; the 'n' out slot
 SC_SR    equ 64             ; the 'r' in/out slot
 SC_RET   equ 72             ; what the C function returned
 SC_VAL   equ 80             ; the result Value, while the buffer is freed
-SC_CARG  equ 128            ; C arguments 0..5 at rbp-128 .. rbp-88
-SC_FRAME equ 128            ; + 4 pushes = 160, 16-aligned
+SC_BLOCK equ 88             ; non-zero: the call may block; GIL given up
+SC_ERRNO equ 96             ; errno, read before the GIL is taken back
+SC_CARG  equ 144            ; C arguments 0..5 at rbp-144 .. rbp-104
+SC_FRAME equ 144            ; + 4 pushes = 176, 16-aligned
 DEF_FUNC_LOCAL ssl_call, SC_FRAME
     push rbx
     push r12
@@ -539,6 +542,31 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     mov [rbp - SC_CARG + rcx*8], rax
 
 .sc_call:
+    ; The four calls that do I/O on a socket give the GIL up: a handshake or
+    ; a read on a blocking socket waits on the peer, and a server thread
+    ; that could not run meanwhile would never answer.  Everything else is
+    ; computation over memory and keeps it.  Between the two macros nothing
+    ; touches an object: the arguments are already C values in this frame,
+    ; and errno goes to the frame, not to the shared word.
+    mov qword [rbp - SC_BLOCK], 0
+    mov r10, [rbp - SC_DESC]
+    mov r10, [r10 + SslFn.fn]
+    mov rax, SSL_do_handshake                 ; the address the table row holds
+    cmp r10, rax
+    je .sc_blocks
+    mov rax, SSL_read                 ; the address the table row holds
+    cmp r10, rax
+    je .sc_blocks
+    mov rax, SSL_write                 ; the address the table row holds
+    cmp r10, rax
+    je .sc_blocks
+    mov rax, SSL_shutdown                 ; the address the table row holds
+    cmp r10, rax
+    jne .sc_go
+.sc_blocks:
+    mov qword [rbp - SC_BLOCK], 1
+    ALLOW_THREADS_BEGIN
+.sc_go:
     call __errno_location wrt ..plt
     mov dword [rax], 0
     mov rdi, [rbp - SC_CARG]
@@ -554,6 +582,12 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     mov [rbp - SC_RET], rax
     call __errno_location wrt ..plt
     movsxd rax, dword [rax]
+    mov [rbp - SC_ERRNO], rax
+    cmp qword [rbp - SC_BLOCK], 0
+    je .sc_called
+    ALLOW_THREADS_END
+.sc_called:
+    mov rax, [rbp - SC_ERRNO]
     mov [rel ssl_last_errno], rax
 
     mov rcx, [rbp - SC_DESC]

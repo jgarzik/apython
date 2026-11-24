@@ -98,6 +98,31 @@ fi
 mkdir -p "$OUTDIR/logs" "$OUTDIR/cwd"
 TSV="$OUTDIR/sweep-$SIDE.tsv"
 
+# apython runs from a STAGED PREFIX whose stdlib is $CPYTHON_LIB itself.
+#
+# Hundreds of these tests start a child interpreter with -I, which ignores
+# PYTHONPATH, and have the child `import test.support` or the test module
+# itself.  CPython's child finds `test` in its own Lib/.  apython's vendored
+# stdlib/ ships without Lib/test, so its child found nothing: those tests
+# failed for a reason that has nothing to do with the interpreter, and one of
+# them -- test_threading's daemon-threads-at-exit script, whose threads die
+# on the import and whose main thread then waits for ever -- turned a module
+# of two hundred tests into a single HANG.  The staged prefix is the same
+# binary and the same lib/, with the reference Lib/ (the tag stdlib/ was
+# vendored from, plus test/) where stdlib/ would be.  Set RC_STAGE=0 for the
+# old arrangement.
+if [ "$SIDE" = ap ] && [ "${RC_STAGE:-1}" = 1 ]; then
+    STAGE="$OUTDIR/prefix"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE/build"
+    cp "$RUNNER" "$STAGE/apython"
+    ln -s "$ROOT/lib" "$STAGE/lib"
+    ln -s "$CPYTHON_LIB" "$STAGE/stdlib"
+    [ -e "$ROOT/build/_ctypes_test.so" ] && \
+        ln -s "$ROOT/build/_ctypes_test.so" "$STAGE/build/_ctypes_test.so"
+    RUNNER="$STAGE/apython"
+fi
+
 # Anything left in a scratch cwd by an earlier, killed run.  They are removed
 # per module below; this is for the sweep that did not get to finish.
 rm -rf "${OUTDIR:?}/cwd"/* 2>/dev/null

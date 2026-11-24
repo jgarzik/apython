@@ -656,6 +656,36 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov [rbp - BAS_SLEN], rdx
 
 .bas_have_src:
+    ; Converting the value may have run Python -- an element's __index__ --
+    ; and that may have resized this bytearray under the bounds clamped
+    ; above.  Clamp again against the length it has now; an extended slice
+    ; that no longer fits selects nothing.
+    mov rcx, [rbp - BAS_SELF]
+    mov rax, [rcx + PyByteArrayObject.ob_size]
+    cmp qword [rbp - BAS_STEP], 1
+    jne .bas_ext_reclamp
+    cmp [rbp - BAS_START], rax
+    jbe .bas_start_live
+    mov [rbp - BAS_START], rax
+.bas_start_live:
+    cmp [rbp - BAS_STOP], rax
+    jbe .bas_reclamped
+    mov [rbp - BAS_STOP], rax
+    jmp .bas_reclamped
+.bas_ext_reclamp:
+    mov rdx, [rbp - BAS_N]
+    test rdx, rdx
+    jz .bas_reclamped
+    cmp [rbp - BAS_START], rax
+    jae .bas_ext_stale
+    dec rdx
+    imul rdx, [rbp - BAS_STEP]
+    add rdx, [rbp - BAS_START]  ; the last index the slice touches
+    cmp rdx, rax
+    jb .bas_reclamped
+.bas_ext_stale:
+    mov qword [rbp - BAS_N], 0
+.bas_reclamped:
     cmp qword [rbp - BAS_STEP], 1
     jne .bas_extended
 

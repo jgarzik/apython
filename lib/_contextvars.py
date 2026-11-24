@@ -112,17 +112,17 @@ class Context:
         self._entered = False
 
     def run(self, callable, *args, **kwargs):
-        global _current
         if self._entered:
             raise RuntimeError(
                 "cannot enter context: %r is already entered" % (self,))
         self._entered = True
-        saved = _current
-        _current = self
+        store = _thread_dict()
+        saved = store.get(_KEY)
+        store[_KEY] = self
         try:
             return callable(*args, **kwargs)
         finally:
-            _current = saved
+            store[_KEY] = saved
             self._entered = False
 
     def copy(self):
@@ -161,12 +161,24 @@ class Context:
         return self._data.items()
 
 
-_current = Context()
+# The current context is PER THREAD, as CPython's is: a new thread starts
+# with an empty one.  It lives in the thread's own dict
+# (_threadcore.thread_dict), made on first use.  When this was one global, a
+# thread saw whatever the thread that started it had set -- so decimal's
+# per-thread context was every thread's, and a thread that changed its
+# precision changed everyone's.
+from _threadcore import thread_dict as _thread_dict
+
+_KEY = "contextvars.current"
 
 
 def _current_context():
-    return _current
+    store = _thread_dict()
+    ctx = store.get(_KEY)
+    if ctx is None:
+        ctx = store[_KEY] = Context()
+    return ctx
 
 
 def copy_context():
-    return _current.copy()
+    return _current_context().copy()

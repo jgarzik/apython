@@ -18,6 +18,7 @@ SET_ENTRY_SIZE    equ 16
 extern ap_malloc
 extern ap_free
 extern ap_realloc
+extern obj_dealloc
 extern obj_repr
 extern obj_decref
 extern str_from_cstr_heap
@@ -32,8 +33,16 @@ extern str_type
 ; which is the one the repr's own C recursion is measured against; the array
 ; grows to meet it.
 ; repr_depth, repr_stack and repr_stack_cap lives in ThreadState (src/include/threadstate.inc).
-; eval_exception_unwind resets repr_depth: a raise from inside a nested
-; __repr__ skips repr_pop.
+;
+; An entry is two words: the container, and the machine rsp its repr was
+; running at.  A raise from inside a nested __repr__ skips repr_pop, so
+; eval_exception_unwind drops the entries itself -- but only those whose rsp
+; is BELOW where the unwind lands, which are the reprs whose frames it just
+; discarded.  One the unwind landed inside is still running, still needs its
+; entry to recognise a cycle, and still pops on its way out.
+RS_ENTRY equ 16
+RS_PTR   equ 0
+RS_RSP   equ 8
 
 section .text
 extern ap_realloc
@@ -62,7 +71,9 @@ repr_check_active:
     mov rax, [gs:ThreadState.repr_stack]
 .rca_loop:
     dec rcx
-    cmp [rax + rcx*8], rdi
+    mov rdx, rcx
+    shl rdx, 4                  ; * RS_ENTRY
+    cmp [rax + rdx + RS_PTR], rdi
     je .rca_found
     test rcx, rcx
     jnz .rca_loop
@@ -96,7 +107,7 @@ repr_push:
     shl rsi, 1
 .rp_sized:
     mov [gs:ThreadState.repr_stack_cap], rsi
-    shl rsi, 3
+    shl rsi, 4                  ; * RS_ENTRY
     mov rdi, [gs:ThreadState.repr_stack]
     call ap_realloc
     mov [gs:ThreadState.repr_stack], rax
@@ -106,7 +117,9 @@ repr_push:
 
 .rp_have_room:
     mov rcx, [gs:ThreadState.repr_stack]
-    mov [rcx + rax*8], rdi
+    shl rax, 4                  ; * RS_ENTRY
+    mov [rcx + rax + RS_PTR], rdi
+    mov [rcx + rax + RS_RSP], rsp
     inc qword [gs:ThreadState.repr_depth]
     ret
 .rp_overflow:
@@ -117,24 +130,13 @@ extern exc_TypeError_type
 
 ; Pop from repr_stack, with a floor at zero.
 ;
-; eval_exception_unwind ZEROES repr_depth, because a raise from inside a
-; nested __repr__ skips the pop and leaves the entries stale.  But an unwind
-; can land INSIDE an outer container repr rather than outside it -- a Python
-; __repr__ that calls another repr, and catches what that one raises -- and
-; the outer repr then still pops on its way out.  Unclamped the counter went
-; NEGATIVE, and repr_check_active's `dec rcx` loop walked backwards out of the
-; array from there: thirteen lines reproduce it, and CPython's test_wsgiref
-; segfaulted in tuple_repr.
+; eval_exception_unwind drops exactly the entries whose reprs it abandoned
+; (see the top of this file), so a repr that is still running finds its own
+; entry on top and the count balances.  The floor is belt and braces: a
+; counter that went negative once sent repr_check_active's loop backwards out
+; of the array, and CPython's test_wsgiref segfaulted in tuple_repr.
 ;
-; This is the shape gc_collecting has, recorded in eval.asm: the unwinder
-; cannot tell "escaped the C routine" from "landed inside it" by the fact of
-; the raise alone.  Here the floor is enough -- the entries the counter
-; indexes were discarded by that same reset, so nothing is lost by counting
-; the remainder of an abandoned repr as zero.
-;
-; It touches no register: callers pop with the finished repr in rax, which the
-; first cut of this clamp clobbered -- and a print that answered nothing at all
-; is what that looked like.
+; It touches no register: callers pop with the finished repr in rax.
 global repr_pop
 repr_pop:
     cmp qword [gs:ThreadState.repr_depth], 0
@@ -150,6 +152,7 @@ repr_pop:
 RB_PTR   equ 8              ; the buffer
 RB_USED  equ 16             ; bytes of content written
 RB_CAP   equ 24             ; bytes allocated
+RB_HELD  equ 32             ; dict: the value, held across its key's repr
 RB_FRAME equ 32            ; + 4 pushes = 64, 16-aligned
 ; list and tuple keep one callee-saved register fewer than dict and set.
 RB_FRAME3 equ 40           ; + 3 pushes = 64, 16-aligned
@@ -184,6 +187,30 @@ RB_FRAME3 equ 40           ; + 3 pushes = 64, 16-aligned
     mov byte [rax + rcx], %1
     inc qword [rbp - RB_USED]
 %endmacro
+
+;; ============================================================================
+;; repr_held(rdi = Value) -> rax = its repr, or NULL
+;;
+;; obj_repr with the element held for the duration.  A container hands its
+;; elements over borrowed, and a __repr__ is arbitrary Python: one that
+;; deleted its own neighbour from the list left the loop calling the repr of
+;; freed memory.  CPython's list_repr and dict_repr take a reference for the
+;; same reason.  The loops also re-read the container's size on every pass.
+;; ============================================================================
+RH_RESULT equ 8
+DEF_FUNC repr_held, 8               ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    INCREF_V rbx, rax
+    mov rdi, rbx
+    call obj_repr
+    mov [rbp - RH_RESULT], rax
+    DECREF_V rbx, rax
+    mov rax, [rbp - RH_RESULT]
+    pop rbx
+    leave
+    ret
+END_FUNC repr_held
 
 ;; ============================================================================
 ;; list_repr(PyListObject *self) -> PyStrObject*
@@ -222,7 +249,7 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     ; Iterate elements
     xor r12d, r12d             ; index = 0
 .lr_loop:
-    cmp r12, r13
+    cmp r12, [rbx + PyListObject.ob_size]   ; live: a __repr__ can shrink it
     jge .lr_done
 
     ; If not first element, append ", "
@@ -238,7 +265,7 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     mov rdi, [rax + r12 * 8]      ; payload
 
     ; Call obj_repr(payload, tag)
-    call obj_repr
+    call repr_held
     test rax, rax
     jz .lr_elem_failed
 
@@ -478,7 +505,7 @@ DEF_FUNC dict_repr, RB_FRAME
     xor r14d, r14d             ; items printed = 0
 
 .dr_loop:
-    cmp r12, r13
+    cmp r12, [rbx + PyDictObject.capacity]  ; live: a __repr__ can clear it
     jge .dr_done
 
     ; Occupied entries have a non-zero key Value
@@ -499,10 +526,14 @@ DEF_FUNC dict_repr, RB_FRAME
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     mov rdi, [rax + rcx + DictEntry.key]
+    ; The value is taken NOW and held: the key's repr may drop the entry.
+    mov rdx, [rax + rcx + DictEntry.value]
+    mov [rbp - RB_HELD], rdx
+    INCREF_V rdx, rax
     push r12                   ; save entry index across calls
-    call obj_repr
+    call repr_held
     test rax, rax
-    jz .dr_elem_failed
+    jz .dr_key_failed
 
     push rax
     mov rcx, [rax + PyStrObject.ob_size]
@@ -525,12 +556,14 @@ DEF_FUNC dict_repr, RB_FRAME
     BUF_BYTE ' '
 
     ; repr(value)
-    pop r12                    ; restore entry index
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, DICT_ENTRY_SIZE
-    mov rdi, [rax + rcx + DictEntry.value]
-    push r12
-    call obj_repr
+    mov rdi, [rbp - RB_HELD]
+    call obj_repr              ; held since before the key's repr
+    push rax
+    push rax                   ; twice: rsp keeps its alignment
+    mov rdi, [rbp - RB_HELD]
+    DECREF_V rdi, rax
+    pop rax
+    pop rax
     test rax, rax
     jz .dr_elem_failed
 
@@ -580,6 +613,9 @@ DEF_FUNC dict_repr, RB_FRAME
     leave
     ret
 
+.dr_key_failed:
+    mov rdi, [rbp - RB_HELD]
+    DECREF_V rdi, rax
 .dr_elem_failed:
     ; The entry index is on the machine stack: both arms above push it across
     ; obj_repr and pop it once that repr comes back, and neither gets there
@@ -712,7 +748,7 @@ DEF_FUNC set_repr, RB_FRAME
     xor r14d, r14d
 
 .sr_loop:
-    cmp r12, r13
+    cmp r12, [rbx + PyDictObject.capacity]  ; live: a __repr__ can clear it
     jge .sr_done
 
     ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key Value(8)
@@ -734,7 +770,7 @@ DEF_FUNC set_repr, RB_FRAME
     imul rcx, r12, SET_ENTRY_SIZE
     mov rdi, [rax + rcx + SET_ENTRY_KEY]
     push r12
-    call obj_repr
+    call repr_held
     test rax, rax
     jz .sr_elem_failed
 

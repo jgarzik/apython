@@ -53,35 +53,40 @@ section .text
 ;; op_load_global_module (200) -> nothing; pushes the global and dispatches
 ;;
 ;; The specialized LOAD_GLOBAL for a name that was found in the module's own
-;; globals.  Guards the globals dict's version and then reads the entry by its
-;; cached dense index, which costs neither the hash nor the probe.
+;; globals.  Reads the entry by its cached dense index, which costs neither
+;; the hash nor the probe, and verifies it IS that name's entry: the index is
+;; inside the table, and the key there is the very name object.  A dict has a
+;; key once, so that is the whole proof and no version is needed.
 ;;
-;; The version guard runs BEFORE anything touches the value stack, so a deopt
-;; has nothing to undo.
+;; It used to guard on sixteen bits of a per-dict write counter that started
+;; at 1 in every dict.  One code object run against two namespaces -- exec()
+;; twice, or types.FunctionType over a second globals -- passed the guard
+;; whenever the counts agreed and read whatever sat at that index in the
+;; other dict, past the end of its table if it was the smaller.
 ;;
-;; CACHE layout at rbx: [+0]=counter [+2]=index [+4]=mod_ver [+6]=bi_ver
+;; The guards run BEFORE anything touches the value stack, so a deopt has
+;; nothing to undo.
+;;
+;; CACHE layout at rbx: [+0]=counter [+2]=index
 ;; ============================================================================
 DEF_FUNC_BARE op_load_global_module
-    ; Version guard FIRST (before any stack modification)
     mov rdi, [r12 + PyFrame.globals]
-    mov rax, [rdi + PyDictObject.dk_version]
-    cmp ax, word [rbx + 4]     ; compare low 16 bits with CACHE[2]
-    jne .lgm_deopt
-
-    ; Fast path: load from globals entries by cached index
-    mov rdi, [rdi + PyDictObject.entries]
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
+    cmp rax, [rdi + PyDictObject.dk_nentries]
+    jae .lgm_deopt
+    mov rdi, [rdi + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
-    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
-    ; answered at random: usually not taken, and taken for no reason when it
-    ; happened to be zero.
+    mov edx, ecx
+    shr edx, 1                 ; the name index
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rdx*8]
+    cmp [rdi + DictEntry.key], rsi
+    jne .lgm_deopt
+    ; A deleted entry has a NULL key, so the compare above refused it.
     mov rax, [rdi + DictEntry.value]
     test rax, rax
     jz .lgm_deopt
-    ; The NULL test above was already made on the RAW Value -- 0 is the only
-    ; NULL encoding -- so nothing here ever needed the tag.
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
@@ -106,38 +111,38 @@ END_FUNC op_load_global_module
 ;; op_load_global_builtin (201) -> nothing; pushes the builtin and dispatches
 ;;
 ;; The specialized LOAD_GLOBAL for a name that was not in the module globals
-;; and was found in builtins.  Both dictionaries are guarded: the globals one
-;; because the name may since have been defined there, which would shadow the
-;; builtin, and the builtins one because the entry itself may have moved.
+;; and was found in builtins.  The builtins entry is verified the way the
+;; module one is, by bounds and key.  The globals dict has to be shown NOT to
+;; have gained the name, which only a version can say: 32 bits of
+;; dk_version, which every dict draws from one process-wide clock, so two
+;; namespaces never hold the same value.
+;;
+;; CACHE layout at rbx: [+0]=counter [+2]=index [+4]=globals version (32b)
 ;; ============================================================================
 DEF_FUNC_BARE op_load_global_builtin
-    ; Guards FIRST (before any stack modification)
-    ; Guard 1: globals version must not have changed (name might now be in globals)
+    ; Guard 1: nothing has been written to the globals dict
     mov rdi, [r12 + PyFrame.globals]
     mov rax, [rdi + PyDictObject.dk_version]
-    cmp ax, word [rbx + 4]     ; CACHE[2] = module_keys_version
+    cmp eax, dword [rbx + 4]
     jne .lgb_deopt
 
-    ; Guard 2: builtins version must match
+    ; Guard 2: the builtins entry at the cached index is this name's
     mov rdi, [r12 + PyFrame.builtins]
-    mov rax, [rdi + PyDictObject.dk_version]
-    cmp ax, word [rbx + 6]     ; CACHE[3] = builtin_keys_version
-    jne .lgb_deopt
-
-    ; Fast path: load from builtins entries by cached index
-    mov rdi, [rdi + PyDictObject.entries]
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
+    cmp rax, [rdi + PyDictObject.dk_nentries]
+    jae .lgb_deopt
+    mov rdi, [rdi + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     add rdi, rax               ; rdi = entry ptr
-    ; A deleted entry has a NULL value.  This tested edx BEFORE anything had
-    ; loaded it -- a register the dispatcher leaves undefined -- so the guard
-    ; answered at random: usually not taken, and taken for no reason when it
-    ; happened to be zero.
+    mov edx, ecx
+    shr edx, 1                 ; the name index
+    LOAD_CO_NAMES rsi
+    mov rsi, [rsi + rdx*8]
+    cmp [rdi + DictEntry.key], rsi
+    jne .lgb_deopt
     mov rax, [rdi + DictEntry.value]
     test rax, rax
     jz .lgb_deopt
-    ; The NULL test above was already made on the RAW Value -- 0 is the only
-    ; NULL encoding -- so nothing here ever needed the tag.
 
     ; Guards passed — now push NULL if needed
     test ecx, 1
@@ -150,10 +155,7 @@ DEF_FUNC_BARE op_load_global_builtin
     DISPATCH
 
 .lgb_deopt:
-    ; Deopt into the generic handler with the argument ecx already
-    ; holds.  Rewinding rbx by two and re-dispatching would drop a
-    ; preceding EXTENDED_ARG, and both of these carry one as soon as
-    ; a module has enough names: the arg is (name index << 1 | flag).
+    ; See .lgm_deopt.
     mov byte [rbx - 2], 116
     jmp op_load_global
 END_FUNC op_load_global_builtin

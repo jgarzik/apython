@@ -1192,12 +1192,10 @@ global hash_info_v5
 hash_info_v5: db "fnv", 0
 
 ;; ============================================================================
-;; sys.thread_info.  Three fields, as CPython's is, and the name is the honest
-;; one: `pthread-stubs` is what CPython itself reports for a build whose
-;; threads do not start, which is exactly what lib/_thread.py is.  `lock` and
-;; `version` are None, which is also CPython's answer when there is nothing to
-;; name -- and what makes test_os's and test_threadsignals' `if
-;; sys.thread_info.version` guards fall the right way.
+;; sys.thread_info.  Three fields, as CPython's is: the thread library, how
+;; a lock is implemented, and the library's version -- "pthread",
+;; "semaphore", and whatever confstr says (thread_info_version,
+;; src/modules/thread.asm).
 ;; ============================================================================
 section .rodata
 
@@ -1206,7 +1204,9 @@ thread_info_f0: db "name", 0
 thread_info_f1: db "lock", 0
 thread_info_f2: db "version", 0
 global thread_info_v0
-thread_info_v0: db "pthread-stubs", 0
+thread_info_v0: db "pthread", 0
+global thread_info_v1
+thread_info_v1: db "semaphore", 0
 
 align 8
 thread_info_fields:

@@ -15,12 +15,14 @@ async def main():
         print("bad host", "connected?")
     except OSError as exc:
         print("bad host", type(exc).__name__)
+    # Which OSError depends on the machine: where localhost is one address
+    # it is ConnectionRefusedError, and where /etc/hosts also names ::1
+    # asyncio tries both and raises a plain OSError naming the two failures.
     try:
         await asyncio.open_connection("localhost", 1)
-    except ConnectionRefusedError as exc:
-        print("localhost refused", exc.errno)
+        print("localhost", "connected?")
     except OSError as exc:
-        print("localhost", type(exc).__name__)
+        print("localhost resolved, then", "OSError")
 
 
 asyncio.run(main())

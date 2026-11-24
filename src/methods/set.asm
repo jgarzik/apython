@@ -197,7 +197,6 @@ END_FUNC set_method_pop
 ;; set_method_clear(args, nargs) -> None
 ;; args[0]=self
 ;; ============================================================================
-SMCL_END   equ 8            ; one past the last slot of the table being cleared
 SMCL_FRAME equ 8            ; + 3 pushes = 32, 16-aligned
 DEF_FUNC set_method_clear, SMCL_FRAME
     push rbx
@@ -207,39 +206,11 @@ DEF_FUNC set_method_clear, SMCL_FRAME
     cmp rsi, 1
     jne .smc_error
 
-    mov rbx, [rdi]          ; self (set)
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.ob_size]   ; live keys still to release
-    mov rcx, [rbx + PyDictObject.capacity]
-    shl rcx, 4
-    add rcx, r12                            ; one past the end
-    mov [rbp - SMCL_END], rcx
-
-.smc_loop:
-    ; The live count ends this; the end of the table is the backstop, since
-    ; a __del__ reached from the DECREF can resurrect and mutate.
-    test r13, r13
-    jz .smc_done
-    cmp r12, [rbp - SMCL_END]
-    jae .smc_done
-
-    mov rdi, [r12 + SET_ENTRY_KEY]
-    add r12, SET_ENTRY_SIZE
-    test rdi, rdi                           ; occupied?
-    jz .smc_loop
-    dec r13
-    mov qword [r12 - SET_ENTRY_SIZE + SET_ENTRY_KEY], 0
-    DECREF_V rdi, rsi
-    jmp .smc_loop
-
-.smc_done:
-    mov qword [rbx + PyDictObject.ob_size], 0
-
-    ; Hand the table back.  Zeroing the keys in place left a set that had
-    ; held a million elements still holding a million slots -- and every
-    ; later walk, iteration and rehash paying for them.
-    mov rdi, rbx
-    call set_release_table
+    ; Detaches the table before it releases a key, and hands it back: a set
+    ; that held a million elements does not go on holding a million slots.
+    mov rdi, [rdi]          ; self (set)
+    extern set_clear_gc
+    call set_clear_gc
 
     RET_NONE
     pop r13

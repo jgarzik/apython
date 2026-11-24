@@ -80,6 +80,22 @@ struc ThreadState
     .asyncgen_firstiter_hook: resq 1
     .asyncgen_finalizer_hook: resq 1
     .gc_collect_rsp:      resq 1  ; rsp of the collection THIS thread runs
+    ; ---- the unmarshal reader (src/marshal.asm) ----------------------------
+    .marshal_buf:         resq 1  ; the bytes being read
+    .marshal_pos:         resq 1  ;   the read position
+    .marshal_len:         resq 1  ;   their length
+    .marshal_refs:        resq 1  ; FLAG_REF table: PyObject*[]
+    .marshal_ref_count:   resq 1  ;   entries in use
+    .marshal_ref_cap:     resq 1  ;   capacity
+    .marshal_soft:        resq 1  ; refuse softly rather than fatally
+    .marshal_error:       resq 1  ; MARSHAL_ERR_*, the first refusal recorded
+    .marshal_rsp_floor:   resq 1  ; how far down the machine stack it may nest
+    .ts_next:             resq 1  ; the list of every thread's state, which
+    .ts_prev:             resq 1  ;   tstate_list_head anchors (src/gil.asm)
+    .ts_ident:            resq 1  ; pthread_self(), what get_ident() answers
+    .ts_native_id:        resq 1  ; gettid()
+    .ts_dict:             resq 1  ; this thread's own dict, or NULL: where
+                                  ;   _thread._local keeps its namespaces
     .import_path_override: resq 1 ; search path for one import, or NULL
     .comp_inherit_future: resq 1  ; PEP 563 inherited by the next compile
     .tb_seen_n:           resq 1  ; traceback printing: cycle guard count

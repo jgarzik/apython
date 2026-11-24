@@ -15,10 +15,17 @@ NAMES = ["TCSANOW", "TCSADRAIN", "TCSAFLUSH", "TCIFLUSH", "TCOFLUSH",
          "IGNBRK", "BRKINT", "ISTRIP", "INLCR", "IGNCR", "ICRNL", "IXON",
          "OPOST", "CSIZE", "PARENB", "CS8", "ECHO", "ICANON", "ISIG",
          "IEXTEN", "VMIN", "VTIME", "VINTR", "VQUIT", "VERASE", "VKILL",
-         "VEOF", "VSTART", "VSTOP", "VSUSP", "B0", "B9600", "B115200",
+         "VEOF", "VSTART", "VSTOP", "VSUSP", "B0",
          "NCCS", "TIOCGWINSZ"]
 for n in NAMES:
     print(n, getattr(termios, n))
+
+# The speeds are the one family that is NOT the same everywhere: glibc 2.42
+# made each constant its own rate (B9600 == 9600), where the kernel's
+# encoding -- what an older glibc hands through, and what the raw ioctl here
+# speaks -- is a small code (B9600 == 13).  Either is right for its platform.
+print("B9600", termios.B9600 in (13, 9600))
+print("B115200", termios.B115200 in (4098, 115200))
 
 print("error is its own class:", termios.error is not OSError,
       issubclass(termios.error, Exception))

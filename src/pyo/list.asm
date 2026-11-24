@@ -514,7 +514,9 @@ LAS_TEMP  equ 16       ; temp list from generic iterable (NULL if not used)
 LAS_EXC   equ 24       ; current_exception, to tell "exhausted" from "raised"
 LAS_SRCLEN   equ 32    ; the two lengths, for the mismatch message: the
 LAS_SLICELEN equ 40    ; registers holding them do not survive its unwind
-LAS_FRAME equ 48            ; + 2 pushes = 64, 16-byte aligned
+LAS_RECYCLE  equ 56    ; the items a slice assignment displaced, released
+LAS_RECN     equ 64    ; only once the list is whole again; and how many
+LAS_FRAME equ 64            ; + 2 pushes = 80, 16-byte aligned
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -585,15 +587,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     test rsi, rsi
     jl .lid_index_error
 
-    push rsi                   ; save index
-
-    ; DECREF old value at index
+    ; Take the old value out; it is released only after the list is whole
+    ; again.  Releasing it first ran its __del__ against a list that still
+    ; held it -- one that cleared the list was a segfault in the shift below.
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rsi * 8]      ; old value payload
-    V_UNPACK rdi, rcx
-    DECREF_VAL rdi, rcx
-
-    pop rsi                    ; restore index
+    mov r12, [rax + rsi * 8]      ; r12 = the old Value (a delete has no new one)
 
     ; Shift elements down: memmove items[i] = items[i+1] for i..size-2
     mov rcx, [rbx + PyListObject.ob_size]
@@ -621,6 +619,9 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; Decrement ob_size
     mov [rbx + PyListObject.ob_size], rcx
 
+    mov rdi, r12
+    DECREF_V rdi, rax
+
     xor eax, eax                ; deleted; see list_setitem for why this is set
     pop r12
     pop rbx
@@ -639,6 +640,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     sub rsp, 8             ; align
 
     mov qword [rbp - LAS_TEMP], 0  ; no temp list yet
+    mov qword [rbp - LAS_RECYCLE], 0
 
     ; Get slice indices relative to list length
     mov rdi, rsi           ; slice
@@ -838,26 +840,41 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; r13 = start, r14 = stop
     ; rbx = list
 
+    ; Materialising the value may have run Python -- an iterator, a
+    ; __getitem__ -- and that may have changed this list.  Clamp the bounds
+    ; again, against the length it has NOW, as CPython's list_ass_slice does
+    ; after its PySequence_Fast.
+    mov rax, [rbx + PyListObject.ob_size]
+    cmp r13, rax
+    cmova r13, rax
+    cmp r14, rax
+    cmova r14, rax
+    cmp r14, r13
+    cmovl r14, r13
+    mov rcx, r14
+    sub rcx, r13           ; old_len, from the live bounds
+
     ; Save new items info on stack
     push r8                ; [rsp+0] = new_len
     push r9                ; [rsp+0] = new_payload_ptr, [rsp+8] = new_len
     push r10               ; [rsp+0] = new_tag_ptr, [rsp+8] = new_payload_ptr
     push rcx               ; [rsp+0] = old_len
 
-    ; 1. DECREF old items in slice range [start..stop)
-    mov rcx, r13           ; i = start
-.las_decref_loop:
-    cmp rcx, r14           ; i < stop?
-    jge .las_decref_done
-    push rcx
-    push rcx                      ; twice: rsp keeps its alignment
-    mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rcx * 8]
-    XDECREF_V rdi, rsi
-    pop rcx
-    pop rcx
-    inc rcx
-    jmp .las_decref_loop
+    ; 1. Move the displaced items aside.  They are released at the exit, once
+    ; the list is whole: releasing them here ran each __del__ against a list
+    ; that still held the item and was about to be shifted.
+    mov [rbp - LAS_RECN], rcx
+    test rcx, rcx
+    jz .las_decref_done
+    lea rdi, [rcx*8]
+    call ap_malloc
+    mov [rbp - LAS_RECYCLE], rax
+    mov rdi, rax
+    mov rsi, [rbx + PyListObject.ob_item]
+    lea rsi, [rsi + r13*8]
+    mov rdx, [rbp - LAS_RECN]
+    shl rdx, 3
+    call ap_memcpy
 .las_decref_done:
 
     ; 2. Shift elements if old_len != new_len
@@ -978,6 +995,22 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_incref_loop
 
 .las_insert_done:
+    ; Release what the assignment displaced, now that the list is whole.
+    mov r14, [rbp - LAS_RECYCLE]
+    test r14, r14
+    jz .las_no_recycle
+    xor r13d, r13d
+.las_recycle_loop:
+    cmp r13, [rbp - LAS_RECN]
+    jae .las_recycle_free
+    mov rdi, [r14 + r13*8]
+    XDECREF_V rdi, rsi
+    inc r13
+    jmp .las_recycle_loop
+.las_recycle_free:
+    mov rdi, r14
+    call ap_free
+.las_no_recycle:
     ; DECREF temp list if generic iterable path created one
     mov rdi, [rbp - LAS_TEMP]
     test rdi, rdi
@@ -1097,6 +1130,23 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop r12
     pop r12
     mov [rbp - LAS_TEMP], r12   ; released at the shared exit
+    ; The iteration ran Python, which may have shrunk this list under the
+    ; slice the bounds were clamped to.  A slice that no longer fits selects
+    ; nothing; the length check below then refuses the assignment.
+    test r14, r14
+    jz .ext_bounds_ok
+    mov rax, [rbx + PyListObject.ob_size]
+    cmp r13, rax
+    jae .ext_bounds_stale
+    mov rcx, r14
+    dec rcx
+    imul rcx, r15
+    add rcx, r13                ; the last index the slice touches
+    cmp rcx, rax
+    jb .ext_bounds_ok
+.ext_bounds_stale:
+    xor r14d, r14d
+.ext_bounds_ok:
     mov r8, [r12 + PyListObject.ob_size]
     mov r12, [r12 + PyListObject.ob_item]
     jmp .ext_check_len
@@ -1132,20 +1182,25 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     test r14, r14
     jz .las_insert_done        ; jump to shared exit
 
+    ; The displaced items go aside and are released at the shared exit, so
+    ; no __del__ runs while the loop is still writing.
+    lea rdi, [r14*8]
+    call ap_malloc
+    mov [rbp - LAS_RECYCLE], rax
+    mov [rbp - LAS_RECN], r14
+    mov r8, rax                ; the recycle cursor
+
 .ext_loop:
-    ; DECREF old value at list[r13]
     mov rax, [rbx + PyListObject.ob_item]
     mov rdi, [rax + r13 * 8]      ; old Value
-    sub rsp, 8                     ; alignment
-    XDECREF_V rdi, rsi        ; may call obj_dealloc, clobbers caller-saved
-    add rsp, 8
+    mov [r8], rdi
+    add r8, 8
 
     ; INCREF the new value from the source
     mov rdi, [r12]
     INCREF_V rdi, rsi
 
     ; Store at list[r13]
-    mov rax, [rbx + PyListObject.ob_item]
     mov [rax + r13 * 8], rdi
 
     ; Advance
@@ -1162,17 +1217,20 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     test r14, r14
     jz .las_insert_done        ; empty slice → no-op
 
-    ; Phase 1: DECREF items at each slice position
+    ; Phase 1: move the items at each slice position aside; they are
+    ; released at the shared exit, after the compaction.
+    lea rdi, [r14*8]
+    call ap_malloc
+    mov [rbp - LAS_RECYCLE], rax
+    mov [rbp - LAS_RECN], r14
+    mov rdx, rax               ; the recycle cursor
     mov rcx, r13               ; cur = start
     mov r8, r14                ; remaining = slicelength
 .ext_del_decref:
-    push rcx
-    push r8
     mov rax, [rbx + PyListObject.ob_item]
     mov rdi, [rax + rcx * 8]
-    XDECREF_V rdi, rsi
-    pop r8
-    pop rcx
+    mov [rdx], rdi
+    add rdx, 8
     add rcx, r15              ; cur += step
     dec r8
     jnz .ext_del_decref
@@ -2154,23 +2212,8 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     jmp .lir_copy_outer
 
 .lir_clear:
-    ; DECREF all items, set size=0
-    mov r13, [rbx + PyListObject.ob_size]
-    xor ecx, ecx
-.lir_clear_loop:
-    cmp rcx, r13
-    jge .lir_clear_done
-    mov rax, [rbx + PyListObject.ob_item]
-    push rcx
-    push rcx                      ; twice: rsp keeps its alignment
-    mov rdi, [rax + rcx * 8]
-    DECREF_V rdi, rsi
-    pop rcx
-    pop rcx
-    inc rcx
-    jmp .lir_clear_loop
-.lir_clear_done:
-    mov qword [rbx + PyListObject.ob_size], 0
+    mov rdi, rbx
+    call list_clear                 ; detaches before it releases
 
 .lir_done:
     INCREF rbx
@@ -2749,6 +2792,19 @@ DEF_FUNC list_traverse
     ret
 END_FUNC list_traverse
 
+;; list_clear(rdi = list) -> void
+;; Empty a list and release everything it held.  tp_clear, and what clear(),
+;; __init__ and `l *= 0` all mean.
+;;
+;; The array is DETACHED first and only then walked.  Releasing an item runs
+;; its __del__, which is arbitrary Python: a second clear() that still found
+;; these items installed released every one of them again, and an append()
+;; could realloc the array out from under the walk.  CPython's list_clear
+;; takes the array away before it drops a single reference, for this reason;
+;; dict_clear_all (src/pyo/dict.asm) is the same function for dicts.
+;;
+;; A list being sorted has ob_size 0 and is left alone.
+LCL_MINCAP equ 8                ; what list_new gives an empty list
 DEF_FUNC list_clear
     push rbx
     push r12
@@ -2756,23 +2812,33 @@ DEF_FUNC list_clear
     push r15
 
     mov rbx, rdi
-    mov r12, [rbx + PyListObject.ob_item]       ; payloads
     mov r13, [rbx + PyListObject.ob_size]
-    mov qword [rbx + PyListObject.ob_size], 0
-
     test r13, r13
     jz .done
+
+    mov edi, LCL_MINCAP * 8
+    call ap_malloc
+    xor ecx, ecx
+.zero:
+    mov qword [rax + rcx*8], 0  ; slice operations can read ahead of ob_size
+    inc ecx
+    cmp ecx, LCL_MINCAP
+    jb .zero
+
+    mov r15, [rbx + PyListObject.ob_item]       ; the detached array
+    mov [rbx + PyListObject.ob_item], rax
+    mov qword [rbx + PyListObject.allocated], LCL_MINCAP
+    mov qword [rbx + PyListObject.ob_size], 0
+    mov r12, r15
 .loop:
-    dec r13
     mov rdi, [r12]
-    push r12
-    push r12
     DECREF_V rdi, rsi
-    pop r12
-    pop r12
     add r12, 8
-    test r13, r13
+    dec r13
     jnz .loop
+
+    mov rdi, r15
+    call ap_free
 .done:
     pop r15
     pop r13

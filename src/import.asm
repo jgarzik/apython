@@ -45,12 +45,6 @@ extern sys_read
 extern sys_stat
 
 ; Marshal globals (save/restore across nested loads)
-extern marshal_buf
-extern marshal_pos
-extern marshal_len
-extern marshal_refs
-extern marshal_ref_count
-extern marshal_ref_cap
 
 ; sys module globals
 extern sys_modules_dict
@@ -720,6 +714,7 @@ DEF_FUNC import_module, IF_FRAME
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_cached
+.not_cached:
 
     ; For dotted names (a.b.c), import each component
     ; First, check if name contains a dot
@@ -928,6 +923,53 @@ DEF_FUNC import_module, IF_FRAME
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .cached_blocked
+
+    ; In sys.modules -- but perhaps only because ANOTHER THREAD is in the
+    ; middle of importing it.  A module is entered there before its body
+    ; runs, so a second thread that took it as it stands got a module with
+    ; half its names: `import json; json.dumps` raised AttributeError when
+    ; two threads imported json at once.  CPython's import_ensure_initialized
+    ; asks the spec and, if it is still initialising, waits on the module's
+    ; lock; _ensure_initialized (lib/_importlib_bootstrap.py) is that.  With
+    ; one thread there is nobody to wait for, and the same test would only
+    ; find this thread's own circular import, so it is skipped.
+    extern gil_threaded
+    cmp qword [rel gil_threaded], 0
+    je .cached_ready
+    push rax                    ; the module
+    push rax                    ; and a slot for the helper's one argument
+    CSTRING rdi, "_ensure_initialized"
+    call im_importlib_func
+    test rax, rax
+    jz .cached_waited           ; importlib is not up yet: nothing to wait on
+    mov rcx, [rbp - IF_NAME]
+    mov [rsp], rcx
+    mov rdi, rax
+    mov rsi, rsp
+    mov edx, 1
+    call obj_call_n
+    test rax, rax
+    jz .cached_wait_raised
+    DECREF_V rax, rcx
+    ; The import this waited for may have FAILED and taken the module back
+    ; out, so ask sys.modules again rather than trust what was read before.
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - IF_NAME]
+    call dict_get
+    add rsp, 16
+    test rax, rax
+    jz .not_cached
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .cached_blocked
+    jmp .cached_ready
+.cached_wait_raised:
+    add rsp, 16
+    jmp .import_error
+.cached_waited:
+    pop rax
+    pop rax                     ; the module
+.cached_ready:
 
     ; Found in sys.modules.  With an empty fromlist a dotted import still
     ; evaluates to the *top* package -- `import a.b` binds `a` -- so a cache
@@ -2732,23 +2774,23 @@ DEF_FUNC import_load_module, IF_FRAME
     DUNDER_EXC_SAVE [rbp - IF_EXC]
 
     ; Save marshal globals
-    mov rax, [rel marshal_buf]
+    mov rax, [gs:ThreadState.marshal_buf]
     mov [rbp - IF_MBUF], rax
-    mov rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_pos]
     mov [rbp - IF_MPOS], rax
-    mov rax, [rel marshal_len]
+    mov rax, [gs:ThreadState.marshal_len]
     mov [rbp - IF_MLEN], rax
-    mov rax, [rel marshal_refs]
+    mov rax, [gs:ThreadState.marshal_refs]
     mov [rbp - IF_MREFS], rax
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     mov [rbp - IF_MRCNT], rax
-    mov rax, [rel marshal_ref_cap]
+    mov rax, [gs:ThreadState.marshal_ref_cap]
     mov [rbp - IF_MRCAP], rax
 
     ; Reset marshal refs so inner import allocates fresh arrays
-    mov qword [rel marshal_refs], 0
-    mov qword [rel marshal_ref_count], 0
-    mov qword [rel marshal_ref_cap], 0
+    mov qword [gs:ThreadState.marshal_refs], 0
+    mov qword [gs:ThreadState.marshal_ref_count], 0
+    mov qword [gs:ThreadState.marshal_ref_cap], 0
 
     ; Read the file -> code object; a .py is compiled on the spot.
     mov rdi, r12
@@ -2767,7 +2809,7 @@ DEF_FUNC import_load_module, IF_FRAME
     call pyc_write_cache
 
     ; Free inner import's marshal refs array (if allocated)
-    mov rdi, [rel marshal_refs]
+    mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
     jz .skip_inner_refs_free
     call ap_free
@@ -2775,17 +2817,17 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Restore marshal globals
     mov rax, [rbp - IF_MBUF]
-    mov [rel marshal_buf], rax
+    mov [gs:ThreadState.marshal_buf], rax
     mov rax, [rbp - IF_MPOS]
-    mov [rel marshal_pos], rax
+    mov [gs:ThreadState.marshal_pos], rax
     mov rax, [rbp - IF_MLEN]
-    mov [rel marshal_len], rax
+    mov [gs:ThreadState.marshal_len], rax
     mov rax, [rbp - IF_MREFS]
-    mov [rel marshal_refs], rax
+    mov [gs:ThreadState.marshal_refs], rax
     mov rax, [rbp - IF_MRCNT]
-    mov [rel marshal_ref_count], rax
+    mov [gs:ThreadState.marshal_ref_count], rax
     mov rax, [rbp - IF_MRCAP]
-    mov [rel marshal_ref_cap], rax
+    mov [gs:ThreadState.marshal_ref_cap], rax
 
     ; Create module dict
     call dict_new
@@ -3108,7 +3150,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
 .load_failed:
     ; Free inner import's marshal refs array (if allocated)
-    mov rdi, [rel marshal_refs]
+    mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
     jz .skip_fail_refs_free
     call ap_free
@@ -3116,17 +3158,17 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Restore marshal globals even on failure
     mov rax, [rbp - IF_MBUF]
-    mov [rel marshal_buf], rax
+    mov [gs:ThreadState.marshal_buf], rax
     mov rax, [rbp - IF_MPOS]
-    mov [rel marshal_pos], rax
+    mov [gs:ThreadState.marshal_pos], rax
     mov rax, [rbp - IF_MLEN]
-    mov [rel marshal_len], rax
+    mov [gs:ThreadState.marshal_len], rax
     mov rax, [rbp - IF_MREFS]
-    mov [rel marshal_refs], rax
+    mov [gs:ThreadState.marshal_refs], rax
     mov rax, [rbp - IF_MRCNT]
-    mov [rel marshal_ref_count], rax
+    mov [gs:ThreadState.marshal_ref_count], rax
     mov rax, [rbp - IF_MRCAP]
-    mov [rel marshal_ref_cap], rax
+    mov [gs:ThreadState.marshal_ref_cap], rax
 
     xor eax, eax
     pop r15

@@ -89,6 +89,12 @@ align 8
 global eval_hook_mask
 eval_hook_mask:  dq 0
 
+; How many threads have a trace function installed.  Bit 1 of the mask is
+; "this is non-zero": the dispatch table is one for every thread, so it must
+; stay the tracing one while ANY thread traces -- one thread's settrace(None)
+; used to switch tracing off under all the others.
+systrace_threads: dq 0
+
 section .rodata
 ev_call:      db "call", 0
 ev_line:      db "line", 0
@@ -777,49 +783,177 @@ DEF_FUNC systrace_exception, STE_FRAME
 END_FUNC systrace_exception
 
 ;; ============================================================================
-;; sys_settrace_func(rdi = args, rsi = nargs) -> rax = None as a Value
-;; sys_gettrace_func(rdi = args, rsi = nargs) -> rax = the function, or None
+;; systrace_install(rdi = ThreadState*, rsi = trace function or 0, OWNED)
+;;   -> nothing
 ;;
-;; sys.settrace(f) installs the global trace function and repoints dispatch;
-;; sys.settrace(None) takes both back down.
+;; Give one thread a trace function, or take its own away.  Any thread's
+;; state, not only the caller's: sys._settraceallthreads walks the list, and
+;; a thread that ends hands its function back through here.  GIL held.
 ;; ============================================================================
-global sys_settrace_func
-DEF_FUNC sys_settrace_func, 8            ; 1 push, so rsp is 16-aligned
+STI_OLD   equ 8                 ; the function being replaced
+STI_FRAME equ 16                ; + 2 pushes = 32, 16-aligned
+global systrace_install
+DEF_FUNC systrace_install, STI_FRAME
     push rbx
-    xor ebx, ebx
-    test rsi, rsi
-    jz .sst_have
-    mov rbx, [rdi]
-    lea rcx, [rel none_singleton]
-    cmp rbx, rcx
-    jne .sst_keep
-    xor ebx, ebx
-    jmp .sst_have
-.sst_keep:
-    INCREF rbx
-.sst_have:
-    mov rdi, [gs:ThreadState.sys_tracefunc]
-    mov [gs:ThreadState.sys_tracefunc], rbx
-    test rdi, rdi
-    jz .sst_set
-    call obj_decref
-.sst_set:
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rax, [rbx + ThreadState.sys_tracefunc]
+    mov [rbp - STI_OLD], rax
+    mov [rbx + ThreadState.sys_tracefunc], r12
+    test rax, rax
+    jz .sti_no_old
+    dec qword [rel systrace_threads]
+.sti_no_old:
+    test r12, r12
+    jz .sti_counted
+    inc qword [rel systrace_threads]
+.sti_counted:
     mov edi, 1
     xor esi, esi
-    test rbx, rbx
-    jz .sst_apply
-    mov esi, 1
-.sst_apply:
+    cmp qword [rel systrace_threads], 0
+    setne sil
     call eval_hooks_set
-    call systrace_recount
-    lea rax, [rel none_singleton]
-    INCREF rax
-    mov edx, TAG_PTR
+    xor eax, eax
+    cmp qword [rbx + ThreadState.sys_tracefunc], 0
+    jne .sti_any
+    cmp qword [rbx + ThreadState.sys_profilefunc], 0
+    je .sti_store
+.sti_any:
+    mov eax, 1
+.sti_store:
+    mov [rbx + ThreadState.systrace_any], rax
+    ; The old function last: releasing it can run Python.
+    mov rdi, [rbp - STI_OLD]
+    test rdi, rdi
+    jz .sti_done
+    call obj_decref
+.sti_done:
+    pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
+    ret
+END_FUNC systrace_install
+
+;; ============================================================================
+;; sysprofile_install(rdi = ThreadState*, rsi = profile function or 0, OWNED)
+;;   -> nothing
+;;
+;; The same for the profile function, which needs no dispatch table of its
+;; own: it is called from eval_frame and eval_return.
+;; ============================================================================
+global sysprofile_install
+DEF_FUNC sysprofile_install, 8  ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + ThreadState.sys_profilefunc]
+    mov [rbx + ThreadState.sys_profilefunc], rsi
+    xor eax, eax
+    test rsi, rsi
+    jnz .spi_any
+    cmp qword [rbx + ThreadState.sys_tracefunc], 0
+    je .spi_store
+.spi_any:
+    mov eax, 1
+.spi_store:
+    mov [rbx + ThreadState.systrace_any], rax
+    test rdi, rdi
+    jz .spi_done
+    call obj_decref
+.spi_done:
+    pop rbx
+    leave
+    ret
+END_FUNC sysprofile_install
+
+;; ============================================================================
+;; systrace_hook_arg(rdi = args, rsi = nargs) -> rax = the function, with a
+;;   new reference, or 0 for None and for no argument
+;; ============================================================================
+DEF_FUNC_BARE systrace_hook_arg
+    xor eax, eax
+    test rsi, rsi
+    jz .sha_done
+    mov rax, [rdi]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    jne .sha_keep
+    xor eax, eax
+    ret
+.sha_keep:
+    INCREF_V rax, rcx
+.sha_done:
+    ret
+END_FUNC systrace_hook_arg
+
+;; ============================================================================
+;; sys_settrace_func(rdi = args, rsi = nargs) -> rax = None as a Value
+;;
+;; sys.settrace(f) installs the calling thread's trace function and repoints
+;; dispatch; sys.settrace(None) takes it down, and the dispatch table with it
+;; once no thread is tracing.
+;; ============================================================================
+global sys_settrace_func
+DEF_FUNC sys_settrace_func
+    call systrace_hook_arg
+    mov rsi, rax
+    mov rdi, [gs:ThreadState.ts_self]
+    call systrace_install
+    lea rax, [rel none_singleton]
+    INCREF rax
+    leave
     ret
 END_FUNC sys_settrace_func
+
+;; ============================================================================
+;; sys_settraceallthreads_func(rdi = args, rsi = nargs) -> rax = None
+;; sys_setprofileallthreads_func(rdi = args, rsi = nargs) -> rax = None
+;;
+;; sys._settraceallthreads and sys._setprofileallthreads: the same function
+;; for every thread that exists now.  threading.settrace_all_threads adds the
+;; threads still to come, through threading.settrace.
+;; ============================================================================
+%macro DEF_HOOK_ALL_THREADS 2   ; %1 = the builtin's name, %2 = the installer
+global %1
+DEF_FUNC %1, 8                  ; + 3 pushes = 32, 16-aligned
+    push rbx
+    push r12
+    push r13
+    call systrace_hook_arg
+    mov r12, rax                ; one reference, handed to the last thread
+    extern tstate_list_head
+    mov rbx, [rel tstate_list_head]
+%%loop:
+    test rbx, rbx
+    jz %%done
+    mov r13, [rbx + ThreadState.ts_next]    ; before the installer runs Python
+    mov rsi, r12
+    test r12, r12
+    jz %%install
+    INCREF r12
+%%install:
+    mov rdi, rbx
+    call %2
+    mov rbx, r13
+    jmp %%loop
+%%done:
+    test r12, r12
+    jz %%none
+    mov rdi, r12
+    call obj_decref             ; the reference systrace_hook_arg took
+%%none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC %1
+%endmacro
+
+DEF_HOOK_ALL_THREADS sys_settraceallthreads_func, systrace_install
+DEF_HOOK_ALL_THREADS sys_setprofileallthreads_func, sysprofile_install
 
 ;; ============================================================================
 ;; sys_gettrace_func(rdi = args, rsi = nargs) -> rax = the trace function as a
@@ -848,33 +982,14 @@ END_FUNC sys_gettrace_func
 ;; function's slot logic and its own global.
 ;; ============================================================================
 global sys_setprofile_func
-DEF_FUNC sys_setprofile_func, 8            ; 1 push, so rsp is 16-aligned
-    push rbx
-    xor ebx, ebx
-    test rsi, rsi
-    jz .ssp_have
-    mov rbx, [rdi]
-    lea rcx, [rel none_singleton]
-    cmp rbx, rcx
-    jne .ssp_keep
-    xor ebx, ebx
-    jmp .ssp_have
-.ssp_keep:
-    INCREF rbx
-.ssp_have:
-    mov rdi, [gs:ThreadState.sys_profilefunc]
-    mov [gs:ThreadState.sys_profilefunc], rbx
-    test rdi, rdi
-    jz .ssp_done
-    call obj_decref
-.ssp_done:
-    call systrace_recount
+DEF_FUNC sys_setprofile_func
+    call systrace_hook_arg
+    mov rsi, rax
+    mov rdi, [gs:ThreadState.ts_self]
+    call sysprofile_install
     lea rax, [rel none_singleton]
     INCREF rax
-    mov edx, TAG_PTR
-    pop rbx
     leave
-    V_PACK rax, rdx
     ret
 END_FUNC sys_setprofile_func
 

@@ -8,11 +8,27 @@ the difference from CPython 3.12 is and, where it is known, why it is not a
 one-line fix.
 
 Divergences that are *deliberate* -- the `posix` subset, the absence of managed
-dicts, a single-threaded `_thread`, the three recorded-oracle tests, and the
+dicts, how threads differ under the GIL, the three recorded-oracle tests, and the
 rest -- are not bugs and are not here.  They live in `DIVERGENCES.md`, with the
 reasoning that chose them and what changing one would cost.
 
 ## Correctness
+
+- **`test.test_module` segfaults in the collector, and `make check-pkg` is
+  red because of it.**  `apython -m unittest test.test_module` over CPython's
+  Lib/ dies inside `gc_collect_gen` at the `tp_traverse` call, during
+  `ModuleTests.test_weakref`'s `gc.collect()`: some tracked object's type
+  pointer is not a type by then.  `test_weakref` passes alone and passes
+  paired with any one other test of the module, so it takes several of the
+  earlier ones together -- the uninitialised-module and module-`__repr__`
+  tests, which also fail, are the likely company.  The shape is the one
+  CLAUDE.md records under "Turning on `TYPE_FLAG_HAVE_GC` without moving
+  every allocation site", or a dealloc that does not untrack; neither has
+  been confirmed.  It predates threads: the floor in `tests/pkg_floor.txt`
+  says 26 of these passed once, and the same run also shows `test_capi`,
+  `test_cext`, `test_cppext` and `test_inspect` below their floors.  The RC
+  sweep cannot see any of it, because it covers `Lib/test/test_*.py` and
+  these are package directories.
 
 - **`pyexpat`'s `buffer_text` reads back `True` and does nothing.**  Setting
   it is accepted, the attribute answers `True`, and `CharacterDataHandler`
@@ -298,9 +314,10 @@ reasoning that chose them and what changing one would cost.
   `doctest`, `pdb`, `unittest` and `signal` with it.  So is `zlib`, as a shim
   over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
-  compress.  So is `array`, which was the largest of these by reach.  What
-  is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `fcntl`,
+  compress.  So is `array`, which was the largest of these by reach.  So are `_ssl` and `_ctypes`, over OpenSSL and libffi, and `_thread` over
+  real threads.  What is left is genuinely C: `_tracemalloc`, `_symtable`,
+  `_sqlite3`, `_crypt`, `_curses`, `_tkinter`, and `_multiprocessing` and
+  `_queue`, which `multiprocessing` and `queue.SimpleQueue`'s fast path want.  `fcntl`,
   `resource`, `syslog`, `pwd`, `grp`, `audioop` and `_lsprof` are there now
   and none of them needed much: two descriptor calls in `posixfd.asm`, two
   resource calls in `posixproc.asm`, and Python for the rest -- `syslog` over

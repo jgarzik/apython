@@ -19,6 +19,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
+%include "threadstate.inc"
 %include "value.inc"
 
 ASM_INIT
@@ -75,11 +77,11 @@ sig_old: resb SIG_SA_SIZE
 
 section .data
 align 8
-;; Non-zero when at least one signal is waiting to be delivered.  The eval
-;; loop reads exactly this word, so the check it pays on every backward jump
-;; is one load and one branch.
-global signal_any_pending
-signal_any_pending: dq 0
+;; "At least one signal is waiting to be delivered" is the EB_SIGNAL bit of
+;; eval_breaker (src/gil.asm), the one word the eval loop's checkpoints test,
+;; so the check it pays on every backward jump is one load and one branch.
+extern eval_breaker
+extern tstate_main_ptr
 
 section .text
 
@@ -94,11 +96,25 @@ DEF_FUNC_LOCAL signal_trampoline
     jae .st_out
     lea rax, [rel signal_pending]
     mov byte [rax + rdi], 1
-    mov qword [rel signal_any_pending], 1
+    lock or qword [rel eval_breaker], EB_SIGNAL
 .st_out:
     leave
     ret
 END_FUNC signal_trampoline
+
+;; ============================================================================
+;; signal_mark_pending(rdi = the signal number) -> void
+;;
+;; Record a signal as arrived without the kernel having delivered one: what
+;; _thread.interrupt_main does.  The handler runs at the main thread's next
+;; checkpoint, exactly as for a real one.
+;; ============================================================================
+global signal_mark_pending
+DEF_FUNC signal_mark_pending
+    call signal_trampoline
+    leave
+    ret
+END_FUNC signal_mark_pending
 
 ;; ============================================================================
 ;; signal_install(rdi = signum, rsi = the C handler to install) -> rax = 0 ok
@@ -160,7 +176,13 @@ SRP_FRAME equ 40            ; + 1 push = 48, 16-aligned
 global signal_run_pending
 DEF_FUNC signal_run_pending, SRP_FRAME
     push rbx
-    mov qword [rel signal_any_pending], 0
+    ; Handlers run on the main thread and nowhere else.  Another thread that
+    ; gets here -- an interrupted syscall of its own -- leaves the flag set
+    ; for the main thread's next checkpoint.
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .srp_not_main
+    lock and qword [rel eval_breaker], ~EB_SIGNAL
     mov ebx, 1
 .srp_loop:
     cmp rbx, SIG_NSIG
@@ -218,6 +240,7 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     inc rbx
     jmp .srp_loop
 .srp_done:
+.srp_not_main:
     xor eax, eax
     pop rbx
     leave
@@ -470,7 +493,7 @@ END_FUNC signal_method_alarm
 ;; ============================================================================
 global signal_method_pause
 DEF_FUNC signal_method_pause, 16
-    call sys_pause
+    BLOCKING_CALL sys_pause
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR

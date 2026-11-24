@@ -19,6 +19,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 %include "posixpath.inc"
 
 ASM_INIT
@@ -1428,7 +1429,7 @@ IRR_LEN   equ 24
 IRR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 extern sys_read_intr
 extern sys_write_intr
-extern signal_any_pending
+extern eval_breaker
 extern signal_run_pending
 
 %macro DEF_IO_RETRY 2           ; %1 = name suffix, %2 = the raw syscall
@@ -1440,11 +1441,11 @@ DEF_FUNC io_%1_retry, IRR_FRAME
     mov rdi, [rbp - IRR_FD]
     mov rsi, [rbp - IRR_BUF]
     mov rdx, [rbp - IRR_LEN]
-    call %2
+    BLOCKING_CALL %2
     cmp rax, -EINTR_ERRNO
     jne %%out
-    cmp qword [rel signal_any_pending], 0
-    je %%again                  ; interrupted by something with no handler
+    test qword [rel eval_breaker], EB_SIGNAL
+    jz %%again                  ; interrupted by something with no handler
     call signal_run_pending
     test eax, eax
     jnz %%raised
