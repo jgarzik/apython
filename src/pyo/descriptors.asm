@@ -2295,7 +2295,7 @@ DEF_FUNC staticmethod_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel staticmethod_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC staticmethod_dunder_new
@@ -2307,7 +2307,7 @@ DEF_FUNC classmethod_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel classmethod_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC classmethod_dunder_new
@@ -2319,7 +2319,7 @@ DEF_FUNC property_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel property_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC property_dunder_new
@@ -2331,7 +2331,7 @@ DEF_FUNC mappingproxy_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel mappingproxy_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC mappingproxy_dunder_new

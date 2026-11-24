@@ -998,7 +998,7 @@ DEF_FUNC method_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel method_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC method_dunder_new

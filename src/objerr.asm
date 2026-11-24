@@ -588,10 +588,10 @@ DEF_FUNC raise_builtin_arity
 END_FUNC raise_builtin_arity
 
 ;; ============================================================================
-;; raise_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
-;;                     argument as a Value, edx = 0 no argument / 1 not a type
-;;                     / 2 not a subtype)
-;;   -> does not return: the composed message is raised as a TypeError
+;; set_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
+;;                   argument as a Value, edx = 0 no argument / 1 not a type
+;;                   / 2 not a subtype / 3 not safe)
+;;   -> rax = 0, always, with the composed TypeError pending
 ;;
 ;; The three ways `T.__new__(cls, ...)` can be called wrongly, worded as
 ;; CPython words them:
@@ -609,8 +609,8 @@ RNB_ARG   equ 16
 RNB_WHY   equ 24
 RNB_BUF   equ 400
 RNB_FRAME equ 400           ; + 0 pushes = 400, 16-aligned
-global raise_new_bad_class
-DEF_FUNC raise_new_bad_class, RNB_FRAME
+global set_new_bad_class
+DEF_FUNC set_new_bad_class, RNB_FRAME
     mov [rbp - RNB_OWNER], rdi
     mov [rbp - RNB_ARG], rsi
     mov [rbp - RNB_WHY], rdx
@@ -678,7 +678,10 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
 .rnb_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RNB_BUF]
-    call raise_exception
+    call set_exception
+    xor eax, eax
+    leave
+    ret
 
 ;; The two names, appended at the cursor in rdi.  The argument is a class here
 ;; -- reason 2 is the only caller -- so its own tp_name is what to print, not
@@ -691,6 +694,15 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
     mov rcx, [rbp - RNB_ARG]
     mov rsi, [rcx + PyTypeObject.tp_name]
     jmp rbt_append_cstr
+END_FUNC set_new_bad_class
+
+;; raise_new_bad_class(the same arguments) -> does not return
+;; set_new_bad_class, then the unwind: for a handler, which alone may jump.
+global raise_new_bad_class
+DEF_FUNC raise_new_bad_class
+    call set_new_bad_class
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_new_bad_class
 
 ;; ============================================================================
