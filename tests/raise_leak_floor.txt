@@ -4,31 +4,20 @@
 # re-record with
 #   bash tests/raise_probe.sh --record
 # in the commit that fixes it.
-cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=1
-cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=3
-cb | bytearray | c[2:5] = [E(1), E(2)] | index | nth=1
-cb | dict | c == other | eq | nth=1
-cb | dict | c == other | eq | nth=3
 cb | dict | c == other | hash | nth=1
 cb | dict | c == other | hash | nth=3
-cb | dict | c | other | eq | nth=1
-cb | dict | c | other | eq | nth=3
 cb | dict | c | other | hash | nth=1
 cb | dict | c | other | hash | nth=3
 cb | dict | c.__init__(other) | eq | nth=1
 cb | dict | c.__init__(other) | eq | nth=3
 cb | dict | c.__init__(other) | hash | nth=1
 cb | dict | c.__init__(other) | hash | nth=3
-cb | dict | c.items() == other.items() | eq | nth=1
-cb | dict | c.items() == other.items() | eq | nth=3
 cb | dict | c.items() == other.items() | hash | nth=1
 cb | dict | c.items() == other.items() | hash | nth=3
 cb | dict | c.keys() & other.keys() | eq | nth=1
 cb | dict | c.keys() & other.keys() | eq | nth=3
 cb | dict | c.keys() & other.keys() | hash | nth=1
 cb | dict | c.keys() & other.keys() | hash | nth=3
-cb | dict | c.keys() == other.keys() | eq | nth=1
-cb | dict | c.keys() == other.keys() | eq | nth=3
 cb | dict | c.keys() == other.keys() | hash | nth=1
 cb | dict | c.keys() == other.keys() | hash | nth=3
 cb | dict | c.popitem() | hash | nth=1
@@ -43,74 +32,41 @@ cb | dict | c.update(other) | hash | nth=3
 cb | dict | dict.fromkeys(gen(8)) | hash | nth=1
 cb | dict | dict.fromkeys(gen(8)) | hash | nth=3
 cb | dict | dict.fromkeys(gen(8)) | iter | nth=3
-cb | list | c[2:5] = gen(8) | iter | nth=1
-cb | list | c[2:5] = gen(8) | iter | nth=3
-cb | list | c[::2] = gen(6) | iter | nth=1
-cb | list | c[::2] = gen(6) | iter | nth=3
 cb | list | dict.fromkeys(c) | hash | nth=1
 cb | list | dict.fromkeys(c) | hash | nth=3
 cb | list | set(c) | hash | nth=1
 cb | list | set(c) | hash | nth=3
-cb | set | c & other | eq | nth=1
-cb | set | c & other | eq | nth=3
 cb | set | c & other | hash | nth=1
 cb | set | c & other | hash | nth=3
-cb | set | c &= other | eq | nth=1
-cb | set | c &= other | eq | nth=3
 cb | set | c &= other | hash | nth=1
 cb | set | c &= other | hash | nth=3
-cb | set | c - other | eq | nth=1
-cb | set | c - other | eq | nth=3
 cb | set | c - other | hash | nth=1
 cb | set | c - other | hash | nth=3
-cb | set | c -= other | eq | nth=1
-cb | set | c -= other | eq | nth=3
 cb | set | c -= other | hash | nth=1
 cb | set | c -= other | hash | nth=3
 cb | set | c <= other | hash | nth=1
 cb | set | c == other | hash | nth=1
-cb | set | c ^ other | eq | nth=1
-cb | set | c ^ other | eq | nth=3
 cb | set | c ^ other | hash | nth=1
 cb | set | c ^ other | hash | nth=3
-cb | set | c ^= other | eq | nth=1
-cb | set | c ^= other | eq | nth=3
 cb | set | c ^= other | hash | nth=1
 cb | set | c ^= other | hash | nth=3
-cb | set | c | other | eq | nth=1
-cb | set | c | other | eq | nth=3
 cb | set | c | other | hash | nth=1
 cb | set | c | other | hash | nth=3
-cb | set | c |= other | eq | nth=1
-cb | set | c |= other | eq | nth=3
 cb | set | c |= other | hash | nth=1
 cb | set | c |= other | hash | nth=3
-cb | set | c.__init__(gen(5)) | eq | nth=1
-cb | set | c.__init__(gen(5)) | eq | nth=3
 cb | set | c.__init__(gen(5)) | hash | nth=1
 cb | set | c.__init__(gen(5)) | hash | nth=3
-cb | set | c.difference_update(gen(8)) | eq | nth=1
-cb | set | c.difference_update(gen(8)) | eq | nth=3
 cb | set | c.difference_update(gen(8)) | hash | nth=1
 cb | set | c.difference_update(gen(8)) | hash | nth=3
-cb | set | c.intersection_update(other) | eq | nth=1
-cb | set | c.intersection_update(other) | eq | nth=3
 cb | set | c.intersection_update(other) | hash | nth=1
 cb | set | c.intersection_update(other) | hash | nth=3
-cb | set | c.isdisjoint(other) | eq | nth=1
 cb | set | c.isdisjoint(other) | hash | nth=1
 cb | set | c.isdisjoint(other) | hash | nth=3
 cb | set | c.issubset(other) | hash | nth=1
-cb | set | c.issuperset(other) | eq | nth=1
-cb | set | c.issuperset(other) | eq | nth=3
 cb | set | c.issuperset(other) | hash | nth=1
 cb | set | c.issuperset(other) | hash | nth=3
-cb | set | c.symmetric_difference_update(other) | eq | nth=1
-cb | set | c.symmetric_difference_update(other) | eq | nth=3
 cb | set | c.symmetric_difference_update(other) | hash | nth=1
 cb | set | c.symmetric_difference_update(other) | hash | nth=3
-cb | set | c.update(gen(8)) | eq | nth=1
-cb | set | c.update(gen(8)) | eq | nth=3
 cb | set | c.update(gen(8)) | hash | nth=1
 cb | set | c.update(gen(8)) | hash | nth=3
 cb | set | frozenset(c) == frozenset(other) | hash | nth=1
@@ -126,50 +82,7 @@ func | time.strptime(<class 'object'>,)
 func | time.strptime(None,)
 func | time.strptime([],)
 func | time.strptime(b'b',)
-meth | bytearray.__mod__('s',)
-meth | bytearray.__mod__(-1,)
-meth | bytearray.__mod__(1.5,)
-meth | bytearray.__mod__(<class 'object'>,)
-meth | bytearray.__mod__(None,)
-meth | bytearray.__mod__(b'b',)
-meth | bytearray.decode **kw
-meth | bytearray.decode(-1,)
-meth | bytearray.decode(1.5,)
-meth | bytearray.decode(<class 'object'>,)
-meth | bytearray.decode(None,)
-meth | bytearray.decode([],)
-meth | bytearray.decode(b'b',)
-meth | dict.__init__(-1,)
-meth | dict.__init__(1.5,)
-meth | dict.__init__(<class 'object'>,)
-meth | dict.__init__(None,)
-meth | dict.__ior__(-1,)
-meth | dict.__ior__(1.5,)
-meth | dict.__ior__(<class 'object'>,)
-meth | dict.__ior__(None,)
-meth | dict.update(-1,)
-meth | dict.update(1.5,)
-meth | dict.update(<class 'object'>,)
-meth | dict.update(None,)
-meth | frozenset.difference(None, 1, 2, 3, 4, 5, 6, 7)
-meth | frozenset.intersection(None, 1, 2, 3, 4, 5, 6, 7)
-meth | frozenset.union(None, 1, 2, 3, 4, 5, 6, 7)
 meth | list.index(<class 'object'>,)
-meth | set.__init__(-1,)
-meth | set.__init__(1.5,)
-meth | set.__init__(<class 'object'>,)
-meth | set.__init__(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.__init__(None,)
-meth | set.difference(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.difference_update(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.intersection(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.intersection_update(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.union(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.update(-1,)
-meth | set.update(1.5,)
-meth | set.update(<class 'object'>,)
-meth | set.update(None, 1, 2, 3, 4, 5, 6, 7)
-meth | set.update(None,)
 new | dict('s',)
 new | dict('s',) **kw
 new | dict(-1,)
@@ -182,10 +95,6 @@ new | dict(None,)
 new | dict(None,) **kw
 new | dict(b'b',)
 new | dict(b'b',) **kw
-new | list(-1,)
-new | list(1.5,)
-new | list(<class 'object'>,)
-new | list(None,)
 new | map('s',) **kw
 new | map(-1,) **kw
 new | map(1.5,) **kw
@@ -195,10 +104,6 @@ new | map(None, 1, 2, 3, 4, 5, 6, 7) **kw
 new | map(None,) **kw
 new | map([],) **kw
 new | map(b'b',) **kw
-new | tuple(-1,)
-new | tuple(1.5,)
-new | tuple(<class 'object'>,)
-new | tuple(None,)
 new | zip(-1,)
 new | zip(-1,) **kw
 new | zip(1.5,)
