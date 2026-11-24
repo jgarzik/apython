@@ -1193,8 +1193,88 @@ def check_const_value(files):
     return bad
 
 
+RAISE_FLOOR = 'tests/raise_floor.txt'
+
+
+def _raise_map():
+    import raisemap
+    funcs, byfile, noret, may = raisemap.load()
+    return raisemap, funcs, byfile
+
+
+def check_raise_floor(files):
+    """Jump-style raises outside the handlers: a ratchet on its way to zero.
+
+    A raise that jumps into the unwinder abandons every native frame under
+    it.  Inside a handler that is the design; anywhere else it leaks what
+    those frames held and denies the caller the error.  raisemap.py is the
+    map; this holds each file to the count recorded in tests/raise_floor.txt.
+    Lower one with `python3 src/compiler/lint.py --record-raise` in the
+    commit that earns it.  A file not in the floor is at zero.
+    """
+    raisemap, funcs, byfile = _raise_map()
+    floor = {}
+    try:
+        for line in open(RAISE_FLOOR):
+            line = line.split('#')[0].strip()
+            if line:
+                p, n = line.rsplit(None, 1)
+                floor[p] = int(n)
+    except FileNotFoundError:
+        return []
+    bad = []
+    for path, n in sorted(raisemap.file_counts(byfile).items()):
+        if raisemap.is_handler_file(path):
+            continue
+        want = floor.get(path, 0)
+        if n > want:
+            bad.append((path, 0,
+                        "%d jump-style raise(s), floor is %d" % (n, want),
+                        "an error is RETURNED outside a handler: FAIL to the"
+                        " function's exit (see `ERRORS RETURN`, macros.inc);"
+                        " `python3 src/compiler/raisemap.py %s` lists them"
+                        % path))
+    return bad
+
+
+def record_raise():
+    raisemap, funcs, byfile = _raise_map()
+    rows = [(p, n) for p, n in sorted(raisemap.file_counts(byfile).items())
+            if n and not raisemap.is_handler_file(p)]
+    with open(RAISE_FLOOR, 'w') as fh:
+        fh.write("# Jump-style raises per file, outside the opcode handlers.\n"
+                 "# A ratchet on its way to zero: lint fails when a file goes\n"
+                 "# above its number.  Lower one with\n"
+                 "#   python3 src/compiler/lint.py --record-raise\n"
+                 "# in the commit that earns it; a row at zero is dropped.\n")
+        for path, n in rows:
+            fh.write("%-38s %d\n" % (path, n))
+    print("raise floor: %d file(s), %d site(s)"
+          % (len(rows), sum(n for _, n in rows)))
+
+
+def check_must_check(files):
+    """A function that returns its errors must have them looked at.
+
+    A missed check is not a crash: the caller carries on with a 0 it takes
+    for an answer, and every gate stays green over it.  So the docblock's
+    `Fails:` line is binding on every caller.
+    """
+    raisemap, funcs, byfile = _raise_map()
+    return [(path, n,
+             "`call %s` in %s is not checked" % (callee, caller),
+             "%s returns its errors (`Fails:` in its docblock): follow the"
+             " call with ERR_NULL / ERR_PENDING / ERR_M1, or say `err:` in a"
+             " comment on the call line and why" % callee)
+            for path, n, caller, callee in raisemap.unchecked_calls(funcs, byfile)]
+
+
 def main():
     os.chdir(ROOT)
+    sys.path.insert(0, os.path.join(ROOT, 'src', 'compiler'))
+    if '--record-raise' in sys.argv:
+        record_raise()
+        return 0
     if '--record-docblocks' in sys.argv:
         record_docblocks(all_asm())
         return 0
@@ -1236,6 +1316,8 @@ def main():
                 + check_const_value(everything)
                 + check_slot_table(everything)
                 + check_unwind_balance(everything)
+                + check_raise_floor(everything)
+                + check_must_check(everything)
                 + check_handler_alignment(everything)
                 + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

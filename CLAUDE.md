@@ -42,7 +42,10 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
 `make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh`,
-`tests/arity_probe.sh`, `tests/typefuzz_probe.sh`, `tests/reentry_probe.sh`
+`tests/arity_probe.sh`, `tests/typefuzz_probe.sh`, `tests/raise_probe.sh`
+(every builtin made to fail, with the live-block count read around each
+failure; a two-way ratchet against `tests/raise_leak_floor.txt`),
+`tests/reentry_probe.sh`
 (every container operation with Python changing the container in the middle
 of it; nothing may crash, and `--valgrind` runs the same corpus under
 valgrind) and `tests/syntax_probe.sh`.  A test listed in `tests/known_failures.txt` is
@@ -201,6 +204,43 @@ in, as well as a place the same thread can re-enter.  Re-read sizes and hold
 references across such a call; `tests/reentry_probe.sh` is the gate, and
 `tests/test_thread_stress.py` runs eight threads at a ten-microsecond switch
 interval.
+
+## Errors return
+
+Only an opcode handler may jump into the unwinder (`RAISE`,
+`raise_exception`, `jmp eval_exception_unwind`): it *is* the eval loop, and
+the unwinder releases its operands.  Everything that is **called** records
+the exception and returns through the same epilogue its success path uses --
+so what it holds is released, and a caller written in assembly can act on the
+error.  A jump from anywhere else abandons every native frame between it and
+the eval loop, and leaks whatever they held.
+
+A function's docblock says which return value means "failed", and that line
+binds every caller:
+
+| Docblock | Means | Caller writes |
+|---|---|---|
+| `;; Fails: 0` | 0 is never an answer | `ERR_NULL .fail` |
+| `;; Fails: 0?` | 0 is an answer; 0 *and* an exception pending | `ERR_PENDING .fail` |
+| `;; Fails: -1` | -1 is an answer; -1 *and* an exception pending | `ERR_M1 .fail` |
+
+`FAIL type, "message", .fail` records the exception and goes to the
+function's error exit.  `lint.py` holds every `call` of a function carrying a
+`Fails:` line to one of those checks within three instructions, or to the
+words `err:` in a comment on the call line saying why none is needed.  A
+missed check is not a crash -- the caller carries on with a 0 it takes for an
+answer -- which is why it is a lint error and not a convention.
+
+The conversion is in progress.  `python3 src/compiler/raisemap.py` is the map
+of what still jumps, `tests/raise_floor.txt` is the per-file ratchet, and the
+`ERR_*_JUMP` macros are the transitional form for a caller that cannot return
+an error yet: they jump exactly as the callee used to, and each one outside
+the handlers is counted as debt.  `tests/raise_probe.sh` is the measure of
+what it buys: every builtin made to fail, with `sys.getallocatedblocks()`
+read around each failure, ratcheted against `tests/raise_leak_floor.txt`.
+
+A destructor cannot fail: `tp_dealloc` and anything it calls swallows an
+error (CPython prints it as unraisable) rather than returning it.
 
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 

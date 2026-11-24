@@ -331,10 +331,6 @@
     call raise_exception
 %endmacro
 
-; The same, but it comes back: set_exception records the exception and returns,
-; leaving the unwind to the interpreter frame.  For a helper that holds owned
-; references at the point it fails -- RAISE would abandon the C stack and leak
-; every one of them.  The caller must return its documented error value.
 ; A builtin that takes no keyword arguments at all, refusing them the way
 ; CPython does.  kw_names_pending is CONSUMED either way: a builtin that
 ; leaves it set hands its caller's keywords to whatever call runs next.
@@ -375,10 +371,75 @@
 %%no_kw:
 %endmacro
 
+; The same, but it comes back: set_exception records the exception and returns,
+; leaving the unwind to the interpreter frame.  For a helper that holds owned
+; references at the point it fails -- RAISE would abandon the C stack and leak
+; every one of them.  The caller must return its documented error value.
 %macro SET_EXC 2                ; %1 = exception type symbol, %2 = message
     lea rdi, [rel %1]
     CSTRING rsi, %2
     call set_exception
+%endmacro
+
+; ---------------------------------------------------------------------------
+; ERRORS RETURN.  Only an opcode handler may jump into the unwinder: it IS the
+; eval loop, and the unwinder releases its operands.  Everything that is
+; CALLED records the exception and returns, through the same epilogue its
+; success path uses, so what it holds is released and its caller can act.
+; A function's docblock says which value means "failed":
+;
+;   ;; Fails: 0     0 is never an answer            -> ERR_NULL
+;   ;; Fails: 0?    0 is an answer; 0 AND pending   -> ERR_PENDING
+;   ;; Fails: -1    -1 is an answer; -1 AND pending -> ERR_M1
+;
+; lint.py holds every `call` of such a function to one of the checks below
+; within three instructions, or to the words `err:` in a comment on the call
+; saying why none is needed.
+;
+;   FAIL exc_TypeError_type, "message", .fail     record it, go to the exit
+;   call dict_get_item
+;   ERR_NULL .fail                                 propagate through my exit
+;
+; The _JUMP forms are for a caller that cannot return an error YET: they jump
+; into the unwinder exactly as the callee used to.  Outside src/opcodes/ and
+; src/eval.asm each one is debt, counted by tests/raise_floor.txt.
+; ---------------------------------------------------------------------------
+%macro FAIL 3                   ; %1 = type, %2 = message, %3 = the error exit
+    SET_EXC %1, %2
+    jmp %3
+%endmacro
+
+%macro ERR_NULL 1               ; rax == 0 -> %1
+    test rax, rax
+    jz %1
+%endmacro
+
+%macro ERR_PENDING 1            ; rax == 0 and an exception pending -> %1
+    test rax, rax
+    jnz %%ok
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne %1
+%%ok:
+%endmacro
+
+%macro ERR_M1 1                 ; rax == -1 and an exception pending -> %1
+    cmp rax, -1
+    jne %%ok
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne %1
+%%ok:
+%endmacro
+
+%macro ERR_NULL_JUMP 0
+    ERR_NULL eval_exception_unwind
+%endmacro
+
+%macro ERR_PENDING_JUMP 0
+    ERR_PENDING eval_exception_unwind
+%endmacro
+
+%macro ERR_M1_JUMP 0
+    ERR_M1 eval_exception_unwind
 %endmacro
 
 ; Build a builtin function and store it in a module dict under its own name.
