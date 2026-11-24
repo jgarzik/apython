@@ -41,7 +41,7 @@ extern builtin_func_type
 extern exc_TypeError_type
 extern none_singleton
 extern obj_decref
-extern raise_exception
+extern set_exception
 extern str_from_cstr
 extern str_from_cstr_heap
 
@@ -570,6 +570,7 @@ END_FUNC type_stamp_methods
 ;; ============================================================================
 ;;   -> rax = the bound method as a Value, or the descriptor itself when
 ;;      the instance is None; 0 with an exception pending on a bad arity
+;; Fails: 0
 ;;
 global builtin_func_dunder_get
 DEF_FUNC builtin_func_dunder_get
@@ -597,7 +598,9 @@ DEF_FUNC builtin_func_dunder_get
     V_PACK rax, rdx
     ret
 .bfg_bad:
-    RAISE exc_TypeError_type, "expected 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "expected 1 or 2 arguments"
+    leave
+    ret
 END_FUNC builtin_func_dunder_get
 
 ;; ============================================================================
