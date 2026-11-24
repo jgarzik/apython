@@ -159,3 +159,246 @@ case("__init_subclass__ raises, fresh",
 case("__set_name__ raises", lambda: type("N", (), {"d": BadSetName()}), message=False)
 case("__set_name__ raises, with slots",
      lambda: type(fresh(), (X,), {"__slots__": "s", "d": BadSetName()}), message=False)
+
+
+class M1(type):
+    pass
+
+
+class M2(type):
+    pass
+
+
+class A1(metaclass=M1):
+    pass
+
+
+class A2(metaclass=M2):
+    pass
+
+
+class EntriesRaise:
+    def __mro_entries__(self, bases):
+        raise ZeroDivisionError("mro_entries said no")
+
+
+class EntriesNotTuple:
+    def __mro_entries__(self, bases):
+        return [X]
+
+
+class EntriesGood:
+    def __mro_entries__(self, bases):
+        return (X, )
+
+
+def s_plain():
+    class N(X):
+        v = 1
+
+
+def s_keywords():
+    class N(TakesKeywords, tag=1, other=[2]):
+        pass
+    assert N.kw == {"tag": 1, "other": [2]}
+
+
+def s_slots():
+    class N(X):
+        __slots__ = ("a", "__b")
+
+        def get(self):
+            return __class__
+
+
+def s_metaclass():
+    class N(X, metaclass=Meta):
+        v = [1]
+
+
+def s_metaclass_keywords():
+    class N(metaclass=MetaKeywords, tag=1):
+        pass
+
+
+def s_metaclass_base_keywords():
+    class N(TakesKeywords, metaclass=Meta, tag=1):
+        pass
+    assert N.kw == {"tag": 1}
+
+
+def s_metaclass_function():
+    class N(X, metaclass=lambda name, bases, ns: 42):
+        pass
+    assert N == 42
+
+
+def s_mro_entries():
+    class N(EntriesGood()):
+        pass
+    assert N.__orig_bases__ != N.__bases__
+
+
+def s_super():
+    class N(Y):
+        def f(self):
+            return super().__init__()
+    N().f()
+
+
+def s_bad_keyword():
+    class N(X, tag=1):
+        pass
+
+
+def s_bad_keyword_metaclass():
+    class N(X, metaclass=Meta, tag=1):
+        pass
+
+
+def s_bool():
+    class N(bool):
+        v = [1]
+
+
+def s_layout():
+    class N(int, str):
+        pass
+
+
+def s_mro():
+    class N(X, Y):
+        pass
+
+
+def s_conflict():
+    class N(A1, A2):
+        pass
+
+
+def s_conflict_explicit():
+    class N(A1, metaclass=M2):
+        pass
+
+
+def s_slots_int():
+    class N(int):
+        __slots__ = ("a",)
+
+
+def s_slots_conflict():
+    class N:
+        __slots__ = ("a",)
+        a = 1
+
+
+def s_slots_module():
+    class N:
+        __slots__ = ("__module__",)
+
+
+def s_qualname():
+    class N:
+        __qualname__ = 3
+
+
+def s_classcell():
+    class N(metaclass=lambda name, bases, ns: type(name, bases, dict(ns, __classcell__=3))):
+        def f(self):
+            return __class__
+
+
+def s_body_raises():
+    class N(X, tag=1):
+        v = [1]
+        raise IndexError("body said no")
+
+
+def s_init_subclass():
+    class N(RaisesInInitSubclass, tag=[1]):
+        v = [1]
+
+
+def s_set_name():
+    class N(X):
+        d = BadSetName()
+
+
+def s_meta_new():
+    class N(X, metaclass=MetaNewRaises):
+        v = [1]
+
+
+def s_meta_init():
+    class N(X, metaclass=MetaInitRaises):
+        v = [1]
+
+
+def s_prepare_raises():
+    class N(X, metaclass=MetaPrepareRaises, tag=1):
+        v = [1]
+
+
+def s_prepare_none():
+    class N(X, metaclass=MetaPrepareNone):
+        v = [1]
+
+
+def s_prepare_none_no_bases():
+    class N(metaclass=MetaPrepareNone):
+        v = [1]
+
+
+def s_metaclass_not_callable():
+    class N(X, metaclass=3):
+        pass
+
+
+def s_entries_raise():
+    class N(X, EntriesRaise()):
+        pass
+
+
+def s_entries_not_tuple():
+    class N(EntriesNotTuple(), X):
+        pass
+
+
+print("--- the class statement: the success paths")
+case("plain", s_plain)
+case("keywords", s_keywords)
+case("slots and a class cell", s_slots)
+case("metaclass", s_metaclass)
+case("metaclass taking keywords", s_metaclass_keywords)
+case("metaclass is a function", s_metaclass_function)
+case("__mro_entries__", s_mro_entries)
+case("super()", s_super)
+
+print("--- the class statement: refused")
+case("a keyword nothing takes", s_bad_keyword, message=False)
+case("bool", s_bool)
+case("layout conflict", s_layout)
+case("inconsistent MRO", s_mro, message=False)
+case("metaclass conflict", s_conflict)
+case("metaclass conflict, explicit", s_conflict_explicit)
+case("__slots__ on an int subclass", s_slots_int)
+case("__slots__ and a class variable", s_slots_conflict)
+case("__slots__ naming __module__", s_slots_module)
+case("__qualname__ not a str", s_qualname)
+case("__classcell__ not a cell", s_classcell)
+case("the body raises", s_body_raises)
+case("__init_subclass__ raises", s_init_subclass)
+case("__set_name__ raises", s_set_name, message=False)
+case("metaclass __new__ raises", s_meta_new)
+case("metaclass __init__ raises", s_meta_init)
+case("__prepare__ raises", s_prepare_raises)
+case("__prepare__ returns None", s_prepare_none)
+case("the same, with no bases", s_prepare_none_no_bases)
+case("metaclass is not callable", s_metaclass_not_callable, message=False)
+case("__mro_entries__ raises", s_entries_raise)
+case("__mro_entries__ not a tuple", s_entries_not_tuple)
+
+print("--- __build_class__ called by hand")
+case("no arguments", lambda: __build_class__())
+case("not a function", lambda: __build_class__(None, "N", X))
+case("not a name", lambda: __build_class__(lambda: None, 3, X, tag=[1]))
