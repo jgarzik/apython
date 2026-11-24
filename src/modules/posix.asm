@@ -40,6 +40,7 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern raise_exception
+extern set_exception
 extern raise_oserror
 extern raise_oserror_owned
 extern raise_type_error_with_name
@@ -795,8 +796,9 @@ P1_MODE   equ 32            ; the mode, converted before the path is resolved
 P1_FRAME  equ 48            ; + 0 pushes = 48
 
 ;; ============================================================================
-;; posix_raise_missing(rdi = the function's name, rsi = the parameter's name,
-;;                     rdx = its 1-based position) -- does not return
+;; posix_set_missing(rdi = the function's name, rsi = the parameter's name,
+;;                   rdx = its 1-based position) -> rax = 0, the TypeError pending
+;; Fails: 0
 ;;
 ;; CPython's argument clinic: "chdir() missing required argument 'path'
 ;; (pos 1)".  Every one of these said "takes exactly N arguments", which does
@@ -807,8 +809,8 @@ PRM_ARG   equ 16
 PRM_POS   equ 24
 PRM_BUF   equ 208
 PRM_FRAME equ 208           ; + 0 pushes = 208, 16-aligned
-global posix_raise_missing
-DEF_FUNC posix_raise_missing, PRM_FRAME
+global posix_set_missing
+DEF_FUNC posix_set_missing, PRM_FRAME
     mov [rbp - PRM_FUNC], rdi
     mov [rbp - PRM_ARG], rsi
     mov [rbp - PRM_POS], rdx
@@ -834,7 +836,16 @@ DEF_FUNC posix_raise_missing, PRM_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - PRM_BUF]
-    call raise_exception
+    call set_exception          ; rax = 0
+    leave
+    ret
+END_FUNC posix_set_missing
+
+;; The jumping form, for the callers not converted yet.
+global posix_raise_missing
+DEF_FUNC_BARE posix_raise_missing
+    call posix_set_missing      ; err: it always fails; the jump is the point
+    jmp eval_exception_unwind
 END_FUNC posix_raise_missing
 
 ;; PM_MISSING func, arg, pos -- the three-argument form, spelled once.

@@ -27,8 +27,8 @@
 %include "src/include/value.inc"
 
 extern posix_int_arg
-extern raise_oserror
-extern posix_raise_missing
+extern set_oserror
+extern posix_set_missing
 extern int_from_i64
 extern list_new
 extern list_append
@@ -43,7 +43,7 @@ extern ap_malloc
 extern ap_free
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_exception
+extern set_exception
 extern builtin_type_new
 extern structseq_new
 extern terminal_size_type
@@ -115,6 +115,7 @@ POSIXID_NOARG posixid_getpgrp, SYS_getpgrp, "getpgrp"
 ;; ============================================================================
 ;; POSIXID_INT1 name, syscall_number, clinic_name
 ;;   -> None; the one-integer setters, which DO fail
+;; Fails: 0
 ;; ============================================================================
 %macro POSIXID_INT1 3
 DEF_FUNC %1, 16
@@ -122,6 +123,7 @@ DEF_FUNC %1, 16
     jz %%argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 %%fail
     mov rdi, rax
     mov rax, %2
     syscall
@@ -130,7 +132,11 @@ DEF_FUNC %1, 16
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+%%fail:
+    xor eax, eax
+    leave
+    ret
 %%ok:
     lea rax, [rel none_singleton]
     INCREF rax
@@ -138,15 +144,16 @@ DEF_FUNC %1, 16
     leave
     ret
 %%argerr:
-    PM_MISSING %3, "id", 1
+    PM_MISSING %3, "id", 1, %%fail
 END_FUNC %1
 %endmacro
 
-%macro PM_MISSING 3
+%macro PM_MISSING 4             ; %4 = the caller's error exit
     CSTRING rdi, %1
     CSTRING rsi, %2
     mov edx, %3
-    call posix_raise_missing
+    call posix_set_missing      ; err: it always fails; %4 is where that goes
+    jmp %4
 %endmacro
 
 POSIXID_INT1 posixid_setuid, SYS_setuid, "setuid"
@@ -154,6 +161,7 @@ POSIXID_INT1 posixid_setgid, SYS_setgid, "setgid"
 
 ;; ============================================================================
 ;; posixid_setpgid(pid, pgrp) -> None
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC posixid_setpgid, 24
     push rbx
@@ -162,9 +170,11 @@ DEF_FUNC posixid_setpgid, 24
     mov rbx, rdi
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .spg_fail
     push rax
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .spg_fail_pop
     pop rsi
     mov rdi, rax
     mov rax, SYS_setpgid
@@ -174,7 +184,8 @@ DEF_FUNC posixid_setpgid, 24
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .spg_fail
 .spg_ok:
     lea rax, [rel none_singleton]
     INCREF rax
@@ -183,7 +194,14 @@ DEF_FUNC posixid_setpgid, 24
     leave
     ret
 .spg_args:
-    RAISE exc_TypeError_type, "setpgid expected 2 arguments"
+    FAIL exc_TypeError_type, "setpgid expected 2 arguments", .spg_fail
+.spg_fail_pop:
+    pop rcx                         ; the pgrp parked across the conversion
+.spg_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC posixid_setpgid
 
 ;; ============================================================================
@@ -192,6 +210,7 @@ END_FUNC posixid_setpgid
 ;; getgroups(2) twice: once with a zero size to learn the count, once to
 ;; fetch them.  NGROUPS_MAX is 65536 on Linux, so the buffer is allocated
 ;; rather than put on the stack.
+;; Fails: 0
 ;; ============================================================================
 GG_N    equ 8
 GG_BUF  equ 16
@@ -209,7 +228,8 @@ DEF_FUNC posixid_getgroups, GG_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .gg_fail
 .gg_have_n:
     mov [rbp - GG_N], rax
     lea rdi, [rax*4 + 8]
@@ -231,7 +251,8 @@ DEF_FUNC posixid_getgroups, GG_FRAME
     pop rdi
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .gg_fail
 .gg_got:
     mov [rbp - GG_N], rax
     mov rdi, rax
@@ -278,6 +299,7 @@ END_FUNC posixid_getgroups
 ;; A set, as CPython's is.  The mask is a bit per CPU in a fixed-size buffer;
 ;; 128 bytes covers 1024 processors, which is what CPython's own default
 ;; cpu_set_t does before it starts doubling.
+;; Fails: 0
 ;; ============================================================================
 SGA_MASK  equ 128
 SGA_SET   equ SGA_MASK + 8
@@ -293,6 +315,7 @@ DEF_FUNC posixid_sched_getaffinity, SGA_FRAME
     jz .sga_have_pid
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .sga_fail
     mov rbx, rax
 .sga_have_pid:
     mov rdi, rbx
@@ -305,7 +328,8 @@ DEF_FUNC posixid_sched_getaffinity, SGA_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .sga_fail
 .sga_got:
     ; The kernel answers how many BYTES it wrote, and leaves the rest of the
     ; buffer alone -- so scanning the whole 128 counted whatever was on the
@@ -421,6 +445,7 @@ END_FUNC posixid_cpu_count
 ;; A structseq rather than a tuple, because os.py does NOT wrap this one --
 ;; `os.times` IS `posix.times`, and `os.times().elapsed` is how every caller
 ;; reads it.
+;; Fails: 0
 ;; ============================================================================
 TMS_BUF   equ 32            ; struct tms: four longs
 TMS_TUPLE equ 40
@@ -436,7 +461,8 @@ DEF_FUNC posixid_times, TMS_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .tms_fail
 .tms_ok:
     mov rbx, rax                    ; the elapsed real time, in ticks
     lea rdi, [rel times_result_type]
@@ -499,6 +525,7 @@ END_FUNC posixid_ticks_to_seconds
 ;; A read or a write at an explicit offset, leaving the descriptor's own
 ;; position where it was.  That is the whole point of them, and it is what
 ;; makes a file readable from two places without a seek between.
+;; Fails: 0
 ;; ============================================================================
 extern bytes_new
 extern bytes_type
@@ -513,6 +540,7 @@ DEF_FUNC posixid_pread, PR_FRAME
     mov rbx, rdi
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pr_fail
     test rax, rax
     js .pr_negative
     mov [rbp - PR_LEN], rax
@@ -523,9 +551,11 @@ DEF_FUNC posixid_pread, PR_FRAME
     mov [rbp - PR_BUF], rax
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pr_fail_buf
     push rax
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pr_fail_pop
     pop rcx                         ; the offset
     mov rdi, rax
     mov rsi, [rbp - PR_BUF]
@@ -544,7 +574,8 @@ DEF_FUNC posixid_pread, PR_FRAME
     pop rdi
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .pr_fail
 .pr_read:
     ; Shorter than asked for is ordinary; the object is truncated in place,
     ; which is safe because nothing else has seen it yet.
@@ -561,7 +592,7 @@ DEF_FUNC posixid_pread, PR_FRAME
     ; the length as a Py_ssize_t and the refusal comes from the call.
     mov edi, 22                     ; EINVAL
     xor esi, esi
-    call raise_oserror
+    call set_oserror
 .pr_fail:
     xor eax, eax
     xor edx, edx
@@ -569,11 +600,18 @@ DEF_FUNC posixid_pread, PR_FRAME
     leave
     ret
 .pr_args:
-    RAISE exc_TypeError_type, "pread expected 3 arguments"
+    FAIL exc_TypeError_type, "pread expected 3 arguments", .pr_fail
+.pr_fail_pop:
+    pop rcx                         ; the offset parked across the conversion
+.pr_fail_buf:
+    mov rdi, [rbp - PR_BUF]
+    call obj_decref
+    jmp .pr_fail
 END_FUNC posixid_pread
 
 ;; ============================================================================
 ;; posixid_pwrite(fd, data, offset) -> how many bytes went
+;; Fails: 0
 ;; ============================================================================
 PW_DATA  equ 8              ; the bytes to write
 PW_LEN   equ 16             ; and how many
@@ -585,13 +623,16 @@ DEF_FUNC posixid_pwrite, PW_FRAME
     mov rbx, rdi
     mov rdi, [rbx + 8]
     call posixid_buffer_arg
+    ERR_PENDING .pw_fail
     mov [rbp - PW_DATA], rax
     mov [rbp - PW_LEN], rdx
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pw_fail
     push rax
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pw_fail_pop
     pop rcx
     mov rdi, rax
     mov rsi, [rbp - PW_DATA]
@@ -604,7 +645,8 @@ DEF_FUNC posixid_pwrite, PW_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .pw_fail
 .pw_ok:
     mov rdi, rax
     call int_from_i64
@@ -613,12 +655,21 @@ DEF_FUNC posixid_pwrite, PW_FRAME
     leave
     ret
 .pw_args:
-    RAISE exc_TypeError_type, "pwrite expected 3 arguments"
+    FAIL exc_TypeError_type, "pwrite expected 3 arguments", .pw_fail
+.pw_fail_pop:
+    pop rcx                         ; the offset parked across the conversion
+.pw_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC posixid_pwrite
 
 ;; ============================================================================
 ;; posixid_buffer_arg(rdi = a Value) -> rax = the bytes, rdx = how many
 ;; bytes and bytearray only, which is what pwrite and sendfile take here.
+;; An empty bytearray's storage may be NULL, so 0 alone is not the refusal.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC_LOCAL posixid_buffer_arg, 16
     V_TEST_PTR rdi, rcx
@@ -642,7 +693,9 @@ DEF_FUNC_LOCAL posixid_buffer_arg, 16
     leave
     ret
 .pba_bad:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    leave                           ; rax = 0
+    ret
 END_FUNC posixid_buffer_arg
 
 ;; posixid_fchdir(fd) -> None -- chdir to an open directory descriptor.
@@ -654,6 +707,7 @@ POSIXID_INT1 posixid_fchdir, SYS_fchdir, "fchdir"
 ;; The four-argument form only, which is Linux's and the one shutil uses.
 ;; An offset of None means "from the descriptor's own position", which is
 ;; what a NULL third argument says to the kernel.
+;; Fails: 0
 ;; ============================================================================
 SF_COUNT equ 8
 SF_OFFV  equ 16             ; the offset itself, which the kernel updates
@@ -666,12 +720,14 @@ DEF_FUNC posixid_sendfile, SF_FRAME
     mov rbx, rdi
     mov rdi, [rbx + 24]
     call posix_int_arg
+    ERR_M1 .sf_fail
     mov [rbp - SF_COUNT], rax
     mov rdi, [rbx + 16]
     lea rcx, [rel none_singleton]
     cmp rdi, rcx
     je .sf_no_offset
     call posix_int_arg
+    ERR_M1 .sf_fail
     mov [rbp - SF_OFFV], rax
     lea rax, [rbp - SF_OFFV]
     mov [rbp - SF_OFFP], rax
@@ -681,9 +737,11 @@ DEF_FUNC posixid_sendfile, SF_FRAME
 .sf_have_offset:
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .sf_fail
     push rax
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .sf_fail_pop
     pop rsi                         ; in_fd
     mov rdi, rax                    ; out_fd
     mov rdx, [rbp - SF_OFFP]
@@ -695,7 +753,8 @@ DEF_FUNC posixid_sendfile, SF_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .sf_fail
 .sf_ok:
     mov rdi, rax
     call int_from_i64
@@ -704,7 +763,14 @@ DEF_FUNC posixid_sendfile, SF_FRAME
     leave
     ret
 .sf_args:
-    RAISE exc_TypeError_type, "sendfile expected 4 arguments"
+    FAIL exc_TypeError_type, "sendfile expected 4 arguments", .sf_fail
+.sf_fail_pop:
+    pop rcx                         ; in_fd parked across the conversion
+.sf_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC posixid_sendfile
 
 ;; ============================================================================
@@ -716,6 +782,7 @@ END_FUNC posixid_sendfile
 ;;
 ;; The structseq type is posix.asm's, already built and registered; only the
 ;; function was missing.
+;; Fails: 0
 ;; ============================================================================
 TIOCGWINSZ equ 0x5413
 GTS_WS    equ 8             ; struct winsize: four u16
@@ -727,6 +794,7 @@ DEF_FUNC posixid_get_terminal_size, GTS_FRAME
     jz .gts_have_fd
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .gts_fail
     mov rbx, rax
 .gts_have_fd:
     mov rdi, rbx
@@ -738,7 +806,8 @@ DEF_FUNC posixid_get_terminal_size, GTS_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .gts_fail
 .gts_ok:
     lea rdi, [rel terminal_size_type]
     call structseq_new
