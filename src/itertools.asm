@@ -2116,13 +2116,13 @@ DEF_FUNC builtin_sorted, SO_FRAME
 .sorted_kw_copy_done:
     lea rdi, [rbp - SO_SORT_BUF]
     lea rsi, [r13 + 1]        ; nargs = 1 + n_kw
-    call list_method_sort
+    call list_method_sort       ; err: tested at .sorted_return
     jmp .sorted_return
 
 .sorted_no_kw:
     lea rdi, [rbp - SO_SORT_BUF]
     mov esi, 1
-    call list_method_sort
+    call list_method_sort       ; err: tested at .sorted_return
 
 .sorted_return:
     ; list_method_sort answers None on success and a NULL Value with the

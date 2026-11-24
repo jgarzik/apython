@@ -1759,7 +1759,7 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
     lea rdi, [rbp - BD_SORT]
     mov esi, 2
     extern list_method_extend
-    call list_method_extend
+    call list_method_extend     ; err: tested below, once the argument is released
     push rax
     DECREF_V rbx, rcx           ; the iterable __dir__ handed us
     pop rax
@@ -1785,8 +1785,7 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
     mov esi, 1
     extern list_method_sort
     call list_method_sort
-    test rax, rax
-    jz .bd_sort_raised
+    ERR_NULL .bd_sort_raised
     DECREF_V rax, rdx
 
     mov rax, rbx
@@ -1826,7 +1825,7 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
     mov [rbp - BD_SORT + 8], rbx
     lea rdi, [rbp - BD_SORT]
     mov esi, 2
-    call list_method_extend
+    call list_method_extend     ; err: tested below, once the argument is released
     push rax
     DECREF_V rbx, rcx           ; the mapping locals() handed us
     pop rax

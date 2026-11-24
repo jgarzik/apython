@@ -1879,7 +1879,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     push rax
     lea rdi, [rsp + 8]
     mov esi, 3
-    call list_method_insert
+    call list_method_insert         ; err: a fresh list and the index 0 cannot be refused
     pop rdi
     add rsp, 32
     call obj_decref
