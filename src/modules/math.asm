@@ -762,7 +762,7 @@ DEF_FUNC math_trunc, MTR_FRAME
     call float_from_f64
     V_PACK rax, rdx
     mov rdi, rax
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     leave
     ret
 

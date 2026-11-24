@@ -1170,7 +1170,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     movq rdi, xmm0
     V_FROM_F64 rdi, rax
     extern float_int
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     pop rbx
     leave
     ret
@@ -1291,6 +1291,7 @@ DEF_FUNC builtin_round_fn, RND_FRAME
 .rnd_nd_ok:
     mov edi, eax
     call float_round_ndigits
+    ERR_M1 .rnd_fail
     movq rax, xmm0
     V_FROM_F64 rax, rdx
     pop rbx

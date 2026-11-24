@@ -285,7 +285,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_from_inline_float:
     ; A float immediate — delegate to float_int for the NaN/inf checks
     mov rdi, rbx
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     V_UNPACK rax, rdx           ; .int_ret hands back the pair, not the Value
     jmp .int_ret
 
@@ -293,7 +293,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; A float subclass instance.  float_int unboxes one itself now, so the
     ; Value goes straight in; this arm used to read the double out by hand.
     mov rdi, rbx
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     V_UNPACK rax, rdx
     jmp .int_ret
 

@@ -2646,7 +2646,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     test eax, eax
     jz .fpc_int_dunder
     mov rdi, [rbp - FPC_VAL]
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     mov edx, 1
     leave
     ret
