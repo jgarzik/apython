@@ -899,8 +899,9 @@ DEF_FUNC raise_callable_arg
 END_FUNC raise_callable_arg
 
 ;; ============================================================================
-;; raise_missing_arguments(rdi = the PyFuncObject, rsi = its half-filled frame)
-;;   -> does not return: the composed message is raised as a TypeError
+;; set_missing_arguments(rdi = the PyFuncObject, rsi = its half-filled frame)
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a TypeError.  The frame is freed.
 ;;
 ;;   f() missing 1 required positional argument: 'b'
 ;;   f() missing 2 required positional arguments: 'a' and 'b'
@@ -948,8 +949,8 @@ RMA_FRAME   equ RMA_BUF        ; + 4 pushes = 640, 16-aligned
 
 extern frame_free
 
-global raise_missing_arguments
-DEF_FUNC raise_missing_arguments, RMA_FRAME
+global set_missing_arguments
+DEF_FUNC set_missing_arguments, RMA_FRAME
     push rbx
     push r12
     push r13
@@ -1091,7 +1092,15 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
     call frame_free
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RMA_BUF]
-    call raise_exception
+    call set_exception
+.rma_ret:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .rma_nothing_missing:
     ; Unreachable from func_call, which only comes here having found an empty
@@ -1101,7 +1110,8 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
     call frame_free
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "function missing required argument"
-    call raise_exception
+    call set_exception
+    jmp .rma_ret
 
 ;; rdi = frame, esi = first slot, edx = one past the last
 ;;   -> eax = how many of those slots are empty
@@ -1120,7 +1130,7 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
     jmp .rma_count_loop
 .rma_count_done:
     ret
-END_FUNC raise_missing_arguments
+END_FUNC set_missing_arguments
 
 ;; ============================================================================
 ;; The AttributeError every failed attribute access ends in.  It moved here
@@ -1579,7 +1589,7 @@ END_FUNC method_one_arg_check
 ;;
 ;; CPython names the function by its __qualname__ and quotes the keyword; the
 ;; bare "got an unexpected keyword argument" said neither.  The frame is freed
-;; here, as raise_missing_arguments frees it: the caller was part-way through
+;; here, as set_missing_arguments frees it: the caller was part-way through
 ;; filling it and never gets control back.
 ;; ============================================================================
 RUK_FUNC    equ 8

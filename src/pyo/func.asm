@@ -30,7 +30,7 @@ extern type_type
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern rbt_append_cstr
-extern raise_exception
+extern set_exception
 
 ;; ============================================================================
 ;; func_new(PyCodeObject *code, PyObject *globals) -> PyFuncObject*
@@ -112,6 +112,12 @@ END_FUNC func_new
 ;;   4. Match keyword args (from kw_names_pending)
 ;;   5. Apply positional defaults (func_defaults)
 ;;   6. Apply kw-only defaults (func_kwdefaults)
+;;
+;; A call the binder refuses -- too many positionals, an unknown keyword, a
+;; parameter left unfilled -- answers 0 with the TypeError pending, as a callee
+;; that raised does.  The frame is freed by whichever refusal needed it to
+;; word the message.
+;; Fails: 0
 ;; ============================================================================
 extern dict_new
 extern dict_set
@@ -164,8 +170,8 @@ DEF_FUNC func_call
     ; ecx = given positional count, rdi = code object, rbx = func
     mov esi, ecx               ; esi = nargs_given
     mov rdi, rbx               ; rdi = func
-    call raise_too_many_positional
-    ; (does not return)
+    call set_too_many_positional
+    jmp .fc_refused
 .args_count_ok:
 
     ; === The shape almost every call has ===
@@ -346,6 +352,7 @@ DEF_FUNC func_call
     mov r8, rax              ; kw_names tuple
     mov r9, [rsp+24]         ; kwargs_dict (NULL if no CO_VARKEYWORDS)
     call func_bind_kwargs
+    ERR_NULL .fc_refused     ; the frame went with the refusal
 
 .kw_done:
     ; === Phase 5: Apply positional defaults ===
@@ -481,11 +488,12 @@ DEF_FUNC func_call
     jmp .check_args_loop
 .args_missing:
     ; The names of what is missing come out of the frame's empty slots, so
-    ; the raiser frees the frame rather than the caller.
+    ; the refusal frees the frame rather than the caller.
     mov rdi, rbx
     mov rsi, r12
-    extern raise_missing_arguments
-    call raise_missing_arguments
+    extern set_missing_arguments
+    call set_missing_arguments
+    jmp .fc_refused
 .args_valid:
     ; === Phase 7: Call eval_frame ===
     mov rdi, r12
@@ -505,6 +513,7 @@ DEF_FUNC func_call
 
     mov rax, [rsp+16]       ; the return Value
 
+.fc_out:
     add rsp, 56
     pop r15
     pop r14
@@ -513,6 +522,12 @@ DEF_FUNC func_call
     pop rbx
     leave
     ret
+
+.fc_refused:
+    ; The binder said no.  There is no frame left to free and nothing else
+    ; this function owns: the arguments are the caller's.
+    xor eax, eax
+    jmp .fc_out
 END_FUNC func_call
 
 ;; ============================================================================
@@ -524,6 +539,9 @@ END_FUNC func_call
 ;; ecx = positional_count
 ;; r8  = kw_names tuple (NOT NULL)
 ;; r9  = kwargs_dict (or NULL if no CO_VARKEYWORDS)
+;;   -> rax = 1, or 0 with the TypeError pending and the FRAME FREED: an
+;;      unexpected keyword's message is worded from it
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC func_bind_kwargs
     push rbx
@@ -648,14 +666,17 @@ DEF_FUNC func_bind_kwargs
     mov rdx, [rdx + rax*8]         ; the keyword's name
     mov rdi, rbx
     mov rsi, r12
-    extern raise_unexpected_keyword
-    call raise_unexpected_keyword
+    extern set_unexpected_keyword
+    call set_unexpected_keyword     ; rax = 0
+    jmp .kw_out
 
 .kw_next:
     inc qword [rsp+16]
     jmp .kw_outer
 
 .kw_outer_done:
+    mov eax, 1
+.kw_out:
     add rsp, 40
     pop r15
     pop r14
@@ -752,6 +773,8 @@ END_FUNC func_dealloc
 ;; Set an arbitrary attribute on a function object.
 ;; Lazily creates func_dict on first use.
 ;; rdi = function, rsi = name, rdx = value
+;;   -> rax = 0, or -1 with the exception pending
+;; Fails: -1
 ;; ============================================================================
 section .bss
 ;; Where the __code__ mismatch message is composed.
@@ -861,6 +884,7 @@ DEF_FUNC func_setattr, SC_FRAME
     mov rdx, r13
     call dict_set
 
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -888,6 +912,7 @@ DEF_FUNC func_setattr, SC_FRAME
     DECREF_V rdi, rcx
 .sq_done:
     xor eax, eax
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -895,7 +920,7 @@ DEF_FUNC func_setattr, SC_FRAME
     leave
     ret
 .sq_type:
-    RAISE exc_TypeError_type, "__qualname__ must be set to a string object"
+    FAIL exc_TypeError_type, "__qualname__ must be set to a string object", .fsa_fail
 
 .set_code:
     ; A code object, and only a code object: everything that reads func_code
@@ -937,6 +962,7 @@ DEF_FUNC func_setattr, SC_FRAME
     call obj_decref
 .sc_done:
     xor eax, eax
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -944,7 +970,7 @@ DEF_FUNC func_setattr, SC_FRAME
     leave
     ret
 .sc_type:
-    RAISE exc_TypeError_type, "__code__ must be set to a code object"
+    FAIL exc_TypeError_type, "__code__ must be set to a code object", .fsa_fail
 .sc_freevars:
     ; CPython names the function and both counts, which is the whole of what
     ; makes the message actionable: "k() requires a code object with 1 free
@@ -973,7 +999,8 @@ DEF_FUNC func_setattr, SC_FRAME
     call sc_append_num
     lea rsi, [rel sc_msgbuf]
     lea rdi, [rel exc_ValueError_type]
-    call raise_exception
+    call set_exception
+    jmp .fsa_fail
     ud2
 
 .set_annotations:
@@ -998,6 +1025,7 @@ DEF_FUNC func_setattr, SC_FRAME
     call obj_decref
 .sa_done:
     xor eax, eax
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -1005,7 +1033,7 @@ DEF_FUNC func_setattr, SC_FRAME
     leave
     ret
 .sa_type:
-    RAISE exc_TypeError_type, "__annotations__ must be set to a dict object"
+    FAIL exc_TypeError_type, "__annotations__ must be set to a dict object", .fsa_fail
 
 .set_module:
     ; Anything, including None, as CPython's func_set_module takes; a delete
@@ -1035,6 +1063,7 @@ DEF_FUNC func_setattr, SC_FRAME
     DECREF_V rdi, rcx
 .sd_done:
     xor eax, eax
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -1057,6 +1086,7 @@ DEF_FUNC func_setattr, SC_FRAME
     jz .set_name_done
     call obj_decref
 .set_name_done:
+    xor eax, eax
     pop r14
     pop r13
     pop r12
@@ -1065,7 +1095,7 @@ DEF_FUNC func_setattr, SC_FRAME
     ret
 
 .set_name_type_error:
-    RAISE exc_TypeError_type, "__name__ must be set to a string object"
+    FAIL exc_TypeError_type, "__name__ must be set to a string object", .fsa_fail
 
 .set_defaults:
     ; A delete arrives as a NULL Value, and None means the same thing: no
@@ -1109,7 +1139,7 @@ DEF_FUNC func_setattr, SC_FRAME
     jmp .setattr_done
 
 .set_defaults_type_error:
-    RAISE exc_TypeError_type, "__defaults__ must be set to a tuple object"
+    FAIL exc_TypeError_type, "__defaults__ must be set to a tuple object", .fsa_fail
 
 .set_kwdefaults:
     ; func_call reads this field with dict_get, so whatever is here has to be
@@ -1159,9 +1189,18 @@ DEF_FUNC func_setattr, SC_FRAME
     jmp .setattr_done
 
 .set_kwd_type_error:
-    RAISE exc_TypeError_type, "__kwdefaults__ must be set to a dict object"
+    FAIL exc_TypeError_type, "__kwdefaults__ must be set to a dict object", .fsa_fail
 
 .setattr_done:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.fsa_fail:
+    mov rax, -1
     pop r14
     pop r13
     pop r12
@@ -1664,12 +1703,12 @@ DEF_FUNC func_repr, 8            ; 1 pushes, so rsp is 16-aligned
 END_FUNC func_repr
 
 ;; ============================================================================
-;; raise_too_many_positional(PyFuncObject *func, int nargs_given)
-;; Raise TypeError with CPython-format message:
+;; set_too_many_positional(PyFuncObject *func, int nargs_given)
+;;   -> rax = 0, always, with the TypeError pending
+;; CPython's message:
 ;;   "qualname() takes N positional arguments but M were given"
 ;;   or "qualname() takes from N to M positional arguments but K were given"
 ;; rdi = func, esi = nargs_given
-;; Does not return.
 ;; ============================================================================
 RTMP_BUF  equ 256
 ; Whether the count being reported is 1.  CPython pluralises "argument" on
@@ -1679,7 +1718,7 @@ RTMP_BUF  equ 256
 ; push list sets the frame's alignment.
 RTMP_SINGULAR equ RTMP_BUF + 8
 RTMP_FRAME equ RTMP_BUF + 24
-DEF_FUNC raise_too_many_positional, RTMP_FRAME
+DEF_FUNC set_too_many_positional, RTMP_FRAME
     push rbx
     push r12
     mov rbx, rdi               ; func
@@ -1804,7 +1843,11 @@ DEF_FUNC raise_too_many_positional, RTMP_FRAME
     extern exc_TypeError_type
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RTMP_BUF]
-    call raise_exception
+    call set_exception
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ; Mini itoa: convert eax to decimal at [rdi], advance rdi
 .rtmp_itoa:
@@ -1860,7 +1903,7 @@ DEF_FUNC raise_too_many_positional, RTMP_FRAME
 .rtmp_strcpy_done:
     ret
 
-END_FUNC raise_too_many_positional
+END_FUNC set_too_many_positional
 
 section .rodata
 rtmp_pos_args:     db " positional arguments but ", 0
@@ -1978,6 +2021,7 @@ END_FUNC cell_new
 ;; 'function' instances".  The closure has to match the code's free
 ;; variables one for one, as CPython requires, or the first LOAD_DEREF reads
 ;; past the tuple.
+;; Fails: 0
 ;; ============================================================================
 FCN_CODE  equ 48            ; the six slots, in parameter order, lowest first
 FCN_GLOB  equ 40
@@ -2003,9 +2047,8 @@ DEF_FUNC func_construct, FCN_FRAME
     lea rdx, [rel fcn_kwnames]
     lea rcx, [rbp - FCN_CODE]
     extern math_bind_kw
-    extern eval_exception_unwind
     call math_bind_kw
-    ERR_M1_JUMP
+    ERR_M1 .fcn_fail
     cmp rax, 5
     ja .fcn_arity
     mov [rbp - FCN_NPOS], rax
@@ -2112,21 +2155,25 @@ DEF_FUNC func_construct, FCN_FRAME
     ret
 
 .fcn_arity:
-    RAISE exc_TypeError_type, "function() takes at most 5 arguments"
+    FAIL exc_TypeError_type, "function() takes at most 5 arguments", .fcn_fail
 .fcn_bad_code:
-    RAISE exc_TypeError_type, "function() argument 'code' must be code"
+    FAIL exc_TypeError_type, "function() argument 'code' must be code", .fcn_fail
 .fcn_bad_globals:
-    RAISE exc_TypeError_type, "function() argument 'globals' must be dict"
+    FAIL exc_TypeError_type, "function() argument 'globals' must be dict", .fcn_fail
 .fcn_bad_name:
-    RAISE exc_TypeError_type, "arg 3 (name) must be None or string"
+    FAIL exc_TypeError_type, "arg 3 (name) must be None or string", .fcn_fail
 .fcn_bad_defs:
-    RAISE exc_TypeError_type, "arg 4 (defaults) must be None or tuple"
+    FAIL exc_TypeError_type, "arg 4 (defaults) must be None or tuple", .fcn_fail
 .fcn_bad_clos:
-    RAISE exc_TypeError_type, "arg 5 (closure) must be tuple"
+    FAIL exc_TypeError_type, "arg 5 (closure) must be tuple", .fcn_fail
 .fcn_need_clos:
-    RAISE exc_TypeError_type, "arg 5 (closure) must be tuple"
+    FAIL exc_TypeError_type, "arg 5 (closure) must be tuple", .fcn_fail
 .fcn_clos_len:
-    RAISE exc_ValueError_type, "closure does not match the code object's free variables"
+    FAIL exc_ValueError_type, "closure does not match the code object's free variables", .fcn_fail
+.fcn_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC func_construct
 
 section .rodata
@@ -2145,6 +2192,7 @@ section .text
 ;;
 ;; tp_new: types.CellType() is an empty cell and types.CellType(x) holds x,
 ;; which is how code builds a closure by hand for types.FunctionType.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC cell_construct
     xor edi, edi
@@ -2158,7 +2206,10 @@ DEF_FUNC cell_construct
     leave
     ret
 .cc_arity:
-    RAISE exc_TypeError_type, "cell expected at most 1 argument"
+    SET_EXC exc_TypeError_type, "cell expected at most 1 argument"
+    RET_NULL
+    leave
+    ret
 END_FUNC cell_construct
 
 
@@ -2207,8 +2258,10 @@ section .text
 ;; `cell_contents`, the one attribute a cell has beyond object's: the value
 ;; the closure sees.  attrs and jsonschema read it at import time, and attrs
 ;; writes it too -- that is how it points a method's __class__ cell at the
-;; class it rebuilt.  An empty cell is a ValueError, as in CPython.  Any other
-;; name answers 0 and the generic lookup takes over.
+;; class it rebuilt.  An empty cell is a ValueError, as in CPython: 0 with it
+;; pending.  Any other name answers 0 with nothing pending and the generic
+;; lookup takes over.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC cell_getattr
     push rdi
@@ -2227,7 +2280,9 @@ DEF_FUNC cell_getattr
     leave
     ret
 .cga_empty:
-    RAISE exc_ValueError_type, "Cell is empty"
+    SET_EXC exc_ValueError_type, "Cell is empty"
+    leave
+    ret
 .cga_other:
     xor eax, eax
     leave
@@ -2236,7 +2291,8 @@ END_FUNC cell_getattr
 
 ;; ============================================================================
 ;; cell_setattr(rdi = a cell, rsi = the name, rdx = the Value, 0 to delete)
-;;   -> nothing
+;;   -> rax = 0, or -1 with the AttributeError pending
+;; Fails: -1
 ;;
 ;; `cell_contents` takes any value, and a delete empties the cell.  Anything
 ;; else is CPython's AttributeError for an object with no such attribute.
@@ -2261,14 +2317,17 @@ DEF_FUNC cell_setattr, CSA_FRAME
     mov rdi, [rcx + PyCellObject.ob_ref]
     mov [rcx + PyCellObject.ob_ref], rax
     XDECREF_V rdi, rcx
+    xor eax, eax
     leave
     ret
 .csa_other:
     mov rdi, [rbp - CSA_CELL]
     mov rsi, [rbp - CSA_NAME]
-    mov edx, 1
-    extern raise_no_attribute
-    call raise_no_attribute
+    extern set_no_attribute_store
+    call set_no_attribute_store
+    mov rax, -1
+    leave
+    ret
 END_FUNC cell_setattr
 
 section .rodata
