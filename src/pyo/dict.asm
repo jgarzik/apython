@@ -414,8 +414,7 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     mov esi, 2
     call dict_method_update             ; kw_names_pending is already cleared
     add rsp, 24
-    test rax, rax
-    jz .dtc_error                       ; update left its exception pending
+    ERR_NULL .dtc_error                 ; update left its exception pending
     mov rdi, rax
     DECREF_V rdi, rsi                   ; the None it returns
     jmp .dtc_add_kwargs
@@ -1797,6 +1796,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov esi, 2
     extern dict_method_update
     call dict_method_update
+    ERR_NULL_JUMP               ; a 0 from here reads as NotImplemented
     test rax, rax
     jz .nb_ior_failed           ; update raised; hand the failure on
     DECREF_V rax, rcx           ; update answers None

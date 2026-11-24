@@ -2251,8 +2251,7 @@ DEF_FUNC op_dict_update
     call dict_method_update
     mov [gs:ThreadState.kw_names_pending], rbx
     add rsp, 16
-    test rax, rax
-    jz .du_propagate
+    ERR_NULL .du_propagate
     DECREF_V rax, rcx           ; update() answers None
     ; And the SOURCE, whose reference came off the stack with the pop.  The
     ; dense walk above releases it at .du_done and this arm did not, so every

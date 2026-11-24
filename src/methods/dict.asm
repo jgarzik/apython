@@ -23,8 +23,8 @@ extern obj_call_n
 extern dict_set
 extern dict_del
 extern none_singleton
-extern raise_exception
-extern raise_key_error
+extern set_exception
+extern set_key_error
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_KeyError_type
@@ -143,6 +143,7 @@ END_FUNC dict_method_items
 
 ;; ============================================================================
 ;; dict_method_pop(args, nargs) -> value
+;; Fails: 0
 ;; args[0]=self, args[1]=key, optionally args[2]=default
 ;; ============================================================================
 DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
@@ -194,7 +195,15 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
 
 .dpop2_error:
     mov rdi, [r14 + 8]         ; the key Value, still in the argument array
-    call raise_key_error
+    call set_key_error
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC dict_method_pop
 
 ;; ============================================================================
@@ -268,6 +277,7 @@ END_FUNC du_as_sequence
 
 ;; ============================================================================
 ;; dict_method_update(args, nargs) -> None
+;; Fails: 0
 ;; args[0]=self; then either a mapping, or an iterable of key/value pairs,
 ;; and/or keyword arguments.  All three forms are ordinary Python; the old
 ;; code read args[1] as a PyDictObject unconditionally, so d.update(5)
@@ -464,10 +474,8 @@ DEF_FUNC dict_method_update, DU_FRAME
     inc r14
     jmp .du_key_loop
 .du_not_mapping:
-    ; raise_exception does not return -- it jumps into the unwinder -- so
-    ; anything this frame owns has to go first.
-    call .du_release
-    RAISE exc_TypeError_type, "object is not subscriptable"
+    SET_EXC exc_TypeError_type, "object is not subscriptable"
+    jmp .du_propagate
 
 .du_mutated:
     extern exc_RuntimeError_type
@@ -642,12 +650,13 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rsi, r14
     CSTRING rdx, " to a sequence"
     CSTRING rdi, "cannot convert dictionary update sequence element #"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .du_propagate
 
 .du_bad_pair:
     ; "element #0 has length 3; 2 is required": two numbers, so the first
-    ; goes into a buffer here and raise_value_error_counted appends the
+    ; goes into a buffer here and set_value_error_counted appends the
     ; second.
     mov r13, [rax + PyTupleObject.ob_size]
     call .du_release
@@ -666,11 +675,14 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rdi, rsp
     mov rsi, r13
     CSTRING rdx, "; 2 is required"
-    extern raise_value_error_counted
-    jmp raise_value_error_counted
+    extern set_value_error_counted
+    call set_value_error_counted
+    add rsp, 128
+    jmp .du_propagate
 
 .du_too_many:
-    RAISE exc_TypeError_type, "update expected at most 1 argument"
+    SET_EXC exc_TypeError_type, "update expected at most 1 argument"
+    jmp .du_propagate
 END_FUNC dict_method_update
 
 ;; ============================================================================
@@ -750,6 +762,7 @@ END_FUNC dict_method_copy
 
 ;; ============================================================================
 ;; dict_classmethod_fromkeys(args, nargs) -> new dict
+;; Fails: 0
 ;; args[0]=cls (type), args[1]=iterable, optional args[2]=value (default None)
 ;; Creates dict from iterable keys with given value.
 ;; ============================================================================
@@ -886,8 +899,9 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     call obj_decref
     mov rdi, [rbp - DFK_ITER]
     call obj_decref
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
         "fromkeys() requires a dict subclass"
+    jmp .dfk_no_iter
 
 .dfk_ctor_failed:
     ; The class refused to build, and said why.
@@ -904,6 +918,7 @@ END_FUNC dict_classmethod_fromkeys
 
 ;; ============================================================================
 ;; dict_method_popitem(args, nargs) -> (key, value) tuple
+;; Fails: 0
 ;; args[0]=self. Removes and returns last inserted item.
 ;; ============================================================================
 DEF_FUNC dict_method_popitem
@@ -962,7 +977,14 @@ DEF_FUNC dict_method_popitem
     ret
 
 .dpopitem_empty:
-    RAISE exc_KeyError_type, "popitem(): dictionary is empty"
+    SET_EXC exc_KeyError_type, "popitem(): dictionary is empty"
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC dict_method_popitem
 
 section .rodata
@@ -994,7 +1016,11 @@ DEF_FUNC_BARE dict_dunder_getitem
     mov rdi, rax
     jmp dict_subscript
 .ddg_error:
-    RAISE exc_TypeError_type, "descriptor '__getitem__' requires a 'dict' object"
+    sub rsp, 8                  ; a bare function: align the call
+    SET_EXC exc_TypeError_type, "descriptor '__getitem__' requires a 'dict' object"
+    add rsp, 8
+    xor eax, eax
+    ret
 END_FUNC dict_dunder_getitem
 
 DEF_FUNC dict_dunder_setitem
@@ -1019,7 +1045,10 @@ DEF_FUNC dict_dunder_setitem
     V_PACK rax, rdx
     ret
 .dds_error:
-    RAISE exc_TypeError_type, "object does not support item assignment"
+    SET_EXC exc_TypeError_type, "object does not support item assignment"
+    xor eax, eax
+    leave
+    ret
 END_FUNC dict_dunder_setitem
 
 DEF_FUNC dict_dunder_delitem
@@ -1043,5 +1072,8 @@ DEF_FUNC dict_dunder_delitem
     V_PACK rax, rdx
     ret
 .ddd_error:
-    RAISE exc_TypeError_type, "object does not support item deletion"
+    SET_EXC exc_TypeError_type, "object does not support item deletion"
+    xor eax, eax
+    leave
+    ret
 END_FUNC dict_dunder_delitem
