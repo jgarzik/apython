@@ -478,3 +478,79 @@ try:
     sys.exit(7)
 except SystemExit as e:
     print("sys.exit code", e.code)
+
+# --- format(), f-strings, str.format and the spec engine behind them --------------
+class FormatRaises:
+    def __format__(self, spec):
+        raise Boom()
+
+
+class FormatInt:
+    def __format__(self, spec):
+        return 5
+
+
+class WideInt(int):
+    pass
+
+
+# A subclass of int whose value is past an int64 is formatted from the int it
+# wraps.  The spec engine released that int as though it had made it, so the
+# second format() of one instance freed the instance's value.
+wide = WideInt(10 ** 30)
+for _ in range(50):
+    text = format(wide, "x")
+    churn = [10 ** 31 + i for i in range(4)]
+print("wide subclass", text, int(wide) == 10 ** 30, format(wide, ",d"))
+
+INT_SPECS = ["=+10.3z", "z", "zd", "zs", ".3d", ".3n", "+s", "#s", "=s", ",x",
+             "_c", "+c", "#c", ".2c", "999999999999999999999d",
+             ".99999999999999999999f", "q", "10q", ",,", "_,", "s", "é",
+             ",s", "_s", ",b", "_n"]
+FLOAT_SPECS = ["=+10.3z", "zd", "zs", ".3d", "+s", "#s", "=s", ",x", "_c", "+c",
+               "#c", ".2c", "c", "999999999999999999999d",
+               ".99999999999999999999f", "q", "10q", ",,", "_,", "s", "x",
+               "5.5.5", "é", ",s", "_s", ",b", "_n"]
+STR_SPECS = ["=+10.3z", "z", "zd", "zs", ".3d", ".3n", "+s", "#s", "=s", ",x",
+             "_c", "+c", "#c", ".2c", "c", "999999999999999999999d",
+             ".99999999999999999999f", "q", "10q", ",,", "_,", "x", "5.5.5",
+             "é", ",b", "_n"]
+COMPLEX_SPECS = ["=+10.3z", "zd", "zs", ".3d", "+s", "#s", "=s", ",x", "_c",
+                 "+c", "#c", ".2c", "c", "999999999999999999999d",
+                 ".99999999999999999999f", "q", "10q", ",,", "_,", "s", "x",
+                 "5.5.5", "é", ",s", "_s", ",b"]
+FORMAT_CASES = (
+    ("int", 5, INT_SPECS),
+    ("negative int", -5, INT_SPECS),
+    ("big int", 10 ** 30, INT_SPECS),
+    ("wide int subclass", wide, INT_SPECS),
+    ("bool", True, INT_SPECS),
+    ("float", 1.5, FLOAT_SPECS),
+    ("str", "abc", STR_SPECS),
+    ("complex", 1 + 2j, COMPLEX_SPECS),
+)
+for label, value, specs in FORMAT_CASES:
+    for spec in specs:
+        check("format %s %s" % (label, ascii(spec)), lambda: format(value, spec))
+check("format c out of range", lambda: format(0x110000, "c"))
+check("format c negative", lambda: format(-1, "c"))
+check("format c big", lambda: format(10 ** 30, "c"))
+check("format c wide subclass", lambda: format(wide, "c"))
+check("format complex zero padding", lambda: format(1j, "010"))
+check("format complex = alignment", lambda: format(1j, "=10"))
+check("format __format__ raises", lambda: format(FormatRaises(), "x"))
+check("format __format__ int", lambda: format(FormatInt(), "x"))
+check("format none", lambda: format())
+check("format three", lambda: format(1, "", 3))
+check("format spec int", lambda: format(1, 5))
+check("f-string __format__ raises", lambda: f"{FormatRaises():x}")
+check("f-string bad spec", lambda: f"{5:.3d}")
+check("f-string __str__ raises", lambda: f"{StrRaises()!s:>5}")
+check("str.format bad spec", lambda: "{:.3d}".format(5))
+check("str.format bad spec, wide subclass", lambda: "{:.3d}".format(wide))
+check("str.format __format__ raises", lambda: "{}".format(FormatRaises()))
+check("int.__format__ bad spec", lambda: (5).__format__(".3d"))
+check("int.__format__ spec int", lambda: (5).__format__(5))
+check("int.__format__ none", lambda: (5).__format__())
+check("% s __str__ raises", lambda: "%s" % StrRaises())
+check("% 5s __str__ raises", lambda: "%5s" % StrRaises())

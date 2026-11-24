@@ -1340,8 +1340,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rsi, [rbp-SM_CONV]
     extern fmt_percent_coerce
     call fmt_percent_coerce
-    test rax, rax
-    jz .sm_conv_failed          ; a raising __index__ or __float__
+    ERR_NULL .sm_conv_failed    ; refused, or a raising __index__ or __float__
     mov [rbp-SM_VALUE], rax
     mov [rbp-SM_OWNVAL], rdx
     mov rcx, [rbp-SM_CONV]
@@ -1509,7 +1508,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     ; printf mode: the two mini-languages agree except on what a precision
     ; means for an integer conversion, and this is the printf side.
     extern format_apply_spec_printf
-    call format_apply_spec_printf
+    call format_apply_spec_printf   ; err: .sm_conv_failed, once the spec is released
     V_UNPACK rax, rdx
     mov [rbp-SM_PIECE], rax
 

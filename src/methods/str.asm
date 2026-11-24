@@ -2266,7 +2266,7 @@ DEF_FUNC str_method_format, SF_FRAME
     mov rdi, rsp
     mov esi, 2
     extern builtin_format_fn
-    call builtin_format_fn
+    call builtin_format_fn      ; err: .fm_fail, from .fm_have_text, spec released
     V_UNPACK rax, rdx
     add rsp, 24
     mov r14, rax
@@ -2282,7 +2282,7 @@ DEF_FUNC str_method_format, SF_FRAME
     mov [rsp], rax              ; args[0] = the value, and no spec
     mov rdi, rsp
     mov esi, 1
-    call builtin_format_fn
+    call builtin_format_fn      ; err: .fm_fail, from .fm_have_text
     V_UNPACK rax, rdx
     add rsp, 16
     mov r14, rax

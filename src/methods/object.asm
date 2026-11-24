@@ -212,7 +212,7 @@ DEF_FUNC builtin_method_format
     jne .bmf_bad_spec
     mov rsi, rax
     mov rdi, [rdi]
-    call format_apply_spec
+    call format_apply_spec      ; err: its 0 is this method's own
     leave
     ret
 .bmf_bad:

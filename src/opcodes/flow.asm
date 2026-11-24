@@ -402,7 +402,7 @@ DEF_FUNC op_format_value, FV_FRAME
     V_PACK rdi, rsi
     mov rsi, rax
     extern format_apply_spec
-    call format_apply_spec
+    call format_apply_spec      ; err: .fv_conv_failed, by the tag at .fv_push
     V_UNPACK rax, rdx
     jmp .fv_have_result
 

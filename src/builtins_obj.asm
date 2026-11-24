@@ -2277,6 +2277,7 @@ END_FUNC builtin_ascii_fn
 ;; ============================================================================
 ;; builtin_format_fn(rdi = args, rsi = nargs) - format(value[, format_spec])
 ;;   -> rax = Value
+;; Fails: 0
 ;; Calls value.__format__(format_spec) or str(value) if no __format__
 ;; ============================================================================
 global builtin_format_fn
@@ -2362,7 +2363,7 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     mov rsi, rdx
     extern format_require_str
     call format_require_str
-    ERR_M1_JUMP
+    ERR_M1 .fmt_bad_result
     pop rdx
     pop rax
     ; If an empty spec was allocated here, release it.
@@ -2376,17 +2377,28 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     pop rax
     jmp .fmt_done
 
+.fmt_bad_result:
+    ; __format__ answered something that is not a str: it is ours, and it is
+    ; still on the stack.
+    pop rdx
+    pop rdi
+    DECREF_VAL rdi, rdx
 .fmt_propagate:
-    extern eval_exception_unwind
-    leave
-    jmp eval_exception_unwind
+    ; The exception is pending.  The empty spec made here goes back first.
+    cmp rbx, 2
+    jge .fmt_fail
+    mov rdi, [rbp - FMT_SPEC]
+    call obj_decref
+.fmt_fail:
+    RET_NULL
+    jmp .fmt_done
 
 .fmt_apply_spec:
     ; Not a class with its own __format__: apply the spec directly.
     extern format_apply_spec
     mov rdi, [rbp - FMT_OBJ]
     mov rsi, [rbp - FMT_SPEC]
-    call format_apply_spec
+    call format_apply_spec      ; err: its 0 leaves through .fmt_done, spec released
     V_UNPACK rax, rdx
     cmp rbx, 2
     jge .fmt_done
@@ -2418,23 +2430,25 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     ret
 
 .fmt_too_few:
-    ; rsi is still nargs at both of these.
+    ; rsi is still nargs at both of these, and rbx is still the caller's.
     CSTRING rdi, "format expected at least 1 argument, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .fmt_fail
 
 .fmt_nargs_error:
     CSTRING rdi, "format expected at most 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .fmt_fail
 
 .fmt_spec_error:
-    pop rbx
     mov rsi, [rbp - FMT_SPEC]
     CSTRING rdi, `format() argument 2 must be str, not \x02`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .fmt_fail
 END_FUNC builtin_format_fn
 
 ;; ============================================================================
