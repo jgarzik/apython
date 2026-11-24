@@ -732,7 +732,8 @@ DEF_FUNC bytes_method_expandtabs, BET_FRAME
     mov esi, 1                  ; a tabsize is a C int in CPython, and it
     extern str_pad_width        ; says so when handed one that will not fit;
     call str_pad_width          ; bs_arg_i64 truncated, so 2**31 tabs became
-    mov [rbp - BET_TABS], rax   ; the low half of one
+    ERR_M1_JUMP                 ; the low half of one
+    mov [rbp - BET_TABS], rax
 .bet_have_tabs:
 
     ; Walk one: the size.

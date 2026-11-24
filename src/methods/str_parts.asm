@@ -393,6 +393,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     mov esi, 1              ; a tabsize is a C int in CPython, and it says so
     extern str_pad_width    ; when handed one that will not fit; obj_as_index
     call str_pad_width      ; alone truncated, so 2**70 tabs became none
+    ERR_M1_JUMP
     mov r13, rax
 .et_have_tab:
     mov [rbp - ET_TAB], r13
