@@ -316,7 +316,7 @@ DEF_FUNC_LOCAL psd_join, PJ_FRAME
     leave
     ret
 .pj_bytes:
-    call bytes_concat
+    call bytes_concat         ; err: the 0 is this function's own answer
     leave
     ret
 END_FUNC psd_join

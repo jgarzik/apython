@@ -153,6 +153,7 @@ END_FUNC bytes_len
 ;; ============================================================================
 ;; bytes_getitem(PyBytesObject *self, int64_t index) -> rax = Value (SmallInt 0-255)
 ;; sq_item: return byte at index as integer
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE bytes_getitem
     ; Handle negative index
@@ -173,13 +174,16 @@ DEF_FUNC_BARE bytes_getitem
     ret
 
 .index_error:
-    push rdi
-    RAISE exc_IndexError_type, "index out of range"
+    sub rsp, 8                  ; no frame here; the call wants rsp aligned
+    SET_EXC exc_IndexError_type, "index out of range"
+    add rsp, 8
+    ret                         ; rax = 0, with it pending
 END_FUNC bytes_getitem
 
 ;; ============================================================================
 ;; bytes_subscript(PyBytesObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: handles both int and slice keys
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
@@ -206,12 +210,23 @@ DEF_FUNC bytes_subscript
     mov rdi, r12
     lea rsi, [rel bs_index_msg]
     call obj_as_index_seq
-    ERR_M1_JUMP
+    ERR_M1 .bs_fail
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax
-    call bytes_getitem          ; already returns a Value
+    call bytes_getitem          ; already returns a Value -- err: its 0 is this slot's own
 
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bs_slice_fail:
+    pop r15
+    pop r14
+    pop r13
+.bs_fail:
+    RET_NULL
     pop r12
     pop rbx
     leave
@@ -226,7 +241,7 @@ DEF_FUNC bytes_subscript
     mov rdi, r12               ; slice
     mov rsi, [rbx + PyBytesObject.ob_size]
     call slice_indices
-    ERR_M1_JUMP
+    ERR_M1 .bs_slice_fail
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax               ; start
     mov r14, rdx               ; stop
@@ -339,6 +354,7 @@ section .text
 ;; ============================================================================
 ;; bytes_contains(PyBytesObject *self, PyObject *value) -> int (0/1)
 ;; sq_contains: check if byte value is in bytes
+;; Fails: -1
 ;; ============================================================================
 BCN_ARG   equ 8             ; the operand as it arrived, for the refusal
 BCN_FRAME equ 48            ; + 4 pushes = 80, 16-aligned
@@ -455,11 +471,20 @@ DEF_FUNC bytes_contains, BCN_FRAME
 .bc_type_error:
     mov rsi, [rbp - BCN_ARG]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bc_fail
 
 .bc_range_error:
-    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+    SET_EXC exc_ValueError_type, "byte must be in range(0, 256)"
+.bc_fail:
+    mov rax, -1                 ; as sq_contains says it
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_contains
 
 ;; ============================================================================
@@ -475,7 +500,7 @@ DEF_FUNC bytes_repr
     mov rsi, [rdi + PyBytesObject.ob_size]
     lea rdi, [rdi + PyBytesObject.data]
     xor edx, edx               ; 0 = b'...'
-    call bytes_repr_impl
+    call bytes_repr_impl      ; err: the 0 is this function's own answer
     leave
     ret
 END_FUNC bytes_repr
@@ -487,7 +512,7 @@ DEF_FUNC bytearray_repr, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, rax
     mov rsi, [rbx + PyByteArrayObject.ob_size]
     mov edx, 1                 ; 1 = bytearray(b'...')
-    call bytes_repr_impl
+    call bytes_repr_impl      ; err: the 0 is this function's own answer
     pop rbx
     leave
     ret
@@ -502,6 +527,7 @@ END_FUNC bytearray_repr
 ;; Four output bytes per input byte is the worst any byte can do (\xHH), and
 ;; the wrapper is at most `bytearray(b'` plus `')` plus the NUL, so 4n + 32
 ;; cannot be exceeded.
+;; Fails: 0
 BRI_FRAME equ 8             ; + 5 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL bytes_repr_impl, BRI_FRAME
     push rbx
@@ -707,7 +733,15 @@ DEF_FUNC_LOCAL bytes_repr_impl, BRI_FRAME
     ret
 .br_oom:
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_repr_impl
 
 
@@ -1137,6 +1171,7 @@ END_FUNC bytes_latin1_to_str
 ;; back as a single mangled byte.  CPython rejects a str for %s outright
 ;; ("%b requires a bytes-like object..."); it accepts one for %r and %a, which
 ;; is why only the wide ones are refused here rather than all of them.
+;; Fails: -1
 DEF_FUNC bytes_mod_reject_wide
     V_TEST_PTR rdi, rax
     ja .bmw_ok
@@ -1159,6 +1194,7 @@ DEF_FUNC bytes_mod_reject_wide
     cmp rax, [rdi + PyStrObject.ob_length]
     jne .bmw_wide               ; more bytes than code points: not ASCII
 .bmw_ok:
+    xor eax, eax
     leave
     ret
 .bmw_wide:
@@ -1166,7 +1202,10 @@ DEF_FUNC bytes_mod_reject_wide
     ; type, which for a subclass is the subclass.
     mov rsi, rdi
     CSTRING rdi, `%b requires a bytes-like object, or an object that implements __bytes__, not '\x01'`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 END_FUNC bytes_mod_reject_wide
 
 global bytes_mod_is_byteslike
@@ -1224,6 +1263,7 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
 
     ; A single argument.
     call bytes_mod_reject_wide
+    ERR_M1 .bmp_fail
     mov rdi, [rbp - BMP_ARGS]
     call bytes_mod_as_str
     test rax, rax
@@ -1233,6 +1273,10 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     leave
     ret
 .bmp_out:
+    leave
+    ret
+.bmp_fail:                      ; nothing is owned yet; `leave` drops the saves
+    xor eax, eax
     leave
     ret
 
@@ -1254,6 +1298,7 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     push rdx
     sub rsp, 8
     call bytes_mod_reject_wide
+    ERR_M1 .bmp_fail
     mov rax, [rsp + 8 + 16]
     mov rcx, [rsp + 8 + 8]
     mov rdx, [rsp + 8]
@@ -1411,6 +1456,7 @@ END_FUNC bytes_mod_release_args
 ;; bytes_mod(PyBytesObject *fmt, PyObject *args) -> PyBytesObject*
 ;; nb_remainder: implements b"fmt" % args
 ;; Strategy: convert bytes fmt to str, call str_mod, convert result to bytes
+;; Fails: 0?
 ;; ============================================================================
 BM_FMT   equ 8
 BM_ARGS  equ 16
@@ -1556,15 +1602,8 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; slot declines" -- a number slot has no other way to say NULL -- and the
     ; interpreter would report "unsupported operand type(s) for %" over the
     ; top of the real message.
-    mov rdi, [gs:ThreadState.current_exception]
-    test rdi, rdi
-    jz .bm_failed_no_exc
-    mov qword [gs:ThreadState.current_exception], 0
-    pop r12
-    pop rbx
-    leave
-    extern raise_exception_obj
-    jmp raise_exception_obj     ; takes the reference, does not return
+    ; It goes on its way as a 0 with the exception still pending, which a
+    ; number slot's caller now tells from "declined".
 .bm_failed_no_exc:
     xor eax, eax
     pop r12
@@ -1612,7 +1651,7 @@ DEF_FUNC bytearray_mod, BMOD_FRAME
 
     mov rdi, rax
     mov rsi, [rbp - BMOD_ARGS]
-    call bytes_mod
+    call bytes_mod              ; err: its 0, declined or raised, is handed on below
     mov rbx, rax
 
     mov rdi, [rbp - BMOD_TMP]
@@ -1698,6 +1737,7 @@ section .text
 ;; bytes_concat(left Value, right Value) -> Value
 ;; bytes had neither sq_concat nor nb_add, so `x + y` on two bytes variables
 ;; raised TypeError; only the constant-folded form worked.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_concat
     BINOP_REQUIRE_LEFT bytes_type, TYPE_FLAG_BYTES_SUBCLASS, 1
@@ -1780,16 +1820,21 @@ DEF_FUNC bytes_concat
     ret
 
 .bc_type_error:
-    ; raise_type_error_with_name does not return, so the pushes above are
-    ; abandoned with the rest of the C stack; nothing to restore.
     mov rsi, r12
     CSTRING rdi, `can't concat \x01 to bytes`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_concat
 
 ;; ============================================================================
 ;; bytes_repeat(bytes Value, count Value) -> Value
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC bytes_repeat
     BINOP_REQUIRE_LEFT bytes_type, TYPE_FLAG_BYTES_SUBCLASS, 1
@@ -1873,10 +1918,10 @@ DEF_FUNC bytes_repeat
 .brep_toobig:
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .brep_decline
 .brep_overflow:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "repeated bytes are too long"
+    FAIL exc_OverflowError_type, "repeated bytes are too long", .brep_decline
 END_FUNC bytes_repeat
 
 ;; ============================================================================
