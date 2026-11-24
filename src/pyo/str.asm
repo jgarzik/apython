@@ -1850,6 +1850,7 @@ DEF_FUNC str_repeat
     jz .srep_decline
     extern seq_repeat_count
     call seq_repeat_count    ; __index__ counts, and one too big to be an
+    ERR_M1 .srep_decline
     mov r12, rax             ; index is refused rather than truncated
 
     ; Clamp negative to 0

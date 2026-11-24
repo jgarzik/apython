@@ -1557,6 +1557,7 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     mov rsi, [rbp - BAO_ARG]
     extern seq_repeat_count
     call seq_repeat_count           ; takes __index__, and refuses a count
+    ERR_M1_JUMP
     mov rsi, rax                    ; too big to be an index
 
     mov rdi, [rbp - BAO_SELF]
@@ -1678,6 +1679,7 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     jz .bir_fail
     mov rsi, [rbp - BAO_ARG]
     call seq_repeat_count
+    ERR_M1_JUMP
     mov rsi, rax
     mov [rbp - BAO_ARG], rsi
     mov rdi, [rbp - BAO_SELF]

@@ -1769,6 +1769,7 @@ END_FUNC binop_is_count
 
 ;; ============================================================================
 ;; seq_repeat_count(rsi = the count, a Value) -> rax = the count as an i64
+;; Fails: -1
 ;;
 ;; Every sequence's sq_repeat and sq_inplace_repeat comes through here, which
 ;; is CPython's sequence_repeat: PyNumber_Check decides whether the argument
@@ -1781,8 +1782,6 @@ END_FUNC binop_is_count
 ;; fit 'int' into an index-sized integer".  The in-place pair did not even do
 ;; that -- they took the count through obj_as_index, which truncates, so
 ;; `b *= 2**64` emptied the bytearray instead of refusing.
-;;
-;; Does not return on failure.
 ;; ============================================================================
 SRC_ARG   equ 8             ; the count as the caller passed it, for the message
 SRC_HELD  equ 16            ; an __index__ result, owned across the conversion
@@ -1816,7 +1815,7 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
     jz .src_bad
     mov rdi, rsi
     call rcx                    ; nb_index answers a Value
-    ERR_PENDING_JUMP
+    ERR_PENDING .src_fail
     test rax, rax
     jz .src_bad
     mov [rbp - SRC_HELD], rax
@@ -1848,8 +1847,7 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
     leave
     ret
 
-;; Give back the __index__ result, if there was one.  Every exit needs it and
-;; three of the four are raises, which do not come back here.
+;; Give back the __index__ result, if there was one.  Every exit needs it.
 .src_release:
     mov rdi, [rbp - SRC_HELD]
     test rdi, rdi
@@ -1861,16 +1859,20 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
 
 .src_bad_index:
     call .src_release
-    RAISE exc_TypeError_type, "__index__ returned non-int"
+    FAIL exc_TypeError_type, "__index__ returned non-int", .src_fail
 .src_overflow:
     call .src_release
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "cannot fit 'int' into an index-sized integer"
+    FAIL exc_OverflowError_type, "cannot fit 'int' into an index-sized integer", .src_fail
 .src_bad:
     call .src_release
     mov rsi, [rbp - SRC_ARG]
     CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.src_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC seq_repeat_count
 
 

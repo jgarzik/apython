@@ -1859,6 +1859,7 @@ DEF_FUNC bytes_repeat
     jz .brep_decline
     extern seq_repeat_count
     call seq_repeat_count    ; __index__ counts, and one too big to be an
+    ERR_M1 .brep_decline
     mov r12, rax             ; index is refused rather than truncated
     test r12, r12
     jg .brep_positive

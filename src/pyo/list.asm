@@ -1865,6 +1865,7 @@ DEF_FUNC list_repeat, LRP_FRAME
     jz .rep_decline
     extern seq_repeat_count
     call seq_repeat_count    ; __index__ counts, and one too big to be an
+    ERR_M1_JUMP
     mov r12, rax             ; index is refused rather than truncated
 
     ; Clamp negative to 0
@@ -2143,6 +2144,7 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ; emptied the list instead of refusing.
     extern seq_repeat_count
     call seq_repeat_count
+    ERR_M1_JUMP
     mov r12, rax              ; r12 = count
 
     ; Handle count <= 0: clear list
