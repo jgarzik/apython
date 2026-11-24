@@ -2085,9 +2085,14 @@ END_FUNC sys_execve
 ;; sys_exit_now(int code) -> noreturn
 ;; The bare _exit: no flush, no atexit, which is what a forked child that
 ;; failed to exec must call rather than unwinding through the parent's state.
+;;
+;; exit_group, not exit.  The exit syscall ends the calling THREAD; it ended
+;; the process only while there was one thread to end.  os._exit() from a
+;; second thread left the process running without it -- and that thread held
+;; the GIL, so every other thread waited on it for ever.
 ;; ============================================================================
 DEF_FUNC_BARE sys_exit_now
-    mov rax, SYS_exit
+    mov rax, SYS_exit_group
     syscall
     ud2
 END_FUNC sys_exit_now

@@ -97,3 +97,11 @@ for bad in [(1, ()), (len, []), (len, (), 3)]:
 time.sleep(0.05)        # let the last threads finish unwinding
 print('_count:', _thread._count())
 print('error is RuntimeError:', _thread.error is RuntimeError)
+
+# os._exit() from a thread ends the PROCESS, not the thread.
+import os, sys, subprocess
+code = ("import os, threading, time\n"
+        "threading.Thread(target=lambda: os._exit(7)).start()\n"
+        "time.sleep(30)\n")
+r = subprocess.run([sys.executable, '-c', code], timeout=20)
+print('_exit from a thread:', r.returncode)

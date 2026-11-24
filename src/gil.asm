@@ -52,6 +52,7 @@ extern sigemptyset
 extern pthread_sigmask
 extern thread_running_reset
 extern signal_run_pending
+extern fatal_error
 
 ETIMEDOUT_ERRNO equ 110
 NS_PER_SEC      equ 1000000000
@@ -91,6 +92,7 @@ gil_cond:           resb 64     ; pthread_cond_t (48 bytes): the GIL is free
 gil_switch_cond:    resb 64     ; pthread_cond_t: the GIL has a new holder
 gil_locked:         resq 1      ; 1 while some thread holds it
 gil_last_holder:    resq 1      ; the ThreadState that took it last
+gil_holder:         resq 1      ; the ThreadState holding it now, or 0
 gil_switch_number:  resq 1      ; bumped each time a DIFFERENT thread takes it
 gil_waiters:        resq 1      ; threads inside gil_take's wait
 
@@ -120,6 +122,7 @@ DEF_FUNC gil_init
     mov rax, [gs:ThreadState.ts_self]
     mov [rel tstate_main_ptr], rax
     mov [rel gil_last_holder], rax
+    mov [rel gil_holder], rax
     mov [rel tstate_list_head], rax
     mov qword [rel gil_locked], 1
     leave
@@ -235,6 +238,7 @@ DEF_FUNC gil_take, GT_FRAME
     mov [rel gil_last_holder], rax
     inc qword [rel gil_switch_number]
 .gt_same:
+    mov [rel gil_holder], rax
     lea rdi, [rel gil_switch_cond]
     call pthread_cond_signal
     lea rdi, [rel gil_mutex]
@@ -259,8 +263,16 @@ END_FUNC gil_take
 ;; until it has called gil_take again.
 ;; ============================================================================
 DEF_FUNC gil_drop
+    ; Only the holder may let go.  A second release from a thread that has
+    ; already given the lock up would hand it to a waiter while the real
+    ; holder is still running -- two threads in the interpreter, and a
+    ; failure that surfaces far from here.  So it is checked, and fatal.
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel gil_holder]
+    jne .gd_not_holder
     lea rdi, [rel gil_mutex]
     call pthread_mutex_lock
+    mov qword [rel gil_holder], 0
     mov qword [rel gil_locked], 0
     lea rdi, [rel gil_cond]
     call pthread_cond_signal
@@ -268,6 +280,9 @@ DEF_FUNC gil_drop
     call pthread_mutex_unlock
     leave
     ret
+.gd_not_holder:
+    CSTRING rdi, "GIL released by a thread that does not hold it"
+    call fatal_error
 END_FUNC gil_drop
 
 ;; ============================================================================
@@ -288,6 +303,7 @@ DEF_FUNC gil_yield, GY_FRAME
     je .gy_out
     lea rdi, [rel gil_mutex]
     call pthread_mutex_lock
+    mov qword [rel gil_holder], 0
     mov qword [rel gil_locked], 0
     mov rbx, [rel gil_switch_number]
     lea rdi, [rel gil_cond]
@@ -432,6 +448,7 @@ DEF_FUNC gil_fork, GF_FRAME
     lock and qword [rel eval_breaker], ~EB_GIL_DROP
     mov rax, [gs:ThreadState.ts_self]
     mov [rel gil_last_holder], rax
+    mov [rel gil_holder], rax
     mov [rel tstate_list_head], rax
     mov qword [rax + ThreadState.ts_next], 0
     mov qword [rax + ThreadState.ts_prev], 0
