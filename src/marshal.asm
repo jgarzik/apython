@@ -3,6 +3,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "threadstate.inc"
 %include "opcodes.inc"
 
 ;; ============================================================================
@@ -107,12 +108,12 @@ MARSHAL_STACK_ROOM equ 1024 * 1024
 ;; reading zeros on its way out.
 ;; ============================================================================
 DEF_FUNC_LOCAL marshal_fail
-    cmp qword [rel marshal_soft], 0
+    cmp qword [gs:ThreadState.marshal_soft], 0
     je .mf_fatal
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne .mf_done
     movsx rsi, esi
-    mov [rel marshal_error], rsi
+    mov [gs:ThreadState.marshal_error], rsi
 .mf_done:
     xor eax, eax
     xor edx, edx
@@ -128,13 +129,13 @@ END_FUNC marshal_fail
 ;; ============================================================================
 DEF_FUNC marshal_read_byte
 
-    mov rax, [rel marshal_pos]
-    cmp rax, [rel marshal_len]
+    mov rax, [gs:ThreadState.marshal_pos]
+    cmp rax, [gs:ThreadState.marshal_len]
     jge mread_byte_eof
 
-    mov rcx, [rel marshal_buf]
+    mov rcx, [gs:ThreadState.marshal_buf]
     movzx eax, byte [rcx + rax]
-    inc qword [rel marshal_pos]
+    inc qword [gs:ThreadState.marshal_pos]
 
     leave
     ret
@@ -154,14 +155,14 @@ mread_byte_eof:
 ;; ============================================================================
 DEF_FUNC marshal_read_long
 
-    mov rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_pos]
     lea rcx, [rax + 4]
-    cmp rcx, [rel marshal_len]
+    cmp rcx, [gs:ThreadState.marshal_len]
     jg mread_long_eof
 
-    mov rcx, [rel marshal_buf]
+    mov rcx, [gs:ThreadState.marshal_buf]
     mov eax, [rcx + rax]       ; little-endian read (x86 native)
-    add qword [rel marshal_pos], 4
+    add qword [gs:ThreadState.marshal_pos], 4
 
     leave
     ret
@@ -181,14 +182,14 @@ mread_long_eof:
 ;; ============================================================================
 DEF_FUNC marshal_read_long64
 
-    mov rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_pos]
     lea rcx, [rax + 8]
-    cmp rcx, [rel marshal_len]
+    cmp rcx, [gs:ThreadState.marshal_len]
     jg mread_long64_eof
 
-    mov rcx, [rel marshal_buf]
+    mov rcx, [gs:ThreadState.marshal_buf]
     mov rax, [rcx + rax]       ; little-endian read (x86 native)
-    add qword [rel marshal_pos], 8
+    add qword [gs:ThreadState.marshal_pos], 8
 
     leave
     ret
@@ -209,14 +210,14 @@ mread_long64_eof:
 DEF_FUNC marshal_read_bytes
 
     mov rsi, rdi               ; rsi = n
-    mov rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_pos]
     lea rcx, [rax + rsi]
-    cmp rcx, [rel marshal_len]
+    cmp rcx, [gs:ThreadState.marshal_len]
     jg mread_bytes_eof
 
-    mov rcx, [rel marshal_buf]
+    mov rcx, [gs:ThreadState.marshal_buf]
     lea rax, [rcx + rax]       ; rax = &buf[pos]
-    add [rel marshal_pos], rsi
+    add [gs:ThreadState.marshal_pos], rsi
 
     leave
     ret
@@ -235,17 +236,17 @@ mread_bytes_eof:
 ;; ============================================================================
 DEF_FUNC marshal_init_refs
 
-    mov qword [rel marshal_ref_count], 0
+    mov qword [gs:ThreadState.marshal_ref_count], 0
 
     ; Check if already allocated with sufficient capacity
-    cmp qword [rel marshal_ref_cap], 0
+    cmp qword [gs:ThreadState.marshal_ref_cap], 0
     jne .already_allocated
 
     ; Allocate the initial ref array (one Value per entry)
     mov rdi, MARSHAL_REFS_INIT_CAP * 8
     call ap_malloc
-    mov [rel marshal_refs], rax
-    mov qword [rel marshal_ref_cap], MARSHAL_REFS_INIT_CAP
+    mov [gs:ThreadState.marshal_refs], rax
+    mov qword [gs:ThreadState.marshal_ref_cap], MARSHAL_REFS_INIT_CAP
 
 .already_allocated:
     leave
@@ -263,29 +264,29 @@ DEF_FUNC marshal_add_ref
     mov r12, rsi               ; r12 = tag
 
     ; Check if we need to grow
-    mov rax, [rel marshal_ref_count]
-    cmp rax, [rel marshal_ref_cap]
+    mov rax, [gs:ThreadState.marshal_ref_count]
+    cmp rax, [gs:ThreadState.marshal_ref_cap]
     jl .store
 
     ; Grow: double the capacity
-    mov rdi, [rel marshal_refs]
-    mov rax, [rel marshal_ref_cap]
+    mov rdi, [gs:ThreadState.marshal_refs]
+    mov rax, [gs:ThreadState.marshal_ref_cap]
     shl rax, 1                 ; new_cap = old_cap * 2
-    mov [rel marshal_ref_cap], rax
+    mov [gs:ThreadState.marshal_ref_cap], rax
     mov rsi, rax
     shl rsi, 3                 ; new_cap * 8
     call ap_realloc
-    mov [rel marshal_refs], rax
+    mov [gs:ThreadState.marshal_refs], rax
 
 .store:
     ; The refs array takes ownership — INCREF, then pack and store
     INCREF_VAL rbx, r12
     V_PACK rbx, r12
-    mov rax, [rel marshal_ref_count]
-    mov rcx, [rel marshal_refs]
+    mov rax, [gs:ThreadState.marshal_ref_count]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], rbx
     inc rax
-    mov [rel marshal_ref_count], rax
+    mov [gs:ThreadState.marshal_ref_count], rax
 
     pop r12
     pop rbx
@@ -302,11 +303,11 @@ DEF_FUNC marshal_cleanup_refs, 8        ; rsp 16-aligned at the call the macros 
     push r12
     push r13
 
-    mov r13, [rel marshal_ref_count]
+    mov r13, [gs:ThreadState.marshal_ref_count]
     test r13, r13
     jz .cleanup_done
 
-    mov rbx, [rel marshal_refs]
+    mov rbx, [gs:ThreadState.marshal_refs]
     xor r12d, r12d             ; index
 .cleanup_loop:
     cmp r12, r13
@@ -316,7 +317,7 @@ DEF_FUNC marshal_cleanup_refs, 8        ; rsp 16-aligned at the call the macros 
     inc r12
     jmp .cleanup_loop
 .cleanup_done:
-    mov qword [rel marshal_ref_count], 0
+    mov qword [gs:ThreadState.marshal_ref_count], 0
     pop r13
     pop r12
     pop rbx
@@ -335,8 +336,8 @@ END_FUNC marshal_cleanup_refs
 ;; part way through left the arm's loop counting down from four billion.
 ;; ============================================================================
 DEF_FUNC_LOCAL marshal_count_ok
-    mov rax, [rel marshal_len]
-    sub rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_len]
+    sub rax, [gs:ThreadState.marshal_pos]
     cmp rdi, rax
     ja .mco_short
     mov rax, rdi
@@ -367,22 +368,22 @@ DEF_FUNC marshal_read_object
     ; A failure already recorded: unwind without reading anything more.  The
     ; handlers below go on calling this for their children, and they have to
     ; get an answer rather than a second refusal.
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne mdo_soft_fail
 
     ; And the machine stack, which nesting is what spends.  The floor is set
     ; by whichever entry point is reading; zero, meaning nobody set one, is
     ; below every real rsp and so never fires.
-    cmp rsp, [rel marshal_rsp_floor]
+    cmp rsp, [gs:ThreadState.marshal_rsp_floor]
     jb mdo_too_deep
 
     ; Read type byte.  Nothing was recorded before this read -- the guard
     ; above saw to that -- so if something is now, this read is what stopped,
     ; and CPython words that one case differently.
     call marshal_read_byte
-    cmp qword [rel marshal_error], MARSHAL_ERR_EOF
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_EOF
     je mdo_eof_at_object
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne mdo_soft_fail
     movzx eax, al
     mov ebx, eax               ; ebx = full type byte
@@ -476,7 +477,7 @@ mdo_soft_fail:
     ret
 
 mdo_eof_at_object:
-    mov qword [rel marshal_error], MARSHAL_ERR_OBJ
+    mov qword [gs:ThreadState.marshal_error], MARSHAL_ERR_OBJ
     jmp mdo_soft_fail
 
 mdo_too_deep:
@@ -934,7 +935,7 @@ mdo_small_tuple:
     xor edi, edi               ; NULL placeholder
     xor esi, esi               ; TAG_NULL
     call marshal_add_ref
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     dec rax
     mov [rsp + 8], rax         ; save ref index for fixup
 .stuple_no_reserve:
@@ -955,7 +956,7 @@ mdo_small_tuple:
 .stuple_loop:
     ; A refusal already recorded means every read below returns nothing and
     ; consumes nothing, so this loop would never reach its end.
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne .stuple_done
     cmp r15, r13
     jge .stuple_done
@@ -985,7 +986,7 @@ mdo_small_tuple:
     test eax, eax
     jz .stuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
@@ -1017,7 +1018,7 @@ mdo_tuple:
     xor edi, edi               ; NULL placeholder
     xor esi, esi               ; TAG_NULL
     call marshal_add_ref
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     dec rax
     mov [rsp + 8], rax         ; save ref index for fixup
 .tuple_no_reserve:
@@ -1038,7 +1039,7 @@ mdo_tuple:
 .tuple_loop:
     ; A refusal already recorded means every read below returns nothing and
     ; consumes nothing, so this loop would never reach its end.
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne .tuple_done
     cmp r15, r13
     jge .tuple_done
@@ -1068,7 +1069,7 @@ mdo_tuple:
     test eax, eax
     jz .tuple_no_fixup
     mov rax, [rsp + 8]        ; ref index
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
@@ -1090,9 +1091,9 @@ mdo_ref:
     call marshal_read_long     ; eax = index
     mov edi, eax               ; zero-extend to rdi (index is unsigned)
     ; Bounds check
-    cmp rdi, [rel marshal_ref_count]
+    cmp rdi, [gs:ThreadState.marshal_ref_count]
     jge mdo_ref_oob
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov rax, [rcx + rdi*8]
     INCREF_V rax, rdx
     V_UNPACK rax, rdx
@@ -1176,7 +1177,7 @@ mdo_code:
     xor edi, edi               ; NULL placeholder
     xor esi, esi               ; TAG_NULL
     call marshal_add_ref
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     dec rax
     mov [rsp + 104], rax       ; save ref index
 .code_no_placeholder:
@@ -1487,7 +1488,7 @@ mdo_code:
     test r12d, r12d
     jz .code_no_fixup
     mov rax, [rsp + 104]       ; ref index
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], r13     ; a pointer is its own Value
     mov rdi, r13
     call obj_incref            ; refs array takes ownership of real object
@@ -1619,7 +1620,7 @@ mdo_list:
     xor edi, edi
     xor esi, esi
     call marshal_add_ref
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     dec rax
     mov [rsp + 8], rax
 .mlist_no_reserve:
@@ -1646,7 +1647,7 @@ mdo_list:
     test r14, r14
     jz .mlist_no_publish
     mov rax, [rsp + 8]
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], r14
     mov rdi, r14
     call obj_incref
@@ -1656,7 +1657,7 @@ mdo_list:
 .mlist_loop:
     ; A refusal already recorded means every read below returns nothing and
     ; consumes nothing, so this loop would never reach its end.
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne .mlist_done
     cmp r15, r13
     jge .mlist_done
@@ -1718,7 +1719,7 @@ mdo_dict:
     xor edi, edi
     xor esi, esi
     call marshal_add_ref
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     dec rax
     mov [rsp + 8], rax
 .mdict_no_reserve:
@@ -1739,7 +1740,7 @@ mdo_dict:
     test r14, r14
     jz .mdict_no_publish
     mov rax, [rsp + 8]
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], r14
     mov rdi, r14
     call obj_incref
@@ -1748,19 +1749,19 @@ mdo_dict:
 .mdict_loop:
     ; A refusal already recorded means every read below returns nothing and
     ; consumes nothing, so this loop would never reach its end.
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne .mdict_done
     ; A NULL type byte ends the dict.  Peek rather than read: the key's own
     ; reader has to see its type byte.
-    mov rax, [rel marshal_pos]
-    cmp rax, [rel marshal_len]
+    mov rax, [gs:ThreadState.marshal_pos]
+    cmp rax, [gs:ThreadState.marshal_len]
     jge .mdict_done
-    mov rcx, [rel marshal_buf]
+    mov rcx, [gs:ThreadState.marshal_buf]
     movzx eax, byte [rcx + rax]
     and eax, ~MARSHAL_FLAG_REF
     cmp eax, MARSHAL_TYPE_NULL
     jne .mdict_pair
-    inc qword [rel marshal_pos]
+    inc qword [gs:ThreadState.marshal_pos]
     jmp .mdict_done
 .mdict_pair:
     push r13
@@ -1814,7 +1815,7 @@ mdo_set_common:
     xor edi, edi               ; NULL placeholder
     xor esi, esi               ; TAG_NULL
     call marshal_add_ref
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     dec rax
     mov [rsp + 8], rax         ; save ref index for fixup
 .fset_no_reserve:
@@ -1834,7 +1835,7 @@ mdo_set_common:
 .fset_loop:
     ; A refusal already recorded means every read below returns nothing and
     ; consumes nothing, so this loop would never reach its end.
-    cmp qword [rel marshal_error], MARSHAL_ERR_NONE
+    cmp qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     jne .fset_done
     cmp r15, r13
     jge .fset_done
@@ -1880,7 +1881,7 @@ mdo_set_common:
     test eax, eax
     jz .fset_no_fixup
     mov rax, [rsp + 8]        ; ref index
-    mov rcx, [rel marshal_refs]
+    mov rcx, [gs:ThreadState.marshal_refs]
     mov [rcx + rax*8], r14     ; a pointer is its own Value
     mov rdi, r14
     call obj_incref            ; refs array takes ownership of real object
@@ -1904,27 +1905,13 @@ mdo_set_common:
     jmp mfinish
 
 ;--------------------------------------------------------------------------
-; BSS section: marshal global state
+; The reader's state -- the buffer, the position in it, the ref table, the
+; soft-refusal flag and the stack floor -- is per thread, in ThreadState
+; (marshal_buf and its neighbours).  It used to be nine process globals, saved
+; and restored around a nested call: sound for one thread, but an allocation
+; inside a read can start a collection, a finalizer is Python, and Python can
+; hand the GIL to a thread that then unmarshals a module of its own.
 ;--------------------------------------------------------------------------
-section .bss
-global marshal_buf
-global marshal_pos
-global marshal_len
-global marshal_refs
-global marshal_ref_count
-global marshal_ref_cap
-
-marshal_buf:       resq 1     ; pointer to file data
-marshal_pos:       resq 1     ; current read position
-marshal_len:       resq 1     ; total data length
-marshal_refs:      resq 1     ; pointer to PyObject* array
-marshal_ref_count: resq 1     ; number of refs stored
-marshal_ref_cap:   resq 1     ; capacity of ref array
-; Set by marshal.loads(), which has a frame to raise into; clear for the .pyc
-; reader, which runs before there is one.
-marshal_soft:      resq 1     ; refuse softly rather than fatally
-marshal_error:     resq 1     ; MARSHAL_ERR_*, the first refusal recorded
-marshal_rsp_floor: resq 1     ; how far down the machine stack nesting may go
 
 ;--------------------------------------------------------------------------
 ; Read-only data: error messages
@@ -2022,9 +2009,9 @@ DEF_FUNC pyc_read_file
     jne pyc_bad_magic
 
     ; Set up marshal read state
-    mov [rel marshal_buf], rbx
-    mov qword [rel marshal_pos], PYC_HEADER_SIZE  ; skip 16-byte header
-    mov [rel marshal_len], r13
+    mov [gs:ThreadState.marshal_buf], rbx
+    mov qword [gs:ThreadState.marshal_pos], PYC_HEADER_SIZE  ; skip 16-byte header
+    mov [gs:ThreadState.marshal_len], r13
 
     ; Initialize marshal reference list
     call marshal_init_refs
@@ -2142,42 +2129,42 @@ DEF_FUNC marshal_loads_fn, ML_FRAME
 
     ; Park the reader's state: a nested marshal is possible, and an import
     ; may already be using it.
-    mov rax, [rel marshal_buf]
+    mov rax, [gs:ThreadState.marshal_buf]
     mov [rbp - ML_SAVE], rax
-    mov rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_pos]
     mov [rbp - ML_SAVE + 8], rax
-    mov rax, [rel marshal_len]
+    mov rax, [gs:ThreadState.marshal_len]
     mov [rbp - ML_SAVE + 16], rax
-    mov rax, [rel marshal_refs]
+    mov rax, [gs:ThreadState.marshal_refs]
     mov [rbp - ML_SAVE + 24], rax
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     mov [rbp - ML_SAVE + 32], rax
-    mov rax, [rel marshal_ref_cap]
+    mov rax, [gs:ThreadState.marshal_ref_cap]
     mov [rbp - ML_SAVE + 40], rax
-    mov rax, [rel marshal_soft]
+    mov rax, [gs:ThreadState.marshal_soft]
     mov [rbp - ML_SAVE + 48], rax
-    mov rax, [rel marshal_error]
+    mov rax, [gs:ThreadState.marshal_error]
     mov [rbp - ML_SAVE + 56], rax
-    mov rax, [rel marshal_rsp_floor]
+    mov rax, [gs:ThreadState.marshal_rsp_floor]
     mov [rbp - ML_SAVE + 64], rax
 
     mov rax, [rbp - ML_DATA]
-    mov [rel marshal_buf], rax
-    mov qword [rel marshal_pos], 0
+    mov [gs:ThreadState.marshal_buf], rax
+    mov qword [gs:ThreadState.marshal_pos], 0
     mov rax, [rbp - ML_LEN]
-    mov [rel marshal_len], rax
-    mov qword [rel marshal_refs], 0
-    mov qword [rel marshal_ref_count], 0
-    mov qword [rel marshal_ref_cap], 0
+    mov [gs:ThreadState.marshal_len], rax
+    mov qword [gs:ThreadState.marshal_refs], 0
+    mov qword [gs:ThreadState.marshal_ref_count], 0
+    mov qword [gs:ThreadState.marshal_ref_cap], 0
 
     ; Refuse softly from here: there is a frame to raise into, and the bytes
     ; came from the program rather than from a file the interpreter opened
     ; before it had one.
-    mov qword [rel marshal_soft], 1
-    mov qword [rel marshal_error], MARSHAL_ERR_NONE
+    mov qword [gs:ThreadState.marshal_soft], 1
+    mov qword [gs:ThreadState.marshal_error], MARSHAL_ERR_NONE
     mov rax, rsp
     sub rax, MARSHAL_STACK_ROOM
-    mov [rel marshal_rsp_floor], rax
+    mov [gs:ThreadState.marshal_rsp_floor], rax
     call marshal_init_refs
 
     call marshal_read_object
@@ -2190,31 +2177,31 @@ DEF_FUNC marshal_loads_fn, ML_FRAME
     ; them back, then free the array, exactly as pyc_read_file does.
     extern marshal_cleanup_refs
     call marshal_cleanup_refs
-    mov rdi, [rel marshal_refs]
+    mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
     jz .mlf_no_refs
     call ap_free
 .mlf_no_refs:
     mov rax, [rbp - ML_SAVE]
-    mov [rel marshal_buf], rax
+    mov [gs:ThreadState.marshal_buf], rax
     mov rax, [rbp - ML_SAVE + 8]
-    mov [rel marshal_pos], rax
+    mov [gs:ThreadState.marshal_pos], rax
     mov rax, [rbp - ML_SAVE + 16]
-    mov [rel marshal_len], rax
+    mov [gs:ThreadState.marshal_len], rax
     mov rax, [rbp - ML_SAVE + 24]
-    mov [rel marshal_refs], rax
+    mov [gs:ThreadState.marshal_refs], rax
     mov rax, [rbp - ML_SAVE + 32]
-    mov [rel marshal_ref_count], rax
+    mov [gs:ThreadState.marshal_ref_count], rax
     mov rax, [rbp - ML_SAVE + 40]
-    mov [rel marshal_ref_cap], rax
-    mov rax, [rel marshal_error]
+    mov [gs:ThreadState.marshal_ref_cap], rax
+    mov rax, [gs:ThreadState.marshal_error]
     mov [rbp - ML_DATA], rax    ; which refusal, before the caller's is back
     mov rax, [rbp - ML_SAVE + 48]
-    mov [rel marshal_soft], rax
+    mov [gs:ThreadState.marshal_soft], rax
     mov rax, [rbp - ML_SAVE + 56]
-    mov [rel marshal_error], rax
+    mov [gs:ThreadState.marshal_error], rax
     mov rax, [rbp - ML_SAVE + 64]
-    mov [rel marshal_rsp_floor], rax
+    mov [gs:ThreadState.marshal_rsp_floor], rax
 
     cmp qword [rbp - ML_DATA], MARSHAL_ERR_NONE
     jne .mlf_refused

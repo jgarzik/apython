@@ -328,8 +328,8 @@ END_FUNC gil_release
 ;; gil_acquire() -> nothing; rax and rdx are preserved
 ;;
 ;; ALLOW_THREADS_END: take the GIL back after the blocking call, whose result
-;; is usually still in rax.  The same no-op conditions as gil_release, so the
-;; two always agree about whether the lock changed hands.
+;; is usually still in rax.  A no-op exactly when gil_release was one for
+;; this thread, so the two agree about whether the lock changed hands.
 ;; ============================================================================
 GA_RAX   equ 8
 GA_RDX   equ 16
@@ -338,7 +338,17 @@ DEF_FUNC gil_acquire, GA_FRAME
     cmp qword [rel gil_threaded], 0
     je .ga_out
     cmp qword [rel gil_finalizing], 0
-    jne .ga_out
+    je .ga_take
+    ; Shutting down.  The main thread never let go (gil_release was a no-op
+    ; for it), so it has nothing to take back.  Any OTHER thread gave the
+    ; lock up before shutdown began and is now coming back from its blocking
+    ; call: it must not simply carry on -- that would be Python running with
+    ; no lock at all, beside the main thread -- so it goes to gil_take, which
+    ; parks it.
+    mov rcx, [gs:ThreadState.ts_self]
+    cmp rcx, [rel tstate_main_ptr]
+    je .ga_out
+.ga_take:
     mov [rbp - GA_RAX], rax
     mov [rbp - GA_RDX], rdx
     call gil_take

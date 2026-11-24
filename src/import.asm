@@ -45,12 +45,6 @@ extern sys_read
 extern sys_stat
 
 ; Marshal globals (save/restore across nested loads)
-extern marshal_buf
-extern marshal_pos
-extern marshal_len
-extern marshal_refs
-extern marshal_ref_count
-extern marshal_ref_cap
 
 ; sys module globals
 extern sys_modules_dict
@@ -2732,23 +2726,23 @@ DEF_FUNC import_load_module, IF_FRAME
     DUNDER_EXC_SAVE [rbp - IF_EXC]
 
     ; Save marshal globals
-    mov rax, [rel marshal_buf]
+    mov rax, [gs:ThreadState.marshal_buf]
     mov [rbp - IF_MBUF], rax
-    mov rax, [rel marshal_pos]
+    mov rax, [gs:ThreadState.marshal_pos]
     mov [rbp - IF_MPOS], rax
-    mov rax, [rel marshal_len]
+    mov rax, [gs:ThreadState.marshal_len]
     mov [rbp - IF_MLEN], rax
-    mov rax, [rel marshal_refs]
+    mov rax, [gs:ThreadState.marshal_refs]
     mov [rbp - IF_MREFS], rax
-    mov rax, [rel marshal_ref_count]
+    mov rax, [gs:ThreadState.marshal_ref_count]
     mov [rbp - IF_MRCNT], rax
-    mov rax, [rel marshal_ref_cap]
+    mov rax, [gs:ThreadState.marshal_ref_cap]
     mov [rbp - IF_MRCAP], rax
 
     ; Reset marshal refs so inner import allocates fresh arrays
-    mov qword [rel marshal_refs], 0
-    mov qword [rel marshal_ref_count], 0
-    mov qword [rel marshal_ref_cap], 0
+    mov qword [gs:ThreadState.marshal_refs], 0
+    mov qword [gs:ThreadState.marshal_ref_count], 0
+    mov qword [gs:ThreadState.marshal_ref_cap], 0
 
     ; Read the file -> code object; a .py is compiled on the spot.
     mov rdi, r12
@@ -2767,7 +2761,7 @@ DEF_FUNC import_load_module, IF_FRAME
     call pyc_write_cache
 
     ; Free inner import's marshal refs array (if allocated)
-    mov rdi, [rel marshal_refs]
+    mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
     jz .skip_inner_refs_free
     call ap_free
@@ -2775,17 +2769,17 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Restore marshal globals
     mov rax, [rbp - IF_MBUF]
-    mov [rel marshal_buf], rax
+    mov [gs:ThreadState.marshal_buf], rax
     mov rax, [rbp - IF_MPOS]
-    mov [rel marshal_pos], rax
+    mov [gs:ThreadState.marshal_pos], rax
     mov rax, [rbp - IF_MLEN]
-    mov [rel marshal_len], rax
+    mov [gs:ThreadState.marshal_len], rax
     mov rax, [rbp - IF_MREFS]
-    mov [rel marshal_refs], rax
+    mov [gs:ThreadState.marshal_refs], rax
     mov rax, [rbp - IF_MRCNT]
-    mov [rel marshal_ref_count], rax
+    mov [gs:ThreadState.marshal_ref_count], rax
     mov rax, [rbp - IF_MRCAP]
-    mov [rel marshal_ref_cap], rax
+    mov [gs:ThreadState.marshal_ref_cap], rax
 
     ; Create module dict
     call dict_new
@@ -3108,7 +3102,7 @@ DEF_FUNC import_load_module, IF_FRAME
 
 .load_failed:
     ; Free inner import's marshal refs array (if allocated)
-    mov rdi, [rel marshal_refs]
+    mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
     jz .skip_fail_refs_free
     call ap_free
@@ -3116,17 +3110,17 @@ DEF_FUNC import_load_module, IF_FRAME
 
     ; Restore marshal globals even on failure
     mov rax, [rbp - IF_MBUF]
-    mov [rel marshal_buf], rax
+    mov [gs:ThreadState.marshal_buf], rax
     mov rax, [rbp - IF_MPOS]
-    mov [rel marshal_pos], rax
+    mov [gs:ThreadState.marshal_pos], rax
     mov rax, [rbp - IF_MLEN]
-    mov [rel marshal_len], rax
+    mov [gs:ThreadState.marshal_len], rax
     mov rax, [rbp - IF_MREFS]
-    mov [rel marshal_refs], rax
+    mov [gs:ThreadState.marshal_refs], rax
     mov rax, [rbp - IF_MRCNT]
-    mov [rel marshal_ref_count], rax
+    mov [gs:ThreadState.marshal_ref_count], rax
     mov rax, [rbp - IF_MRCAP]
-    mov [rel marshal_ref_cap], rax
+    mov [gs:ThreadState.marshal_ref_cap], rax
 
     xor eax, eax
     pop r15
