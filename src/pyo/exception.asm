@@ -1175,7 +1175,7 @@ DEF_FUNC exc_setattr, ESA_FRAME
     lea rdi, [rel tuple_type]
     lea rsi, [rbp - ESA_VAL]        ; a one-Value argument array
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     test rax, rax
     jz .esa_fail                    ; an iterable that raised part way
     mov rdi, [rbx + PyExceptionObject.exc_args]

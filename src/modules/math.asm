@@ -1935,7 +1935,7 @@ DEF_FUNC math_dist, MDS_FRAME
     mov rsi, rdi
     mov edx, 1
     lea rdi, [rel tuple_type]
-    call tuple_type_call        ; materialise p; raises for a non-iterable
+    call tuple_type_call        ; materialise p; raises for a non-iterable -- err: the 0 is tested just below
     test rax, rax
     jz .mds_failed_args
     mov [rbp - MDS_P], rax
@@ -1943,7 +1943,7 @@ DEF_FUNC math_dist, MDS_FRAME
     add rsi, 8                  ; &args[1]
     mov edx, 1
     lea rdi, [rel tuple_type]
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     add rsp, 16
     test rax, rax
     jz .mds_failed

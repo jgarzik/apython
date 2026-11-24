@@ -604,7 +604,7 @@ DEF_FUNC op_call_function_ex
     lea rdi, [rel tuple_type]
     lea rsi, [rbp - CFX_ARGS]
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     test rax, rax
     jz .cfex_args_raised
     mov rdi, [rbp - CFX_ARGS]       ; the original iterable, still owned

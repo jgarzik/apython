@@ -186,7 +186,7 @@ DEF_FUNC slice_richcompare, SLC_FRAME
     mov rsi, [rbp - SLC_T2]
     mov rdx, [rbp - SLC_OP]
     extern tuple_richcompare
-    call tuple_richcompare
+    call tuple_richcompare    ; err: its 0, declined or raised, is this slot's own answer
     mov rbx, rax
     mov rdi, [rbp - SLC_T1]
     call obj_decref

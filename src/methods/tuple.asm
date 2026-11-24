@@ -54,6 +54,7 @@ DEF_FUNC tuple_dunder_contains
     mov rsi, [rdi + 8]      ; the item Value
     mov rdi, rax
     call tuple_contains
+    ERR_M1 .tdc_fail
     test eax, eax
     jz .tdc_false
     lea rax, [rel bool_true]
@@ -65,6 +66,10 @@ DEF_FUNC tuple_dunder_contains
     INCREF rax
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.tdc_fail:
+    xor eax, eax                ; an element's __eq__ raised
+    leave
     ret
 END_FUNC tuple_dunder_contains
 
@@ -99,9 +104,13 @@ DEF_FUNC_BARE tuple_dunder_mul
     mov rdi, rax
     push rsi                    ; one push: rsp is 16-aligned at the call
     call tuple_repeat
+    ERR_PENDING .tdm_fail
     pop rsi
     test rax, rax
     jz set_seq_repeat_not_index ; a tail call: its 0 is this dunder's own
+    ret
+.tdm_fail:
+    pop rsi                     ; the count raised, or was too large: rax is 0
     ret
 END_FUNC tuple_dunder_mul
 
@@ -114,9 +123,13 @@ DEF_FUNC_BARE tuple_dunder_rmul
     mov rdi, rax
     push rsi
     call tuple_repeat
+    ERR_PENDING .tdr_fail
     pop rsi
     test rax, rax
     jz set_seq_repeat_not_index ; a tail call: its 0 is this dunder's own
+    ret
+.tdr_fail:
+    pop rsi
     ret
 END_FUNC tuple_dunder_rmul
 

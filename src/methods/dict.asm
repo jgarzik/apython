@@ -270,7 +270,7 @@ DEF_FUNC du_as_sequence, DAS_FRAME
     lea rsi, [rbp - DAS_ARG]
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is this function's own answer
     leave
     ret
 END_FUNC du_as_sequence
@@ -438,10 +438,10 @@ DEF_FUNC dict_method_update, DU_FRAME
     lea rsi, [rbp - DU_PAIRV]
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested below, once keys() is released
     mov [rbp - DU_TMP], rax
     mov rdi, r14
-    call obj_decref
+    DECREF_V rdi, rcx           ; a Value: keys() may have answered 42
     mov r12, [rbp - DU_TMP]
     test r12, r12
     jz .du_propagate                    ; keys() was not iterable
@@ -576,7 +576,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     lea rsi, [rbp - DU_PAIRV]
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: .du_pair_have tests the 0
     jmp .du_pair_have
 .du_pair_direct:
     INCREF_V rdi, rax

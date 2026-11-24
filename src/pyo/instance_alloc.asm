@@ -18,6 +18,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern object_type
 extern exc_TypeError_type
 extern set_exception
@@ -297,8 +298,7 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     mov edx, 1
     pop rsi
     call tuple_type_call
-    test rax, rax
-    jz .tsf_fail                ; not iterable, or iterating it raised
+    ERR_NULL .tsf_fail                ; not iterable, or iterating it raised
     mov [rbp - TSF_TMP], rax
     mov rbx, rax
     mov r12, [rbx + PyTupleObject.ob_size]

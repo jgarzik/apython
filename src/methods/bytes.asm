@@ -2673,7 +2673,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     lea rsi, [rdi + 8]          ; &args[1]; rdi is still the args pointer
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call        ; raises for a non-iterable, as CPython does
+    call tuple_type_call        ; raises for a non-iterable, as CPython does -- err: the 0 is tested just below
     ; ...and it can fail for a reason of its own: draining the iterable runs
     ; whatever produced it, and a generator that raises part way through
     ; leaves NULL here with the exception already pending.  Reading ob_size

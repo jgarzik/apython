@@ -149,7 +149,7 @@ DEF_FUNC_BARE op_unpack_sequence
     extern tuple_type_call
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call            ; raises for a non-iterable
+    call tuple_type_call            ; raises for a non-iterable -- err: the 0 is tested just below
     add rsp, 32
     pop rcx                         ; expected count
     test rax, rax

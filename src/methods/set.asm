@@ -506,7 +506,7 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     lea rsi, [rdi + 8]
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call        ; raises for a non-iterable
+    call tuple_type_call        ; raises for a non-iterable -- err: the 0 is tested just below
     ; It also answers NULL when the iteration itself raised -- a __getitem__
     ; or __next__ that threw partway through -- and reading ob_size off that
     ; NULL made `s.update(G())` a segfault rather than G's own exception.

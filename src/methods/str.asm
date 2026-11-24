@@ -1348,7 +1348,7 @@ DEF_FUNC str_method_join
     lea rdi, [rel tuple_type]
     lea rsi, [r15 + 8]
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     ; It can fail: draining the iterable runs whatever produced it, and a
     ; generator that raises part way through leaves NULL here with the
     ; exception already pending.  `"".join(codecs.iterdecode(gen, "idna"))`

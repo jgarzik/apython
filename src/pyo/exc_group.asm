@@ -279,7 +279,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     lea rdi, [rel tuple_type]
     mov edx, 1
     extern tuple_type_call
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     V_UNPACK rax, rdx
     test rax, rax
     jz .egc_propagate
