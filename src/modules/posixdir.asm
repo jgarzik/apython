@@ -59,8 +59,8 @@ extern obj_decref
 extern obj_is_true
 extern posix_path_arg
 extern posix_stat_result
-extern raise_exception
-extern raise_oserror
+extern set_exception
+extern set_oserror
 extern str_concat
 extern str_type
 extern str_from_cstr_heap
@@ -517,7 +517,8 @@ DEF_FUNC direntry_m_fspath
 END_FUNC direntry_m_fspath
 
 ;; direntry_m_stat(rdi = args, rsi = nargs) -> Value (os.stat_result)
-;; Raises, as os.stat does, when the path cannot be stat'd -- which is what a
+;; Fails: 0
+;; OSError, as os.stat's is, when the path cannot be stat'd -- which is what a
 ;; dangling symlink is, and what tells it apart from is_file()'s False.
 DMS_SELF  equ 8
 DMS_BUF   equ 16 + StatBuf_size
@@ -541,7 +542,9 @@ DEF_FUNC direntry_m_stat, DMS_FRAME
     mov rdi, rax
     mov rsi, [rbp - DMS_SELF]
     mov rsi, [rsi + PyDirEntryObject.de_path]
-    call raise_oserror              ; does not return
+    call set_oserror                ; rax = 0, the OSError pending
+    leave
+    ret
 END_FUNC direntry_m_stat
 
 ;; ============================================================================
@@ -587,11 +590,17 @@ DEF_FUNC direntry_getattr, 16           ; + 2 pushes = 32, 16-aligned
 END_FUNC direntry_getattr
 
 ;; ============================================================================
-;; direntry_new_refused(rdi = type, rsi = args, rdx = nargs) -> does not return
-;; A DirEntry only ever comes from scandir(), as CPython's does.
+;; direntry_new_refused(rdi = type, rsi = args, rdx = nargs) -> rax = 0
+;; Fails: 0
+;; A DirEntry only ever comes from scandir(), as CPython's does.  A tp_new
+;; answers a fat pair that type_call packs, so the tag is cleared with it.
 ;; ============================================================================
 DEF_FUNC direntry_new_refused
-    RAISE exc_TypeError_type, "cannot create 'posix.DirEntry' instances"
+    SET_EXC exc_TypeError_type, "cannot create 'posix.DirEntry' instances"
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 END_FUNC direntry_new_refused
 
 ;; ============================================================================
@@ -692,6 +701,7 @@ END_FUNC scandir_iter_getattr
 
 ;; ============================================================================
 ;; posix.scandir(path='.') -> an iterator of DirEntry
+;; Fails: 0
 ;;
 ;; The getdents64 loop is listdir's, with the entry's d_type and d_ino kept
 ;; instead of thrown away, and the path built once per entry from a prefix
@@ -706,7 +716,7 @@ PSD_BUF    equ 32
 PSD_N      equ 40           ; bytes getdents64 wrote this round
 PSD_OFF    equ 48           ; the cursor into the buffer
 PSD_OWNED  equ 56           ; what posix_path_arg asked us to release
-PSD_ERR    equ 64           ; an errno held across the cleanup before it raises
+PSD_ERR    equ 64           ; (unused: the errno goes straight to set_oserror)
 PSD_PREFIX equ 72           ; the directory, with a separator, as a str
 PSD_ITER   equ 80
 ; Whether the argument was a BYTES.  CPython gives a bytes path bytes .name
@@ -799,17 +809,10 @@ DEF_FUNC posix_scandir, PSD_FRAME
     cmp rax, -4095
     jb .psd_opened
     neg rax
-    mov [rbp - PSD_ERR], rax
-    PD_PATH_DONE [rbp - PSD_OWNED]
-    mov rdi, [rbp - PSD_PREFIX]
-    test rdi, rdi
-    jz .psd_open_raise
-    mov qword [rbp - PSD_PREFIX], 0
-    call obj_decref
-.psd_open_raise:
-    mov rdi, [rbp - PSD_ERR]
+    mov rdi, rax
     mov rsi, [rbp - PSD_PATH]
-    call raise_oserror              ; does not return
+    call set_oserror
+    jmp .psd_fail
 .psd_opened:
     mov [rbp - PSD_FD], rax
 
@@ -830,16 +833,13 @@ DEF_FUNC posix_scandir, PSD_FRAME
     mov rsi, [rbp - PSD_BUF]
     mov edx, PSD_BUFSZ
     call sys_getdents64
-    ; Not POSIX_CHECK: by here the descriptor is open and the list is half
-    ; built, and a raise abandons the C stack without running any cleanup.
     cmp rax, -4095
     jb .psd_read_ok
     neg rax
-    mov [rbp - PSD_ERR], rax
-    call posixdir_cleanup
-    mov rdi, [rbp - PSD_ERR]
+    mov rdi, rax
     mov rsi, [rbp - PSD_PATH]
-    call raise_oserror              ; does not return
+    call set_oserror
+    jmp .psd_fail
 .psd_read_ok:
     test rax, rax
     jz .psd_done
@@ -955,10 +955,9 @@ END_FUNC posix_scandir
 ;; ============================================================================
 ;; posixdir_cleanup() -> void
 ;;
-;; Everything posix_scandir may be holding, released in one place: it is
-;; reached both from the error paths and from the arm that has to close and
-;; free BEFORE it raises, because a raise never comes back.  It reads the
-;; caller's frame through rbp, which is why it carves none of its own.
+;; Everything posix_scandir may be holding, released in one place, for its
+;; error exit.  It reads the caller's frame through rbp, which is why it
+;; carves none of its own.
 ;; ============================================================================
 DEF_FUNC_LOCAL posixdir_cleanup, 8      ; + 1 push = 16, 16-aligned
     push rbx
