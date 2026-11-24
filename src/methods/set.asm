@@ -16,7 +16,7 @@ extern tuple_type
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_KeyError_type
 extern set_type
@@ -46,6 +46,7 @@ section .text
 ;; ============================================================================
 ;; set_method_add(args, nargs) -> None
 ;; args[0]=self, args[1]=elem
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC set_method_add
     cmp rsi, 2
@@ -62,12 +63,16 @@ DEF_FUNC set_method_add
     ret
 
 .sma_error:
-    RAISE exc_TypeError_type, "add() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "add() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC set_method_add
 
 ;; ============================================================================
 ;; set_method_remove(args, nargs) -> None (raises KeyError if missing)
 ;; args[0]=self, args[1]=elem
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC set_method_remove
     cmp rsi, 2
@@ -86,15 +91,22 @@ DEF_FUNC set_method_remove
     ret
 
 .smr_keyerr:
-    RAISE exc_KeyError_type, "element not in set"
+    SET_EXC exc_KeyError_type, "element not in set"
+    xor eax, eax
+    leave
+    ret
 
 .smr_error:
-    RAISE exc_TypeError_type, "remove() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "remove() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC set_method_remove
 
 ;; ============================================================================
 ;; set_method_discard(args, nargs) -> None (no error if missing)
 ;; args[0]=self, args[1]=elem
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC set_method_discard
     cmp rsi, 2
@@ -112,13 +124,17 @@ DEF_FUNC set_method_discard
     ret
 
 .smd_error:
-    RAISE exc_TypeError_type, "discard() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "discard() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC set_method_discard
 
 ;; ============================================================================
 ;; set_method_pop(args, nargs) -> removed element
 ;; args[0]=self
 ;; Scans for first occupied entry, removes and returns it.
+;; Fails: 0
 ;; ============================================================================
 SMP_FRAME equ 24            ; 3 pushes, so rsp is 16-aligned at the calls
                             ; the DECREF macros below expand to
@@ -187,15 +203,28 @@ DEF_FUNC set_method_pop, SMP_FRAME
     ret
 
 .smpop_empty:
-    RAISE exc_KeyError_type, "pop from an empty set"
+    SET_EXC exc_KeyError_type, "pop from an empty set"
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .smpop_error:
-    RAISE exc_TypeError_type, "pop() takes no arguments"
+    SET_EXC exc_TypeError_type, "pop() takes no arguments"
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_method_pop
 
 ;; ============================================================================
 ;; set_method_clear(args, nargs) -> None
 ;; args[0]=self
+;; Fails: 0
 ;; ============================================================================
 SMCL_FRAME equ 8            ; + 3 pushes = 32, 16-aligned
 DEF_FUNC set_method_clear, SMCL_FRAME
@@ -221,12 +250,19 @@ DEF_FUNC set_method_clear, SMCL_FRAME
     ret
 
 .smc_error:
-    RAISE exc_TypeError_type, "clear() takes no arguments"
+    SET_EXC exc_TypeError_type, "clear() takes no arguments"
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_method_clear
 
 ;; ============================================================================
 ;; set_method_copy(args, nargs) -> new set (shallow copy)
 ;; args[0]=self
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC set_method_copy
     push rbx
@@ -285,12 +321,20 @@ DEF_FUNC set_method_copy
 .smcp_error:
     ; Unreachable now that copy is registered with its arity: the shared
     ; path names the type, "set.copy() takes no arguments (1 given)".
-    RAISE exc_TypeError_type, "copy() takes no arguments"
+    SET_EXC exc_TypeError_type, "copy() takes no arguments"
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_method_copy
 
 ;; ============================================================================
 ;; set_method_union(args, nargs) -> new set = self | other
 ;; args[0]=self, args[1]=other (iterable)
+;; Fails: 0
 ;; ============================================================================
 ; set_add probes the RESULT with a key borrowed from one of the operands, and
 ; the probe runs __eq__ -- which may clear that operand.  Same hazard as
@@ -407,7 +451,15 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     ret
 
 .smu_error:
-    RAISE exc_TypeError_type, "union() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "union() takes exactly one argument"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_binop_union
 
 ;; ============================================================================
@@ -565,6 +617,7 @@ END_FUNC set_update_one
 ;; ============================================================================
 ;; set_method_intersection(args, nargs) -> new set = self & other
 ;; args[0]=self, args[1]=other
+;; Fails: 0
 ;; ============================================================================
 ; The key is borrowed from the table being walked, and set_contains runs
 ; __eq__ -- arbitrary Python, which may clear that very set and take the key's
@@ -682,12 +735,21 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     ret
 
 .smi_error:
-    RAISE exc_TypeError_type, "intersection() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "intersection() takes exactly one argument"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_binop_intersection
 
 ;; ============================================================================
 ;; set_method_difference(args, nargs) -> new set = self - other
 ;; args[0]=self, args[1]=other
+;; Fails: 0
 ;; ============================================================================
 ; Same borrowed-key and moving-table hazard as set_binop_intersection above.
 SMDF_KEY   equ 8
@@ -787,7 +849,15 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     ret
 
 .smdf_error:
-    RAISE exc_TypeError_type, "difference() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "difference() takes exactly one argument"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_binop_difference
 
 ;; ============================================================================
@@ -805,6 +875,7 @@ END_FUNC set_binop_difference
 ;; any of them: the bodies stay two-operand, and this walks the arguments.  A
 ;; single operand is the overwhelmingly common case and still reaches the body
 ;; directly, with no intermediate copy.
+;; Fails: 0
 ;; ============================================================================
 SF_ARGS  equ 8
 SF_N     equ 16
@@ -829,8 +900,7 @@ DEF_FUNC_LOCAL set_fold, SF_FRAME
     ; Value, so nothing here needs unpacking.
     mov esi, 1
     call set_method_copy
-    test rax, rax
-    jz .sf_fail
+    ERR_NULL .sf_fail
     mov [rbp - SF_ACC], rax
     mov qword [rbp - SF_IDX], 1
 
@@ -876,27 +946,59 @@ DEF_FUNC_LOCAL set_fold, SF_FRAME
     jmp rax                     ; a tail call: rdi and rsi are already right
 
 .sf_arity:
-    RAISE exc_TypeError_type, "descriptor requires a set argument"
+    SET_EXC exc_TypeError_type, "descriptor requires a set argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC set_fold
 
 ;; The three variadic entry points.  The operators reach the bodies through
 ;; these too, always with exactly two operands, so they cost one jump.
+;; Fails: 0
 DEF_FUNC_BARE set_method_union
-    NO_KEYWORDS "set.union() takes no keyword arguments"
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    jne .kw
     lea rdx, [rel set_binop_union]
     jmp set_fold
+.kw:
+    sub rsp, 8                  ; a bare function: align the call
+    NO_KEYWORDS_RET "set.union() takes no keyword arguments", .fail
+.fail:
+    add rsp, 8
+    xor eax, eax
+    ret
 END_FUNC set_method_union
 
+;; set_method_intersection(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC_BARE set_method_intersection
-    NO_KEYWORDS "set.intersection() takes no keyword arguments"
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    jne .kw
     lea rdx, [rel set_binop_intersection]
     jmp set_fold
+.kw:
+    sub rsp, 8                  ; a bare function: align the call
+    NO_KEYWORDS_RET "set.intersection() takes no keyword arguments", .fail
+.fail:
+    add rsp, 8
+    xor eax, eax
+    ret
 END_FUNC set_method_intersection
 
+;; set_method_difference(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC_BARE set_method_difference
-    NO_KEYWORDS "set.difference() takes no keyword arguments"
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    jne .kw
     lea rdx, [rel set_binop_difference]
     jmp set_fold
+.kw:
+    sub rsp, 8                  ; a bare function: align the call
+    NO_KEYWORDS_RET "set.difference() takes no keyword arguments", .fail
+.fail:
+    add rsp, 8
+    xor eax, eax
+    ret
 END_FUNC set_method_difference
 
 ;; ============================================================================
@@ -906,6 +1008,7 @@ END_FUNC set_method_difference
 ;; silently IGNORED the rest -- `s.update(a, b)` dropped b without a word,
 ;; which is worse than the TypeError the other three raised.  It is also
 ;; set.__init__, so it has to tolerate nargs == 1.
+;; Fails: 0
 ;; ============================================================================
 SUV_ARGS  equ 8
 SUV_N     equ 16
@@ -914,7 +1017,7 @@ SUV_TMP   equ 40            ; [-40] = self, [-32] = one source
 SUV_FRAME equ 48            ; + 0 pushes = 48
 
 DEF_FUNC set_method_update, SUV_FRAME
-    NO_KEYWORDS "set.update() takes no keyword arguments"
+    NO_KEYWORDS_RET "set.update() takes no keyword arguments", .suv_fail
     mov [rbp - SUV_ARGS], rdi
     mov [rbp - SUV_N], rsi
     mov qword [rbp - SUV_IDX], 1
@@ -952,10 +1055,19 @@ END_FUNC set_method_update
 ;; keywords outright -- there is no __new__ carve-out, because a subclass that
 ;; wants them overrides __init__ and this never runs -- and the message names
 ;; the TYPE, not the method the body happens to be shared with.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE set_dunder_init
-    NO_KEYWORDS "set() takes no keyword arguments"
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    jne .kw
     jmp set_method_update
+.kw:
+    sub rsp, 8                  ; a bare function: align the call
+    NO_KEYWORDS_RET "set() takes no keyword arguments", .fail
+.fail:
+    add rsp, 8
+    xor eax, eax
+    ret
 END_FUNC set_dunder_init
 
 ;; ============================================================================
@@ -976,7 +1088,7 @@ SUI_FRAME equ 16            ; + 1 push = 24, not 16-aligned
 DEF_FUNC set_method_%1, SUI_FRAME
 %defstr %%mname %1
 %strcat %%nokw "set.", %%mname, "() takes no keyword arguments"
-    NO_KEYWORDS %%nokw
+    NO_KEYWORDS_RET %%nokw, %%fail_bare
     push rbx
     cmp rsi, 1
     jl %%bad
@@ -986,7 +1098,8 @@ DEF_FUNC set_method_%1, SUI_FRAME
     cmp rsi, 2
     je %%arity_ok
     lea rdi, [rel %3]
-    call set_raise_arity
+    call set_arity_error
+    jmp %%fail
 %%arity_ok:
 %endif
     mov rbx, [rdi]              ; self, kept across the call
@@ -1022,11 +1135,15 @@ DEF_FUNC set_method_%1, SUI_FRAME
     leave
     ret
 %%frozen:
-    pop rbx
-    RAISE exc_TypeError_type, "descriptor requires a 'set' object"
+    SET_EXC exc_TypeError_type, "descriptor requires a 'set' object"
+    jmp %%fail
 %%bad:
-    pop rbx
-    RAISE exc_TypeError_type, "descriptor requires a set argument"
+    SET_EXC exc_TypeError_type, "descriptor requires a set argument"
+    jmp %%fail
+%%fail_bare:
+    xor eax, eax
+    leave
+    ret
 END_FUNC set_method_%1
 %endmacro
 
@@ -1040,7 +1157,8 @@ DEF_SET_UPDATE symmetric_difference_update, set_method_symmetric_difference, \
 ;; args[0]=self, args[1]=other
 ;; ============================================================================
 ;; ============================================================================
-;; set_raise_arity(rdi = the method's name, rsi = nargs) -- does not return
+;; set_arity_error(rdi = the method's name, rsi = nargs)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; CPython's wording for a set method given the wrong number of arguments:
 ;;   set.symmetric_difference() takes exactly one argument (2 given)
@@ -1050,7 +1168,7 @@ SRA_NAME  equ 8
 SRA_N     equ 16
 SRA_BUF   equ 160
 SRA_FRAME equ 160           ; + 0 pushes = 160, 16-aligned
-DEF_FUNC_LOCAL set_raise_arity, SRA_FRAME
+DEF_FUNC_LOCAL set_arity_error, SRA_FRAME
     mov [rbp - SRA_NAME], rdi
     dec rsi                     ; self does not count
     mov [rbp - SRA_N], rsi
@@ -1073,9 +1191,11 @@ DEF_FUNC_LOCAL set_raise_arity, SRA_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - SRA_BUF]
-    extern raise_exception
-    call raise_exception
-END_FUNC set_raise_arity
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC set_arity_error
 
 section .rodata
 sn_set_dot:   db "set.", 0
@@ -1090,6 +1210,8 @@ section .text
 SMSD_KEY   equ 8
 SMSD_IDX   equ 16
 SMSD_FRAME equ 24           ; + 5 pushes = 64, 16-aligned
+;; set_method_symmetric_difference(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     push rbx
     push r12
@@ -1224,13 +1346,15 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     ; CPython names the method in full and reports the count:
     ;   set.symmetric_difference() takes exactly one argument (2 given)
     lea rdi, [rel sn_symmetric_difference]
-    call set_raise_arity
+    call set_arity_error
+    jmp .smsd_fail
 END_FUNC set_method_symmetric_difference
 
 ;; ============================================================================
 ;; set_method_issubset(args, nargs) -> bool
 ;; args[0]=self, args[1]=other
 ;; True if every element of self is in other.
+;; Fails: 0
 ;; ============================================================================
 ; The key is borrowed from the table being walked and set_contains runs
 ; __eq__; see set_binop_intersection.
@@ -1332,13 +1456,22 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     ret
 
 .smss_error:
-    RAISE exc_TypeError_type, "issubset() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "issubset() takes exactly one argument"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_method_issubset
 
 ;; ============================================================================
 ;; set_method_issuperset(args, nargs) -> bool
 ;; args[0]=self, args[1]=other
 ;; True if every element of other is in self.
+;; Fails: 0
 ;; ============================================================================
 ; The key is borrowed from the table being walked and set_contains runs
 ; __eq__; see set_binop_intersection.
@@ -1434,13 +1567,22 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
     ret
 
 .smis_error:
-    RAISE exc_TypeError_type, "issuperset() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "issuperset() takes exactly one argument"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_method_issuperset
 
 ;; ============================================================================
 ;; set_method_isdisjoint(args, nargs) -> bool
 ;; args[0]=self, args[1]=other
 ;; True if self and other have no common elements.
+;; Fails: 0
 ;; ============================================================================
 ; The key is borrowed from the table being walked and set_contains runs
 ; __eq__; see set_binop_intersection.
@@ -1548,7 +1690,15 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     ret
 
 .smdj_error:
-    RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "isdisjoint() takes exactly one argument"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC set_method_isdisjoint
 
 ;; ============================================================================
@@ -1563,6 +1713,7 @@ END_FUNC set_method_isdisjoint
 ;; tp_hash, and a frozenset subclass defining __hash__ of its own has
 ;; slot_tp_hash there, so the unbound frozenset.__hash__ would re-enter the
 ;; subclass's method instead of naming the type it was reached through.
+;; Fails: 0
 ;; ============================================================================
 global frozenset_dunder_hash
 DEF_FUNC frozenset_dunder_hash
@@ -1581,7 +1732,10 @@ DEF_FUNC frozenset_dunder_hash
     V_PACK rax, rdx
     ret
 .fdh_error:
-    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__hash__() takes no arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC frozenset_dunder_hash
 
 ;; ============================================================================

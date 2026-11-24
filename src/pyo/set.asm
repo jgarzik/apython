@@ -1917,6 +1917,7 @@ DEF_FUNC set_nb_or, SNB_FRAME
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_union
+    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
     leave
     ret
 END_FUNC set_nb_or
@@ -1929,6 +1930,7 @@ DEF_FUNC set_nb_and, SNB_FRAME
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_intersection
+    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
     leave
     ret
 END_FUNC set_nb_and
@@ -2064,6 +2066,7 @@ DEF_FUNC set_nb_sub, SNB_FRAME
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_difference
+    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
     leave
     ret
 END_FUNC set_nb_sub
@@ -2076,6 +2079,7 @@ DEF_FUNC set_nb_xor, SNB_FRAME
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
     call set_method_symmetric_difference
+    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
     leave
     ret
 END_FUNC set_nb_xor
