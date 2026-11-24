@@ -3,7 +3,8 @@
 # file goes above its number.  Lower one with
 #   python3 src/compiler/lint.py --record-docblocks
 # in the commit that earns it; a row at zero is dropped.
-src/buildclass.asm                     5
+src/buildclass.asm                     3
+src/buildclass_ns.asm                  2
 src/builtins.asm                       4
 src/builtins_num.asm                   12
 src/compiler/assemble.asm              8

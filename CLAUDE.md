@@ -538,7 +538,13 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `obj_declared_class`, the "what does this object say it is" step they share.
   CPython asks the real type first and `__class__` only when that says no, and
   so does this
-- `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
+- `src/buildclass.asm` — `type.__new__` and `type_from_parts`, the type
+  constructor.  `buildclass_stmt.asm` is the `class` statement in front of it
+  -- `__build_class__`, the bases through `__mro_entries__`, the metaclass and
+  `__prepare__` -- and `buildclass_ns.asm` is what the constructor does to the
+  new class's namespace: `__set_name__`, the `__eq__`-without-`__hash__`
+  rule, the implicit classmethods and private-name mangling.  Both were split
+  off when `buildclass.asm` reached the 100k cap
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
 - `src/format.asm` — The format-spec mini-language (`format()`, f-strings, `%`)
