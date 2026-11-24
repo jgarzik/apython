@@ -390,6 +390,29 @@ DEF_FUNC module_getattr, MG_FRAME
     call dict_get               ; a Value; 0 is the miss, and it never raises
     test rax, rax
     jz .mg_really_not_found
+    mov [rbp - MG_HOOK], rax    ; borrowed; nothing below runs Python
+
+    ; There is a hook -- but it answers a MISS, and the dict is only half of
+    ; what can find the name.  CPython's module_getattro runs the generic
+    ; lookup first, so anything the type supplies (`__class__`, `__reduce__`,
+    ; a method of a ModuleType subclass) never reaches the hook.  It used to:
+    ; isinstance() reads __class__ off every object, and ran the user's hook
+    ; on any module that had one.  Answering 0 with nothing pending hands the
+    ; name back to the caller's own walk of the type, exactly as a module
+    ; with no hook does.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, r12
+    extern type_lookup_cached
+    call type_lookup_cached     ; rax = payload, edx = tag; borrowed
+    test edx, edx
+    jnz .mg_really_not_found
+    mov rdi, rbx
+    mov rsi, r12
+    extern obj_generic_attr
+    call obj_generic_attr       ; __class__, which no dict holds; owned, or 0
+    test rax, rax
+    jnz .mg_generic
+    mov rax, [rbp - MG_HOOK]
 
     ; The hook, called with the attribute name.  obj_call_n returns rather
     ; than unwinding, and refuses a non-callable with a TypeError of its own --
@@ -425,6 +448,12 @@ DEF_FUNC module_getattr, MG_FRAME
     pop rbx
     leave
     ret                         ; already a Value, and owned
+
+.mg_generic:
+    pop r12
+    pop rbx
+    leave
+    ret                         ; a Value, and owned
 
 .mg_hook_raised:
     ; An AttributeError is "absent" and has to reach getattr()'s default and
