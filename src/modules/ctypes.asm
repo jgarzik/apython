@@ -28,15 +28,15 @@
 ; everything itself and reports it as unraisable, as CPython does; the clear
 ; below is only a backstop.
 ;
-;   **NEVER `RAISE` FROM cx_tramp.**  It would discard the C frames of
-;   whatever library is calling back.
+;   **NEVER JUMP INTO THE UNWINDER FROM cx_tramp.**  It would discard the C
+;   frames of whatever library is calling back.  Nothing else in this file
+;   jumps either: a refused argument is recorded and returned as 0.
 
 %include "macros.inc"
 %include "object.inc"
 
 ASM_INIT
 
-extern eval_exception_unwind
 extern none_singleton
 extern dict_new
 extern module_new
@@ -53,8 +53,8 @@ extern memoryview_type
 extern ap_memcpy
 extern obj_as_index
 extern obj_call_n
-extern raise_exception
-extern raise_type_error_with_name
+extern set_exception
+extern set_type_error_with_name
 extern exc_TypeError_type
 
 extern dlopen
@@ -82,16 +82,17 @@ section .text
 
 ;; ============================================================================
 ;; cx_arg_i64(rdi = args, rsi = index) -> rax = the int
+;; Fails: -1
 ;;
-;; Does not return when the argument is not an index.
+;; -1 is also an answer -- an address is any 64 bits -- so the caller asks
+;; whether an exception came with it.
 ;; ============================================================================
 DEF_FUNC_BARE cx_arg_i64
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     sub rsp, 8                  ; a call, so the refusal can be seen
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and its exception are this one's
     add rsp, 8
-    ERR_M1_JUMP
     ret
 END_FUNC cx_arg_i64
 
@@ -165,11 +166,32 @@ DEF_FUNC_BARE cx_ret_none
 END_FUNC cx_ret_none
 
 ;; ============================================================================
-;; cx_nargs() -> does not return; the one arity error every function shares
+;; cx_nargs() -> rax = 0 to the CALLER of whoever jumped here, with the one
+;;   arity TypeError every function shares pending
+;;
+;; JUMPED to, never called, and only from a function whose frame is DEF_FUNC's
+;; own with nothing pushed on it: the `leave` below is that function's, and
+;; the 0 goes back to its caller.  One exit can serve them all because none
+;; of them holds anything when it refuses -- every argument is converted
+;; before the first allocation, and the arguments are the interpreter's.
 ;; ============================================================================
 DEF_FUNC_BARE cx_nargs
-    RAISE exc_TypeError_type, "_ctypescore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_ctypescore: wrong number of arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC cx_nargs
+
+;; ============================================================================
+;; cx_fail() -> rax = 0 to the caller of whoever jumped here
+;;
+;; The same shared exit, for an exception that is already pending.
+;; ============================================================================
+DEF_FUNC_BARE cx_fail
+    xor eax, eax
+    leave
+    ret
+END_FUNC cx_fail
 
 ;; ============================================================================
 ;; _ctypescore.dlopen(name, mode) -> int handle, 0 on failure
@@ -186,6 +208,7 @@ DEF_FUNC cx_dlopen, DO_FRAME
     mov [rbp - DO_ARGS], rdi
     mov esi, 1
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - DO_MODE], rax
     mov rax, [rbp - DO_ARGS]
     mov rdi, [rax]
@@ -207,7 +230,7 @@ DEF_FUNC cx_dlopen, DO_FRAME
     leave
     ret
 .do_type:
-    RAISE exc_TypeError_type, "_ctypescore.dlopen: name must be bytes or None"
+    FAIL exc_TypeError_type, "_ctypescore.dlopen: name must be bytes or None", cx_fail
 END_FUNC cx_dlopen
 
 ;; ============================================================================
@@ -222,6 +245,7 @@ DEF_FUNC cx_dlsym, DS_FRAME
     mov [rbp - DS_ARGS], rdi
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - DS_H], rax
     mov rax, [rbp - DS_ARGS]
     mov rdi, [rax + 8]
@@ -236,7 +260,7 @@ DEF_FUNC cx_dlsym, DS_FRAME
     leave
     ret
 .ds_type:
-    RAISE exc_TypeError_type, "_ctypescore.dlsym: name must be bytes"
+    FAIL exc_TypeError_type, "_ctypescore.dlsym: name must be bytes", cx_fail
 END_FUNC cx_dlsym
 
 ;; ============================================================================
@@ -247,6 +271,7 @@ DEF_FUNC cx_dlclose
     jne cx_nargs
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov rdi, rax
     call dlclose wrt ..plt
     movsxd rdi, eax
@@ -297,8 +322,8 @@ DEF_FUNC cx_addr, AD_FRAME
 .ad_type:
     lea rdi, [rel cx_e_buffer]
     mov rsi, [rbp - AD_OBJ]
-    leave
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp cx_fail
 END_FUNC cx_addr
 
 ;; ============================================================================
@@ -313,10 +338,12 @@ DEF_FUNC cx_read, RD_FRAME
     mov [rbp - RD_ARGS], rdi
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - RD_ADDR], rax
     mov rdi, [rbp - RD_ARGS]
     mov esi, 1
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov rsi, rax
     test rsi, rsi
     jg .rd_some
@@ -340,6 +367,7 @@ DEF_FUNC cx_write, WR_FRAME
     mov [rbp - WR_ARGS], rdi
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - WR_ADDR], rax
     mov rax, [rbp - WR_ARGS]
     mov rdi, [rax + 8]
@@ -356,7 +384,7 @@ DEF_FUNC cx_write, WR_FRAME
     leave
     ret
 .wr_type:
-    RAISE exc_TypeError_type, "_ctypescore.write: data must be bytes-like"
+    FAIL exc_TypeError_type, "_ctypescore.write: data must be bytes-like", cx_fail
 END_FUNC cx_write
 
 ;; ============================================================================
@@ -367,6 +395,7 @@ DEF_FUNC cx_strlen
     jne cx_nargs
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov rdi, rax
     call strlen wrt ..plt
     mov rdi, rax
@@ -383,6 +412,7 @@ DEF_FUNC cx_wcslen
     jne cx_nargs
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     xor edi, edi
 .wl_loop:
     cmp dword [rax + rdi*4], 0
@@ -408,6 +438,7 @@ PC_FRAME equ 64                 ; + 0 pushes = 64, 16-aligned
     mov rdi, [rbp - PC_ARGS]
     mov esi, %%i
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - PC_V + %%i*8], rax
 %assign %%i %%i+1
 %endrep
@@ -513,10 +544,12 @@ DEF_FUNC cx_closure, PC_FRAME
     mov [rbp - PC_ARGS], rdi
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - PC_V], rax
     mov rdi, [rbp - PC_ARGS]
     mov esi, 2
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rbp - PC_V + 8], rax
     mov rax, [rbp - PC_ARGS]
     mov rax, [rax + 8]
@@ -561,6 +594,7 @@ DEF_FUNC cx_closure_free
     jne cx_nargs
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     test rax, rax
     jz .cf_done
     mov rdi, rax
@@ -641,6 +675,7 @@ DEF_FUNC cx_errno_set, ES_FRAME
     mov [rbp - ES_OLD], rax
     xor esi, esi
     call cx_arg_i64
+    ERR_M1 cx_fail
     mov [rel cx_errno], eax
     mov rdi, [rbp - ES_OLD]
     call cx_ret_int

@@ -342,3 +342,70 @@ err("Parse(text handler raises)", _parse_text_handler_raises, _msg=True)
 err("Parse(after final)", _parse_twice)
 err("Parse(isfinal __bool__ raises)", pyexpat.ParserCreate().Parse, b"", RaisesBool(), _msg=True)
 err("ErrorString(str)", pyexpat.ErrorString, "x")
+
+# --- ctypes --------------------------------------------------------------
+import ctypes
+
+print("== ctypes")
+core("dlopen()", "_ctypescore", "dlopen")
+core("dlopen(int name)", "_ctypescore", "dlopen", 5, 2)
+core("dlopen(str mode)", "_ctypescore", "dlopen", None, "x")
+core("dlsym(1 arg)", "_ctypescore", "dlsym", 0)
+core("dlsym(str handle)", "_ctypescore", "dlsym", "x", b"puts")
+core("dlsym(int name)", "_ctypescore", "dlsym", 0, 5)
+core("dlclose()", "_ctypescore", "dlclose")
+core("dlclose(str)", "_ctypescore", "dlclose", "x")
+core("addr()", "_ctypescore", "addr")
+core("addr(int)", "_ctypescore", "addr", 5)
+core("addr(str)", "_ctypescore", "addr", "text")
+core("read(1 arg)", "_ctypescore", "read", 0)
+core("read(str address)", "_ctypescore", "read", "x", 1)
+core("read(str length)", "_ctypescore", "read", 0, "x")
+core("write(1 arg)", "_ctypescore", "write", 0)
+core("write(str address)", "_ctypescore", "write", "x", b"")
+core("write(int data)", "_ctypescore", "write", 0, 5)
+core("strlen()", "_ctypescore", "strlen")
+core("strlen(str)", "_ctypescore", "strlen", "x")
+core("wcslen(str)", "_ctypescore", "wcslen", "x")
+core("prep_cif(4 args)", "_ctypescore", "prep_cif", 0, 0, 0, 0)
+core("prep_cif(str)", "_ctypescore", "prep_cif", 0, 0, 0, 0, "x")
+core("prep_cif_var(str)", "_ctypescore", "prep_cif_var", 0, 0, 0, "x", 0, 0)
+core("call(4 args)", "_ctypescore", "call", 0, 0, 0, 0)
+core("call(str)", "_ctypescore", "call", 0, 0, "x", 0, 0)
+core("closure(2 args)", "_ctypescore", "closure", 0, 0)
+core("closure(str cif)", "_ctypescore", "closure", "x", len, 0)
+core("closure(str out)", "_ctypescore", "closure", 0, len, "x")
+core("closure_free()", "_ctypescore", "closure_free")
+core("closure_free(str)", "_ctypescore", "closure_free", "x")
+core("errno_set()", "_ctypescore", "errno_set")
+core("errno_set(str)", "_ctypescore", "errno_set", "x")
+
+_libc = ctypes.CDLL(None)
+# CPython's own dlopen and dlsym failures grow its heap, so these two are
+# asked for the type only.
+for _what, _fn, _args in (("CDLL(missing)", ctypes.CDLL, ("/nonexistent/libnothing.so",)),
+                          ("getattr(missing symbol)", getattr, (_libc, "no_such_symbol_anywhere"))):
+    try:
+        _fn(*_args)
+        print(_what, "-> no error")
+    except Exception as _e:
+        print(_what, "->", type(_e).__name__)
+err("c_int(str)", ctypes.c_int, "x")
+err("c_char_p(int list)", ctypes.c_char_p, [1])
+err("strlen(wrong type)", _libc.strlen, 1.5)
+err("sizeof(int)", ctypes.sizeof, 5)
+err("create_string_buffer(None)", ctypes.create_string_buffer, None)
+err("cast(1 arg)", ctypes.cast, 1)
+
+# A callback that raises: the C caller goes on, and qsort still sorts with
+# the comparisons that did answer.
+_CMP = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
+
+
+def _cmp(a, b):
+    return a[0] - b[0]
+
+
+_arr = (ctypes.c_int * 5)(5, 1, 4, 2, 3)
+_libc.qsort(_arr, 5, ctypes.sizeof(ctypes.c_int), _CMP(_cmp))
+print(list(_arr))
