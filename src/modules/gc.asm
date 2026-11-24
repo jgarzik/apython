@@ -19,7 +19,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern obj_decref
@@ -32,7 +31,7 @@ extern obj_as_index
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 
@@ -86,9 +85,13 @@ DEF_FUNC gc_mod_collect, GMCF_FRAME
     ret
 
 .gmc_args:
-    RAISE exc_TypeError_type, "collect() takes at most 1 argument"
+    SET_EXC exc_TypeError_type, "collect() takes at most 1 argument"
+    leave
+    ret
 .gmc_range:
-    RAISE exc_ValueError_type, "invalid generation"
+    SET_EXC exc_ValueError_type, "invalid generation"
+    leave
+    ret
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -196,7 +199,9 @@ DEF_FUNC gc_mod_get_count
     V_PACK rax, rdx
     ret
 .gmgc_args:
-    RAISE exc_TypeError_type, "get_count() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_count() takes no arguments"
+    leave
+    ret
 END_FUNC gc_mod_get_count
 
 DEF_FUNC gc_mod_get_threshold
@@ -211,7 +216,9 @@ DEF_FUNC gc_mod_get_threshold
     V_PACK rax, rdx
     ret
 .gmgt_args:
-    RAISE exc_TypeError_type, "get_threshold() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_threshold() takes no arguments"
+    leave
+    ret
 END_FUNC gc_mod_get_threshold
 
 ;; ============================================================================
@@ -260,7 +267,9 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     V_PACK rax, rdx
     ret
 .gst_args:
-    RAISE exc_TypeError_type, "set_threshold() takes 1 to 3 arguments"
+    SET_EXC exc_TypeError_type, "set_threshold() takes 1 to 3 arguments"
+    leave
+    ret
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -293,7 +302,7 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
     je .ggo_have_gen
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .ggo_fail
     cmp rax, 2
     jg .ggo_range
     mov [rbp - GGO_GEN], rax    ; negative means all of them, as CPython has it
@@ -329,9 +338,14 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
     ret
 
 .ggo_args:
-    RAISE exc_TypeError_type, "get_objects() takes at most 1 argument"
+    FAIL exc_TypeError_type, "get_objects() takes at most 1 argument", .ggo_fail
 .ggo_range:
-    RAISE exc_ValueError_type, "generation parameter must be less than the number of available generations (3)"
+    FAIL exc_ValueError_type, "generation parameter must be less than the number of available generations (3)", .ggo_fail
+.ggo_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC gc_mod_get_objects
 
 ;; ============================================================================
@@ -608,7 +622,9 @@ DEF_FUNC gc_mod_is_tracked
     V_PACK rax, rdx
     ret
 .git_args:
-    RAISE exc_TypeError_type, "is_tracked() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "is_tracked() takes exactly one argument"
+    leave
+    ret
 END_FUNC gc_mod_is_tracked
 
 ;; ============================================================================
@@ -707,7 +723,9 @@ DEF_FUNC gc_mod_set_debug
     V_PACK rax, rdx
     ret
 .gsd_args:
-    RAISE exc_TypeError_type, "set_debug() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "set_debug() takes exactly one argument"
+    leave
+    ret
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -723,7 +741,9 @@ DEF_FUNC gc_mod_get_debug
     V_PACK rax, rdx
     ret
 .ggd_args:
-    RAISE exc_TypeError_type, "get_debug() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_debug() takes no arguments"
+    leave
+    ret
 END_FUNC gc_mod_get_debug
 
 ;; ============================================================================
