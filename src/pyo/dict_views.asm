@@ -376,6 +376,7 @@ END_FUNC dict_keys_view_contains
 ;; second element is the right operand, so a probe carrying a type with an
 ;; __eq__ is offered the reflected operand by the ordinary rule rather than
 ;; being asked first.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     push rbx
@@ -415,10 +416,11 @@ DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     ret
 
 .divc_error:
-    ; sq_contains has no error channel; the exception is already pending.
+    ; sq_contains answers -1 with the exception pending.
+    mov rax, -1
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC dict_items_view_contains
 
 ;; ============================================================================
@@ -523,6 +525,7 @@ DEF_VIEW_BINOP nb_xor, NB_XOR
 
 ;; ============================================================================
 ;; dvr_len(rdi = a set, a frozenset or a keys/items view) -> rax = its length
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE dvr_len
     mov rax, [rdi + PyObject.ob_type]
@@ -531,7 +534,6 @@ DEF_FUNC_BARE dvr_len
     sub rsp, 8
     call rax
     add rsp, 8
-    ERR_M1_JUMP
     ret
 END_FUNC dvr_len
 
@@ -669,9 +671,11 @@ DEF_FUNC_LOCAL dict_view_richcompare, DVC_FRAME
 .dvc_ok:
     mov rdi, [rbp - DVC_SELF]
     call dvr_len
+    ERR_M1 .dvc_fail
     mov [rbp - DVC_LSELF], rax
     mov rdi, [rbp - DVC_OTHER]
     call dvr_len
+    ERR_M1 .dvc_fail
     mov [rbp - DVC_LOTHER], rax
 
     mov rax, [rbp - DVC_LSELF]
@@ -823,6 +827,7 @@ section .text
 ;; type already carries the kind that tells keys from values from items.  So
 ;; this is dict_reversed with the view's own dv_kind rather than a hardcoded
 ;; zero, which is exactly what CPython's dictview_reversed does.
+;; Fails: 0
 ;; ============================================================================
 DVREV_FRAME equ 24          ; + 1 push = 32, 16-aligned
 DEF_FUNC dict_view_reversed, DVREV_FRAME
@@ -877,8 +882,11 @@ DEF_FUNC dict_view_reversed, DVREV_FRAME
     ret
 .dvr_args:
     extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "__reversed__() takes exactly one argument"
+    extern set_exception
+    SET_EXC exc_TypeError_type, "__reversed__() takes exactly one argument"
+    pop rbx
+    leave
+    ret
 END_FUNC dict_view_reversed
 
 section .text
@@ -917,6 +925,7 @@ END_FUNC dict_view_get_mapping
 ;; holds each item -- which is a dict lookup for a keys view and a key-and-value
 ;; comparison for an items view.  Both are already written as sq_contains, so
 ;; this is the walk and nothing else.
+;; Fails: 0
 ;; ============================================================================
 DVJ_SELF  equ 8
 DVJ_ITER  equ 16
@@ -1020,8 +1029,8 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     ret
 .dvj_args:
     extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "isdisjoint() takes exactly one argument"
+    jmp .dvj_raised
 END_FUNC dict_view_isdisjoint
 
 section .data
