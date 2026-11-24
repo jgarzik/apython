@@ -24,7 +24,6 @@ extern ap_strlen
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern obj_decref
-extern raise_exception
 extern set_exception
 extern str_type
 extern bytes_type

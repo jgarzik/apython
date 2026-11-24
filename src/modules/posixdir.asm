@@ -74,7 +74,6 @@ extern sys_lstat
 extern sys_open
 extern sys_stat
 extern ap_strcmp
-extern raise_no_attribute
 extern none_singleton
 extern bool_true
 extern bool_false
