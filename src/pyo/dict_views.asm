@@ -458,7 +458,7 @@ DEF_FUNC_LOCAL dict_view_to_set, DVS_FRAME
     lea rdi, [rel set_type]
     mov edx, 1
     extern set_type_call
-    call set_type_call
+    call set_type_call        ; err: its 0 is this function's own answer
     V_UNPACK rax, rdx
     leave
     ret

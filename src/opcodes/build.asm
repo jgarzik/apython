@@ -2621,6 +2621,7 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]     ; item
     call set_add               ; set_add does INCREF
+    ERR_M1_JUMP
     inc qword [rbp - BSE_I]
     jmp .build_set_fill
 
@@ -2670,6 +2671,7 @@ DEF_FUNC_BARE op_set_add
     mov rdx, r8
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add
+    ERR_M1_JUMP
     ; set_add does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
     pop rsi                    ; value tag
@@ -2780,6 +2782,7 @@ DEF_FUNC op_set_update
     mov rsi, rax               ; item
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add               ; set_add does INCREF
+    ERR_M1_JUMP
     mov rdi, [rbp - SU_ITEM]
     mov rsi, [rbp - SU_ITAG]
     DECREF_VAL rdi, rsi        ; DECREF to compensate (set_add INCREF'd)
@@ -2846,6 +2849,7 @@ DEF_FUNC op_set_update
     push rbx
     mov rdi, [rbp - SU_SOURCE]
     call set_add
+    ERR_M1_JUMP
     pop rbx
 
 .su_set_next:

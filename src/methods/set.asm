@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern eval_exception_unwind
 extern frozenset_type
 extern obj_decref
 extern tuple_type
@@ -56,10 +57,16 @@ DEF_FUNC set_method_add
     mov rdi, [rax]          ; self (set)
     mov rsi, [rax + 8]     ; elem payload
     call set_add
+    ERR_M1 .sma_fail
 
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.sma_fail:
+    xor eax, eax                ; hashing or comparing the element raised
+    leave
     ret
 
 .sma_error:
@@ -82,6 +89,7 @@ DEF_FUNC set_method_remove
     mov rdi, [rax]          ; self
     mov rsi, [rax + 8]     ; elem payload
     call set_remove
+    ERR_M1 .smr_fail
     test eax, eax
     jnz .smr_keyerr
 
@@ -93,6 +101,11 @@ DEF_FUNC set_method_remove
 .smr_keyerr:
     SET_EXC exc_KeyError_type, "element not in set"
     xor eax, eax
+    leave
+    ret
+
+.smr_fail:
+    xor eax, eax                ; hashing or comparing the element raised
     leave
     ret
 
@@ -116,11 +129,17 @@ DEF_FUNC set_method_discard
     mov rdi, [rax]          ; self
     mov rsi, [rax + 8]     ; elem payload
     call set_remove
+    ERR_M1 .smd_fail
     ; Ignore return value (don't care if not found)
 
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.smd_fail:
+    xor eax, eax                ; hashing or comparing the element raised
+    leave
     ret
 
 .smd_error:
@@ -358,7 +377,7 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     ; s.difference([1]) walked a list's header as a hash table, found nothing
     ; occupied, and answered s unchanged.
     mov rdi, [rdi + 8]
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smu_fail
     mov r15, rax            ; owned: the set itself, or one built from it
@@ -416,6 +435,7 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     mov [rbp - SMU_KEY], rsi
     mov rdi, rbx
     call set_add
+    ERR_M1 .smu_fail_key
     mov rdi, [rbp - SMU_KEY]
     DECREF_V rdi, rax
 
@@ -438,6 +458,15 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smu_fail_key:
+    ; hashing or comparing an element raised part way: the key held for the
+    ; turn, the half-built result and the coerced operand all go back
+    mov rdi, [rbp - SMU_KEY]
+    DECREF_V rdi, rax
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, r15
+    call obj_decref
 .smu_fail:
     ; not iterable, or iterating it raised
     RET_NULL
@@ -531,6 +560,7 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     mov rsi, [rax + rcx * 8]
     mov rdi, [rbp - SU_SELF]
     call set_add
+    ERR_M1 .supd_fail_seq
     pop rcx
     inc rcx
     jmp .supd_seq_loop
@@ -586,6 +616,7 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     mov [rbp - SU_KEY], rsi
     mov rdi, [rbp - SU_SELF]
     call set_add
+    ERR_M1 .supd_fail_key
     mov rdi, [rbp - SU_KEY]
     DECREF_V rdi, rax
 
@@ -604,6 +635,18 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.supd_fail_seq:
+    ; an element would not hash, or its __eq__ raised: the loop counter comes
+    ; off the stack and the materialised sequence goes back
+    pop rcx
+    mov rdi, [rbp - SU_TMP]
+    mov qword [rbp - SU_TMP], 0
+    call obj_decref
+    jmp .supd_fail
+
+.supd_fail_key:
+    mov rdi, [rbp - SU_KEY]         ; the key held for the turn
+    DECREF_V rdi, rax
 .supd_fail:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx
@@ -643,7 +686,7 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     ; s.difference([1]) walked a list's header as a hash table, found nothing
     ; occupied, and answered s unchanged.
     mov rdi, [rdi + 8]
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smi_fail
     mov r15, rax            ; owned: the set itself, or one built from it
@@ -691,6 +734,7 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     mov [rbp - SMI_KEY], rsi
     mov rdi, r13            ; the side being probed
     call set_contains
+    ERR_M1 .smi_fail_key
     mov rsi, [rbp - SMI_KEY]
     test eax, eax
     jz .smi_drop
@@ -698,6 +742,7 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     ; In both — add to result
     mov rdi, rbx
     call set_add
+    ERR_M1 .smi_fail_key
 
 .smi_drop:
     mov rdi, [rbp - SMI_KEY]
@@ -722,6 +767,15 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smi_fail_key:
+    ; hashing or comparing an element raised part way: the key held for the
+    ; turn, the half-built result and the coerced operand all go back
+    mov rdi, [rbp - SMI_KEY]
+    DECREF_V rdi, rax
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, r15
+    call obj_decref
 .smi_fail:
     ; not iterable, or iterating it raised
     RET_NULL
@@ -771,7 +825,7 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     ; s.difference([1]) walked a list's header as a hash table, found nothing
     ; occupied, and answered s unchanged.
     mov rdi, [rdi + 8]
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smdf_fail
     mov r15, rax            ; owned: the set itself, or one built from it
@@ -805,6 +859,7 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     mov [rbp - SMDF_KEY], rsi
     mov rdi, r15
     call set_contains
+    ERR_M1 .smdf_fail_key
     mov rsi, [rbp - SMDF_KEY]
     test eax, eax
     jnz .smdf_drop          ; in other — skip
@@ -812,6 +867,7 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     ; NOT in other — add to result
     mov rdi, rbx
     call set_add
+    ERR_M1 .smdf_fail_key
 
 .smdf_drop:
     mov rdi, [rbp - SMDF_KEY]
@@ -836,6 +892,15 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smdf_fail_key:
+    ; hashing or comparing an element raised part way: the key held for the
+    ; turn, the half-built result and the coerced operand all go back
+    mov rdi, [rbp - SMDF_KEY]
+    DECREF_V rdi, rax
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, r15
+    call obj_decref
 .smdf_fail:
     ; not iterable, or iterating it raised
     RET_NULL
@@ -1228,7 +1293,7 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     ; s.difference([1]) walked a list's header as a hash table, found nothing
     ; occupied, and answered s unchanged.
     mov rdi, [rdi + 8]
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smsd_fail
     mov r15, rax            ; owned: the set itself, or one built from it
@@ -1262,12 +1327,14 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     mov [rbp - SMSD_KEY], rsi
     mov rdi, r15
     call set_contains
+    ERR_M1 .smsd_fail_key
     mov rsi, [rbp - SMSD_KEY]
     test eax, eax
     jnz .smsd_self_drop
 
     mov rdi, rbx
     call set_add
+    ERR_M1 .smsd_fail_key
 
 .smsd_self_drop:
     mov rdi, [rbp - SMSD_KEY]
@@ -1300,12 +1367,14 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     mov [rbp - SMSD_KEY], rsi
     mov rdi, r14
     call set_contains
+    ERR_M1 .smsd_fail_key
     mov rsi, [rbp - SMSD_KEY]
     test eax, eax
     jnz .smsd_other_drop
 
     mov rdi, rbx
     call set_add
+    ERR_M1 .smsd_fail_key
 
 .smsd_other_drop:
     mov rdi, [rbp - SMSD_KEY]
@@ -1330,6 +1399,15 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smsd_fail_key:
+    ; hashing or comparing an element raised part way: the key held for the
+    ; turn, the half-built result and the coerced operand all go back
+    mov rdi, [rbp - SMSD_KEY]
+    DECREF_V rdi, rax
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, r15
+    call obj_decref
 .smsd_fail:
     ; not iterable, or iterating it raised
     RET_NULL
@@ -1379,7 +1457,7 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     ; off the end of a table it had measured wrong, into "set: hash table
     ; full", which is a fatal_error and not an exception.
     mov rdi, [rdi + 8]
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smss_fail
     mov r15, rax            ; owned: the set itself, or one built from it
@@ -1404,6 +1482,7 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     mov [rbp - SMSS_KEY], rsi
     mov rdi, r15
     call set_contains
+    ERR_M1 .smss_fail_key
     mov rdi, [rbp - SMSS_KEY]
     push rax
     push rax                             ; pad
@@ -1444,6 +1523,13 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smss_fail_key:
+    ; an element's __eq__ or __hash__ raised: the key held for the turn and
+    ; the coerced operand go back
+    mov rdi, [rbp - SMSS_KEY]
+    DECREF_V rdi, rax
+    mov rdi, r15
+    call obj_decref
 .smss_fail:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx
@@ -1490,7 +1576,7 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
 
     mov r15, [rdi]          ; self (check contains)
     mov rdi, [rdi + 8]     ; other (iterate this); see issubset above
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smis_fail
     mov r14, rax            ; owned
@@ -1515,6 +1601,7 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
     mov [rbp - SMIS_KEY], rsi
     mov rdi, r15            ; check in self
     call set_contains
+    ERR_M1 .smis_fail_key
     mov rdi, [rbp - SMIS_KEY]
     push rax
     push rax                             ; pad
@@ -1555,6 +1642,13 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smis_fail_key:
+    ; an element's __eq__ or __hash__ raised: the key held for the turn and
+    ; the coerced operand go back
+    mov rdi, [rbp - SMIS_KEY]
+    DECREF_V rdi, rax
+    mov rdi, r14
+    call obj_decref
 .smis_fail:
     xor eax, eax
     xor edx, edx
@@ -1601,7 +1695,7 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
 
     mov r14, [rdi]          ; self
     mov rdi, [rdi + 8]     ; other; see issubset above
-    call set_coerce_operand
+    call set_coerce_operand      ; err: the 0 is tested just below
     test rax, rax
     jz .smdj_fail
     mov r15, rax            ; owned
@@ -1638,6 +1732,7 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     mov [rbp - SMDJ_KEY], rsi
     mov rdi, r13            ; the side being probed
     call set_contains
+    ERR_M1 .smdj_fail_key
     mov rdi, [rbp - SMDJ_KEY]
     push rax
     push rax                             ; pad
@@ -1678,6 +1773,13 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.smdj_fail_key:
+    ; an element's __eq__ or __hash__ raised: the key held for the turn and
+    ; the coerced operand go back
+    mov rdi, [rbp - SMDJ_KEY]
+    DECREF_V rdi, rax
+    mov rdi, r15
+    call obj_decref
 .smdj_fail:
     xor eax, eax
     xor edx, edx

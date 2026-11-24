@@ -32,6 +32,7 @@ struc SubList
 endstruc
 %include "value.inc"
 
+extern eval_exception_unwind
 extern dict_new
 extern dict_get
 extern dict_set
@@ -388,6 +389,9 @@ END_FUNC abc_is_abstract
 ;; instantiated, and CPython computes it here rather than in abc.py: the names
 ;; in the class body that are marked abstract, plus any the bases left abstract
 ;; and this class did not override.
+;; -> rax = 0
+;; Fails: -1
+;; for a name whose __hash__ or __eq__ raises as the set is built.
 ;; ============================================================================
 CA_CLS   equ 8
 CA_SET   equ 16
@@ -428,6 +432,7 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     mov rdi, [rbp - CA_SET]
     mov rsi, rbx
     call set_add
+    ERR_M1 .ca_fail
     jmp .ca_own_loop
 
 .ca_bases:
@@ -483,6 +488,7 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     mov rdi, [rbp - CA_SET]
     mov rsi, [rbp - CA_KEY]
     call set_add
+    ERR_M1 .ca_fail
     jmp .ca_names_loop
 
 .ca_store:
@@ -496,10 +502,17 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     call abc_state_set
     mov rdi, [rbp - CA_SET]
     call obj_decref
+    xor eax, eax
+.ca_ret:
     pop r12
     pop rbx
     leave
     ret
+.ca_fail:
+    mov rdi, [rbp - CA_SET]     ; the half-built set
+    call obj_decref
+    mov rax, -1
+    jmp .ca_ret
 END_FUNC abc_compute_abstracts
 
 ;; ============================================================================
@@ -535,6 +548,7 @@ DEF_FUNC abc_init_func, AI_FRAME
 
     mov rdi, [rbp - AI_CLS]
     call abc_compute_abstracts
+    ERR_M1 .ai_fail
 
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
@@ -542,6 +556,8 @@ DEF_FUNC abc_init_func, AI_FRAME
     ret
 .bad:
     SET_EXC exc_TypeError_type, "_abc_init() requires a class"
+.ai_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC abc_init_func
@@ -613,6 +629,7 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     push rax
     mov rsi, rax
     call set_contains
+    ERR_M1 .error_ref
     push rax
     mov rdi, [rsp + 8]
     call obj_decref
@@ -655,6 +672,7 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     push rax
     mov rsi, rax
     call set_contains
+    ERR_M1 .error_ref
     push rax
     mov rdi, [rsp + 8]
     call obj_decref
@@ -830,6 +848,7 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     push rax
     mov rsi, rax
     call set_add
+    ERR_M1 .error_ref
     pop rdi
     call obj_decref
 .yes:
@@ -850,6 +869,7 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     push rax
     mov rsi, rax
     call set_add
+    ERR_M1 .error_ref
     pop rdi
     call obj_decref
 .no:
@@ -869,6 +889,11 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     leave
     ret
 
+.error_ref:
+    ; Comparing the weak reference with what a cache already holds ran a
+    ; class's __eq__, and it raised.  The reference is on top of the stack.
+    pop rdi
+    call obj_decref
 .error:
     mov eax, -1
     pop r12
@@ -1155,6 +1180,7 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     push rax
     mov rsi, rax
     call set_contains
+    ERR_M1 .propagate_ref
     push rax
     mov rdi, [rsp + 8]
     call obj_decref
@@ -1195,6 +1221,9 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
+.propagate_ref:
+    pop rdi                     ; the weak reference being looked up
+    call obj_decref
 .propagate:
     call .ic_release_declared
     xor eax, eax
@@ -1268,6 +1297,7 @@ DEF_FUNC abc_register_func, RG_FRAME
     push rax
     mov rsi, rax
     call set_add
+    ERR_M1 .raised_ref
     pop rdi
     call obj_decref
     inc qword [rel abc_invalidation_counter]
@@ -1277,6 +1307,12 @@ DEF_FUNC abc_register_func, RG_FRAME
     mov rdi, rax
     call obj_incref
     mov rax, [rbp - RG_SUB]
+    leave
+    ret
+.raised_ref:
+    pop rdi                     ; the weak reference being added
+    call obj_decref
+    xor eax, eax
     leave
     ret
 .not_a_class:

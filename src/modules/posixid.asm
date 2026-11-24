@@ -361,7 +361,7 @@ DEF_FUNC posixid_sched_getaffinity, SGA_FRAME
     mov rsi, rax
     push rsi
     push rsi
-    call set_add
+    call set_add              ; err: the key is an int built just above
     pop rdi
     pop rdi
     DECREF_V rdi, rdx
