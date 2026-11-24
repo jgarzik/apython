@@ -1227,13 +1227,14 @@ DEF_FUNC type_call
     cmp rax, rcx
     jne .type_three_bad_ns
 
-    ; type_from_parts takes ownership of a reference to the namespace, which
-    ; becomes tp_dict, and keeps the name alive through tp_name.
+    ; type_from_parts consumes a reference to the namespace and borrows the
+    ; name: the class takes its own.  One was taken here too and never given
+    ; back, a str leaked per class whenever the name was built for the call.
     inc qword [rdx + PyObject.ob_refcnt]
     mov rdi, [rbx]
-    inc qword [rdi + PyObject.ob_refcnt]
     extern type_from_parts
     call type_from_parts
+    ERR_NULL .type_three_fail
     mov edx, TAG_PTR
     pop rbx
     leave

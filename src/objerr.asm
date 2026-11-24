@@ -196,15 +196,6 @@ DEF_FUNC set_final_base, RFB_FRAME
     ret
 END_FUNC set_final_base
 
-;; raise_final_base(the same arguments) -> does not return
-;; set_final_base, then the unwind: for a handler, which alone may jump.
-global raise_final_base
-DEF_FUNC raise_final_base
-    call set_final_base
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_final_base
-
 ;; ============================================================================
 ;; set_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
 ;;                         Value)

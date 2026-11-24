@@ -26,6 +26,7 @@ extern obj_dealloc
 extern obj_incref
 extern object_type
 extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 
 section .text
@@ -304,6 +305,7 @@ END_FUNC type_mro_fill
 ;; ============================================================================
 ;; mro_compute(rdi = the new type, rsi = bases tuple or NULL)
 ;;   -> rax = new tuple holding the C3 linearization, one strong reference
+;; Fails: 0
 ;;
 ;; L[C] = C + merge(L[B1], ..., L[Bn], [B1, ..., Bn]), taking as the next entry
 ;; the first sequence head that appears in no sequence's tail.
@@ -540,5 +542,13 @@ DEF_FUNC mro_compute, MC_FRAME
     call ap_free
     mov rdi, [rbp - MC_OUT]
     call ap_free
-    RAISE exc_TypeError_type, "Cannot create a consistent method resolution order (MRO) for bases"
+    SET_EXC exc_TypeError_type, "Cannot create a consistent method resolution order (MRO) for bases"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC mro_compute

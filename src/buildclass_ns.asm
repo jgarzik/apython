@@ -16,6 +16,7 @@
 extern ap_free
 extern ap_malloc
 extern ap_memcpy
+extern ap_strcmp
 extern dunder_call_3
 extern obj_dealloc
 extern obj_decref
@@ -485,3 +486,139 @@ END_FUNC tah_dict_get
 section .rodata
 tsn_name: db "__set_name__", 0
 section .text
+
+;; ============================================================================
+;; type_slots_conflict(rdi = the __slots__ sequence, rsi = the class dict,
+;;                     rdx = the class name, rcx = TFP_FILLED_* bits)
+;;   -> rax = 0
+;; Fails: -1
+;;
+;; "'x' in __slots__ conflicts with class variable", a ValueError, for a slot
+;; whose name the class body also bound.  The member descriptor goes into the
+;; dict under that name, so without the refusal `__slots__ = ('x',); x = 1`
+;; silently lost the 1.  CPython's type_new_copy_slots asks after it has
+;; mangled the name, so the name in the message is the mangled one, and it
+;; never asks about '__dict__' or '__weakref__', which are not copied.
+;;
+;; The dict is asked as the class body left it.  __module__ and __doc__ are
+;; in it by now whether the body wrote them or not, and rcx says which of the
+;; two type_from_parts put there itself; the two cells are plumbing the
+;; compiler leaves, and CPython excuses those by name as well.
+;;
+;; Every item is a str and an identifier: bc_slots_validate runs first.
+;; ============================================================================
+TSC_SLOTS  equ 8
+TSC_DICT   equ 16
+TSC_CLS    equ 24
+TSC_FILLED equ 32
+TSC_I      equ 40
+TSC_NAME   equ 48               ; the mangled name, owned
+TSC_BUF    equ 48 + 192
+TSC_FRAME  equ 48 + 192         ; + 0 pushes = 240, 16-aligned
+TSC_FILLED_MODULE equ 1         ; buildclass.asm's TFP_FILLED_MODULE
+TSC_FILLED_DOC    equ 2         ; ... and TFP_FILLED_DOC
+global type_slots_conflict
+DEF_FUNC type_slots_conflict, TSC_FRAME
+    mov [rbp - TSC_SLOTS], rdi
+    mov [rbp - TSC_DICT], rsi
+    mov [rbp - TSC_CLS], rdx
+    mov [rbp - TSC_FILLED], rcx
+    mov qword [rbp - TSC_I], 0
+.tsc_loop:
+    mov rax, [rbp - TSC_SLOTS]
+    mov rcx, [rbp - TSC_I]
+    cmp rcx, [rax + PyTupleObject.ob_size]      ; a list keeps both where a tuple does
+    jge .tsc_ok
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    mov [rbp - TSC_NAME], rdi                   ; borrowed, until it is mangled
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__dict__"
+    call ap_strcmp
+    test eax, eax
+    jz .tsc_next
+    mov rdi, [rbp - TSC_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__weakref__"
+    call ap_strcmp
+    test eax, eax
+    jz .tsc_next
+
+    mov rdi, [rbp - TSC_NAME]
+    mov rsi, [rbp - TSC_CLS]
+    call type_mangle_name
+    mov [rbp - TSC_NAME], rax                   ; owned from here
+    mov rdi, [rbp - TSC_DICT]
+    mov rsi, rax
+    call dict_get                               ; a Value; 0 is the miss
+    test rax, rax
+    jz .tsc_release
+
+    ; Bound -- unless it is one of the four that are not the body's doing.
+    mov rdi, [rbp - TSC_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__classcell__"
+    call ap_strcmp
+    test eax, eax
+    jz .tsc_release
+    mov rdi, [rbp - TSC_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__classdictcell__"
+    call ap_strcmp
+    test eax, eax
+    jz .tsc_release
+    test qword [rbp - TSC_FILLED], TSC_FILLED_MODULE
+    jz .tsc_not_module
+    mov rdi, [rbp - TSC_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__module__"
+    call ap_strcmp
+    test eax, eax
+    jz .tsc_release
+.tsc_not_module:
+    test qword [rbp - TSC_FILLED], TSC_FILLED_DOC
+    jz .tsc_conflict
+    mov rdi, [rbp - TSC_NAME]
+    lea rdi, [rdi + PyStrObject.data]
+    CSTRING rsi, "__doc__"
+    call ap_strcmp
+    test eax, eax
+    jnz .tsc_conflict
+
+.tsc_release:
+    mov rdi, [rbp - TSC_NAME]
+    call obj_decref
+.tsc_next:
+    inc qword [rbp - TSC_I]
+    jmp .tsc_loop
+
+.tsc_ok:
+    xor eax, eax
+    leave
+    ret
+
+.tsc_conflict:
+    ; rbt_append_cstr stops each field at 80 bytes, which is what the buffer
+    ; is sized for.
+    lea rdi, [rbp - TSC_BUF]
+    CSTRING rsi, "'"
+    extern rbt_append_cstr
+    call rbt_append_cstr
+    mov rdi, rax
+    mov rsi, [rbp - TSC_NAME]
+    lea rsi, [rsi + PyStrObject.data]
+    call rbt_append_cstr
+    mov rdi, rax
+    CSTRING rsi, "' in __slots__ conflicts with class variable"
+    call rbt_append_cstr
+    extern exc_ValueError_type
+    extern set_exception
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - TSC_BUF]
+    call set_exception
+    mov rdi, [rbp - TSC_NAME]
+    call obj_decref
+    mov rax, -1
+    leave
+    ret
+END_FUNC type_slots_conflict

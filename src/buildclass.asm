@@ -99,18 +99,14 @@ DEF_FUNC type_method_new
     mov rbx, rdi                    ; args
     mov r12, [rdi]                  ; mcls
 
+    ; type_from_parts consumes a reference to the namespace, and borrows the
+    ; name and the bases.  The name used to be given a reference here as
+    ; well, which nothing ever took back: one str per class, for every class
+    ; built through type.__new__ under a name made for the occasion.
+    mov rdi, [rbx + 24]             ; namespace
+    call obj_incref
     mov rdi, [rbx + 8]              ; name
     mov rsi, [rbx + 16]             ; bases
-    mov rdx, [rbx + 24]             ; namespace
-    ; type_from_parts adopts a reference to each
-    push rdi
-    call obj_incref
-    pop rdi
-    push rdi
-    mov rdi, rdx
-    call obj_incref
-    pop rdi
-    mov rsi, [rbx + 16]
     mov rdx, [rbx + 24]
     ; The metatype is whatever __new__ was handed, not the default, and it has
     ; to be on the class before its descriptors' __set_name__ run -- which is
@@ -336,8 +332,9 @@ END_FUNC type_method_subclasscheck
 
 ;; ============================================================================
 ;; bc_fill_cell(rdi = the class namespace, rsi = a cstring name, rdx = a Value,
-;;              rcx = the refusal to raise when the name is not a cell)
-;;   -> nothing, or does not return
+;;              rcx = the refusal to word when the name is not a cell)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; Fill the cell the compiler left under that name, then take the name back
 ;; out: both cells a class body can leave are plumbing rather than attributes,
@@ -397,23 +394,39 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
 .bfc_out:
+    xor eax, eax
     leave
     ret
 
 .bfc_not_a_cell:
-    ; Release the interned key first: the raise abandons this frame.
+    ; What was found stays where it is -- the namespace still holds it -- so
+    ; it can be named after the key is given back.
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
     mov rdi, [rbp - BFC_MSG]
     mov rsi, [rbp - BFC_FOUND]
-    extern raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
     leave
-    jmp raise_type_error_with_name      ; does not return
+    ret
 END_FUNC bc_fill_cell
 
 ;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
 ;;   -> rax = the new type object, one strong reference
+;; Fails: 0
+;;
+;; The name and the bases are BORROWED: the class takes references of its own
+;; to both.  The namespace is CONSUMED, whether a class comes back or not --
+;; an exact dict is copied into tp_dict and released, anything else becomes
+;; tp_dict as it stands -- so a caller hands over a reference and keeps none.
+;;
+;; A refusal gives back everything built so far.  Before the type object
+;; exists that is the namespace; after, it is the type, which owns the rest.
+;; A half-built class already has its MRO, and the first entry of that tuple
+;; is the class -- a cycle a release alone cannot free -- so it is handed to
+;; the collector on the way out, exactly as a finished class would have been.
 ;;
 ;; The heaptype construction shared by __build_class__ and the three-argument
 ;; type().  Extracted rather than duplicated: type() used to fall through to
@@ -536,14 +549,13 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
 END_FUNC bc_take_qualname
 
 ;; ============================================================================
-;; bc_check_qualname(rdi = the class body namespace, or 0) -> nothing; may
-;;   raise and then does not return
+;; bc_check_qualname(rdi = the class body namespace, or 0) -> rax = 0
+;; Fails: -1
 ;;
 ;; "type __qualname__ must be a str, not int", which CPython's type_new says
-;; before it builds anything.  Separate from the move above because it has to
-;; run BEFORE the type object exists: a raise from after the half-built class
-;; is registered in build_class_pending goes through a teardown this early
-;; stage is not ready for.
+;; before it builds anything.  Separate from the move above because it runs
+;; BEFORE the type object exists, where a refusal has only the namespace to
+;; give back.
 ;; ============================================================================
 BCQ_KEY   equ 8
 BCQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -583,9 +595,12 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
 .bcq_not_str:
     mov rsi, rax
     lea rdi, [rel bc_qualname_not_str]
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 .bcq_done:
+    xor eax, eax
     leave
     ret
 END_FUNC bc_check_qualname
@@ -624,8 +639,8 @@ END_FUNC bc_slot_is_dict_name
 ;; ============================================================================
 ;; bc_slots_validate(rdi = slots sequence, rsi = nslots, edx = 1 when a base
 ;;                   already supplies an instance dict)
-;;   -> eax = 1 when one of the names is '__dict__'; raises and does not return
-;;      when an item is not a usable slot name
+;;   -> rax = 1 when one of the names is '__dict__', else 0
+;; Fails: -1
 ;;
 ;; CPython's valid_identifier, plus type_new_slots_impl's two special cases.
 ;; Every item must be a str and every str must be an identifier: a non-str was
@@ -690,19 +705,23 @@ DEF_FUNC_LOCAL bc_slots_validate, BSV_FRAME
     ret
 
 .bsv_not_str:
-    ; rdi is still the item, and raise_type_error_with_name names a Value's
+    ; rdi is still the item, and set_type_error_with_name names a Value's
     ; type whether it is a pointer or not.
     mov rsi, rdi
     CSTRING rdi, `__slots__ items must be strings, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bsv_fail
 
 .bsv_not_identifier:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "__slots__ must be identifiers"
+    FAIL exc_TypeError_type, "__slots__ must be identifiers", .bsv_fail
 
 .bsv_double_dict:
-    RAISE exc_TypeError_type, "__dict__ slot disallowed: we already got one"
+    SET_EXC exc_TypeError_type, "__dict__ slot disallowed: we already got one"
+.bsv_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC bc_slots_validate
 
 DEF_FUNC type_from_parts
@@ -715,7 +734,9 @@ DEF_FUNC type_from_parts
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
-TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
+TFP_FILLED equ 64           ; which of __module__ / __doc__ were filled in here
+TFP_FILLED_MODULE equ 1
+TFP_FILLED_DOC    equ 2
 TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
 TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
@@ -726,10 +747,15 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
 ; bc_base_has_dict reads it through the saved rbp.
 TFP_ADDDICT equ 104
 TFP_ADDWEAK equ 112
+; Where rsp sits once the prologue is done: five pushes and the 88 bytes.  The
+; error exits go back to it, because several of them leave from under pushes
+; the body made around a call.
+TFP_RSP   equ 40 + 88
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
-    DUNDER_EXC_SAVE [rbp - TFP_EXC]
+    mov qword [rbp - TFP_SLOT1], 0
+    mov qword [rbp - TFP_FILLED], 0
 
     ; tp_dict is a COPY of the namespace, never the namespace itself.  The
     ; caller's reference is transferred to us either way, so the original is
@@ -843,8 +869,9 @@ TFP_ADDWEAK equ 112
     jmp .tfp_final_scan
 .tfp_final_base:
     mov rdi, [rcx + PyTypeObject.tp_name]
-    extern raise_final_base
-    call raise_final_base
+    extern set_final_base
+    call set_final_base
+    jmp .tfp_fail_ns
 .tfp_final_ok:
 
     ; Two bases whose layouts are unrelated cannot both be laid out in one
@@ -889,7 +916,7 @@ TFP_ADDWEAK equ 112
     inc rbx
     jmp .tfp_layout_scan
 .tfp_layout_conflict:
-    RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
+    FAIL exc_TypeError_type, "multiple bases have instance lay-out conflict", .tfp_fail_ns
 .tfp_layout_ok:
     ; A subtype of int, bytes or tuple cannot carry slots.  int wraps its
     ; value rather than embedding it and the other two keep their data
@@ -947,16 +974,15 @@ TFP_ADDWEAK equ 112
     je .tfp_slots_ok
     lea rdi, [rel bc_slots_unsupported]
     mov rsi, r13
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .tfp_fail_ns
 .tfp_slots_ok:
-    ; __qualname__ is checked HERE, before the type object exists.  Refusing
-    ; it once the half-built class is registered in build_class_pending
-    ; unwinds through a teardown that is not prepared for a raise from this
-    ; early -- and the symptom was an interned name released one time too
-    ; many, surfacing at shutdown in an unrelated code object's co_names.
+    ; __qualname__ is checked HERE, before the type object exists, as
+    ; CPython's type_new checks it: there is only the namespace to give back.
     mov rdi, r15
     call bc_check_qualname
+    ERR_M1 .tfp_fail_ns
     mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
@@ -994,9 +1020,13 @@ TFP_ADDWEAK equ 112
     mov ecx, (HEAPTYPE_ALLOC_SIZE - 16) / 8
     rep stosq
 
-    ; tp_name: point to class_name string's data area
+    ; tp_name: point to class_name string's data area.  The reference that
+    ; keeps those characters alive is taken with it, so that the type owns
+    ; its name from the first moment it can be released.
     lea rax, [r14 + PyStrObject.data]
     mov [r12 + PyTypeObject.tp_name], rax
+    mov rdi, r14
+    call obj_incref
 
     ; Instance layout.  A heaptype embeds its base's layout and puts its own
     ; __dict__ immediately after it, so both numbers come from the base:
@@ -1217,6 +1247,7 @@ TFP_ADDWEAK equ 112
     mov rsi, [rsp]                  ; the "__module__" key
     mov rdx, rax
     call dict_set
+    or qword [rbp - TFP_FILLED], TFP_FILLED_MODULE
 .bc_have_module:
     pop rdi
     call obj_decref
@@ -1245,18 +1276,14 @@ TFP_ADDWEAK equ 112
     mov rsi, [rsp]
     lea rdx, [rel none_singleton]
     call dict_set
+    or qword [rbp - TFP_FILLED], TFP_FILLED_DOC
 .bc_have_doc:
     pop rdi
     call obj_decref
 .bc_have_doc_key:
 
-    ; INCREF class_name (type object refers to it via tp_name)
-    mov rdi, r14
-    call obj_incref
-
     ; === Parse __slots__ from class_dict ===
     ; r12=type, r15=class_dict, [rbp - TFP_BASE]=base_class
-    mov qword [rbp - TFP_SLOT1], 0
     lea rdi, [rel bc_slots_name]
     call str_from_cstr_heap
     push rax                        ; save __slots__ str
@@ -1341,14 +1368,26 @@ TFP_ADDWEAK equ 112
     ; '__dict__' and '__weakref__', could not carry an attribute.
     ; Every item is checked here, before any of it is believed: a str, an
     ; identifier, and '__dict__' at most once and only when no base already
-    ; supplies one.  bc_slots_validate raises and does not return when it is
+    ; supplies one.  bc_slots_validate refuses the whole class when it is
     ; not, so everything below reads names it has vouched for.
     call bc_base_has_dict
     mov edx, eax
     mov rdi, rbx
     mov rsi, r13
     call bc_slots_validate
+    ERR_M1 .tfp_fail_type
     mov [rbp - TFP_WANTDICT], rax
+
+    ; And none of them may already be a name the class body bound: the member
+    ; descriptor would silently replace it.  CPython's type_new_copy_slots
+    ; asks the same thing at the same point, once every name is known good.
+    mov rdi, rbx
+    mov rsi, r15
+    mov rdx, r14
+    mov rcx, [rbp - TFP_FILLED]
+    extern type_slots_conflict
+    call type_slots_conflict
+    ERR_M1 .tfp_fail_type
 
     ; A str subclass keeps its characters inline, so there is no fixed offset
     ; past the header to lay a slot at: one put there writes over the string's
@@ -1597,6 +1636,7 @@ TFP_ADDWEAK equ 112
     mov rsi, rax
     extern mro_compute
     call mro_compute
+    ERR_NULL .tfp_fail_type
     mov [r12 + PyTypeObject.tp_mro], rax
 
     ; Inherit the family bits from every base, not only the layout one: a
@@ -2050,16 +2090,13 @@ TFP_ADDWEAK equ 112
     mov rcx, [gs:ThreadState.class_kwnames_pending]
     mov r8, [gs:ThreadState.class_kwvalues_pending]
     call bc_call_kw
+    ; It ran and raised, or was never reached for want of room for the
+    ; keywords: either way the exception is pending and there is no class.
+    ; The error exit puts rsp back, so the argument need not be popped first.
+    ERR_NULL .tfp_fail_type
     add rsp, 16                ; pop fat args
-    test rax, rax
-    jz .bc_init_subclass_failed
     mov rdi, rax
     call obj_decref
-    jmp .bc_no_init_subclass
-
-.bc_init_subclass_failed:
-    ; It ran and raised; the exception is pending and the class is not built.
-    DUNDER_RAISED [rbp - TFP_EXC], .tfp_set_name_failed
 
 .bc_no_init_subclass:
 
@@ -2074,11 +2111,13 @@ TFP_ADDWEAK equ 112
     mov rdx, r12
     lea rcx, [rel bc_classcell_bad]
     call bc_fill_cell
+    ERR_M1 .tfp_fail_type
     mov rdi, r15
     lea rsi, [rel bc_classdictcell_name]
     mov rdx, r15
     lea rcx, [rel bc_classdictcell_bad]
     call bc_fill_cell
+    ERR_M1 .tfp_fail_type
 
     ; Track the type object in GC
     extern gc_track
@@ -2090,7 +2129,7 @@ TFP_ADDWEAK equ 112
     mov rsi, r15
     call type_apply_set_name
     test eax, eax
-    jz .tfp_set_name_failed
+    jz .tfp_fail_type
 
     ; Return the new type object - clear pending flag first
     mov qword [gs:ThreadState.build_class_pending], 0
@@ -2105,12 +2144,37 @@ TFP_ADDWEAK equ 112
     leave
     ret
 
-.tfp_set_name_failed:
-    ; A __set_name__ raised.  The class is discarded and the exception carried
-    ; out as a NULL return, which is what every builtin does.
+.tfp_fail_type:
+    ; Refused with the type object already built.  It owns everything taken
+    ; since -- the dict the namespace became, the name, the bases, the MRO --
+    ; so releasing it is the whole of the cleanup, bar the one-tuple a bare
+    ; `__slots__ = 'name'` was wrapped in.
+    ;
+    ; Tracked first, if it is not yet.  Its MRO names it, a filled
+    ; __classcell__ names it, each member descriptor names it: cycles, and a
+    ; class the collector has never been told about is one it cannot free.
+    ; An __init_subclass__ that raised used to leave exactly that behind.
+    lea rsp, [rbp - TFP_RSP]
     mov qword [gs:ThreadState.build_class_pending], 0
+    mov rdi, [rbp - TFP_SLOT1]
+    test rdi, rdi
+    jz .tfp_fail_slot1_done
+    call obj_decref
+.tfp_fail_slot1_done:
+    mov rdi, r12
+    call gc_track
     mov rdi, r12
     call obj_decref
+    jmp .tfp_fail
+
+.tfp_fail_ns:
+    ; Refused before anything was built: the namespace is all there is.
+    lea rsp, [rbp - TFP_RSP]
+    test r15, r15
+    jz .tfp_fail
+    mov rdi, r15
+    call obj_decref
+.tfp_fail:
     xor eax, eax
     add rsp, 88                 ; must match the sub in the prologue
     pop r15
@@ -2363,6 +2427,7 @@ END_FUNC bc_add_layout_getset
 ;; already uses is kw_names_pending plus the values sitting after the
 ;; positional ones, so both __prepare__ and the metaclass are reached exactly
 ;; the way an ordinary keyword call is.
+;; Fails: 0
 ;; ============================================================================
 BCK_MAX   equ 20
 
@@ -2428,13 +2493,16 @@ DEF_FUNC bc_call_kw, BCK_FRAME
     mov rdx, r12
     call obj_call_n             ; err: 0 goes to the caller as it stands
     mov qword [gs:ThreadState.kw_names_pending], 0
+.out:
     pop r13
     pop r12
     pop rbx
     leave
     ret
 .too_many:
-    RAISE exc_TypeError_type, "too many class keyword arguments"
+    SET_EXC exc_TypeError_type, "too many class keyword arguments"
+    xor eax, eax
+    jmp .out
 END_FUNC bc_call_kw
 section .rodata
 global bc_prepare_name

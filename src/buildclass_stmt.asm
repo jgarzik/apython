@@ -231,7 +231,7 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     mov edx, 2
     mov rcx, [rbp - BPN_KWN]
     mov r8, [rbp - BPN_KWV]
-    call bc_call_kw
+    call bc_call_kw             ; err: DUNDER_RAISED below tells a raise from a miss
     mov rbx, rax
     mov rdi, [rbp - BPN_FN]
     call obj_decref
@@ -791,7 +791,7 @@ BCL_ORIG  equ 96
     mov edx, 3
     mov rcx, [rbp - BCL_OKWN]
     mov r8, [rbp - BCL_OKWV]
-    call bc_call_kw
+    call bc_call_kw             ; err: its 0 is this function's answer too
     ; Kept as a Value, not unpacked: a metaclass that is not a type may answer
     ; anything, including an immediate.  Unpacking here and re-packing in the
     ; epilogue with a hardcoded TAG_PTR turned a returned 42 into a pointer to
