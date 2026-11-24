@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FLOOR = os.path.join(HERE, 'raise_leak_floor.txt')
@@ -270,17 +271,18 @@ def callback_cases():
 def sweep(apython, filt):
     """-> (leaks {name: blocks}, crashes [name], cases that raised)"""
     child = CHILD.replace('__CALLBACKS__', json.dumps(callback_cases()))
-    path = os.path.join(os.environ.get('TMPDIR', '/tmp'),
-                        'raise_probe_child_%d.py' % os.getpid())
-    with open(path, 'w') as fh:
-        fh.write(child)
     leaks, crashes, raised, start = {}, [], 0, 0
-    try:
+    # A directory of our own (mode 0700, random name): the child is a script
+    # this hands to an interpreter, so its path must not be one that anyone
+    # else could have written first.
+    with tempfile.TemporaryDirectory() as work:
+        path = os.path.join(work, 'child.py')
+        with open(path, 'w') as fh:
+            fh.write(child)
         while True:
             p = subprocess.run([apython, path, str(start), filt],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               stdin=subprocess.DEVNULL, timeout=600,
-                               pass_fds=())
+                               stdin=subprocess.DEVNULL, timeout=600)
             last, done = None, False
             for line in p.stdout.decode('utf-8', 'replace').split('\n'):
                 if line.startswith('@ '):
@@ -300,8 +302,6 @@ def sweep(apython, filt):
                                  " (rc=%d)" % p.returncode)
             crashes.append(last[1])
             start = last[0] + 1
-    finally:
-        os.unlink(path)
     return leaks, crashes, raised
 
 
