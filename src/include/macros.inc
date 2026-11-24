@@ -474,6 +474,28 @@
 %%ok:
 %endmacro
 
+; After dict_get, on a path where a MISS is the common answer -- attribute
+; and global lookup.  dict_get leaves rdx = -2 beside a 0 that is a failure
+; (-1 beside one that is "absent"), so telling them apart is a register
+; compare where ERR_PENDING is a load through gs on every miss.
+%macro ERR_DICT_GET 1           ; rax == 0 and rdx == -2 -> %1
+    test rax, rax
+    jnz %%ok
+    cmp rdx, -2
+    je %1
+%%ok:
+%endmacro
+
+; The same after dict_get_index, whose answer is an index and whose miss is
+; a negative one.
+%macro ERR_DICT_IDX 1           ; rax < 0 and rdx == -2 -> %1
+    test rax, rax
+    jns %%ok
+    cmp rdx, -2
+    je %1
+%%ok:
+%endmacro
+
 %macro ERR_NULL_JUMP 0
     ERR_NULL eval_exception_unwind
 %endmacro

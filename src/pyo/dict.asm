@@ -542,6 +542,44 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
 END_FUNC dict_type_call
 
 
+%ifdef EXC_STRICT
+;; ============================================================================
+;; dict_get_str(rdi=dict, rsi=key) -> rax = value Value (borrowed), or 0
+;; dict_set_str(rdi=dict, rsi=key, rdx=value Value) -> rax = 0
+;;
+;; The lookup and the store for a caller that CANNOT fail, and calling one of
+;; these is the claim that it cannot.  Two things must both hold:
+;;
+;;   - the key is an exact str (a literal, an interned name, a co_names
+;;     entry) or an int immediate, so hashing it runs no Python; and
+;;   - the DICT is the runtime's own at that moment: one the caller has just
+;;     built, a module's or a type's table before anything can reach it, an
+;;     internal registry.
+;;
+;; The second matters as much as the first.  A str probing a dict Python can
+;; reach -- an instance __dict__, module globals, kwargs, a class namespace,
+;; sys.modules -- still runs a FOREIGN key's __eq__ when the hashes collide,
+;; and that can raise.  Such a caller wants dict_get / dict_set and a check.
+;;
+;; In an ordinary build these are the same code as the checked entries, by
+;; address.  Under `make EXC_STRICT=1` they trap when the lookup does report
+;; a failure, so a wrong claim stops the strict suite instead of being lost.
+;; ============================================================================
+DEF_FUNC dict_get_str
+    call dict_get_ret           ; err: trapped below, which is the point
+    test rax, rax
+    jnz .dgs_ok
+    cmp rdx, -2
+    jne .dgs_ok
+    ud2
+.dgs_ok:
+    leave
+    ret
+END_FUNC dict_get_str
+%else
+    global dict_get_str:function
+dict_get_str:
+%endif
 ;; ============================================================================
 ;; dict_get_ret(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Fails: 0?
@@ -549,6 +587,11 @@ END_FUNC dict_type_call
 ;; The value is BORROWED.  dict_get below is the same lookup; the two differ
 ;; in what a key's __eq__ raising does.  This one answers 0 with the
 ;; exception pending, which is where every caller is headed.
+;;
+;; When it answers 0, rdx says which 0: -1 for absent, -2 for a failure.  A
+;; miss is the COMMON answer on an attribute or a global lookup, and
+;; ERR_PENDING would pay a load from the thread state on every one of them;
+;; ERR_DICT_GET (macros.inc) reads the register instead.
 ;; ============================================================================
 DEF_FUNC dict_get_ret, 8        ; + 1 push = 16, 16-aligned
     push rbx
@@ -563,12 +606,15 @@ DEF_FUNC dict_get_ret, 8        ; + 1 push = 16, 16-aligned
     leave
     ret
 .dgr_miss:                      ; absent, or 0 with the exception pending
+    mov rdx, rax                ; -1 or -2: which of the two
     xor eax, eax
     pop rbx
     leave
     ret
 END_FUNC dict_get_ret
 
+    global dict_get_jumping:function    ; the name this is about to keep
+dict_get_jumping:
 ;; ============================================================================
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;;
@@ -872,6 +918,8 @@ DEF_FUNC dict_lookup, DL_FRAME
     ret
 END_FUNC dict_lookup
 
+    global dict_get_index_jumping:function
+dict_get_index_jumping:
 ;; ============================================================================
 ;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
@@ -1134,6 +1182,22 @@ DEF_FUNC_BARE dict_value_trackable
     ret
 END_FUNC dict_value_trackable
 
+%ifdef EXC_STRICT
+;; dict_set_str(rdi=dict, rsi=key, rdx=value Value) -> rax = 0
+;; The strict build's own copy: see dict_get_str.
+DEF_FUNC dict_set_str
+    call dict_set_ret           ; err: trapped below, which is the point
+    test rax, rax
+    jz .dss_ok
+    ud2
+.dss_ok:
+    leave
+    ret
+END_FUNC dict_set_str
+%else
+    global dict_set_str:function
+dict_set_str:
+%endif
 global dict_set_ret
 DEF_FUNC dict_set_ret, DS_FRAME
     push rbx
@@ -1143,6 +1207,8 @@ DEF_FUNC dict_set_ret, DS_FRAME
     jmp dict_set.ds_body
 END_FUNC dict_set_ret
 
+    global dict_set_jumping:function    ; the name this is about to keep
+dict_set_jumping:
 ;; ============================================================================
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value) -> rax = 0
 ;;

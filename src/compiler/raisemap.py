@@ -41,7 +41,8 @@ MACRO_RE = re.compile(r'^\s*(%s)\b' % '|'.join(RAISE_MACROS))
 BRANCH_RE = re.compile(r'^\s*(call|jmp|j[a-z]{1,3})\s+([A-Za-z_][\w.]*)\s*$')
 DEF_RE = re.compile(r'^DEF_FUNC(?:_LOCAL|_BARE)?\s+(\w+)')
 END_RE = re.compile(r'^END_FUNC\s+(\w+)')
-CHECK_RE = re.compile(r'^\s*(ERR_NULL|ERR_M1|ERR_PENDING)(_JUMP)?\b')
+CHECK_RE = re.compile(r'^\s*(ERR_NULL|ERR_M1|ERR_PENDING|ERR_DICT_GET|ERR_DICT_IDX)'
+                      r'(_JUMP)?\b')
 # `;; Fails: 0`, `;; Fails: 0?` or `;; Fails: -1` in a docblock is the
 # function's promise that it RETURNS its own errors, and what it returns for
 # one: 0; 0 with an exception pending (0 alone is an answer); -1 with an
