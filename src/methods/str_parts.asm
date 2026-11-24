@@ -13,6 +13,9 @@
 
 
 ; External functions
+extern dict_get_ret
+extern dict_set_ret
+extern dict_set_str
 extern eval_exception_unwind
 extern int_type
 extern bool_type
@@ -1065,7 +1068,8 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rcx, [rbp - TRN_SUB]
     test rcx, rcx
     jnz .trn_call_sub
-    call dict_get                   ; a miss is a NULL Value, never a raise
+    call dict_get_ret               ; a miss is a NULL Value
+    ERR_PENDING .trn_fail           ; a colliding key's __eq__ raised
     test rax, rax
     jz .trn_keep
     ; dict_get hands back a BORROWED reference where mp_subscript hands back
@@ -1382,7 +1386,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     V_PACK_I64 rdx, rcx             ; dict_set takes Values
     V_PACK_I64 rsi, r8
     mov rdi, rbx
-    call dict_set
+    call dict_set_str               ; our own table, keyed by ordinals
     jmp .smt_loop
 
 .smt_done:
@@ -1409,7 +1413,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     V_PACK_I64 rsi, r8
     mov rdi, rbx
     LOAD_NONE rdx
-    call dict_set
+    call dict_set_str
     jmp .smt_del_loop
 
 .smt_finish:
@@ -1498,7 +1502,8 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rsi, rdi
     mov rdx, [rbp - SMT_TO]
     mov rdi, r12
-    call dict_set
+    call dict_set_ret               ; the key may be an int SUBCLASS, whose
+    ERR_M1 .smt_fail_table          ; __hash__ is Python
 .smt_dict_next:
     inc r13
     jmp .smt_dict_loop

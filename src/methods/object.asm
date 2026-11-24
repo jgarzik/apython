@@ -434,8 +434,8 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     mov rdi, [rbp - ORI_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    extern dict_get
-    call dict_get
+    extern dict_get_ret
+    call dict_get_ret           ; err: a 0 goes to .ori_fail either way, with whatever is pending
     push rax
     mov rdi, [rbp - ORI_KEY]
     call obj_decref
@@ -2051,8 +2051,8 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     mov rdx, [rdi]
     mov rsi, [rax + PyMemberDescrObject.md_name]
     mov rdi, [rbp - OCS_DICT]
-    extern dict_set
-    call dict_set
+    extern dict_set_str
+    call dict_set_str           ; a dict made here, keyed by slot names
 
 .ocs_next_entry:
     inc qword [rbp - OCS_IDX]

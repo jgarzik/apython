@@ -13,6 +13,7 @@
 %include "object.inc"
 %include "methodinit.inc"
 
+extern dict_set_str
 extern add_method_to_dict_checked
 extern add_new_staticmethod
 extern builtin_func_new
@@ -201,7 +202,7 @@ DEF_FUNC init_num_types, 8       ; + 1 push = 16, 16-aligned
     mov rdi, rbx
     mov rsi, rax                ; key
     mov rdx, [rsp + 8]         ; classmethod wrapper
-    call dict_set
+    call dict_set_str
 
     ; DECREF key
     pop rdi

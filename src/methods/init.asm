@@ -13,6 +13,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern dict_set_str
 extern frameobj_method_clear
 extern frame_object_type
 extern memoryview_method_tobytes
@@ -343,7 +344,7 @@ DEF_FUNC_LOCAL dict_add_none, DAN_FRAME
     mov rdi, [rbp - DAN_DICT]
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     add rsp, 8
     pop rdi
     call obj_decref
@@ -375,7 +376,7 @@ DEF_FUNC dict_add_builtin_func, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, rbx
     mov rsi, rax            ; key
     mov rdx, [rsp + 8]     ; func obj
-    call dict_set
+    call dict_set_str
 
     ; DECREF key (dict_set did INCREF)
     pop rdi
@@ -427,7 +428,7 @@ DEF_FUNC dict_add_getset
     mov rdi, rbx
     mov rsi, [rsp + 8]          ; key
     mov rdx, rax                ; the descriptor
-    call dict_set
+    call dict_set_str
 
     pop rdi
     call obj_decref             ; dict_set took its own reference
@@ -477,7 +478,7 @@ DEF_FUNC dict_add_getattr, DGA_FRAME
     mov rdi, rbx
     mov rsi, [rbp - DGA_NAME]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
 
     mov rdi, [rbp - DGA_DESC]
     call obj_decref             ; dict_set took its own reference
@@ -522,7 +523,7 @@ DEF_FUNC add_method_to_dict_checked, 8            ; 3 pushes, so rsp is 16-align
     mov rdi, rbx
     mov rsi, rax            ; key
     mov rdx, [rsp + 8]     ; func obj
-    call dict_set
+    call dict_set_str
 
     ; DECREF key (dict_set did INCREF)
     pop rdi
@@ -581,7 +582,7 @@ DEF_FUNC_LOCAL add_staticmethod, ASM_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - ASM_SM]
-    call dict_set
+    call dict_set_str
 
     mov rdi, [rbp - ASM_KEY]
     call obj_decref
@@ -635,7 +636,7 @@ DEF_FUNC add_new_staticmethod, 8            ; 3 pushes, so rsp is 16-aligned
     push rdx
     mov rdi, rbx                ; the type dict
     mov rsi, r12                ; name
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12
@@ -677,7 +678,7 @@ DEF_FUNC add_class_getitem
     mov rdi, rbx
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12
@@ -1717,7 +1718,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax                ; key
     mov rdx, [rsp + 8]         ; staticmethod wrapper
-    call dict_set
+    call dict_set_str
 
     ; DECREF key
     pop rdi
@@ -1748,7 +1749,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1772,7 +1773,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12
@@ -1827,7 +1828,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12
@@ -1863,7 +1864,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12
@@ -1966,7 +1967,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1986,7 +1987,7 @@ DEF_FUNC methods_init
     mov rdi, rbx
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi

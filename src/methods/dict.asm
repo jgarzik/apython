@@ -9,6 +9,8 @@
 %include "opcodes.inc"
 
 ; External functions
+extern dict_get_ret
+extern dict_set_ret
 extern eval_exception_unwind
 extern ap_memset
 extern obj_decref
@@ -60,7 +62,8 @@ DEF_FUNC dict_method_get
     ; dict_get(self, key)
     mov rdi, rbx
     mov rsi, [rax + 8]      ; key Value -- dict_get unpacks it itself, so
-    call dict_get           ; decoding here would hand it a bare payload
+    call dict_get_ret       ; decoding here would hand it a bare payload
+    ERR_PENDING .dg_fail
     test rax, rax               ; a Value, and 0 is the only miss
     jnz .dg_found
 
@@ -86,6 +89,14 @@ DEF_FUNC dict_method_get
 .dg_found:
     add rsp, 8              ; discard saved args
     INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.dg_fail:                   ; the key could not be hashed, or an __eq__ raised
+    add rsp, 8              ; discard saved args
+    xor eax, eax
     pop r12
     pop rbx
     leave
@@ -158,9 +169,15 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     mov r12, rsi            ; nargs
     mov r13, [r14 + 8]      ; args[1], the key Value
 
+    ; An empty dict has no such key, whatever the key: CPython answers before
+    ; it hashes, so `{}.pop([])` is a KeyError and `{}.pop([], 0)` is 0.
+    cmp qword [rbx + PyDictObject.ob_size], 0
+    je .dpop2_not_found
+
     mov rdi, rbx
     mov rsi, r13
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .dpop2_fail
     test rax, rax           ; a Value, and 0 is the only miss
     jz .dpop2_not_found
 
@@ -304,6 +321,7 @@ DU_OTHER  equ 72        ; the positional argument, borrowed
 DU_KEYV   equ 80        ; key and value, held across dict_set: both are
 DU_VALV   equ 88        ;   borrowed from a table user code can empty
 DU_ORIGN  equ 96        ; the source's dk_nentries when the walk started
+DU_RC     equ 104       ; dict_set's answer, across the releases after it
 DU_FRAME  equ 112           ; + 4 pushes = 144
 
 DEF_FUNC dict_method_update, DU_FRAME
@@ -387,11 +405,14 @@ DEF_FUNC dict_method_update, DU_FRAME
     INCREF_V rdx, rcx
     mov rsi, rdi                    ; key Value
     mov rdi, rbx                    ; self
-    call dict_set
+    call dict_set_ret               ; err: tested once the pair is released
+    mov [rbp - DU_RC], rax
     mov rdi, [rbp - DU_KEYV]
     DECREF_V rdi, rcx
     mov rdi, [rbp - DU_VALV]
     DECREF_V rdi, rcx
+    cmp qword [rbp - DU_RC], 0
+    jne .du_propagate               ; a key's __hash__ or __eq__ raised
 
     ; And say so, rather than carrying on over whatever is left.  CPython's
     ; dict_merge compares the source's dk_nentries against what it was after
@@ -476,9 +497,12 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rsi, [rax + r14 * 8]            ; the key again
     mov rdi, [rbp - DU_SELF]
-    call dict_set
+    call dict_set_ret               ; err: tested once the value is released
+    mov [rbp - DU_RC], rax
     mov rdi, [rbp - DU_PAIRV]
     DECREF_V rdi, rsi
+    cmp qword [rbp - DU_RC], 0
+    jne .du_propagate
     inc r14
     jmp .du_key_loop
 .du_not_mapping:
@@ -606,11 +630,14 @@ DEF_FUNC dict_method_update, DU_FRAME
     INCREF_V rsi, rcx
     INCREF_V rdx, rcx
     mov rdi, [rbp - DU_SELF]
-    call dict_set
+    call dict_set_ret               ; err: tested once the pair is released
+    mov [rbp - DU_RC], rax
     mov rdi, [rbp - DU_KEYV]
     DECREF_V rdi, rcx
     mov rdi, [rbp - DU_VALV]
     DECREF_V rdi, rcx
+    cmp qword [rbp - DU_RC], 0
+    jne .du_propagate
     mov rdi, [rbp - DU_PAIR]
     mov qword [rbp - DU_PAIR], 0
     call obj_decref
@@ -639,7 +666,8 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rcx, [rbp - DU_ARGS]
     mov rdx, [rcx + rax * 8]        ; value Value
     mov rdi, [rbp - DU_SELF]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .du_propagate
     inc r14
     jmp .du_kw_loop
 
@@ -713,7 +741,8 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
 
     mov rdi, rbx
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .sd_fail_args
     test rax, rax           ; a Value, and 0 is the only miss
     jnz .sd_found
 
@@ -731,7 +760,8 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .sd_fail
 
     mov rax, r13
     INCREF_V rax, rdx
@@ -746,6 +776,18 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
 .sd_found:
     add rsp, 8              ; discard saved args ptr
     INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sd_fail_args:
+    add rsp, 8              ; discard saved args ptr
+.sd_fail:                   ; the key could not be hashed, or an __eq__ raised
+    xor eax, eax
     pop r15
     pop r14
     pop r13
@@ -860,13 +902,19 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     mov rsi, rax                   ; key payload
     mov r8, rdx                    ; key tag
     V_PACK rsi, r8
+    mov rbx, rsi                   ; the key is OWNED: the iterator handed it
+                                   ; over, and the dict takes its own
 
     ; dict_set(dict, key Value, value Value)
     mov rdi, [rbp - DFK_DICT]
     mov rdx, [rbp - DFK_VAL]       ; value payload
     mov rcx, [rbp - DFK_VTAG]      ; value tag
     V_PACK rdx, rcx
-    call dict_set
+    call dict_set_ret              ; err: tested once the key is released
+    mov r12, rax
+    DECREF_V rbx, rax
+    test r12, r12
+    jnz .dfk_set_failed            ; unhashable, or a key's __eq__ raised
 
     jmp .dfk_loop
 
@@ -890,6 +938,9 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.dfk_set_failed:
+    mov rdi, [rbp - DFK_ITER]
+    call obj_decref
 .dfk_raised:
     mov rdi, [rbp - DFK_DICT]
     call obj_decref
@@ -1052,7 +1103,8 @@ DEF_FUNC dict_dunder_setitem
     mov rsi, [rdi + 8]
     mov rdx, [rdi + 16]
     mov rdi, rax
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .dds_fail
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
@@ -1061,6 +1113,7 @@ DEF_FUNC dict_dunder_setitem
     ret
 .dds_error:
     SET_EXC exc_TypeError_type, "object does not support item assignment"
+.dds_fail:
     xor eax, eax
     leave
     ret

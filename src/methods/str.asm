@@ -2920,8 +2920,8 @@ DEF_FUNC_LOCAL fm_lookup
     je .fml_dict
     REQUIRE_DICT_TYPE rax, rcx, .fml_generic
 .fml_dict:
-    extern dict_get
-    call dict_get
+    extern dict_get_ret
+    call dict_get_ret           ; err: returned as is; the caller tells a miss from a failure by what is pending
     xor r8d, r8d
     leave
     ret
