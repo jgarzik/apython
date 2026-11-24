@@ -1419,12 +1419,18 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
 
 .rna_bare:
     ; A store, a delete, or an exc_from_cstr that could not allocate.
-    cmp qword [rbp - RNA_NORET], 0
-    jne .rna_return
     lea rdi, [rel exc_AttributeError_type]
     mov rsi, rbx
+    cmp qword [rbp - RNA_NORET], 0
+    jne .rna_bare_set
     call raise_exception
     ud2
+.rna_bare_set:
+    ; The returning forms.  This arm went straight to .rna_return, which
+    ; answered 0 with nothing pending: harmless while only the read form
+    ; returned, since a read reaches here only when an allocation failed.
+    call set_exception
+    jmp .rna_return
 
 ;; A local helper, not a DEF_FUNC: rbx is the exception and rdi/rsi are the
 ;; name and the value.  A NULL value is None, which is what CPython stores
@@ -1484,6 +1490,23 @@ DEF_FUNC set_no_attribute, RNA_FRAME
     xor edx, edx
     jmp raise_no_attribute.rna_fresh
 END_FUNC set_no_attribute
+
+;; set_no_attribute_store(rdi = the object as a Value, rsi = the name)
+;;   -> rax = 0, always, with the AttributeError pending
+;;
+;; The store-or-delete form: the same sentence, and neither `.name` nor
+;; `.obj` filled in, which is CPython's split.  setattr(5, "x", 1) and
+;; delattr(5, "x") are its callers.
+global set_no_attribute_store
+DEF_FUNC set_no_attribute_store, RNA_FRAME
+    push rbx
+    push r12
+    mov [rbp - RNA_NAME], rsi
+    mov [rbp - RNA_OBJ], rdi
+    mov qword [rbp - RNA_ISSET], 1
+    mov qword [rbp - RNA_NORET], 1
+    jmp raise_no_attribute.rna_fresh
+END_FUNC set_no_attribute_store
 
 ;; ============================================================================
 ;; method_one_arg_check(rsi = nargs, self included, rdx = the no-keywords

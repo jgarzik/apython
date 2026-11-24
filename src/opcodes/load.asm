@@ -2596,13 +2596,24 @@ END_FUNC obj_getattr_raw
 ;; exception behind for whatever looked at current_exception next:
 ;; `isinstance(m, C)` for a module with a PEP 562 hook ended the program with
 ;; a traceback for an AttributeError nothing had raised at it.
+;;
+;; The same exception can be pending behind an attribute that was FOUND.  A
+;; module's tp_getattr asks its PEP 562 hook before the type's own attributes
+;; are consulted, so for `__class__` the hook raises, the walk goes on to find
+;; it on the type, and the answer arrives with the hook's AttributeError still
+;; in the global -- which is what isinstance() asks of every object it is
+;; handed.  So it is swallowed on both answers; rax is carried across in the
+;; frame.
 ;; ============================================================================
-DEF_FUNC obj_getattr_opt
+GAO_VAL   equ 8
+GAO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC obj_getattr_opt, GAO_FRAME
     call obj_getattr_raw
-    test rax, rax
-    jnz .gao_out
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .gao_out
+    mov [rbp - GAO_VAL], rax
     call attr_miss_swallow
-    xor eax, eax
+    mov rax, [rbp - GAO_VAL]
 .gao_out:
     leave
     ret
@@ -2611,7 +2622,8 @@ END_FUNC obj_getattr_opt
 ;; ============================================================================
 ;; attr_miss_swallow() -> nothing
 ;;
-;; After a lookup that answered 0: if what is pending is the AttributeError a
+;; After a lookup that answered 0 -- or that found the attribute somewhere
+;; the hook was asked before: if what is pending is the AttributeError a
 ;; __getattr__ hook raised to say "absent" (attr_error_pending), release it.
 ;; Anything else pending is a real failure and is left alone.
 ;; ============================================================================

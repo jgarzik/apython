@@ -1553,7 +1553,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %endif
     mov esi, 3
     extern %7
-    call %7
+    call %7                     ; err: its 0 is this wrapper's own
     leave
     ret
 %endif
@@ -1844,7 +1844,7 @@ DEF_FUNC object_method_getattribute, OGA2_FRAME
     jz .omg_plain
     mov [gs:ThreadState.instance_getattr_skip], rax
 .omg_plain:
-    call builtin_getattr        ; with the wrong count it raises, as it should
+    call builtin_getattr        ; err: its 0 is this function's own, once the skip is cleared
     mov qword [gs:ThreadState.instance_getattr_skip], 0
     leave
     ret
