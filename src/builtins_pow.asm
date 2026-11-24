@@ -181,7 +181,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov ecx, r8d            ; exp tag (TAG_SMALLINT)
     V_PACK rdi, rdx
     V_PACK rsi, rcx
-    call int_power
+    call int_power            ; err: the 0 is this builtin's own answer
     V_UNPACK rax, rdx       ; int_power returns a Value
     ; rax = result payload, edx = result tag
     pop r13
