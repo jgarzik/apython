@@ -61,9 +61,10 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov [rbp - SC_ARGS], rdi
     mov [rbp - SC_NARGS], rsi
 
-    ; Validate nargs >= 6
+    ; Exactly six.  "At least six" let a longer call through.
     cmp rsi, 6
     jb .compile_error_args
+    ja .compile_too_many
 
     ; Extract args (one Value per slot)
     ; args[0] = pattern string
@@ -243,6 +244,22 @@ DEF_FUNC sre_compile_func, SC_FRAME
 
 .compile_error_args:
     RAISE exc_TypeError_type, "_sre.compile() requires 6 arguments"
+
+.compile_too_many:
+    ; Nothing is held yet, so this one returns: the count is in the message,
+    ; as CPython's is.
+    CSTRING rdi, "compile() takes at most 6 arguments ("
+    mov rsi, [rbp - SC_NARGS]
+    CSTRING rdx, " given)"
+    extern set_type_error_counted
+    call set_type_error_counted ; rax = 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_compile_func
 
 ;; ============================================================================

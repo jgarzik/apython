@@ -1474,6 +1474,47 @@ DEF_FUNC set_no_attribute, RNA_FRAME
 END_FUNC set_no_attribute
 
 ;; ============================================================================
+;; method_one_arg_check(rsi = nargs, self included, rdx = the no-keywords
+;;                      sentence, rcx = the arity sentence up to its count)
+;;   -> rax = 1 when the call is self and exactly one positional argument
+;; Fails: 0
+;;
+;; CPython's METH_O, for a method written here as (args, nargs): "property.
+;; getter() takes no keyword arguments", "property.getter() takes exactly one
+;; argument (2 given)".  kw_names_pending is consumed either way.  A method
+;; that only counted its arguments took a keyword's VALUE for the argument
+;; and left the name pending for whatever it called next.
+;; ============================================================================
+MOA_N     equ 8
+MOA_ARITY equ 16
+MOA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global method_one_arg_check
+DEF_FUNC method_one_arg_check, MOA_FRAME
+    mov [rbp - MOA_N], rsi
+    mov [rbp - MOA_ARITY], rcx
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je .moa_no_kw
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, rdx
+    call set_exception          ; rax = 0
+    leave
+    ret
+.moa_no_kw:
+    mov eax, 1
+    cmp qword [rbp - MOA_N], 2
+    je .moa_out
+    mov rdi, [rbp - MOA_ARITY]
+    mov rsi, [rbp - MOA_N]
+    dec rsi                     ; self does not count
+    CSTRING rdx, " given)"
+    call set_type_error_counted ; rax = 0
+.moa_out:
+    leave
+    ret
+END_FUNC method_one_arg_check
+
+;; ============================================================================
 ;; set_unexpected_keyword(rdi = the function, rsi = its frame,
 ;;                          rdx = the keyword's name, a str)
 ;;   -> rax = 0, always, with the exception pending:

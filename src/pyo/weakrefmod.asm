@@ -1313,16 +1313,35 @@ DEF_FUNC wr_getweakrefs_func
     ret
 END_FUNC wr_getweakrefs_func
 
-; _remove_dead_weakref(dict, key): drop dict[key] if it is a reference whose
-; referent has gone.  WeakValueDictionary calls this from its callback.
-DEF_FUNC wr_remove_dead_func
-    cmp rsi, 2
-    jl .none
+;; ============================================================================
+;; wr_remove_dead_func(args, nargs) -> rax = None
+;; Fails: 0
+;;
+;; _remove_dead_weakref(dict, key): drop dict[key] if it is a reference whose
+;; referent has gone.  WeakValueDictionary calls this from its callback.
+;;
+;; Exactly two arguments, and the first a dict.  It asked only that the first
+;; be a pointer, so None went to dict_get as a table, and a longer call was
+;; taken as a shorter one.
+;; ============================================================================
+WRD_FRAME equ 8             ; + 1 push = 16, 16-aligned
+extern set_type_error_counted
+extern set_type_error_with_name
+DEF_FUNC wr_remove_dead_func, WRD_FRAME
     push rbx
+    cmp rsi, 2
+    jne .wrd_arity
     mov rbx, rdi
     mov rdi, [rbx]
     V_TEST_PTR rdi, rax
-    ja .none_pop
+    ja .wrd_not_dict
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .wrd_dict
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz .wrd_not_dict
+.wrd_dict:
     mov rsi, [rbx + 8]
     push rdi
     push rsi
@@ -1341,11 +1360,24 @@ DEF_FUNC wr_remove_dead_func
     jne .none_pop
     call dict_del
 .none_pop:
-    pop rbx
-.none:
     RET_NONE
+    pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.wrd_not_dict:
+    mov rsi, [rbx]
+    CSTRING rdi, `_remove_dead_weakref() argument 1 must be dict, not \x02`
+    call set_type_error_with_name
+    jmp .wrd_fail
+.wrd_arity:
+    CSTRING rdi, "_remove_dead_weakref expected 2 arguments, got "
+    xor edx, edx                ; rsi is still the count
+    call set_type_error_counted
+.wrd_fail:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC wr_remove_dead_func
 

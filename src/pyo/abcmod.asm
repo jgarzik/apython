@@ -228,6 +228,90 @@ DEF_FUNC_BARE abc_deref
 END_FUNC abc_deref
 
 ;; ============================================================================
+;; abc_require_class(rdi = an argument, as a Value) -> rax = it, when a class
+;; Fails: 0
+;;
+;; Every entry point here reads its state out of the argument's tp_dict, and
+;; none of them asked whether the argument HAD one: `_abc._reset_registry(1.5)`
+;; read a field of a float's bits and `_abc._get_dump("s")` one of a str's.
+;; CPython's _get_impl fetches `_abc_impl` off whatever it is handed, so what
+;; it says of a non-class is the AttributeError that fetch raises -- "'float'
+;; object has no attribute '_abc_impl'" -- and so does this.
+;; ============================================================================
+ARC_ARG   equ 8
+ARC_NAME  equ 16
+ARC_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern set_no_attribute
+DEF_FUNC_LOCAL abc_require_class, ARC_FRAME
+    mov [rbp - ARC_ARG], rdi
+    call type_check_is_class
+    test eax, eax
+    jz .arc_refuse
+    mov rax, [rbp - ARC_ARG]
+    leave
+    ret
+.arc_refuse:
+    CSTRING rdi, "_abc_impl"
+    call str_from_cstr_heap
+    mov [rbp - ARC_NAME], rax
+    mov rdi, [rbp - ARC_ARG]
+    mov rsi, rax
+    call set_no_attribute
+    mov rdi, [rbp - ARC_NAME]
+    call obj_decref
+    xor eax, eax
+    leave
+    ret
+END_FUNC abc_require_class
+
+;; ============================================================================
+;; abc_class_arg(rdi = args, rsi = nargs, rdx = the no-keywords sentence,
+;;               rcx = the arity sentence up to its count)
+;;   -> rax = the one argument, a class (borrowed)
+;; Fails: 0
+;;
+;; The whole signature of _get_dump, _reset_registry and _reset_caches, which
+;; is CPython's METH_O: no keywords, exactly one argument, and that argument
+;; an ABC.  A keyword used to arrive as the class.
+;; ============================================================================
+ACA_ARGS  equ 8
+ACA_N     equ 16
+ACA_ARITY equ 24
+ACA_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+extern set_exception
+extern set_type_error_counted
+DEF_FUNC_LOCAL abc_class_arg, ACA_FRAME
+    mov [rbp - ACA_ARGS], rdi
+    mov [rbp - ACA_N], rsi
+    mov [rbp - ACA_ARITY], rcx
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je .aca_no_kw
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, rdx
+    call set_exception
+    jmp .aca_fail
+.aca_no_kw:
+    cmp qword [rbp - ACA_N], 1
+    jne .aca_arity
+    mov rdi, [rbp - ACA_ARGS]
+    mov rdi, [rdi]
+    call abc_require_class
+    ERR_NULL .aca_fail
+    leave
+    ret
+.aca_arity:
+    mov rdi, [rbp - ACA_ARITY]
+    mov rsi, [rbp - ACA_N]
+    CSTRING rdx, " given)"
+    call set_type_error_counted
+.aca_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC abc_class_arg
+
+;; ============================================================================
 ;; get_cache_token() -> int
 ;; ============================================================================
 DEF_FUNC abc_get_cache_token
@@ -793,14 +877,27 @@ END_FUNC abc_subclasscheck
 
 ;; ============================================================================
 ;; _abc_subclasscheck(cls, subclass) -> bool
+;; Fails: 0
+;;
+;; Exactly two arguments, and both classes: the walk below reads tp_dict and
+;; the MRO off each.  It took "at least two", so a longer call was accepted,
+;; and it asked neither argument what it was.
 ;; ============================================================================
-DEF_FUNC abc_subclasscheck_func
-    cmp rsi, 2
-    jl .bad
+SCF_FRAME equ 8             ; + 1 push = 16, 16-aligned
+DEF_FUNC abc_subclasscheck_func, SCF_FRAME
     push rbx
-    mov rbx, [rdi + 8]
-    mov rdi, [rdi]
-    mov rsi, rbx
+    cmp rsi, 2
+    jne .bad
+    mov rbx, rdi                ; args
+    mov rdi, [rbx]
+    call abc_require_class
+    ERR_NULL .propagate
+    mov rdi, [rbx + 8]
+    call type_check_is_class
+    test eax, eax
+    jz .not_a_class
+    mov rdi, [rbx]
+    mov rsi, [rbx + 8]
     call abc_subclasscheck
     cmp eax, -1
     je .propagate
@@ -822,8 +919,13 @@ DEF_FUNC abc_subclasscheck_func
     pop rbx
     leave
     ret
+.not_a_class:
+    FAIL exc_TypeError_type, "issubclass() arg 1 must be a class", .propagate
 .bad:
-    RAISE exc_TypeError_type, "_abc_subclasscheck() takes 2 arguments"
+    CSTRING rdi, "_abc_subclasscheck expected 2 arguments, got "
+    xor edx, edx                ; rsi is still the count
+    call set_type_error_counted
+    jmp .propagate
 END_FUNC abc_subclasscheck_func
 
 ;; ============================================================================
@@ -976,6 +1078,7 @@ END_FUNC type_abstract_error
 
 ;; ============================================================================
 ;; _abc_instancecheck(cls, instance) -> bool
+;; Fails: 0
 ;;
 ;; CPython consults instance.__class__ as well as type(instance), so that an
 ;; object which lies about its class is believed -- which is most of what a
@@ -993,12 +1096,16 @@ IC_DECL  equ 32             ; instance.__class__, when it is a class and differs
 IC_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
-    jl .bad
+    jne .bad
     mov rax, [rdi]
     mov [rbp - IC_CLS], rax
     mov rax, [rdi + 8]
     mov [rbp - IC_INST], rax
-    mov rdi, rax
+    mov qword [rbp - IC_DECL], 0
+    mov rdi, [rbp - IC_CLS]
+    call abc_require_class      ; the cache below is read off its tp_dict
+    ERR_NULL .propagate
+    mov rdi, [rbp - IC_INST]
     call value_type
     mov [rbp - IC_SUB], rax
     mov qword [rbp - IC_DECL], 0
@@ -1096,7 +1203,11 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
 .ic_nothing:
     ret
 .bad:
-    RAISE exc_TypeError_type, "_abc_instancecheck() takes 2 arguments"
+    CSTRING rdi, "_abc_instancecheck expected 2 arguments, got "
+    xor edx, edx                ; rsi is still the count
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC abc_instancecheck_func
 
 ;; ============================================================================
@@ -1107,12 +1218,18 @@ RG_SUB   equ 16
 RG_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_register_func, RG_FRAME
     cmp rsi, 2
-    jl .bad
+    jne .bad
     mov rax, [rdi]
     mov [rbp - RG_CLS], rax
     mov rax, [rdi + 8]
     mov [rbp - RG_SUB], rax
-    mov rdi, rax
+    ; The ABC has to be a class too: it is the second argument of the
+    ; issubclass() below, and CPython's refusal is that call's.
+    mov rdi, [rbp - RG_CLS]
+    call type_check_is_class
+    test eax, eax
+    jz .abc_not_a_class
+    mov rdi, [rbp - RG_SUB]
     call type_check_is_class
     test eax, eax
     jz .not_a_class
@@ -1159,20 +1276,31 @@ DEF_FUNC abc_register_func, RG_FRAME
     RAISE exc_TypeError_type, "Can only register classes"
 .cycle:
     RAISE exc_RuntimeError_type, "Refusing to create an inheritance cycle"
+.abc_not_a_class:
+    SET_EXC exc_TypeError_type, \
+        "issubclass() arg 2 must be a class, a tuple of classes, or a union"
+    leave
+    ret
 .bad:
-    RAISE exc_TypeError_type, "_abc_register() takes 2 arguments"
+    CSTRING rdi, "_abc_register expected 2 arguments, got "
+    xor edx, edx                ; rsi is still the count
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC abc_register_func
 
 ;; ============================================================================
 ;; _get_dump(cls) -> (registry, cache, negative_cache, negative_cache_version)
+;; Fails: 0
 ;; ============================================================================
 GD_CLS   equ 8
 GD_TUP   equ 16
 GD_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_get_dump_func, GD_FRAME
-    cmp rsi, 1
-    jl .bad
-    mov rax, [rdi]
+    CSTRING rdx, "_abc._get_dump() takes no keyword arguments"
+    CSTRING rcx, "_abc._get_dump() takes exactly one argument ("
+    call abc_class_arg
+    ERR_NULL .fail
     mov [rbp - GD_CLS], rax
     mov edi, 4
     call tuple_new
@@ -1200,36 +1328,45 @@ DEF_FUNC abc_get_dump_func, GD_FRAME
     mov rax, [rbp - GD_TUP]
     leave
     ret
-.bad:
-    RAISE exc_TypeError_type, "_get_dump() requires a class"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC abc_get_dump_func
 
 ;; ============================================================================
 ;; _reset_registry(cls) -> None
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC abc_reset_registry_func
-    cmp rsi, 1
-    jl .bad
-    mov rdi, [rdi]
+    CSTRING rdx, "_abc._reset_registry() takes no keyword arguments"
+    CSTRING rcx, "_abc._reset_registry() takes exactly one argument ("
+    call abc_class_arg
+    ERR_NULL .fail
+    mov rdi, rax
     CSTRING rsi, "_abc_registry"
     call abc_fresh_set
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
-.bad:
-    RAISE exc_TypeError_type, "_reset_registry() requires a class"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC abc_reset_registry_func
 
 ;; ============================================================================
 ;; _reset_caches(cls) -> None
+;; Fails: 0
 ;; ============================================================================
 RC_CLS   equ 8
 RC_FRAME equ 16             ; + 0 pushes = 16
 DEF_FUNC abc_reset_caches_func, RC_FRAME
-    cmp rsi, 1
-    jl .bad
-    mov rax, [rdi]
+    CSTRING rdx, "_abc._reset_caches() takes no keyword arguments"
+    CSTRING rcx, "_abc._reset_caches() takes exactly one argument ("
+    call abc_class_arg
+    ERR_NULL .fail
     mov [rbp - RC_CLS], rax
     mov rdi, rax
     CSTRING rsi, "_abc_cache"
@@ -1241,8 +1378,10 @@ DEF_FUNC abc_reset_caches_func, RC_FRAME
     inc qword [rax + PyObject.ob_refcnt]
     leave
     ret
-.bad:
-    RAISE exc_TypeError_type, "_reset_caches() requires a class"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC abc_reset_caches_func
 
 ;; ============================================================================

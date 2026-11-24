@@ -1789,16 +1789,46 @@ END_FUNC sys_get_int_max_str_digits_func
 
 ;; ============================================================================
 ;; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
-;; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
+;; Fails: 0
+;;
+;; set_int_max_str_digits(maxdigits): 0 is unlimited, otherwise at least 640.
+;;
+;; The argument is an INDEX.  It went straight to int_to_i64, which reads
+;; PyIntObject.compact off whatever it is handed, so `set_int_max_str_digits(
+;; 1.5)` dereferenced a double's bits and `([])` read a list's header as a
+;; number.  And it may be given by name, which is how CPython's own tests
+;; call it: the keyword used to be taken for the argument whatever it was
+;; called, and its name left in kw_names_pending for the next call to find.
 ;; ============================================================================
-DEF_FUNC sys_set_int_max_str_digits_func
+SIM_ARGS  equ 8
+SIM_N     equ 16
+SIM_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern set_type_error_counted
+DEF_FUNC sys_set_int_max_str_digits_func, SIM_FRAME
+    mov [rbp - SIM_ARGS], rdi
+    mov [rbp - SIM_N], rsi
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
     cmp rsi, 1
-    jne .set_imsd_error
+    jg .set_imsd_too_many
+    jl .set_imsd_missing
+    test rax, rax
+    jz .set_imsd_have           ; one positional argument
+    ; One argument, by keyword: it has to be `maxdigits`.
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax]
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "maxdigits"
+    call ap_strcmp
+    test eax, eax
+    jnz .set_imsd_missing
 
+.set_imsd_have:
+    mov rdi, [rbp - SIM_ARGS]
     mov rdi, [rdi]            ; args[0]
-
     V_UNPACK rdi, rdx
-    call int_to_i64
+    call obj_as_index
+    ERR_M1 .set_imsd_fail
     ; rax = new limit
     test rax, rax
     jz .set_imsd_ok         ; 0 = unlimited
@@ -1814,10 +1844,23 @@ DEF_FUNC sys_set_int_max_str_digits_func
 
 .set_imsd_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "set_int_max_str_digits: value must be 0 or >= 640"
+    FAIL exc_ValueError_type, \
+        "maxdigits must be 0 or larger than 640", .set_imsd_fail
 
-.set_imsd_error:
-    RAISE exc_TypeError_type, "set_int_max_str_digits() takes exactly 1 argument"
+.set_imsd_missing:
+    FAIL exc_TypeError_type, \
+        "set_int_max_str_digits() missing required argument 'maxdigits' (pos 1)", \
+        .set_imsd_fail
+
+.set_imsd_too_many:
+    CSTRING rdi, "set_int_max_str_digits() takes at most 1 argument ("
+    mov rsi, [rbp - SIM_N]
+    CSTRING rdx, " given)"
+    call set_type_error_counted
+.set_imsd_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sys_set_int_max_str_digits_func
 
 ;; ============================================================================

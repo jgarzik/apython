@@ -831,16 +831,17 @@ END_FUNC _get_prop_deleter_builtin
 ;; ============================================================================
 ;; _prop_setter_impl(args, nargs) — property.setter(func)
 ;; args[0] = property (self from bound method), args[1] = func
-;; Returns new property with same fget/fdel, new fset
+;; -> rax = a new property with the same fget/fdel and the new fset
+;; Fails: 0
 ;; ============================================================================
+extern method_one_arg_check
 DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
-
-    ; args[0] = property, args[1] = new fset
-    cmp rsi, 2
-    jne .psi_error
-
-    mov rbx, rdi                ; args
+    mov rbx, rdi                ; args: args[0] = property, args[1] = new fset
+    CSTRING rdx, "property.setter() takes no keyword arguments"
+    CSTRING rcx, "property.setter() takes exactly one argument ("
+    call method_one_arg_check
+    ERR_NULL .psi_fail
     mov r8, [rbx]               ; old property
     mov r9, [rbx + 8]          ; new fset
 
@@ -872,21 +873,25 @@ DEF_FUNC _prop_setter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.psi_error:
-    RAISE exc_TypeError_type, "setter expected 1 argument"
+.psi_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC _prop_setter_impl
 
 ;; ============================================================================
 ;; _prop_getter_impl(args, nargs) — property.getter(func)
-;; Returns new property with new fget, same fset/fdel
+;; -> rax = a new property with the new fget and the same fset/fdel
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
-
-    cmp rsi, 2
-    jne .pgi_error
-
     mov rbx, rdi
+    CSTRING rdx, "property.getter() takes no keyword arguments"
+    CSTRING rcx, "property.getter() takes exactly one argument ("
+    call method_one_arg_check
+    ERR_NULL .pgi_fail
     mov r8, [rbx]               ; old property
     mov r9, [rbx + 8]          ; new fget
 
@@ -916,21 +921,25 @@ DEF_FUNC _prop_getter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.pgi_error:
-    RAISE exc_TypeError_type, "getter expected 1 argument"
+.pgi_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC _prop_getter_impl
 
 ;; ============================================================================
 ;; _prop_deleter_impl(args, nargs) — property.deleter(func)
-;; Returns new property with same fget/fset, new fdel
+;; -> rax = a new property with the same fget/fset and the new fdel
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC _prop_deleter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
-
-    cmp rsi, 2
-    jne .pdi_error
-
     mov rbx, rdi
+    CSTRING rdx, "property.deleter() takes no keyword arguments"
+    CSTRING rcx, "property.deleter() takes exactly one argument ("
+    call method_one_arg_check
+    ERR_NULL .pdi_fail
     mov r8, [rbx]               ; old property
     mov r9, [rbx + 8]          ; new fdel
 
@@ -953,8 +962,11 @@ DEF_FUNC _prop_deleter_impl, 8            ; 1 pushes, so rsp is 16-aligned
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.pdi_error:
-    RAISE exc_TypeError_type, "deleter expected 1 argument"
+.pdi_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC _prop_deleter_impl
 
 ;; ============================================================================
