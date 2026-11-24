@@ -5,17 +5,7 @@
 # in the commit that earns it; a row at zero is dropped.
 src/buildclass.asm                     14
 src/buildclass_stmt.asm                9
-src/builtins.asm                       12
-src/builtins_attr.asm                  6
-src/builtins_func.asm                  1
-src/builtins_int.asm                   14
-src/builtins_num.asm                   28
-src/builtins_obj.asm                   54
-src/builtins_pow.asm                   7
-src/builtins_str.asm                   6
-src/builtins_type.asm                  8
 src/compiler/compile.asm               11
-src/format.asm                         22
 src/import.asm                         8
 src/itertools.asm                      8
 src/marshal.asm                        5
@@ -30,7 +20,6 @@ src/object.asm                         15
 src/objerr.asm                         16
 src/pyo/abcmod.asm                     4
 src/pyo/asyncgen.asm                   30
-src/pyo/asyncmod.asm                   20
 src/pyo/bytearray.asm                  29
 src/pyo/bytes.asm                      22
 src/pyo/bytes_decode.asm               5
@@ -56,7 +45,6 @@ src/pyo/int.asm                        9
 src/pyo/int_str.asm                    2
 src/pyo/int_truediv.asm                2
 src/pyo/iter.asm                       12
-src/pyo/iter_reduce.asm                15
 src/pyo/list.asm                       27
 src/pyo/memoryview.asm                 34
 src/pyo/method.asm                     6
@@ -71,8 +59,6 @@ src/pyo/str.asm                        5
 src/pyo/str_mod.asm                    8
 src/pyo/structseq.asm                  4
 src/pyo/subclasses.asm                 2
-src/pyo/sysmod.asm                     20
-src/pyo/timemod.asm                    32
 src/pyo/tracebackobj.asm               4
 src/pyo/tuple.asm                      8
 src/pyo/typeattr.asm                   9
