@@ -203,10 +203,12 @@ DEF_FUNC fileobj_write
 .write_error:
     extern raise_exception
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "write() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "write() takes exactly 1 argument"
+    leave
+    ret
 
 .write_type_error:
-    RAISE exc_TypeError_type, "write() argument must be str"
+    SET_EXC exc_TypeError_type, "write() argument must be str"
 .closed:                        ; the ValueError is pending
     xor eax, eax
     leave
@@ -844,7 +846,7 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator_opt
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .fwl_raised
     test rax, rax
     jz .fwl_not_iterable
     V_UNPACK rax, rdx
@@ -901,9 +903,9 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     ret
 
 .fwl_not_iterable:
-    RAISE exc_TypeError_type, "writelines() argument must be iterable"
+    FAIL exc_TypeError_type, "writelines() argument must be iterable", .fwl_raised
 .fwl_args:
-    RAISE exc_TypeError_type, "writelines() takes exactly one argument"
+    FAIL exc_TypeError_type, "writelines() takes exactly one argument", .fwl_raised
 END_FUNC fileobj_writelines
 
 ;; ============================================================================
