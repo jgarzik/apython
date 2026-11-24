@@ -37,7 +37,7 @@ extern str_type
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_IndexError_type
-extern raise_exception
+extern set_exception
 extern obj_decref
 extern obj_incref
 extern bytearray_new
@@ -82,6 +82,7 @@ BSC_FRAME equ 64            ; + 1 push = 72... see the DEF_FUNC below
 ;; bytearray_shared_call(rdi = args, rsi = nargs, rdx = the bytes body,
 ;;                       ecx = 0 raw / 1 wrap a bytes-like / 2 wrap a list)
 ;;   -> the body's Value
+;; Fails: 0
 DEF_FUNC bytearray_shared_call, 72
     push rbx
     mov [rbp - BSC_ARGS], rdi
@@ -200,9 +201,13 @@ DEF_FUNC bytearray_shared_call, 72
     mov rdi, [rbp - BSC_TMP]
     call obj_decref
 .bsc_bad:
-    RAISE exc_TypeError_type, "descriptor requires a bytearray object"
+    SET_EXC exc_TypeError_type, "descriptor requires a bytearray object"
+    xor eax, eax
+    jmp .bsc_out
 .bsc_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    jmp .bsc_out
 END_FUNC bytearray_shared_call
 
 ;; bytearray_from_bytes(rdi = a bytes, borrowed) -> rax = a new bytearray
@@ -388,6 +393,7 @@ BA_SHARED join, bytes_method_join, 1
 
 ;; ============================================================================
 ;; bytearray_dunder_len(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;;
 ;; The slots, reachable by name.  __setitem__ and __delitem__ especially:
 ;; CPython's own code calls them directly, and `del b[i]` compiles to
@@ -404,11 +410,15 @@ DEF_FUNC bytearray_dunder_len
     leave
     ret
 .badl_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    SET_EXC exc_TypeError_type, "expected exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_dunder_len
 
 ;; ============================================================================
 ;; bytearray_dunder_iter(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;; bytearray.__iter__, reached by name rather than through the slot.
 ;; ============================================================================
 DEF_FUNC bytearray_dunder_iter
@@ -421,11 +431,15 @@ DEF_FUNC bytearray_dunder_iter
     leave
     ret
 .badi_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    SET_EXC exc_TypeError_type, "expected exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_dunder_iter
 
 ;; ============================================================================
 ;; bytearray_dunder_getitem(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;; bytearray.__getitem__, reached by name rather than through the slot.
 ;; ============================================================================
 DEF_FUNC bytearray_dunder_getitem
@@ -439,11 +453,15 @@ DEF_FUNC bytearray_dunder_getitem
     leave
     ret
 .badg_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    SET_EXC exc_TypeError_type, "expected exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_dunder_getitem
 
 ;; ============================================================================
 ;; bytearray_dunder_setitem(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;; bytearray.__setitem__, reached by name rather than through the slot.
 ;; ============================================================================
 DEF_FUNC bytearray_dunder_setitem
@@ -459,11 +477,15 @@ DEF_FUNC bytearray_dunder_setitem
     leave
     ret
 .bads_bad:
-    RAISE exc_TypeError_type, "expected exactly two arguments"
+    SET_EXC exc_TypeError_type, "expected exactly two arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_dunder_setitem
 
 ;; ============================================================================
 ;; bytearray_dunder_delitem(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;; bytearray.__delitem__, reached by name rather than through the slot.
 ;; ============================================================================
 DEF_FUNC bytearray_dunder_delitem
@@ -479,11 +501,15 @@ DEF_FUNC bytearray_dunder_delitem
     leave
     ret
 .badd_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    SET_EXC exc_TypeError_type, "expected exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_dunder_delitem
 
 ;; ============================================================================
 ;; bytearray_dunder_contains(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;; bytearray.__contains__, reached by name rather than through the slot.
 ;; ============================================================================
 DEF_FUNC bytearray_dunder_contains
@@ -505,7 +531,10 @@ DEF_FUNC bytearray_dunder_contains
     leave
     ret
 .badc_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    SET_EXC exc_TypeError_type, "expected exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_dunder_contains
 
 ;; ============================================================================
