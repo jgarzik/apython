@@ -20,12 +20,12 @@
 
 extern object_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern str_from_cstr_heap
 extern type_call
 extern dict_get
-extern raise_type_error_with_typename
-extern raise_type_error_with_name
+extern set_type_error_with_typename
+extern set_type_error_with_name
 extern dunder_lookup_owner
 extern rbt_append_cstr
 extern new_dunder_cstr
@@ -629,6 +629,7 @@ END_FUNC builtin_sub_dealloc
 ;; ============================================================================
 ;; object_type_call(args, nargs) -> PyObject*
 ;; object() returns a bare instance of object_type
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE object_type_call
     ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
@@ -666,7 +667,10 @@ DEF_FUNC_BARE object_type_call
     ret
 
 .otc_no_args:
-    RAISE exc_TypeError_type, "object() takes no arguments"
+    SET_EXC exc_TypeError_type, "object() takes no arguments"
+    RET_NULL
+    pop rbp
+    ret
 END_FUNC object_type_call
 
 ;; ============================================================================
@@ -840,6 +844,7 @@ END_FUNC object_new_is_safe
 ;; object_new_fn(args, nargs) -> instance
 ;; Implements object.__new__(cls) — creates a bare instance of cls.
 ;; args[0] = cls (the type to instantiate)
+;; Fails: 0
 ;; ============================================================================
 ONF_TYPE  equ 8
 ONF_BASE  equ 16
@@ -900,13 +905,17 @@ DEF_FUNC object_new_fn, ONF_FRAME
     ret
 
 .onf_no_type:
-    RAISE exc_TypeError_type, "object.__new__(): not enough arguments"
+    SET_EXC exc_TypeError_type, "object.__new__(): not enough arguments"
+    leave
+    ret
 
 .onf_not_a_type:
     ; CPython names what it got: "X is not a type object (int)".
     mov rsi, rdi
     CSTRING rdi, `object.__new__(X): X is not a type object (\x01)`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 
 .onf_unsafe:
     ; "object.__new__(C) is not safe, use B.__new__()" -- C is the type asked
@@ -934,16 +943,21 @@ DEF_FUNC object_new_fn, ONF_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel onf_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    leave
+    ret
 
 .onf_own_new:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
           "object.__new__() takes exactly one argument (the type to instantiate)"
+    leave
+    ret
 .onf_no_args:
     mov rsi, [rbp - ONF_TYPE]
     CSTRING rdi, `\x01() takes no arguments`
-    jmp raise_type_error_with_typename
+    call set_type_error_with_typename
+    leave
+    ret
 END_FUNC object_new_fn
 
 section .rodata
