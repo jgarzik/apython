@@ -50,11 +50,13 @@ extern recursion_limit
 
 ; obj_repr returns NULL both for "this type has no repr" and for "the repr
 ; raised".  A container propagating that NULL must have an exception pending,
-; or the caller sees a bare NULL Value and pushes it.
+; or the caller sees a bare NULL Value and pushes it.  Each use is followed
+; by the function's own error exit, so the exception is recorded, not jumped
+; with: a jump from here dropped the callee-saved registers the exit restores.
 %macro REPR_ENSURE_EXC 0
     cmp qword [gs:ThreadState.current_exception], 0
     jne %%have_exc
-    RAISE exc_TypeError_type, "object has no repr"
+    SET_EXC exc_TypeError_type, "object has no repr"
 %%have_exc:
 %endmacro
 
@@ -84,11 +86,15 @@ repr_check_active:
     mov eax, 1
     ret
 
-; Push ptr onto repr_stack.  Grows it as needed; RecursionError only at the
-; interpreter's own recursion limit.  Preserves rdi, which the caller still
-; needs.
+;; repr_push(rdi = the container) -> rax = 0
+;; Push ptr onto repr_stack.  Grows it as needed; RecursionError only at the
+;; interpreter's own recursion limit.  Preserves rdi, which the caller still
+;; needs.
+;; Fails: -1
+;;   -- the RecursionError is pending and nothing was pushed, so the caller
+;;   must not repr_pop.
 global repr_push
-repr_push:
+DEF_FUNC_BARE repr_push
     mov rax, [gs:ThreadState.repr_depth]
     cmp rax, [rel recursion_limit]
     jge .rp_overflow
@@ -121,12 +127,18 @@ repr_push:
     mov [rcx + rax + RS_PTR], rdi
     mov [rcx + rax + RS_RSP], rsp
     inc qword [gs:ThreadState.repr_depth]
+    xor eax, eax
     ret
 .rp_overflow:
     extern exc_RecursionError_type
-    extern raise_exception
+    extern set_exception
 extern exc_TypeError_type
-    RAISE exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
+    sub rsp, 8                  ; a bare function: realign for the call
+    SET_EXC exc_RecursionError_type, "maximum recursion depth exceeded while getting the repr of an object"
+    add rsp, 8
+    mov rax, -1
+    ret
+END_FUNC repr_push
 
 ; Pop from repr_stack, with a floor at zero.
 ;
@@ -232,6 +244,7 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     ; Push onto repr stack
     mov rdi, rbx
     call repr_push
+    ERR_M1 .lr_fail               ; too deep: nothing was pushed
 
     ; Get count
     mov r13, [rbx + PyListObject.ob_size]
@@ -329,6 +342,7 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
+.lr_fail:
     RET_NULL
     pop r13
     pop r12
@@ -367,6 +381,7 @@ DEF_FUNC tuple_repr, RB_FRAME3
     jnz .tr_recursive
     mov rdi, rbx
     call repr_push
+    ERR_M1 .tr_fail               ; too deep: nothing was pushed
 
     mov r13, [rbx + PyTupleObject.ob_size]
 
@@ -452,6 +467,7 @@ DEF_FUNC tuple_repr, RB_FRAME3
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
+.tr_fail:
     RET_NULL
     pop r13
     pop r12
@@ -490,6 +506,7 @@ DEF_FUNC dict_repr, RB_FRAME
     jnz .dr_recursive
     mov rdi, rbx
     call repr_push
+    ERR_M1 .dr_fail               ; too deep: nothing was pushed
 
     ; Allocate buffer
     mov edi, 256
@@ -627,6 +644,7 @@ DEF_FUNC dict_repr, RB_FRAME
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
+.dr_fail:
     RET_NULL
     pop r14
     pop r13
@@ -710,6 +728,7 @@ DEF_FUNC set_repr, RB_FRAME
     jnz .sr_recursive
     mov rdi, rbx
     call repr_push
+    ERR_M1 .sr_fail               ; too deep: nothing was pushed
 
     mov edi, 256
     call ap_malloc
@@ -832,6 +851,7 @@ DEF_FUNC set_repr, RB_FRAME
     call ap_free
     call repr_pop
     REPR_ENSURE_EXC
+.sr_fail:
     RET_NULL
     pop r14
     pop r13

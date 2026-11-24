@@ -1170,6 +1170,7 @@ DEF_FUNC namespace_repr, NR_FRAME
     jnz .nr_recursive
     mov rdi, [rbp - NR_SELF]
     call repr_push
+    ERR_M1 .nr_too_deep         ; nothing was pushed
 
     lea rbx, [rbp - NR_BUF]
     xor r13d, r13d
@@ -1197,6 +1198,14 @@ DEF_FUNC namespace_repr, NR_FRAME
     mov byte [rbx + r13], '('
     inc r13
     jmp .nr_setup
+
+.nr_too_deep:
+    xor eax, eax                ; the RecursionError is pending
+    xor edx, edx
+    pop r13
+    pop rbx
+    leave
+    ret
 
 .nr_recursive:
     lea rdi, [rel nr_recursive_str]

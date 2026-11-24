@@ -218,6 +218,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     jnz .dvr_recursive
     mov rdi, [rbp - DVR_VIEW]
     call repr_push
+    ERR_M1 .dvr_failed          ; too deep: nothing was pushed
 
     xor edi, edi
     extern list_new
