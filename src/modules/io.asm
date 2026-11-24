@@ -1107,8 +1107,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     xor esi, esi                ; the whole sentence comes from the kind
     mov edx, 3                  ; POSIX_PATH_KIND_IO: _io's own sentence
     call posix_path_arg
-    test rax, rax
-    jz .fi_path_refused         ; 0 with the exception already pending
+    ERR_NULL .fi_path_refused   ; 0 with the exception already pending
     mov [rbp - FI_PATHOBJ], rdx
     mov rdi, rax
     mov rsi, [rbp - FI_OFLAGS]

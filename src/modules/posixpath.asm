@@ -13,7 +13,7 @@
 ; refusal it wants is worded differently, which is what POSIX_PATH_KIND_IO is.
 ;
 ; The message builders it calls -- posix_typename_of, posix_copy_bounded,
-; posix_raise_typename -- and the buffer they write into stay in posix.asm,
+; posix_set_typename -- and the buffer they write into stay in posix.asm,
 ; where a dozen other refusals share them.
 
 %include "macros.inc"
@@ -30,7 +30,6 @@ extern str_type
 extern bytes_type
 extern posix_copy_bounded
 extern posix_typename_of
-extern posix_raise_typename
 extern pm_msgbuf
 extern pm_msg_fspath
 extern pm_msg_path
@@ -108,6 +107,10 @@ END_FUNC posix_embedded_nul
 ;; rcx is a real return value, not leftover scratch: a caller that builds a
 ;; name or a path out of what it finds has to build it of the argument's own
 ;; kind.  Callers that only pass the string to a syscall ignore it.
+;;
+;; Every refusal -- a bad type, an embedded NUL, a __fspath__ that raised or
+;; answered something that is not a path -- is 0 with the exception pending.
+;; Fails: 0
 ;;
 ;; CPython names the function and the argument in its refusal -- "stat: path
 ;; should be string, bytes, os.PathLike or integer, not float" -- and lists

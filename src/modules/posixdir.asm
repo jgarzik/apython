@@ -745,8 +745,7 @@ DEF_FUNC posix_scandir, PSD_FRAME
     CSTRING rsi, "scandir: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .psd_fail
+    ERR_NULL .psd_fail
     mov rbx, rax
     mov [rbp - PSD_OWNED], rdx
     mov [rbp - PSD_ISBYTES], rcx    ; a bytes path gets bytes names and paths

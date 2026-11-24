@@ -39,11 +39,11 @@ extern ap_strlen
 extern obj_decref
 extern obj_dealloc
 extern obj_incref
-extern raise_exception
 extern set_exception
-extern raise_oserror
-extern raise_oserror_owned
-extern raise_type_error_with_name
+extern set_oserror
+extern set_oserror_owned
+extern set_oserror_owned2
+extern set_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OSError_type
@@ -153,19 +153,21 @@ extern environ
 section .text
 
 ;; ============================================================================
-;; POSIX_CHECK reg, filename_value
+;; POSIX_CHECK_RET reg, filename_value, exit
 ;;
 ;; The kernel returns -errno in [-4095, -1] and the result otherwise.  As an
 ;; unsigned compare that is "at or above -4095", which is the standard test
 ;; and needs no sign handling.
 ;; ============================================================================
-%macro POSIX_CHECK 2            ; %1 = the result register, %2 = filename Value
+%macro POSIX_CHECK_RET 3        ; %1 = the result register, %2 = filename Value,
+                                ; %3 = the caller's error exit
     cmp %1, -4095
     jb %%ok
     mov rdi, %1
     neg rdi
     mov rsi, %2
-    call raise_oserror          ; does not return
+    call set_oserror
+    jmp %3
 %%ok:
 %endmacro
 
@@ -439,13 +441,12 @@ DEF_FUNC posix_stat, PST_FRAME
     CSTRING rsi, "stat: path"
     mov edx, POSIX_PATH_KIND_FD
     call posix_path_arg
-    test rax, rax
-    jz .pst_fail
+    ERR_NULL .pst_fail
     mov [rbp - PST_OWNED], rdx
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_stat
-    POSIX_PATH_CHECK rax, [rbp - PST_PATH], [rbp - PST_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - PST_PATH], [rbp - PST_OWNED], .pst_fail
     lea rdi, [rbp - PST_BUF]
     call posix_stat_result
     leave
@@ -453,10 +454,11 @@ DEF_FUNC posix_stat, PST_FRAME
 .pst_fd:
     mov rdi, [rbp - PST_PATH]
     call posix_int_arg
+    ERR_M1 .pst_fail
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_fstat
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pst_fail
     lea rdi, [rbp - PST_BUF]
     call posix_stat_result
     leave
@@ -466,7 +468,7 @@ DEF_FUNC posix_stat, PST_FRAME
     leave
     ret
 .pst_argerr:
-    RAISE exc_TypeError_type, "stat() takes at least 1 argument"
+    FAIL exc_TypeError_type, "stat() takes at least 1 argument", .pst_fail
 END_FUNC posix_stat
 
 DEF_FUNC posix_lstat, PST_FRAME
@@ -477,13 +479,12 @@ DEF_FUNC posix_lstat, PST_FRAME
     CSTRING rsi, "lstat: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .plst_fail
+    ERR_NULL .plst_fail
     mov [rbp - PST_OWNED], rdx
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_lstat
-    POSIX_PATH_CHECK rax, [rbp - PST_PATH], [rbp - PST_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - PST_PATH], [rbp - PST_OWNED], .plst_fail
     lea rdi, [rbp - PST_BUF]
     call posix_stat_result
     leave
@@ -493,7 +494,7 @@ DEF_FUNC posix_lstat, PST_FRAME
     leave
     ret
 .plst_argerr:
-    RAISE exc_TypeError_type, "lstat() takes at least 1 argument"
+    FAIL exc_TypeError_type, "lstat() takes at least 1 argument", .plst_fail
 END_FUNC posix_lstat
 
 DEF_FUNC posix_fstat, PST_FRAME
@@ -501,16 +502,21 @@ DEF_FUNC posix_fstat, PST_FRAME
     jz .pfst_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pfst_fail
     lea rsi, [rbp - PST_BUF]
     mov rdi, rax
     call sys_fstat
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pfst_fail
     lea rdi, [rbp - PST_BUF]
     call posix_stat_result
     leave
     ret
 .pfst_argerr:
-    RAISE exc_TypeError_type, "fstat() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "fstat() takes exactly 1 argument", .pfst_fail
+.pfst_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_fstat
 
 ;; ============================================================================
@@ -555,8 +561,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     CSTRING rsi, "listdir: path"
     mov edx, POSIX_PATH_KIND_FD_NONE
     call posix_path_arg
-    test rax, rax
-    jz .pld_fail
+    ERR_NULL .pld_fail
     mov rbx, rax
     mov [rbp - PLD_OWNED], rdx
     mov [rbp - PLD_ISBYTES], rcx    ; a bytes path gets bytes names
@@ -571,7 +576,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     mov esi, O_RDONLY | O_DIRECTORY | O_CLOEXEC
     xor edx, edx
     call sys_open
-    POSIX_PATH_CHECK rax, [rbp - PLD_PATH], [rbp - PLD_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - PLD_PATH], [rbp - PLD_OWNED], .pld_fail
     mov [rbp - PLD_FD], rax
 
     mov edi, PLD_BUFSZ
@@ -591,30 +596,8 @@ DEF_FUNC posix_listdir, PLD_FRAME
     mov rsi, [rbp - PLD_BUF]
     mov edx, PLD_BUFSZ
     call sys_getdents64
-    ; Not POSIX_CHECK: by here the descriptor is open, the 32 KiB buffer is
-    ; allocated and the list is half built, and a raise abandons the C stack
-    ; without running any of the cleanup below.  Close and free FIRST, then
-    ; raise with the errno kept aside.
-    cmp rax, -4095
-    jb .pld_read_ok
-    neg rax
-    mov [rbp - PLD_ERR], rax
-    mov rdi, [rbp - PLD_FD]
-    call sys_close
-    mov qword [rbp - PLD_FD], -1
-    mov rdi, [rbp - PLD_BUF]
-    call ap_free
-    mov qword [rbp - PLD_BUF], 0
-    mov rdi, [rbp - PLD_LIST]
-    test rdi, rdi
-    jz .pld_read_raise
-    mov qword [rbp - PLD_LIST], 0
-    call obj_decref
-.pld_read_raise:
-    mov rdi, [rbp - PLD_ERR]
-    mov rsi, [rbp - PLD_PATH]
-    call raise_oserror              ; does not return
-.pld_read_ok:
+    ; The descriptor, the buffer and the half-built list are .pld_fail's.
+    POSIX_CHECK_RET rax, [rbp - PLD_PATH], .pld_fail
     test rax, rax
     jz .pld_done                    ; 0 = the directory is exhausted
     mov [rbp - PLD_N], rax
@@ -730,12 +713,12 @@ DEF_FUNC posix_getcwd_impl, 40
     jb .pcw_try
     mov edi, 36                 ; ENAMETOOLONG
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .pcw_fail
 
 .pcw_have:
-    ; The buffer is ours and raise_oserror does not come back, so a failure
-    ; that is not ERANGE -- the working directory unlinked, say -- leaked it
-    ; on every call.  Release it before letting POSIX_CHECK raise.
+    ; A failure that is not ERANGE -- the working directory unlinked, say --
+    ; still owns the buffer.
     cmp rax, -4095
     jb .pcw_ok
     push rax
@@ -744,7 +727,7 @@ DEF_FUNC posix_getcwd_impl, 40
     call ap_free
     add rsp, 8
     pop rax
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pcw_fail
 .pcw_ok:
     ; getcwd returns the length INCLUDING the NUL.
     dec rax
@@ -769,7 +752,12 @@ DEF_FUNC posix_getcwd_impl, 40
     ret
 
 .pcw_oom:
-    RAISE exc_OSError_type, "cannot allocate a path buffer"
+    FAIL exc_OSError_type, "cannot allocate a path buffer", .pcw_fail
+.pcw_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC posix_getcwd_impl
 
 DEF_FUNC_BARE posix_getcwd
@@ -841,19 +829,13 @@ DEF_FUNC posix_set_missing, PRM_FRAME
     ret
 END_FUNC posix_set_missing
 
-;; The jumping form, for the callers not converted yet.
-global posix_raise_missing
-DEF_FUNC_BARE posix_raise_missing
-    call posix_set_missing      ; err: it always fails; the jump is the point
-    jmp eval_exception_unwind
-END_FUNC posix_raise_missing
-
 ;; PM_MISSING func, arg, pos -- the three-argument form, spelled once.
-%macro PM_MISSING 3
+%macro PM_MISSING 4             ; %4 = the caller's error exit
     CSTRING rdi, %1
     CSTRING rsi, %2
     mov edx, %3
-    call posix_raise_missing
+    call posix_set_missing      ; err: it always fails; %4 is where that goes
+    jmp %4
 %endmacro
 
 %macro POSIX_ONE_PATH 4         ; %1 = name, %2 = the syscall,
@@ -867,12 +849,11 @@ DEF_FUNC %1, P1_FRAME
     CSTRING rsi, %4
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz %%fail
+    ERR_NULL %%fail
     mov [rbp - P1_OWNED], rdx
     mov rdi, rax
     call %2
-    POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - P1_PATH], [rbp - P1_OWNED], %%fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
@@ -883,7 +864,7 @@ DEF_FUNC %1, P1_FRAME
     leave
     ret
 %%argerr:
-    PM_MISSING %3, "path", 1
+    PM_MISSING %3, "path", 1, %%fail
 END_FUNC %1
 %endmacro
 
@@ -907,6 +888,7 @@ DEF_FUNC posix_mkdir, P1_FRAME
     jl .pmk_have_mode
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pmk_fail
     mov rsi, rax
 .pmk_have_mode:
     mov [rbp - P1_MODE], rsi
@@ -915,15 +897,14 @@ DEF_FUNC posix_mkdir, P1_FRAME
     CSTRING rsi, "mkdir: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .pmk_fail
+    ERR_NULL .pmk_fail
     mov [rbp - P1_PTR], rax
     mov [rbp - P1_OWNED], rdx
     mov rsi, [rbp - P1_MODE]
 .pmk_go:
     mov rdi, [rbp - P1_PTR]
     call sys_mkdir
-    POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - P1_PATH], [rbp - P1_OWNED], .pmk_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop r12
@@ -938,7 +919,9 @@ DEF_FUNC posix_mkdir, P1_FRAME
     leave
     ret
 .pmk_argerr:
-    RAISE exc_TypeError_type, "mkdir() takes at least 1 argument"
+    SET_EXC exc_TypeError_type, "mkdir() takes at least 1 argument"
+    leave
+    ret
 END_FUNC posix_mkdir
 
 ;; posix.chmod(path, mode)
@@ -950,20 +933,20 @@ DEF_FUNC posix_chmod, P1_FRAME
     mov rbx, rdi
     mov rdi, [rbx + 8]
     call posix_int_arg          ; the mode first: see mkdir
+    ERR_M1 .pch_fail
     mov [rbp - P1_MODE], rax
     mov rdi, [rbx]
     mov [rbp - P1_PATH], rdi
     CSTRING rsi, "chmod: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .pch_fail
+    ERR_NULL .pch_fail
     mov r12, rax
     mov [rbp - P1_OWNED], rdx
     mov rsi, [rbp - P1_MODE]
     mov rdi, r12
     call sys_chmod
-    POSIX_PATH_CHECK rax, [rbp - P1_PATH], [rbp - P1_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - P1_PATH], [rbp - P1_OWNED], .pch_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop r12
@@ -978,7 +961,9 @@ DEF_FUNC posix_chmod, P1_FRAME
     leave
     ret
 .pch_argerr:
-    RAISE exc_TypeError_type, "chmod() takes at least 2 arguments"
+    SET_EXC exc_TypeError_type, "chmod() takes at least 2 arguments"
+    leave
+    ret
 END_FUNC posix_chmod
 
 ;; posix.rename(src, dst) / posix.replace(src, dst)
@@ -1006,8 +991,7 @@ DEF_FUNC posix_rename, PRN_FRAME
     CSTRING rsi, "rename: src"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .prn_fail
+    ERR_NULL .prn_fail
     mov [rbp - PRN_SPTR], rax
     mov [rbp - PRN_SOWN], rdx
     mov rdi, [rbx + 8]
@@ -1015,8 +999,7 @@ DEF_FUNC posix_rename, PRN_FRAME
     CSTRING rsi, "rename: dst"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .prn_fail
+    ERR_NULL .prn_fail
     mov [rbp - PRN_DOWN], rdx
     mov rsi, rax
     mov rdi, [rbp - PRN_SPTR]
@@ -1032,8 +1015,8 @@ DEF_FUNC posix_rename, PRN_FRAME
     mov rdx, [rbp - PRN_SOWN]
     mov rcx, [rbp - PRN_DST]
     mov r8, [rbp - PRN_DOWN]
-    extern raise_oserror_owned2
-    call raise_oserror_owned2   ; does not return
+    call set_oserror_owned2     ; releases both resolved paths
+    jmp .prn_fail_out
 .prn_ok:
     POSIX_PATH_DONE [rbp - PRN_DOWN]
     POSIX_PATH_DONE [rbp - PRN_SOWN]
@@ -1046,13 +1029,14 @@ DEF_FUNC posix_rename, PRN_FRAME
     ; The second path may have failed after the first was resolved.
     POSIX_PATH_DONE [rbp - PRN_DOWN]
     POSIX_PATH_DONE [rbp - PRN_SOWN]
+.prn_fail_out:
     xor eax, eax
     xor edx, edx
     pop rbx
     leave
     ret
 .prn_argerr:
-    RAISE exc_TypeError_type, "rename() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "rename() takes exactly 2 arguments", .prn_fail_out
 END_FUNC posix_rename
 
 ;; posix.symlink(src, dst) -- create dst as a symbolic link to src
@@ -1084,8 +1068,7 @@ DEF_FUNC posix_symlink, PSL_FRAME
     CSTRING rsi, "symlink: src"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .psl_fail
+    ERR_NULL .psl_fail
     mov [rbp - PSL_SPTR], rax
     mov [rbp - PSL_SOWN], rdx
     mov rdi, [rbx + 8]
@@ -1093,8 +1076,7 @@ DEF_FUNC posix_symlink, PSL_FRAME
     CSTRING rsi, "symlink: dst"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .psl_fail
+    ERR_NULL .psl_fail
     mov [rbp - PSL_DOWN], rdx
     mov rsi, rax
     mov rdi, [rbp - PSL_SPTR]
@@ -1110,7 +1092,8 @@ DEF_FUNC posix_symlink, PSL_FRAME
     mov rdx, [rbp - PSL_SOWN]
     mov rcx, [rbp - PSL_DST]
     mov r8, [rbp - PSL_DOWN]
-    call raise_oserror_owned2   ; does not return
+    call set_oserror_owned2     ; releases both resolved paths
+    jmp .psl_fail_out
 .psl_ok:
     POSIX_PATH_DONE [rbp - PSL_DOWN]
     POSIX_PATH_DONE [rbp - PSL_SOWN]
@@ -1122,13 +1105,14 @@ DEF_FUNC posix_symlink, PSL_FRAME
 .psl_fail:
     POSIX_PATH_DONE [rbp - PSL_DOWN]
     POSIX_PATH_DONE [rbp - PSL_SOWN]
+.psl_fail_out:
     xor eax, eax
     xor edx, edx
     pop rbx
     leave
     ret
 .psl_argerr:
-    RAISE exc_TypeError_type, "symlink() takes at least 2 arguments"
+    FAIL exc_TypeError_type, "symlink() takes at least 2 arguments", .psl_fail_out
 END_FUNC posix_symlink
 
 ;; posix.readlink(path) -> str
@@ -1149,8 +1133,7 @@ DEF_FUNC posix_readlink, PRL_FRAME
     CSTRING rsi, "readlink: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .prl_fail
+    ERR_NULL .prl_fail
     mov [rbp - PRL_PTR], rax
     mov [rbp - PRL_OWNED], rdx
     mov [rbp - PRL_ISBYTES], rcx
@@ -1183,7 +1166,8 @@ DEF_FUNC posix_readlink, PRL_FRAME
     POSIX_PATH_DONE [rbp - PRL_OWNED]
     mov edi, 36                     ; ENAMETOOLONG
     mov rsi, [rbp - PRL_PATH]
-    call raise_oserror
+    call set_oserror
+    jmp .prl_fail
 .prl_err:
     mov rdi, [rbp - PRL_BUF]
     push rax
@@ -1191,7 +1175,7 @@ DEF_FUNC posix_readlink, PRL_FRAME
     call ap_free
     pop rax
     pop rax
-    POSIX_PATH_CHECK rax, [rbp - PRL_PATH], [rbp - PRL_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - PRL_PATH], [rbp - PRL_OWNED], .prl_fail
 .prl_have:
     POSIX_PATH_DONE [rbp - PRL_OWNED]
     ; readlink(b'x') answers a bytes in CPython, as scandir and listdir do.
@@ -1216,7 +1200,9 @@ DEF_FUNC posix_readlink, PRL_FRAME
     leave
     ret
 .prl_argerr:
-    RAISE exc_TypeError_type, "readlink() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "readlink() takes exactly 1 argument"
+    leave                       ; PRL_OWNED is not set yet; rax = 0
+    ret
 END_FUNC posix_readlink
 
 ;; ============================================================================
@@ -1241,12 +1227,14 @@ DEF_FUNC posix_open, POP_FRAME
     ; them would strand the string __fspath__ built.
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pop_fail
     mov [rbp - POP_FLAGS], rax
     mov qword [rbp - POP_MODE], 0o777
     cmp r12, 3
     jl .pop_have_mode
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pop_fail
     mov [rbp - POP_MODE], rax
 .pop_have_mode:
     mov rdi, [rbx]
@@ -1254,8 +1242,7 @@ DEF_FUNC posix_open, POP_FRAME
     CSTRING rsi, "open: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .pop_fail
+    ERR_NULL .pop_fail
     mov [rbp - POP_PTR], rax
     mov [rbp - POP_OWNED], rdx
     mov rsi, [rbp - POP_FLAGS]
@@ -1263,7 +1250,7 @@ DEF_FUNC posix_open, POP_FRAME
 .pop_go:
     mov rdi, [rbp - POP_PTR]
     call sys_open
-    POSIX_PATH_CHECK rax, [rbp - POP_PATH], [rbp - POP_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - POP_PATH], [rbp - POP_OWNED], .pop_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -1280,11 +1267,14 @@ DEF_FUNC posix_open, POP_FRAME
     leave
     ret
 .pop_argerr:
-    RAISE exc_TypeError_type, "open() takes at least 2 arguments"
+    SET_EXC exc_TypeError_type, "open() takes at least 2 arguments"
+    leave
+    ret
 END_FUNC posix_open
 
 ;; ============================================================================
-;; posix_int_arg(rdi = a Value) -> rax = the integer it holds, or raises
+;; posix_int_arg(rdi = a Value) -> rax = the integer it holds
+;; Fails: -1
 ;;
 ;; val_to_i64 trusts its caller and falls into int_to_i64, which reads
 ;; PyIntObject.compact unconditionally.  Every descriptor, mode and flag here
@@ -1312,26 +1302,27 @@ DEF_FUNC posix_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     pop rdi
     test eax, eax
     jz .pia_range
-    call obj_as_index
-    ERR_M1_JUMP
-    pop rdi
-    leave
+    call obj_as_index           ; err: its -1 and its exception are ours
+    leave                       ; which also drops the parked argument
     ret
 .pia_range:
-    pop rdi
-    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
+    FAIL exc_OverflowError_type, "Python int too large to convert to C int", .pia_fail
 .pia_bad:
     pop rdi
     lea rsi, [rel pm_int_required]
     mov rdx, rdi
     lea rdi, [rel exc_TypeError_type]
-    call posix_raise_typename
-    ud2
+    call posix_set_typename
+.pia_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC posix_int_arg
 
-;; posix_raise_typename(rdi = type, rsi = prefix cstr, rdx = the object)
+;; posix_set_typename(rdi = type, rsi = prefix cstr, rdx = the object)
+;;   -> rax = 0, the exception pending
 ;; Builds "<prefix> <typename> ..." the way CPython words it.
-DEF_FUNC posix_raise_typename
+DEF_FUNC posix_set_typename, 16     ; + 2 pushes = 32, 16-aligned
     push rbx
     push r12
     mov rbx, rdi
@@ -1366,9 +1357,12 @@ DEF_FUNC posix_raise_typename
     call posix_copy_bounded
     mov rdi, rbx
     lea rsi, [rel pm_msgbuf]
-    call raise_exception
-    ud2
-END_FUNC posix_raise_typename
+    call set_exception          ; rax = 0
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC posix_set_typename
 
 ;; posix_copy_bounded(rdi = dest, rsi = src cstr, rdx = max) -> rax = the NUL
 ;; posix_typename_of(rdi = dest, rsi = a Value) -> rax = the NUL after the name
@@ -1419,15 +1413,20 @@ DEF_FUNC posix_close, 16
     jz .pcl_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pcl_fail
     mov rdi, rax
     call sys_close
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pcl_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .pcl_argerr:
-    RAISE exc_TypeError_type, "close() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "close() takes exactly 1 argument", .pcl_fail
+.pcl_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_close
 
 ;; posix.read(fd, n) -> bytes
@@ -1442,9 +1441,11 @@ DEF_FUNC posix_read, PRD_FRAME
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .prd_fail
     mov r12, rax                    ; fd
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .prd_fail
     mov rbx, rax                    ; n
     test rbx, rbx
     js .prd_negative
@@ -1475,17 +1476,13 @@ DEF_FUNC posix_read, PRD_FRAME
     call ap_free
     pop rax
     pop rax
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .prd_fail
 .prd_handler_raised:
     ; A Python signal handler raised while the read was interrupted; its
     ; exception is the caller's, and the buffer is this frame's.
     mov rdi, [rbp - PRD_BUF]
     call ap_free
-    extern eval_exception_unwind
-    pop r12
-    pop rbx
-    leave
-    jmp eval_exception_unwind
+    jmp .prd_fail
 
 .prd_ok:
     mov rdi, [rbp - PRD_BUF]
@@ -1503,7 +1500,7 @@ DEF_FUNC posix_read, PRD_FRAME
     leave
     ret
 .prd_negative:
-    RAISE exc_ValueError_type, "negative read count"
+    FAIL exc_ValueError_type, "negative read count", .prd_fail
 .prd_fail:
     xor eax, eax
     xor edx, edx
@@ -1512,7 +1509,9 @@ DEF_FUNC posix_read, PRD_FRAME
     leave
     ret
 .prd_argerr:
-    RAISE exc_TypeError_type, "read() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "read() takes exactly 2 arguments"
+    leave
+    ret
 END_FUNC posix_read
 
 ;; posix.write(fd, data) -> int
@@ -1524,14 +1523,14 @@ END_FUNC posix_read
 DEF_FUNC posix_write, 24
     ; The push comes BEFORE the arity branch: after it, lint's push counter --
     ; which stops at the first non-push instruction -- could not see it, and
-    ; the frame that satisfies the real parity looked wrong to the gate.  The
-    ; refusal below does not return, so it owes nothing back.
+    ; the frame that satisfies the real parity looked wrong to the gate.
     push rbx
     cmp rsi, 2
     jl .pwr_argerr
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pwr_fail
     mov rdi, rax                    ; fd... but the buffer comes next
     push rdi
     push rdi
@@ -1554,7 +1553,7 @@ DEF_FUNC posix_write, 24
     call io_write_retry
     cmp rax, -4
     je .pwr_handler_raised
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pwr_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -1565,17 +1564,19 @@ DEF_FUNC posix_write, 24
 .pwr_handler_raised:
     ; A Python signal handler raised while the write was interrupted; its
     ; exception is the caller's.
-    extern eval_exception_unwind
-    pop rbx
-    leave
-    jmp eval_exception_unwind
+    jmp .pwr_fail
 
 .pwr_badbuf:
     pop rdi
     pop rdi
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    FAIL exc_TypeError_type, "a bytes-like object is required", .pwr_fail
 .pwr_argerr:
-    RAISE exc_TypeError_type, "write() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "write() takes exactly 2 arguments", .pwr_fail
+.pwr_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC posix_write
 
 ;; posix.lseek(fd, pos, whence) -> int
@@ -1587,19 +1588,22 @@ DEF_FUNC posix_lseek, 16
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pls_fail
     mov r12, rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pls_fail
     push rax
     push rax
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pls_fail2
     mov rdx, rax
     pop rsi
     pop rsi
     mov rdi, r12
     call sys_lseek
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pls_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -1609,7 +1613,17 @@ DEF_FUNC posix_lseek, 16
     leave
     ret
 .pls_argerr:
-    RAISE exc_TypeError_type, "lseek() takes exactly 3 arguments"
+    SET_EXC exc_TypeError_type, "lseek() takes exactly 3 arguments"
+    leave
+    ret
+.pls_fail2:
+    add rsp, 16
+.pls_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC posix_lseek
 
 DEF_FUNC posix_dup, 16
@@ -1617,9 +1631,10 @@ DEF_FUNC posix_dup, 16
     jz .pdp_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pdp_fail
     mov rdi, rax
     call sys_dup
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pdp_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -1627,7 +1642,11 @@ DEF_FUNC posix_dup, 16
     leave
     ret
 .pdp_argerr:
-    RAISE exc_TypeError_type, "dup() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "dup() takes exactly 1 argument", .pdp_fail
+.pdp_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_dup
 
 ;; posix.access(path, mode) -> bool -- and it answers False rather than
@@ -1645,13 +1664,13 @@ DEF_FUNC posix_access, PAC_FRAME
     mov qword [rbp - PAC_OWNED], 0
     mov rdi, [rbx + 8]
     call posix_int_arg          ; the mode first: see mkdir
+    ERR_M1 .pac_fail
     mov [rbp - PAC_MODE], rax
     mov rdi, [rbx]
     CSTRING rsi, "access: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .pac_fail
+    ERR_NULL .pac_fail
     mov r12, rax
     mov [rbp - PAC_OWNED], rdx
     mov rsi, [rbp - PAC_MODE]
@@ -1680,7 +1699,9 @@ DEF_FUNC posix_access, PAC_FRAME
     leave
     ret
 .pac_argerr:
-    RAISE exc_TypeError_type, "access() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "access() takes exactly 2 arguments"
+    leave
+    ret
 END_FUNC posix_access
 
 ;; posix.pipe() -> (r, w)
@@ -1692,7 +1713,7 @@ DEF_FUNC posix_pipe, PPI_FRAME
     lea rdi, [rbp - PPI_FDS]
     mov esi, O_CLOEXEC
     call sys_pipe2
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .ppi_fail
     mov edi, 2
     call tuple_new
     test rax, rax
@@ -1740,9 +1761,10 @@ DEF_FUNC posix_umask, 16
     jz .pum_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pum_fail
     mov rdi, rax
     call sys_umask
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pum_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -1750,7 +1772,11 @@ DEF_FUNC posix_umask, 16
     leave
     ret
 .pum_argerr:
-    RAISE exc_TypeError_type, "umask() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "umask() takes exactly 1 argument", .pum_fail
+.pum_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_umask
 
 ;; ============================================================================
@@ -1783,9 +1809,11 @@ DEF_FUNC posix_ioctl, PIO_FRAME
 
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pio_fail
     mov [rbp - PIO_FD], rax         ; the fd, across the next conversion
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pio_fail
     mov r11, rax                    ; the request
 
     cmp r12, 3
@@ -1843,6 +1871,7 @@ DEF_FUNC posix_ioctl, PIO_FRAME
     jb .pio_call
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pio_fail
     mov rdx, rax
 .pio_call:
     mov rdi, [rbp - PIO_FD]
@@ -1861,14 +1890,19 @@ DEF_FUNC posix_ioctl, PIO_FRAME
     neg eax
     mov edi, eax
     xor esi, esi
-    extern raise_oserror
-    call raise_oserror
-.pio_too_big:
+    call set_oserror
+.pio_fail:
+    xor eax, eax
     pop r12
     pop rbx
-    RAISE exc_ValueError_type, "ioctl buffer is too long"
+    leave
+    ret
+.pio_too_big:
+    FAIL exc_ValueError_type, "ioctl buffer is too long", .pio_fail
 .pio_argerr:
-    RAISE exc_TypeError_type, "ioctl() takes 2 or 3 arguments"
+    SET_EXC exc_TypeError_type, "ioctl() takes 2 or 3 arguments"
+    leave
+    ret
 END_FUNC posix_ioctl
 
 ;; ============================================================================
@@ -1887,6 +1921,7 @@ DEF_FUNC posix_isatty, PIT_FRAME
     jz .pit_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pit_fail
     mov rdi, rax
     mov esi, TCGETS
     lea rdx, [rbp - PIT_BUF]
@@ -1903,7 +1938,11 @@ DEF_FUNC posix_isatty, PIT_FRAME
     leave
     ret
 .pit_argerr:
-    RAISE exc_TypeError_type, "isatty() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "isatty() takes exactly 1 argument", .pit_fail
+.pit_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_isatty
 
 ;; ============================================================================
@@ -1920,22 +1959,32 @@ DEF_FUNC posix_ftruncate, 8         ; lint: pushes=1 -- the `push rbx` below sit
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pft_fail
     push rax
     push rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pft_fail2
     mov rsi, rax
     pop rdi
     pop rdi
     call sys_ftruncate
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pft_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
     leave
     ret
 .pft_argerr:
-    RAISE exc_TypeError_type, "ftruncate() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "ftruncate() takes exactly 2 arguments", .pft_fail0
+.pft_fail2:
+    add rsp, 16                 ; the descriptor, parked twice
+.pft_fail:
+    pop rbx
+.pft_fail0:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_ftruncate
 
 
@@ -1962,19 +2011,19 @@ DEF_FUNC posix_truncate, PTR_FRAME
     ; it after the path would strand whatever __fspath__ built.
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .ptr_fail
     mov [rbp - PTR_LEN], rax
     mov rdi, [rbx]
     mov [rbp - PTR_PATH], rdi
     CSTRING rsi, "truncate: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .ptr_fail
+    ERR_NULL .ptr_fail
     mov [rbp - PTR_OWNED], rdx
     mov rdi, rax
     mov rsi, [rbp - PTR_LEN]
     call sys_truncate
-    POSIX_PATH_CHECK rax, [rbp - PTR_PATH], [rbp - PTR_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - PTR_PATH], [rbp - PTR_OWNED], .ptr_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
@@ -1987,8 +2036,7 @@ DEF_FUNC posix_truncate, PTR_FRAME
     leave
     ret
 .ptr_argerr:
-    pop rbx
-    PM_MISSING "truncate", "length", 2
+    PM_MISSING "truncate", "length", 2, .ptr_fail
 END_FUNC posix_truncate
 
 ;; posix.link(src, dst)
@@ -2010,8 +2058,7 @@ DEF_FUNC posix_link, PLK_FRAME
     CSTRING rsi, "link: src"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .plk_fail
+    ERR_NULL .plk_fail
     mov [rbp - PLK_SPTR], rax
     mov [rbp - PLK_SOWN], rdx
     mov rdi, [rbx + 8]
@@ -2019,8 +2066,7 @@ DEF_FUNC posix_link, PLK_FRAME
     CSTRING rsi, "link: dst"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .plk_fail
+    ERR_NULL .plk_fail
     mov [rbp - PLK_DOWN], rdx
     mov rsi, rax
     mov rdi, [rbp - PLK_SPTR]
@@ -2034,8 +2080,8 @@ DEF_FUNC posix_link, PLK_FRAME
     mov rdx, [rbp - PLK_SOWN]
     mov rcx, [rbp - PLK_DST]
     mov r8, [rbp - PLK_DOWN]
-    extern raise_oserror_owned2
-    call raise_oserror_owned2   ; does not return
+    call set_oserror_owned2     ; releases both resolved paths
+    jmp .plk_fail_out
 .plk_ok:
     call .plk_release
     LOAD_NONE rax
@@ -2059,14 +2105,14 @@ DEF_FUNC posix_link, PLK_FRAME
     ret
 .plk_fail:
     call .plk_release
+.plk_fail_out:
     xor eax, eax
     xor edx, edx
     pop rbx
     leave
     ret
 .plk_argerr:
-    pop rbx
-    PM_MISSING "link", "dst", 2
+    PM_MISSING "link", "dst", 2, .plk_fail_out
 END_FUNC posix_link
 
 ;; posix.chown(path, uid, gid)
@@ -2082,23 +2128,24 @@ DEF_FUNC posix_chown, PCH_FRAME
     mov rbx, rdi
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pch_fail
     mov [rbp - PCH_UID], rax
     mov rdi, [rbx + 16]
     call posix_int_arg
+    ERR_M1 .pch_fail
     mov [rbp - PCH_GID], rax
     mov rdi, [rbx]
     mov [rbp - PCH_PATH], rdi
     CSTRING rsi, "chown: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .pch_fail
+    ERR_NULL .pch_fail
     mov [rbp - PCH_OWNED], rdx
     mov rdi, rax
     mov rsi, [rbp - PCH_UID]
     mov rdx, [rbp - PCH_GID]
     call sys_chown
-    POSIX_PATH_CHECK rax, [rbp - PCH_PATH], [rbp - PCH_OWNED]
+    POSIX_PATH_CHECK_RET rax, [rbp - PCH_PATH], [rbp - PCH_OWNED], .pch_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
@@ -2111,8 +2158,7 @@ DEF_FUNC posix_chown, PCH_FRAME
     leave
     ret
 .pch_argerr:
-    pop rbx
-    PM_MISSING "chown", "gid", 3
+    PM_MISSING "chown", "gid", 3, .pch_fail
 END_FUNC posix_chown
 
 ;; The three that take descriptors and no path.
@@ -2123,15 +2169,20 @@ DEF_FUNC %1, 16
     jz %%argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 %%fail
     mov rdi, rax
     call %2
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, %%fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 %%argerr:
-    PM_MISSING %3, %4, %5
+    PM_MISSING %3, %4, %5, %%fail
+%%fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1
 %endmacro
 POSIX_FD_ONLY posix_fsync, sys_fsync, "fsync", "fd", 1
@@ -2146,22 +2197,32 @@ DEF_FUNC %1, 16
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 %%fail
     push rax
     push rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 %%fail2
     mov rsi, rax
     pop rdi
     pop rdi
     call %2
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, %%fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
     leave
     ret
 %%argerr:
-    PM_MISSING %3, %4, %5
+    PM_MISSING %3, %4, %5, %%fail0
+%%fail2:
+    add rsp, 16                 ; the descriptor, parked twice
+%%fail:
+    pop rbx
+%%fail0:
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1
 %endmacro
 POSIX_FD_INT posix_fchmod, sys_fchmod, "fchmod", "mode", 2
@@ -2178,22 +2239,32 @@ DEF_FUNC posix_dup2, 8         ; lint: pushes=1 -- the `push rbx` below sits aft
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pd2_fail
     push rax
     push rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pd2_fail2
     mov rsi, rax
     pop rdi
     pop rdi
     call sys_dup2
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pd2_fail
     mov edx, TAG_SMALLINT
     pop rbx
     leave
     V_PACK rax, rdx
     ret
 .pd2_argerr:
-    PM_MISSING "dup2", "fd2", 2
+    PM_MISSING "dup2", "fd2", 2, .pd2_fail0
+.pd2_fail2:
+    add rsp, 16                 ; the descriptor, parked twice
+.pd2_fail:
+    pop rbx
+.pd2_fail0:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_dup2
 ;;
 ;; The argv array is built on the machine stack rather than the heap: this
@@ -2243,12 +2314,14 @@ DEF_FUNC posix_utime, PUT_FRAME
     push rax
     mov rdi, [rax]
     call posix_time_seconds
+    ERR_M1 .put_fail1
     mov [rbp - PUT_TIMES], rax
     mov qword [rbp - PUT_TIMES + 8], 0
     pop rax
     push rax
     mov rdi, [rax + 8]
     call posix_time_seconds
+    ERR_M1 .put_fail1
     mov [rbp - PUT_TIMES + 16], rax
     mov qword [rbp - PUT_TIMES + 24], 0
     pop rax
@@ -2261,8 +2334,7 @@ DEF_FUNC posix_utime, PUT_FRAME
     CSTRING rsi, "utime: path"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .put_fail
+    ERR_NULL .put_fail
     mov r9, [rbp - PUT_OWNED]
     mov [rbp - PUT_OWNED], rdx
     mov rsi, rax
@@ -2280,7 +2352,7 @@ DEF_FUNC posix_utime, PUT_FRAME
     call obj_decref
 .put_no_release:
     pop rax
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .put_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     pop rbx
@@ -2292,16 +2364,18 @@ DEF_FUNC posix_utime, PUT_FRAME
     pop rbx
     leave
     ret
+.put_fail1:
+    pop rcx                     ; the times tuple's items, parked
+    jmp .put_fail
 .put_bad_times:
-    pop rbx
-    RAISE exc_TypeError_type, "utime: 'times' must be either a tuple of two ints or None"
+    FAIL exc_TypeError_type, "utime: 'times' must be either a tuple of two ints or None", .put_fail
 .put_argerr:
-    pop rbx
-    PM_MISSING "utime", "path", 1
+    PM_MISSING "utime", "path", 1, .put_fail
 END_FUNC posix_utime
 
 ;; posix_time_seconds(rdi = a Value) -> rax = whole seconds
 ;; An int stays exact; a float truncates toward zero.
+;; Fails: -1
 DEF_FUNC_LOCAL posix_time_seconds
     V_IS_FLOAT rdi, rax
     ja .pts_int
@@ -2311,7 +2385,7 @@ DEF_FUNC_LOCAL posix_time_seconds
     leave
     ret
 .pts_int:
-    call posix_int_arg
+    call posix_int_arg          ; err: its -1 and its exception are ours
     leave
     ret
 END_FUNC posix_time_seconds
@@ -2328,11 +2402,12 @@ DEF_FUNC posix_get_inheritable, 16
     jz .pgi_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pgi_fail
     mov rdi, rax
     mov esi, F_GETFD
     xor edx, edx
     call sys_fcntl
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pgi_fail
     test eax, FD_CLOEXEC
     jnz .pgi_false              ; close-on-exec set => NOT inheritable
     lea rax, [rel bool_true]
@@ -2345,7 +2420,11 @@ DEF_FUNC posix_get_inheritable, 16
     leave
     ret
 .pgi_argerr:
-    RAISE exc_TypeError_type, "get_inheritable() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "get_inheritable() takes exactly 1 argument", .pgi_fail
+.pgi_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_get_inheritable
 
 PSI_FD    equ 8
@@ -2359,6 +2438,7 @@ DEF_FUNC posix_set_inheritable, PSI_FRAME
     mov rdi, [rdi]
     mov [rbp - PSI_WANT], rsi
     call posix_int_arg
+    ERR_M1 .psi_fail
     mov [rbp - PSI_FD], rax
 
     ; Read the current flags, then set or clear FD_CLOEXEC without disturbing
@@ -2367,7 +2447,7 @@ DEF_FUNC posix_set_inheritable, PSI_FRAME
     mov esi, F_GETFD
     xor edx, edx
     call sys_fcntl
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .psi_fail
     mov edx, eax
     mov rdi, [rbp - PSI_WANT]
     call obj_is_true
@@ -2381,13 +2461,17 @@ DEF_FUNC posix_set_inheritable, PSI_FRAME
     mov rdi, [rbp - PSI_FD]
     mov esi, F_SETFD
     call sys_fcntl
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .psi_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .psi_argerr:
-    RAISE exc_TypeError_type, "set_inheritable() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "set_inheritable() takes exactly 2 arguments", .psi_fail
+.psi_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_set_inheritable
 
 ;; ============================================================================
@@ -2405,7 +2489,9 @@ DEF_FUNC posix_device_encoding, 16
     leave
     ret
 .pde_argerr:
-    RAISE exc_TypeError_type, "device_encoding() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "device_encoding() takes exactly 1 argument"
+    leave
+    ret
 END_FUNC posix_device_encoding
 
 ;; ============================================================================
@@ -2426,7 +2512,7 @@ DEF_FUNC posix_uname, PUN_FRAME
     push rbx
     lea rdi, [rbp - PUN_BUF]
     call sys_uname
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pun_fail
 
     lea rdi, [rel uname_result_type]
     call structseq_init_type
@@ -2471,6 +2557,7 @@ DEF_FUNC posix_strerror, 16
     jz .pse_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pse_fail
     mov edi, eax
     call strerror wrt ..plt
     mov rdi, rax
@@ -2478,7 +2565,11 @@ DEF_FUNC posix_strerror, 16
     leave
     ret
 .pse_argerr:
-    RAISE exc_TypeError_type, "strerror() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "strerror() takes exactly 1 argument", .pse_fail
+.pse_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_strerror
 
 ;; posix.urandom(n) -> bytes
@@ -2491,6 +2582,7 @@ DEF_FUNC posix_urandom, PUR_FRAME
     jz .pur_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pur_fail
     test rax, rax
     js .pur_negative
     mov [rbp - PUR_N], rax
@@ -2527,7 +2619,7 @@ DEF_FUNC posix_urandom, PUR_FRAME
     call ap_free
     pop rax
     pop rax
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pur_fail
 .pur_advance:
     add rcx, rax
     jmp .pur_loop
@@ -2545,14 +2637,14 @@ DEF_FUNC posix_urandom, PUR_FRAME
     leave
     ret
 .pur_negative:
-    RAISE exc_ValueError_type, "negative argument not allowed"
+    FAIL exc_ValueError_type, "negative argument not allowed", .pur_fail
 .pur_fail:
     xor eax, eax
     xor edx, edx
     leave
     ret
 .pur_argerr:
-    RAISE exc_TypeError_type, "urandom() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "urandom() takes exactly 1 argument", .pur_fail
 END_FUNC posix_urandom
 
 ;; posix.fspath(path) -> the path itself, or what __fspath__ gives
@@ -2565,8 +2657,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     jz .pfs_argerr
     mov rdi, [rdi]
     ; Kept, because dunder_call_1 below does not preserve rdi and .pfs_bad
-    ; used to read it back out of the register afterwards -- a wild pointer
-    ; that raise_type_error_with_name then dereferenced.
+    ; used to read it back out of the register afterwards -- a wild pointer.
     mov [rbp - PFS_OBJ], rdi
     mov qword [rbp - PFS_EXC], 0
     V_TEST_PTR rdi, rax
@@ -2645,15 +2736,16 @@ DEF_FUNC posix_fspath, PFS_FRAME
     DECREF_V rdi, rcx           ; a Value: __fspath__ may answer an immediate
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel pm_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .pfs_propagate
 
 .pfs_bad:
     mov rsi, [rbp - PFS_OBJ]
     CSTRING rdi, `expected str, bytes or os.PathLike object, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .pfs_propagate
 .pfs_argerr:
-    RAISE exc_TypeError_type, "fspath() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "fspath() takes exactly 1 argument", .pfs_propagate
 END_FUNC posix_fspath
 
 ;; ============================================================================
