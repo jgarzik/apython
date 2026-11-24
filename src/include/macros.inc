@@ -266,8 +266,10 @@
 ; A dunder registered by name is called with whatever the caller passed, and
 ; the slot behind it decodes args[0] without asking -- so str.__getitem__(5, 0)
 ; is a wild pointer, not an error.  Both forms read args[0] out of rdi, hand
-; it to dunder_require_self, and leave rdi untouched; the helper raises and
-; does not return when the receiver is of the wrong type.
+; it to dunder_require_self, and leave rdi untouched.  A receiver of the wrong
+; type is the helper's 0, and the macro RETURNS it from the function it sits
+; in -- (0, 0), the TypeError pending -- which is right only because it is
+; the function's first act: nothing is held and nothing is pushed.
 ;
 ; Both preserve rdi AND rsi.  rsi is the argument count, and every one of
 ; these checks its arity after the receiver, so clobbering it turns a correct
@@ -290,9 +292,11 @@
     CSTRING rcx, %2
 %endif
     extern dunder_require_self
+    extern require_self_refused
     call dunder_require_self
     pop rsi
     pop rdi
+    ERR_NULL require_self_refused       ; nothing is held yet: 0, through `leave`
 %endmacro
 
 %macro REQUIRE_SELF_BARE 1-2 0
@@ -308,10 +312,12 @@
     CSTRING rcx, %2
 %endif
     extern dunder_require_self
+    extern require_self_refused_bare
     call dunder_require_self
     add rsp, 8
     pop rsi
     pop rdi
+    ERR_NULL require_self_refused_bare  ; no frame and nothing held: 0, by `ret`
 %endmacro
 
 ; Raise an exception with a literal message.  436 sites hand-rolled this triple.

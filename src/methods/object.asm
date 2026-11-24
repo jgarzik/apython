@@ -16,6 +16,7 @@
 
 ; External functions
 extern frozenset_type
+extern require_self_refused
 extern int_is_integer
 extern complex_type
 extern obj_decref
@@ -645,6 +646,7 @@ DEF_FUNC %1_dunder_%2
     CSTRING rcx, %3             ; %2 is the slot name, not the dunder's
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     V_TEST_PTR rdi, rax
     ja %%immediate
@@ -696,6 +698,7 @@ DEF_FUNC %1_dunder_len
 
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rcx, [rax + PyTypeObject.tp_as_mapping]
@@ -771,6 +774,7 @@ DEF_FUNC %1_dunder_call, DDC_FRAME
     CSTRING rcx, "__call__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax                ; the receiver, checked
 
     lea rax, [rel %1_type]
@@ -829,6 +833,7 @@ DEF_FUNC %1_dunder_iter
 
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_iter]
@@ -916,6 +921,7 @@ DEF_FUNC %1_dunder_next, DN_FRAME
     CSTRING rcx, "__next__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
 
     DUNDER_EXC_SAVE [rbp - DN_EXC]
@@ -997,6 +1003,7 @@ DEF_FUNC bytes_dunder_bytes
     xor edx, edx
     CSTRING rcx, "__bytes__"
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
@@ -1125,6 +1132,7 @@ DEF_FUNC %1_dunder_%2
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
@@ -1182,6 +1190,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
     DUNDER_EXC_SAVE [rbp - DB_EXC]
@@ -1243,6 +1252,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
     DUNDER_EXC_SAVE [rbp - DB_EXC]
@@ -1471,6 +1481,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rsi, rax
     mov rdi, [rbp - DB_RHS]
 %else
@@ -1484,6 +1495,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
 %endif
@@ -1609,6 +1621,7 @@ DEF_FUNC %1_dunder_%2, 16
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
 
     ; The operand that is not self has to be one this type accepts, as for
     ; the other binary dunders.  The reflected form already put self SECOND.
@@ -1659,6 +1672,7 @@ DEF_FUNC %1_dunder_bool
     CSTRING rcx, "__bool__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
@@ -2549,6 +2563,7 @@ DEF_FUNC %1_dunder_hash
     CSTRING rcx, "__hash__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     V_UNPACK rdi, rdx
     lea rax, [rel %1_type]
@@ -2610,6 +2625,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
 

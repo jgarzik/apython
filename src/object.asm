@@ -1185,7 +1185,10 @@ END_FUNC type_name_message
 ;; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
 ;; rdx = a second acceptable type, or 0,
 ;; rcx = the descriptor's own name, or 0)
-;; -> rax = the self Value, unchanged; does not return if the type is wrong
+;; -> rax = the self Value, unchanged
+;; Fails: 0
+;;   -- the TypeError is pending and self was not what the method is for.
+;;   self is never 0: it is args[0] of a call that had at least one argument.
 ;;
 ;; A dunder reached BY NAME is handed whatever the caller passed, and the slot
 ;; behind it decodes self without asking: int.__neg__(2.5) gives int's
@@ -1279,9 +1282,34 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel rbt_buf]
-    call raise_exception
-    ud2
+    call set_exception          ; rax = 0
+    leave
+    ret
 END_FUNC dunder_require_self
+
+;; ============================================================================
+;; require_self_refused / require_self_refused_bare -- JUMPED to, never called
+;;
+;; Where dunder_require_self's 0 goes.  Every by-name dunder asks it first,
+;; before it holds anything, so they all leave the same way: the frame taken
+;; down (or, for a body with no frame, nothing at all) and the (0, 0) pair
+;; handed back with the TypeError pending.  One shared exit keeps the check
+;; at each of some sixty sites to a test and a branch.
+;; ============================================================================
+global require_self_refused
+DEF_FUNC_BARE require_self_refused
+    xor eax, eax
+    xor edx, edx
+    leave                       ; the frame of whoever jumped here
+    ret
+END_FUNC require_self_refused
+
+global require_self_refused_bare
+DEF_FUNC_BARE require_self_refused_bare
+    xor eax, eax
+    xor edx, edx
+    ret
+END_FUNC require_self_refused_bare
 
 ;; ============================================================================
 ;; set_binop_type_error(rdi = left Value, rsi = right Value,
