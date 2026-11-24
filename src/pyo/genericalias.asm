@@ -17,7 +17,6 @@
 %include "opcodes.inc"
 
 ; --- what descriptors.asm keeps ---
-extern eval_exception_unwind
 extern ga_name_str
 extern generic_alias_as_number
 extern union_type
@@ -42,7 +41,7 @@ extern str_from_cstr_heap
 extern obj_getattr_opt
 extern obj_repr
 extern obj_richcompare_bool
-extern raise_exception
+extern set_exception
 extern str_from_cstr
 extern str_new_heap
 extern str_type
@@ -218,13 +217,16 @@ DEF_FUNC generic_alias_iter, GAI_FRAME
     mov esi, TAG_PTR
     extern get_iterator
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .gai_fail_tuple
     push rax
     mov rdi, [rbp - GAI_TUP]
     call obj_decref             ; the iterator holds it now
     pop rax
     leave
     ret
+.gai_fail_tuple:
+    mov rdi, [rbp - GAI_TUP]
+    call obj_decref
 .gai_fail:
     xor eax, eax
     leave
@@ -236,6 +238,7 @@ END_FUNC generic_alias_iter
 ;;
 ;; tp_new: `types.GenericAlias(list, int)` spelt out, which is what
 ;; _collections_abc and typing both do rather than subscripting.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC generic_alias_construct
     cmp rdx, 2
@@ -256,12 +259,12 @@ DEF_FUNC generic_alias_construct
     mov edx, TAG_PTR            ; a constructor returns the (payload, tag) pair
     leave
     ret
+.gac_error:
+    SET_EXC exc_TypeError_type, "GenericAlias expected 2 arguments"
 .gac_failed:
-    xor edx, edx
+    RET_NULL
     leave
     ret
-.gac_error:
-    RAISE exc_TypeError_type, "GenericAlias expected 2 arguments"
 END_FUNC generic_alias_construct
 
 ;; ============================================================================
@@ -288,6 +291,7 @@ END_FUNC generic_alias_dunder_new
 ;;
 ;; The builtin registered as __class_getitem__ on each container type.
 ;; args[0] = cls, args[1] = the subscript.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC generic_alias_class_getitem
     cmp rsi, 2
@@ -301,7 +305,9 @@ DEF_FUNC generic_alias_class_getitem
     V_PACK rax, rdx
     ret
 .gacg_bad:
-    RAISE exc_TypeError_type, "__class_getitem__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__class_getitem__() takes exactly one argument"
+    leave
+    ret
 END_FUNC generic_alias_class_getitem
 
 ;; ============================================================================
@@ -313,6 +319,7 @@ END_FUNC generic_alias_class_getitem
 ;; collections.abc's _CallableGenericAlias, a GenericAlias subclass, could not
 ;; be or'ed: `Callable[[Any], None] | None` in pluggy, which pytest imports
 ;; first thing, was a TypeError.  Published by name, they are inherited.
+;; Fails: 0
 ;; ============================================================================
 global generic_alias_dunder_or
 DEF_FUNC generic_alias_dunder_or
@@ -323,11 +330,14 @@ DEF_FUNC generic_alias_dunder_or
     leave
     jmp gad_or_common
 .gado_bad:
-    RAISE exc_TypeError_type, "__or__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__or__() takes exactly one argument"
+    leave
+    ret
 END_FUNC generic_alias_dunder_or
 
 ;; ============================================================================
 ;; generic_alias_dunder_ror(args = (self, other), nargs) -> other | self
+;; Fails: 0
 ;; ============================================================================
 global generic_alias_dunder_ror
 DEF_FUNC generic_alias_dunder_ror
@@ -339,7 +349,9 @@ DEF_FUNC generic_alias_dunder_ror
     leave
     jmp gad_or_common
 .gadr_bad:
-    RAISE exc_TypeError_type, "__ror__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__ror__() takes exactly one argument"
+    leave
+    ret
 END_FUNC generic_alias_dunder_ror
 
 ;; ============================================================================
@@ -370,6 +382,7 @@ END_FUNC gad_or_common
 ;; base that is not a class what to put in its place, and an alias answers
 ;; with its origin -- so `class D(dict["k", int])`, which setuptools'
 ;; pkg_resources declares at module scope, was "bases must be types".
+;; Fails: 0
 ;; ============================================================================
 global generic_alias_mro_entries
 DEF_FUNC generic_alias_mro_entries
@@ -388,7 +401,9 @@ DEF_FUNC generic_alias_mro_entries
     leave
     ret
 .game_bad:
-    RAISE exc_TypeError_type, "__mro_entries__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__mro_entries__() takes exactly one argument"
+    leave
+    ret
 END_FUNC generic_alias_mro_entries
 
 ;; ============================================================================
@@ -547,9 +562,14 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     jz .gq_module_from_name
     CSTRING rdi, "__module__"
     call str_from_cstr
+    mov r15, rax
     mov rsi, rax
     mov rdi, r14
     call dict_get
+    xchg r15, rax               ; the name was built for this one lookup and
+    mov rdi, rax                ; was never released: two strings per class
+    call obj_decref             ; named, on every repr of an alias
+    mov rax, r15
     V_UNPACK rax, rdx
     test edx, edx
     jz .gq_module_from_name
@@ -609,9 +629,14 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     jz .gq_from_tp_name
     CSTRING rdi, "__qualname__"
     call str_from_cstr
+    mov r15, rax
     mov rsi, rax
     mov rdi, r14
     call dict_get
+    xchg r15, rax               ; the name was built for this one lookup and
+    mov rdi, rax                ; was never released: two strings per class
+    call obj_decref             ; named, on every repr of an alias
+    mov rax, r15
     V_UNPACK rax, rdx
     test edx, edx
     jz .gq_from_tp_name
@@ -685,6 +710,7 @@ END_FUNC generic_alias_repr
 ;;
 ;; Calling an alias constructs the origin: list[int]() is a list.  Tail-jumps
 ;; into the origin's own tp_call, so the alias costs nothing at the call.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE generic_alias_call
     mov rax, [rdi + PyGenericAliasObject.ga_origin]
@@ -695,7 +721,11 @@ DEF_FUNC_BARE generic_alias_call
     jz .gac_bad
     jmp rcx
 .gac_bad:
-    RAISE exc_TypeError_type, "generic alias is not callable"
+    ; No frame here, so the refusal is a tail jump too: set_exception's 0 is
+    ; this call's answer.
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "generic alias is not callable"
+    jmp set_exception
 END_FUNC generic_alias_call
 
 ;; ============================================================================
@@ -1127,6 +1157,7 @@ DEF_FUNC generic_alias_subscript, GAS_FRAME
 
 .gas_fail:
     call gas_release
+.gas_failed:
     xor eax, eax
     xor edx, edx
     pop r12
@@ -1151,12 +1182,13 @@ DEF_FUNC generic_alias_subscript, GAS_FRAME
     call gas_release
     pop rsi
     pop rdi
-    call gas_raise_named            ; does not return
+    call gas_set_named
+    jmp .gas_failed
 END_FUNC generic_alias_subscript
 
 ;; ============================================================================
-;; gas_raise_named(rdi = the alias, rsi = the rest of the sentence, a cstr)
-;;   -> does not return: a TypeError naming the alias
+;; gas_set_named(rdi = the alias, rsi = the rest of the sentence, a cstr)
+;;   -> rax = 0, always, with a TypeError naming the alias pending
 ;;
 ;; CPython words all three refusals around the alias's own repr -- "list[int]
 ;; is not a generic class" -- and test_typing matches that phrase, so the
@@ -1166,7 +1198,7 @@ GRN_SUFFIX equ 8
 GRN_REPR   equ 16
 GRN_BUF    equ 208
 GRN_FRAME  equ 208          ; + 0 pushes = 208, 16-aligned
-DEF_FUNC_LOCAL gas_raise_named, GRN_FRAME
+DEF_FUNC_LOCAL gas_set_named, GRN_FRAME
     mov [rbp - GRN_SUFFIX], rsi
     call obj_repr
     mov [rbp - GRN_REPR], rax
@@ -1190,8 +1222,10 @@ DEF_FUNC_LOCAL gas_raise_named, GRN_FRAME
 .grn_go:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - GRN_BUF]
-    call raise_exception
-END_FUNC gas_raise_named
+    call set_exception
+    leave
+    ret
+END_FUNC gas_set_named
 
 ;; ============================================================================
 ;; gas_release() -- drop the four owned temporaries in the caller's frame
@@ -1503,11 +1537,8 @@ DEF_FUNC gas_subscript_any
     mov rax, [rax + PyMappingMethods.mp_subscript]
     test rax, rax
     jz .gsa_dunder
-    call rax
-    ; The caller stores what this answers straight into a tuple, so a
-    ; __getitem__ that raised must not come back as a value.  Transitional.
-    ERR_PENDING_JUMP
-    leave
+    call rax                    ; 0 when __getitem__ raised, and the
+    leave                       ; caller, gas_subst_nested, hands that on
     ret
 .gsa_dunder:
     call mapping_getitem_opt    ; err: 0 goes to the caller as it stands
