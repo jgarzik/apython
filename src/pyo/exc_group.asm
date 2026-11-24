@@ -890,7 +890,7 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_MLIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     jmp .split_next
 
 .split_rest:
@@ -901,7 +901,7 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_RLIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     jmp .split_next
 
 .split_nested:
@@ -927,7 +927,7 @@ DEF_FUNC eg_split, EGS_FRAME
     je .split_nested_rest
     mov rdi, [rbp - EGS_MLIST]
     mov rsi, [rbp - EGS_SUBM]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - EGS_SUBM]
     call obj_decref
 .split_nested_rest:
@@ -935,7 +935,7 @@ DEF_FUNC eg_split, EGS_FRAME
     je .split_next
     mov rdi, [rbp - EGS_RLIST]
     mov rsi, [rbp - EGS_SUBR]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - EGS_SUBR]
     call obj_decref
 
@@ -1669,7 +1669,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov r9, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [r9 + rcx*8]
     mov rdi, [rbp - PRS_FLAT]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rax
     pop r8
     pop rcx
@@ -1688,7 +1688,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rsi, [rax + PyListObject.ob_item]       ; payloads
     mov rsi, [rsi + rdx*8]                       ; list item payload
     mov rdi, [rbp - PRS_FLAT]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rcx
     pop rdx
 

@@ -450,7 +450,7 @@ DEF_FUNC gc_mod_get_referrers, GGF_FRAME
 .ggf_hit:
     mov rdi, [rbp - GGF_LIST]
     mov rsi, r12
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
 .ggf_edges_done:
     mov rdi, r13
     call obj_decref
@@ -555,7 +555,7 @@ DEF_FUNC gc_mod_get_stats, GGS_FRAME
 
     mov rdi, [rbp - GGS_LIST]
     mov rsi, [rbp - GGS_DICT]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - GGS_DICT]
     call obj_decref
     inc qword [rbp - GGS_I]
@@ -644,7 +644,7 @@ DEF_FUNC_LOCAL gm_visit_append, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov rdi, [rel gm_referents_out]
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: the caller's own list, built for this walk
     pop rbx
     leave
     ret

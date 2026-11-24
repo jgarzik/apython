@@ -1254,7 +1254,7 @@ END_FUNC mso_append_cstr
 ;; ============================================================================
 DEF_FUNC_LOCAL mso_append_owned, MAC_FRAME
     mov [rbp - MAC_STR], rsi
-    call list_append
+    call list_append          ; err: startup, before any Python has run
     mov rdi, [rbp - MAC_STR]
     call obj_decref
     leave

@@ -846,7 +846,7 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     mov rdi, [rbp - CPO_LIST]
     mov rsi, rax
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     add rsp, 8
     pop rdi
     extern obj_decref
@@ -1415,7 +1415,7 @@ col_emit:
     mov rdi, [rbp - COL_LIST]
     mov rsi, [rbp - COL_TUP]
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - COL_TUP]
     extern obj_decref
     call obj_decref

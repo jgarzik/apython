@@ -406,7 +406,7 @@ DEF_FUNC type_method_mro, TMM_FRAME
     mov rdi, [rbp - TMM_LIST]
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rsi, [rax + rbx*8]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc rbx
     jmp .tmm_copy
 .tmm_copied:

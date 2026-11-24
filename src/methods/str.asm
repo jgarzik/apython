@@ -1931,7 +1931,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     push rax
     mov rdi, [rbp - SPI_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r13

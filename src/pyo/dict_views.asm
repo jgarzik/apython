@@ -240,7 +240,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     mov rsi, rax
     V_PACK rsi, rdx
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     ; dict_iter_next hands back an OWNED reference and list_append takes its

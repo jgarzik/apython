@@ -1073,7 +1073,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ; edx = tag
     extern list_append
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rsi                 ; item tag
     pop rdi                 ; item payload
     DECREF_VAL rdi, rsi

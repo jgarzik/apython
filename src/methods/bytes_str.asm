@@ -994,7 +994,7 @@ DEF_FUNC bytes_method_splitlines, BSL_FRAME
     mov r15, rax
     mov rdi, r14
     mov rsi, rax
-    call list_append            ; takes its own reference
+    call list_append            ; takes its own reference -- err: a list built here is not being sorted
     mov rdi, r15
     call obj_decref
     mov r13, [rbp - BSL_NEXT]

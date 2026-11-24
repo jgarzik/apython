@@ -579,7 +579,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rbp - UEX_RESTL]
     ; edx = item tag from .ue_getitem (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append           ; list_append does INCREF
+    call list_append           ; list_append does INCREF -- err: a list built here is not being sorted
     inc qword [rbp - UEX_I]
     dec qword [rbp - UEX_N]
     jmp .ue_rest_loop
@@ -655,7 +655,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rbp - UEX_TMPL]
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - UEX_I]
     mov rsi, [rbp - UEX_N]
     DECREF_VAL rdi, rsi

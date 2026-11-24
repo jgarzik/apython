@@ -17,7 +17,7 @@ extern ap_memcpy
 extern obj_decref
 extern obj_dealloc
 extern fatal_error
-extern raise_exception
+extern set_exception
 extern exc_IndexError_type
 extern int_to_i64
 extern bool_true
@@ -28,7 +28,6 @@ extern slice_indices
 extern slice_indices_live
 extern type_type
 extern int_type
-extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
 extern obj_as_index_seq
@@ -37,7 +36,7 @@ extern exc_RecursionError_type
 extern int_fits_i64
 extern str_type
 extern bool_type
-extern list_sorting_error
+extern set_list_sorting_error
 
 ;; ============================================================================
 ;; list_new(int64_t capacity) -> PyListObject*
@@ -194,7 +193,9 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
 END_FUNC list_copy
 
 ;; ============================================================================
-;; list_extend_from_array(rdi = list, rsi = Value[], rdx = count) -> void
+;; list_extend_from_array(rdi = list, rsi = Value[], rdx = count) -> rax = 0
+;; Fails: -1
+;; The one refusal is a list that is being sorted.
 ;;
 ;; Append count Values in one go: grow once, one ap_memcpy, one INCREF pass.
 ;; Every caller that knows its source's length wants this -- LIST_EXTEND from
@@ -225,7 +226,7 @@ DEF_FUNC list_extend_from_array, LEFA_FRAME
 
     ; The sorting sentinel, as every other way into a list checks it.
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lefa_sorting
 
     xor eax, eax
     cmp r12, [rbx + PyListObject.ob_item]
@@ -281,17 +282,27 @@ DEF_FUNC list_extend_from_array, LEFA_FRAME
     jb .lefa_incref
 
 .lefa_done:
+    xor eax, eax
+.lefa_ret:
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret
+
+.lefa_sorting:
+    call set_list_sorting_error
+    mov rax, -1
+    jmp .lefa_ret
 END_FUNC list_extend_from_array
 
 ;; ============================================================================
-;; list_append(rdi=list, rsi=item Value)
-;; Append item, growing if needed.  INCREFs the item.
+;; list_append(rdi=list, rsi=item Value) -> rax = 0
+;; Fails: -1
+;; Append item, growing if needed.  INCREFs the item.  The one refusal is a
+;; list that is being sorted, so a caller appending to a list it built itself
+;; has nothing to check and says so.
 ;; ============================================================================
 DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
@@ -301,7 +312,7 @@ DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
     mov rbx, rdi               ; list
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .la_sorting
     mov r12, rsi               ; item Value
 
     ; Check if need to grow
@@ -331,22 +342,30 @@ DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
     ; Increment size
     inc qword [rbx + PyListObject.ob_size]
 
+    xor eax, eax
+.la_ret:
     pop r13
     pop r12
     pop rbx
     leave
     ret
+
+.la_sorting:
+    call set_list_sorting_error
+    mov rax, -1
+    jmp .la_ret
 END_FUNC list_append
 
 ;; ============================================================================
 ;; list_getitem(PyListObject *list, int64_t index) -> rax = Value
+;; Fails: 0
 ;; sq_item: return item at index with bounds check and negative index support
 ;; ============================================================================
 DEF_FUNC list_getitem
 
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rdi + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lgi_sorting
 
     ; Handle negative index
     test rsi, rsi
@@ -371,11 +390,20 @@ DEF_FUNC list_getitem
     ret
 
 .index_error:
-    RAISE exc_IndexError_type, "list index out of range"
+    SET_EXC exc_IndexError_type, "list index out of range"
+    xor eax, eax
+    leave
+    ret
+.lgi_sorting:
+    call set_list_sorting_error
+    xor eax, eax
+    leave
+    ret
 END_FUNC list_getitem
 
 ;; ============================================================================
-;; list_setitem(PyListObject *list, int64_t index, PyObject *value, int value_tag)
+;; list_setitem(rdi = list, rsi = index, rdx = the value Value) -> rax = 0
+;; Fails: -1
 ;; sq_ass_item: set item at index, DECREF old, INCREF new. rcx = value_tag.
 ;; ============================================================================
 DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
@@ -390,7 +418,7 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     mov rbx, rdi               ; list
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lsi_sorting
     mov r12, rdx               ; new value Value
 
     ; Handle negative index
@@ -434,12 +462,23 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     leave
     ret
 
+.lsi_sorting:
+    call set_list_sorting_error
+    jmp .lsi_fail
 .index_error:
-    RAISE exc_IndexError_type, "list assignment index out of range"
+    SET_EXC exc_IndexError_type, "list assignment index out of range"
+.lsi_fail:
+    mov rax, -1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_setitem
 
 ;; ============================================================================
 ;; list_subscript(PyListObject *list, PyObject *key) -> rax = Value
+;; Fails: 0
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; ============================================================================
 DEF_FUNC list_subscript
@@ -449,7 +488,7 @@ DEF_FUNC list_subscript
     mov rbx, rdi               ; save list
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .ls_sorting
 
     ; Check if key is a SmallInt (rdx = key tag from caller)
     cmp edx, TAG_SMALLINT
@@ -471,7 +510,7 @@ DEF_FUNC list_subscript
     mov rdi, rsi
     lea rsi, [rel ls_index_msg]
     call obj_as_index_seq
-    ERR_M1_JUMP
+    ERR_M1 .ls_fail
     mov rsi, rax
     jmp .ls_do_getitem
 
@@ -483,7 +522,7 @@ DEF_FUNC list_subscript
 
     ; Call list_getitem — already returns a Value
     mov rdi, rbx
-    call list_getitem
+    call list_getitem         ; err: its 0 is this function's own answer
 
     pop rbx
     leave
@@ -493,10 +532,18 @@ DEF_FUNC list_subscript
     ; Call list_getslice(list, slice)
     mov rdi, rbx
     ; rsi = slice (already set)
-    call list_getslice
+    call list_getslice        ; err: its 0 is this function's own answer
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
+    ret
+
+.ls_sorting:
+    call set_list_sorting_error
+.ls_fail:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 
 END_FUNC list_subscript
@@ -506,7 +553,8 @@ ls_index_msg: db `list indices must be integers or slices, not \x01`, 0
 section .text
 
 ;; ============================================================================
-;; list_ass_subscript(rdi=list, rsi=key Value, rdx=value Value)
+;; list_ass_subscript(rdi=list, rsi=key Value, rdx=value Value) -> rax = 0
+;; Fails: -1
 ;; mp_ass_subscript: set with an int or slice key.
 ;; A value Value of 0 (NULL) means "delete".
 ;; ============================================================================
@@ -518,6 +566,11 @@ LAS_SLICELEN equ 40    ; registers holding them do not survive its unwind
 LAS_RECYCLE  equ 56    ; the items a slice assignment displaced, released
 LAS_RECN     equ 64    ; only once the list is whole again; and how many
 LAS_FRAME equ 64            ; + 2 pushes = 80, 16-byte aligned
+; Where rsp sits for the whole slice arm: the frame, rbx and r12, then r13,
+; r14, r15 and the alignment pad.  The slice arm's error exit resets rsp to
+; it, so a refusal found with temporaries still pushed needs no unwinding of
+; its own.
+LAS_SLICE_RSP equ LAS_FRAME + 48
 DEF_FUNC list_ass_subscript, LAS_FRAME
     push rbx
     push r12
@@ -529,7 +582,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rbx, rdi               ; list
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .las_sorting
     mov r12, rdx               ; value
     mov [rbp - LAS_VTAG], r8   ; save value tag
 
@@ -556,7 +609,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     lea rsi, [rel ls_index_msg]
     extern obj_as_index_seq
     call obj_as_index_seq
-    ERR_M1_JUMP
+    ERR_M1 .las_fail
     mov rsi, rax
 .las_have_key:
 
@@ -569,7 +622,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rdx, r12
     mov rcx, [rbp - LAS_VTAG]  ; value tag from caller
     V_PACK rdx, rcx
-    call list_setitem
+    call list_setitem         ; err: its answer is this function's own
 
     pop r12
     pop rbx
@@ -631,7 +684,36 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ret
 
 .lid_index_error:
-    RAISE exc_IndexError_type, "list assignment index out of range"
+    SET_EXC exc_IndexError_type, "list assignment index out of range"
+    jmp .las_fail
+
+.las_sorting:
+    call set_list_sorting_error
+.las_fail:
+    ; The error exit of the int arm, and the tail of the slice arm's.
+    mov rax, -1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.las_slice_fail:
+    ; The error exit of the slice arm.  The temporary list -- a copy of self,
+    ; or what a generic iterable was drained into -- is the one thing it can
+    ; still be holding; the recycle array is only made once nothing below it
+    ; can refuse.
+    lea rsp, [rbp - LAS_SLICE_RSP]
+    mov rdi, [rbp - LAS_TEMP]
+    test rdi, rdi
+    jz .las_slice_fail_pop
+    mov qword [rbp - LAS_TEMP], 0
+    call obj_decref
+.las_slice_fail_pop:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    jmp .las_fail
 
 .las_slice:
     ; Slice assignment: a[start:stop] = value
@@ -650,7 +732,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; clamp has to see the length it left behind, not the one from before.
     lea rsi, [rbx + PyListObject.ob_size]
     call slice_indices_live
-    ERR_M1_JUMP
+    ERR_M1 .las_slice_fail
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax           ; r13 = start
     mov r14, rdx           ; r14 = stop
@@ -723,7 +805,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov esi, TAG_PTR
     push rcx                    ; old_len; the call below clobbers rcx
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .las_slice_fail
     test rax, rax
     jz .las_type_error_pop
     push rax                    ; save iterator
@@ -750,7 +832,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rdi, [rsp + 16]       ; temp list (2 pushes deeper)
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: the temp list was built just above
     pop rsi
     pop rdi
     DECREF_VAL rdi, rsi
@@ -811,22 +893,9 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rdi, [rbp - LAS_EXC]
     call obj_decref
 
-.las_gen_fail:
-    ; Restore exactly what .las_slice pushed -- r13, r14, r15 and the
-    ; alignment pad -- then hand the pending exception to the unwinder.
-    ; Returning NULL would signal nothing: op_store_subscr calls
-    ; mp_ass_subscript and never looks at the result, so the exception would
-    ; sit pending until some later opcode tripped over it.  get_iterator
-    ; propagates the same way.
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    PUBLISH_SP
-    leave
-    jmp eval_exception_unwind
+    ; Both are released; the pending exception goes out through the slice
+    ; arm's exit like every other refusal.
+    jmp .las_slice_fail
 
 .las_type_error_pop:
     ; This used to FALL THROUGH into .las_have_items with r8 and r9 undefined,
@@ -1033,11 +1102,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 
 .las_step_zero:
     extern exc_ValueError_type
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
-    RAISE exc_ValueError_type, "slice step cannot be zero"
+    FAIL exc_ValueError_type, "slice step cannot be zero", .las_slice_fail
 
 ;; Extended slice assignment: a[start:stop:step] = iterable (step != 0, step != 1)
 ;; Registers on entry: rbx=list, r12=value, r13=start, r14=stop, r15=step
@@ -1098,7 +1163,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .las_slice_fail
     test rax, rax
     jz .las_type_error
     push rax                    ; the iterator
@@ -1120,7 +1185,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     push rax                    ; twice, to keep rsp 16-byte aligned
     mov rdi, [rsp + 16]         ; the temp list, two pushes deeper
     mov rsi, rax
-    call list_append
+    call list_append          ; err: the temp list was built just above
     pop rdi
     pop rdi
     DECREF_V rdi, rsi           ; list_append took its own reference
@@ -1290,19 +1355,9 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_insert_done
 
 .ext_len_mismatch:
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
-    ; The materialised iterable is ours, and RAISE abandons the C stack:
-    ; `L[::2] = G()` for any generic iterable leaked the temp list built to
-    ; hold it every time the lengths disagreed.
-    mov rdi, [rbp - LAS_TEMP]
-    test rdi, rdi
-    jz .ext_len_mismatch_raise
-    mov qword [rbp - LAS_TEMP], 0
-    call obj_decref
-.ext_len_mismatch_raise:
+    ; The materialised iterable is ours: `L[::2] = G()` for any generic
+    ; iterable leaked the temp list built to hold it every time the lengths
+    ; disagreed.  The slice arm's exit releases it.
     ; "attempt to assign sequence of size 3 to extended slice of size 2".
     ; The two numbers were known thirty lines up and gone by here; naming them
     ; also needed an int-to-decimal helper another file could reach, which
@@ -1324,17 +1379,12 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     call msg_append_i64
     lea rdi, [rel exc_ValueError_type]
     mov rsi, rsp
-    extern raise_exception
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .las_slice_fail         ; which resets rsp and releases the temp list
 
 .las_type_error:
     extern exc_TypeError_type
-    add rsp, 8
-    pop r15
-    pop r14
-    pop r13
-    RAISE exc_TypeError_type, "can only assign an iterable"
+    FAIL exc_TypeError_type, "can only assign an iterable", .las_slice_fail
 END_FUNC list_ass_subscript
 
 ;; ============================================================================
@@ -1346,7 +1396,8 @@ DEF_FUNC_BARE list_len
 END_FUNC list_len
 
 ;; ============================================================================
-;; list_contains(PyListObject *list, PyObject *value, int value_tag) -> int (0/1)
+;; list_contains(rdi = list, rsi = the value Value) -> eax = 0 / 1
+;; Fails: -1
 ;; sq_contains: linear scan with identity check then __eq__ protocol
 ;; ============================================================================
 LC_LIST    equ 8
@@ -1402,9 +1453,9 @@ DEF_FUNC list_contains, LC_FRAME
     ret
 
 .contains_error:
-    ; sq_contains has no error channel; the exception is already pending.
+    mov rax, -1                 ; an element's __eq__ raised
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC list_contains
 
 ;; ============================================================================
@@ -1477,6 +1528,7 @@ END_FUNC list_bool
 
 ;; ============================================================================
 ;; list_getslice(PyListObject *list, PySliceObject *slice) -> PyListObject*
+;; Fails: 0
 ;; Creates a new list from a slice of the original.
 ;; ============================================================================
 DEF_FUNC list_getslice
@@ -1494,7 +1546,7 @@ DEF_FUNC list_getslice
     mov rdi, r12               ; slice
     lea rsi, [rbx + PyListObject.ob_size]  ; the LIVE length; see above
     call slice_indices_live
-    ERR_M1_JUMP
+    ERR_M1 .lgs_fail
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax               ; r13 = start
     mov r14, rdx               ; r14 = stop
@@ -1636,6 +1688,17 @@ DEF_FUNC list_getslice
     mov edx, TAG_PTR
     leave
     ret
+
+.lgs_fail:
+    RET_NULL                    ; a bound was not an index
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_getslice
 
 ;; ============================================================================
@@ -1737,6 +1800,7 @@ END_FUNC list_incref_range_by
 
 ;; ============================================================================
 ;; list_concat(PyListObject *a, PyObject *b) -> PyListObject*
+;; Fails: 0?
 ;; Concatenate two lists: [1,2] + [3,4] -> [1,2,3,4]
 ;; ============================================================================
 LCC_NEW   equ 8                 ; the new list, across the two memcpys
@@ -1819,12 +1883,20 @@ DEF_FUNC list_concat, LCC_FRAME
     VALUE_FOR_TYPE rdi, rsi
     mov rsi, rdi
     CSTRING rdi, `can only concatenate list (not "\x01") to list`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_concat
 
 ;; ============================================================================
 ;; list_repeat(PyListObject *list, PyObject *count) -> PyListObject*
+;; Fails: 0?
 ;; Repeat a list: [1,2] * 3 -> [1,2,1,2,1,2]
 ;; ============================================================================
 LRP_NEW   equ 8                 ; the new list, across the copies
@@ -1865,7 +1937,7 @@ DEF_FUNC list_repeat, LRP_FRAME
     jz .rep_decline
     extern seq_repeat_count
     call seq_repeat_count    ; __index__ counts, and one too big to be an
-    ERR_M1_JUMP
+    ERR_M1 .rep_decline
     mov r12, rax             ; index is refused rather than truncated
 
     ; Clamp negative to 0
@@ -1951,14 +2023,15 @@ DEF_FUNC list_repeat, LRP_FRAME
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .rep_decline
 .rep_overflow:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "too many items for list repetition"
+    FAIL exc_OverflowError_type, "too many items for list repetition", .rep_decline
 END_FUNC list_repeat
 
 ;; ============================================================================
-;; list_inplace_concat(left, right, left_tag, right_tag) -> (rax, edx)
+;; list_inplace_concat(left, right) -> rax = left, with a new reference
+;; Fails: 0?
 ;; nb_iadd / sq_inplace_concat: extend left list in-place with right iterable
 ;; Returns (left, TAG_PTR) — same object.
 ;; ============================================================================
@@ -1981,7 +2054,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rbx, rdi              ; left = self (list)
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lic_sorting
     mov r12, rsi              ; right (iterable payload)
     mov r13, rcx              ; right_tag
     mov [rbp - LIC_SELF], rdi
@@ -2017,6 +2090,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
 .lic_from_array:
     mov rdi, rbx
     call list_extend_from_array
+    ERR_M1 .lic_fail
     jmp .lic_done
 
 .lic_generic:
@@ -2025,7 +2099,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .lic_fail
     test rax, rax
     jz .lic_type_error
     mov [rbp - LIC_ITER], rax
@@ -2049,6 +2123,7 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1 .lic_append_failed
     pop rsi
     pop rdi
     DECREF_VAL rdi, rsi
@@ -2074,19 +2149,26 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     V_PACK rax, rdx             ; return one Value
     ret
 
+.lic_append_failed:
+    ; Another thread began sorting this list while the iterator ran.  The
+    ; item and the iterator are still ours.
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - LIC_ITER]
+    call obj_decref
+    jmp .lic_fail
+
+.lic_sorting:
+    call set_list_sorting_error
 .lic_gen_raised:
-    ; Not a NULL return: this is an nb_inplace_add slot, and op_binary_op
-    ; reads NULL from a slot as "declined", which it reports as
-    ; "unsupported operand type(s)" -- burying the exception the iterator
-    ; raised.  Unwind directly, exactly as .lic_type_error's RAISE does.
-    ; The operands are back on the value stack once the unwinder restores
-    ; r13, so they are not released here either.
-    extern eval_exception_unwind
+.lic_fail:
+    RET_NULL
     pop r13
     pop r12
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .lic_type_error:
     ; `L += x` is L.extend(x), so what it needs of x is that it be ITERABLE --
@@ -2097,12 +2179,13 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     ;
     mov rsi, [rbp - LIC_RIGHT]
     CSTRING rdi, `'\x01' object is not iterable`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .lic_fail
 END_FUNC list_inplace_concat
 
 ;; ============================================================================
-;; list_inplace_repeat(left, right, left_tag, right_tag) -> (rax, edx)
+;; list_inplace_repeat(left, right) -> rax = left, with a new reference
+;; Fails: 0?
 ;; nb_imul / sq_inplace_repeat: repeat left list in-place by right integer
 ;; Returns (left, TAG_PTR) — same object.
 ;; ============================================================================
@@ -2138,13 +2221,13 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     mov rbx, rdi              ; self (list)
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lir_sorting
 
     ; The same funnel sq_repeat uses.  int_to_i64 truncated, so `a *= 2**64`
     ; emptied the list instead of refusing.
     extern seq_repeat_count
     call seq_repeat_count
-    ERR_M1_JUMP
+    ERR_M1 .lir_fail
     mov r12, rax              ; r12 = count
 
     ; Handle count <= 0: clear list
@@ -2236,7 +2319,17 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     ret
 .lir_toobig:
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, ""
+    SET_EXC exc_MemoryError_type, ""
+    jmp .lir_fail
+.lir_sorting:
+    call set_list_sorting_error
+.lir_fail:
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .lir_decline:
     ; Reached before the pushes, so there is no mirror to unwind.
     xor eax, eax                ; NULL Value = NotImplemented
@@ -2246,6 +2339,7 @@ END_FUNC list_inplace_repeat
 
 ;; ============================================================================
 ;; list_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyListObject*
+;; Fails: 0
 ;; Constructor: list() or list(iterable)
 ;; ============================================================================
 ; Frame layout
@@ -2308,7 +2402,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rsi, rbx
     mov rdx, r13
     mov rbx, [rbp - LTC_LIST]
-    call list_extend_from_array
+    call list_extend_from_array   ; err: the list was built just above
     mov rax, rbx
     mov edx, TAG_PTR
     pop r13
@@ -2354,7 +2448,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .ltc_exc_cleanup
     mov [rbp - LTC_ITER], rax
 
     ; Iterate and append (call_iternext handles heaptype __next__)
@@ -2373,7 +2467,7 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rsi, rax
     ; edx = tag from tp_iternext (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: the list was built just above
     ; DECREF item (list_append INCREFs internally, tag-aware)
     pop rsi                 ; item tag
     pop rdi                 ; item payload
@@ -2422,9 +2516,10 @@ DEF_FUNC list_type_call, LTC_FRAME
 
 .ltc_not_iterable:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "list() argument must be an iterable"
+    FAIL exc_TypeError_type, "list() argument must be an iterable", .ltc_fail
 
 .ltc_length_hint_failed:
+.ltc_fail:
     ; sq_length answered -1 and left an exception; hand it on.  The list does
     ; not exist yet -- the probe now runs before it is made, so that its
     ; answer can be the capacity -- so there is nothing to release.
@@ -2440,13 +2535,14 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rsi, r13
     CSTRING rdi, "list expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .ltc_fail
 
 .ltc_kwarg_error:
     ; Clear kw_names_pending to avoid stale state
     mov qword [gs:ThreadState.kw_names_pending], 0
-    RAISE exc_TypeError_type, "list() takes no keyword arguments"
+    FAIL exc_TypeError_type, "list() takes no keyword arguments", .ltc_fail
 END_FUNC list_type_call
 
 ;; ============================================================================
@@ -2523,7 +2619,8 @@ list_sequence_methods:
 section .text
 
 ;; ============================================================================
-;; list_richcompare(left, right, op, left_tag, right_tag) -> (rax, edx)
+;; list_richcompare(left, right, op) -> (rax, edx)
+;; Fails: 0?
 ;; Compare two lists. Returns bool fat value.
 ;; Supports EQ, NE, LT, LE, GT, GE (lexicographic for ordering).
 ;; ============================================================================
@@ -2533,13 +2630,16 @@ section .text
 ; several exits need not each be touched.
 DEF_FUNC list_richcompare
     C_RECURSION_ENTER .lrc_too_deep
-    call list_richcompare_inner
+    call list_richcompare_inner   ; err: its answer is this function's own
     C_RECURSION_LEAVE
     leave
     ret
 .lrc_too_deep:
     C_RECURSION_LEAVE
-    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+    SET_EXC exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+    RET_NULL
+    leave
+    ret
 END_FUNC list_richcompare
 
 LRC_LEFT     equ 8
@@ -2554,6 +2654,7 @@ LRC_FRAME    equ 48         ; + 0 pushes = 48
 ;; clear either list, and bpo-38588 is the test for it -- and if the index has
 ;; run off the end of what is left, compares the *current* sizes instead.  So
 ;; [X()] == [Y()], where each __eq__ empties the other list, is True.
+;; Fails: 0?
 DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     ; Verify right is a list; anything else is NotImplemented.
     V_TEST_PTR rsi, rax
@@ -2708,8 +2809,9 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     ret
 
 .lrc_error:
+    RET_NULL                    ; an element's comparison raised
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC list_richcompare_inner
 
 section .data

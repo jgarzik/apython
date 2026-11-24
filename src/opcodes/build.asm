@@ -1049,6 +1049,7 @@ DEF_FUNC_BARE op_list_append
     mov rdx, r8                ; item tag for list_append
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1_JUMP
     ; list_append does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
     pop rsi                    ; value tag
@@ -1137,6 +1138,7 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     mov rdi, [rbp - LE_LIST]
     extern list_extend_from_array
     call list_extend_from_array
+    ERR_M1_JUMP
     jmp .extend_done
 
 .extend_generic:
@@ -1172,6 +1174,7 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     ; edx = tag (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1_JUMP
     ; DECREF item (list_append INCREFs)
     pop rsi                    ; tag
     pop rdi                    ; payload

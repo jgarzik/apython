@@ -68,7 +68,7 @@ DEF_FUNC list_method_append
     V_UNPACK rsi, rdx       ; args[1]
     mov rdi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: the sorting sentinel was tested just above
 
     RET_NONE
     leave
@@ -974,8 +974,13 @@ DEF_FUNC list_dunder_setitem
     mov rdx, [rdi + 16]     ; args[2] = value (already a Value)
     mov rdi, rax
     call list_ass_subscript
+    ERR_M1 .ldsi_fail
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+.ldsi_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC list_dunder_setitem
@@ -990,10 +995,15 @@ DEF_FUNC list_dunder_delitem
     xor edx, edx            ; a NULL value Value means "delete"
     mov rdi, rax
     call list_ass_subscript
+    ERR_M1 .lddi_fail
     extern none_singleton
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.lddi_fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC list_dunder_delitem
 
@@ -1007,6 +1017,7 @@ DEF_FUNC list_dunder_contains
     mov rsi, [rdi + 8]     ; item payload
     mov rdi, rax
     call list_contains
+    ERR_M1 .ldc_fail
     ; eax = 0 or 1 → return bool
     test eax, eax
     jz .ldc_false
@@ -1021,6 +1032,10 @@ DEF_FUNC list_dunder_contains
     INCREF rax
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.ldc_fail:
+    xor eax, eax                ; an element's __eq__ raised
+    leave
     ret
 END_FUNC list_dunder_contains
 
@@ -1335,6 +1350,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rdi, [rbp - LE_SELF]
     extern list_extend_from_array
     call list_extend_from_array
+    ERR_M1 .extend_iter_raised
     jmp .extend_done
 
 .extend_generic:
@@ -1371,6 +1387,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; edx = tag (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1 .extend_append_failed
     ; DECREF item (list_append INCREFs internally)
     pop rsi                     ; tag
     pop rdi                     ; payload
@@ -1388,6 +1405,14 @@ DEF_FUNC list_method_extend, LE_FRAME
     EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_iter_raised
     jmp .extend_done            ; nothing pending: an ordinary exhaustion
 
+.extend_append_failed:
+    ; Another thread began sorting this list while the iterator ran.  The
+    ; item and the iterator are still ours.
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - LE_ITER]
+    call obj_decref
 .extend_iter_raised:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx

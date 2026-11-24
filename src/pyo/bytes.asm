@@ -2387,7 +2387,7 @@ extern str_set_length
     lea rdi, [rel list_type]
     mov rsi, [rbp - BLS_ARGS]
     mov edx, 1
-    call list_type_call
+    call list_type_call       ; err: .bls_bad_type, below, looks for what is pending
     V_UNPACK rax, rdx
     test rax, rax
     jz .bls_bad_type

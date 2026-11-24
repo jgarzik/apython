@@ -1820,7 +1820,7 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
 .ean_append:
     mov rdi, [rbp - EAN_LIST]
     mov rsi, [rbp - EAN_NOTE]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
 
 .ean_out:
     mov rdi, [rbp - EAN_NAME]

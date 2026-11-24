@@ -298,7 +298,7 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
 
 .mdd_default:
     mov rdi, rbx
-    call dir_default
+    call dir_default          ; err: its 0 is this method's own answer
     pop rbx
     leave
     ret

@@ -413,7 +413,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r12
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 .path_no_placeholder:
@@ -456,7 +456,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r13
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 
@@ -507,7 +507,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r13
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop rbx

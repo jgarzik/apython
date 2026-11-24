@@ -82,7 +82,7 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     sub rsp, 8
     mov rdi, [rel icb_dirs]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     add rsp, 8
     pop rdi
     call obj_decref

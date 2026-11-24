@@ -2065,7 +2065,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, r12
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     pop rsi
     DECREF_VAL rdi, rsi

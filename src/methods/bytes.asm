@@ -2289,7 +2289,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov rdi, r13
     mov rsi, rax
     push rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop rcx
@@ -2360,7 +2360,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov rdi, r13
     mov rsi, rax
     push rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r11
@@ -2388,7 +2388,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov rdi, r13
     mov rsi, rax
     push rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 

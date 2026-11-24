@@ -494,7 +494,7 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
 .have_chain:
     mov rdi, rax
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: a chain lives in the side table and is never handed to Python
     ; The chain holds a BORROWED reference.  list_append took one, and it is
     ; given straight back: an owned one meant a ref nobody else held stayed
     ; alive for as long as its referent did, so `r = ref(c, cb); del r; del c`
@@ -1336,7 +1336,7 @@ DEF_FUNC wr_getweakrefs_func
     push rdx
     push r8
     mov rdi, [rsp + 24]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop r8
     pop rdx
     pop rcx

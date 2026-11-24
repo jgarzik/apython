@@ -1369,7 +1369,7 @@ DEF_FUNC memoryview_method_tolist, 40
     mov rdi, [rbp - MVL_OUT]
     push rsi
     push rsi
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rsi
     pop rsi
     DECREF_V rsi, rcx           ; V_PACK may have boxed it

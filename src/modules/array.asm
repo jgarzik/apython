@@ -750,7 +750,7 @@ DEF_FUNC array_richcompare, ARC_FRAME
     mov rsi, rax
     mov rdx, [rbp - ARC_OP]
     extern list_richcompare
-    call list_richcompare
+    call list_richcompare     ; err: (0, 0) with the exception pending is this slot's answer too
     mov [rbp - ARC_RES], rax
     mov [rbp - ARC_TAG], rdx
     call .arc_drop
@@ -1099,7 +1099,7 @@ DEF_FUNC array_tolist, ATL_FRAME
     push rax
     mov rdi, [rbp - ATL_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     DECREF_V rdi, rcx           ; a Value; list_append took its own reference
     inc qword [rbp - ATL_I]

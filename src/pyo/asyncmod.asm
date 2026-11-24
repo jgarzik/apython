@@ -937,7 +937,7 @@ DEF_FUNC gather_awaitable_iternext, GAI_FRAME
     mov rsi, [rax + AsyncTask.result]
 .gai_append:
     mov rdi, [rsp + 8]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - GAI_I]
     jmp .gai_gather
 

@@ -383,7 +383,7 @@ DEF_FUNC type_method_subclasses, TMS_FRAME
     mov rdx, [rax + SubList.items]
     mov rsi, [rdx + rcx*8]
     mov rdi, [rbp - TMS_LIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - TMS_IDX]
     jmp .tms_copy
 

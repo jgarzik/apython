@@ -302,7 +302,7 @@ END_FUNC object_method_sizeof
 DEF_FUNC object_method_dir
     extern dir_default
     mov rdi, [rdi]              ; args[0] = self, a Value
-    call dir_default
+    call dir_default          ; err: its 0 is this method's own answer
     leave
     ret
 END_FUNC object_method_dir

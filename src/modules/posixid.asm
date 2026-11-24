@@ -271,7 +271,7 @@ DEF_FUNC posixid_getgroups, GG_FRAME
     V_PACK rax, rdx
     mov rdi, [rbp - GG_OUT]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - GG_I]
     jmp .gg_loop
 .gg_done:

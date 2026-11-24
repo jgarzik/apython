@@ -895,7 +895,7 @@ DEF_FUNC posix_scandir, PSD_FRAME
     mov rdi, [rbp - PSD_LIST]
     mov rsi, rcx
     push rcx
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref                 ; the list took its own
 

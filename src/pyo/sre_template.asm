@@ -736,7 +736,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     sub rsp, 8
     mov rdi, [rbp - TP_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     add rsp, 8
     pop rdi
     call obj_decref
@@ -756,7 +756,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     V_PACK_I64 rax, rcx
     mov rsi, rax
     mov rdi, [rbp - TP_LIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rax
     ret
 
@@ -959,7 +959,7 @@ DEF_FUNC sre_template_expand, TE_FRAME
 
     mov rdi, [rbp - TE_OUT]
     mov rsi, rax
-    call list_append            ; takes its own reference
+    call list_append            ; takes its own reference -- err: a list built here is not being sorted
     jmp .te_next
 
 .te_group:
@@ -984,7 +984,7 @@ DEF_FUNC sre_template_expand, TE_FRAME
     mov [rbp - TE_SEP], rax     ; borrow the slot: it is free until the join
     mov rdi, [rbp - TE_OUT]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - TE_SEP]
     call obj_decref
     mov qword [rbp - TE_SEP], 0

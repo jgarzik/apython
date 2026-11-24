@@ -1471,7 +1471,7 @@ DEF_FUNC sock_poll_fn, 56
     V_PACK rax, rdx
     mov rdi, [rbp - SPL_OUT]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - SPL_I]
     jmp .spl_out
 .spl_done:
@@ -1715,7 +1715,7 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     V_PACK rax, rdx
     mov rdi, [rbp - SEW_OUT]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rcx, [rbp - SEW_I]
     imul rcx, rcx, 12
     mov rdx, [rbp - SEW_EVS]
@@ -1724,7 +1724,7 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     V_PACK rax, rdx
     mov rdi, [rbp - SEW_OUT]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - SEW_I]
     jmp .sew_out
 .sew_done:

@@ -715,7 +715,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -750,7 +750,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -816,7 +816,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; Append tuple to list
     mov rdi, r14
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref
     lea rdi, [rbp - FA_STATE]
@@ -2200,7 +2200,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -2240,7 +2240,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -2288,7 +2288,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx

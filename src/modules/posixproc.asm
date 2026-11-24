@@ -284,7 +284,7 @@ DEF_FUNC posix_register_at_fork, PRF_FRAME
     cmp rsi, rax
     je .prf_next
     extern list_append
-    call list_append
+    call list_append          ; err: the three fork-hook lists are private to this module
 .prf_next:
     inc qword [rbp - PRF_I]
     jmp .prf_loop

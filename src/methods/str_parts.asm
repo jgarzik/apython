@@ -674,7 +674,7 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     mov rdi, r13
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r8
@@ -711,7 +711,7 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     mov rdi, r13
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r8
@@ -734,7 +734,7 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     mov rdi, r13
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 
@@ -1154,7 +1154,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
 .trn_append_r12:
     mov rdi, [rbp - TRN_LIST]
     mov rsi, r12
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, r12
     DECREF_V rdi, rcx
     jmp .trn_next
@@ -1179,7 +1179,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rbx, rax
     mov rdi, [rbp - TRN_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref
     mov rdi, r12
@@ -1201,7 +1201,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rbx, rax
     mov rdi, [rbp - TRN_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref
 

@@ -1539,6 +1539,8 @@ END_FUNC builtin_locals
 
 ;; ============================================================================
 ;; dir_default(rdi = obj Value) -> rax = a list Value of the names obj carries
+;; Fails: 0
+;; for a key whose __eq__ raises while the names are being told apart.
 ;;
 ;; What object.__dir__ answers: the tp_dicts along the MRO, plus the instance
 ;; __dict__ when the object has one.  A module is the exception CPython also
@@ -1653,11 +1655,12 @@ DEF_FUNC dir_default, DD_FRAME
     mov rdi, rbx
     mov rsi, r12
     call list_contains
+    ERR_M1 .dd_class_raised
     test eax, eax
     jnz .dd_class_present
     mov rdi, rbx
     mov rsi, r12
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
 .dd_class_present:
     mov rdi, r12
     call obj_decref
@@ -1672,6 +1675,19 @@ DEF_FUNC dir_default, DD_FRAME
     V_PACK rax, rdx             ; one Value out
     ret
 
+.dd_class_raised:
+    mov rdi, r12                ; the "__class__" being looked for
+    call obj_decref
+.dd_fail:
+    mov rdi, rbx                ; the list so far
+    call obj_decref
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
 ;; .dd_add_keys(rdi = a dict) -- append each of its keys to rbx, skipping the
 ;; ones already there.  Bases repeat names the derived class already gave.
 .dd_add_keys:
@@ -1684,27 +1700,38 @@ DEF_FUNC dir_default, DD_FRAME
     test rax, rax
     jz .dd_keys_done
     mov rdi, r13
-    call rax                    ; tp_iternext(iter) -> key or NULL
-    V_UNPACK rax, rdx
-    test edx, edx
+    call rax                    ; tp_iternext(iter) -> the key Value, or 0
+    test rax, rax
     jz .dd_keys_done
 
+    ; The key stays a Value, and stays on the stack until it is released.
+    ; It used to be unpacked, and only the first of the two calls below was
+    ; handed it packed again: `vars(o)[5] = 1; dir(o)` appended the raw 5 as
+    ; a pointer.  The already-present arm also never released it.
     push rax
     mov rdi, rbx
     mov rsi, rax
-    V_PACK rsi, rdx             ; list_contains takes a Value
     call list_contains
+    ERR_M1 .dd_key_raised
     test eax, eax
-    pop rax
-    jnz .dd_key_loop            ; already present
-
-    push rax
+    jnz .dd_key_drop            ; already present
     mov rdi, rbx
-    mov rsi, rax
-    call list_append
+    mov rsi, [rsp]
+    call list_append          ; err: a list built here is not being sorted
+.dd_key_drop:
     pop rdi
-    call obj_decref
+    DECREF_V rdi, rax
     jmp .dd_key_loop
+
+.dd_key_raised:
+    ; A key's __eq__ raised.  The key and the iterator go back, then this
+    ; subroutine's own return address, and the walk ends at the error exit.
+    pop rdi
+    DECREF_V rdi, rax
+    mov rdi, r13
+    call obj_decref
+    add rsp, 8
+    jmp .dd_fail
 
 .dd_keys_done:
     mov rdi, r13
@@ -1803,6 +1830,7 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
 .bd_default:
     mov rdi, [rbp - BD_OBJ]
     call dir_default            ; -> a list Value; a pointer is its own Value
+    ERR_NULL .bd_propagate
     mov rbx, rax
     mov [rbp - BD_SORT], rax
 

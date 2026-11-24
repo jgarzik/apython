@@ -25,6 +25,7 @@ section .text
 ;; union_type_or(rdi = the left Value, rsi = the right Value)
 ;;   -> (rax = a UnionType, rdx = TAG_PTR), or a NULL Value when the pair is
 ;;      not unionable
+;; Fails: 0?
 ;;
 ;; types.UnionType -- what `int | str` evaluates to (PEP 604).
 ;; types.py takes UnionType from `type(int | str)`.  Represented as a
@@ -136,6 +137,16 @@ DEF_FUNC union_type_or, UTO_FRAME
     leave
     ret
 
+.uto_raised:
+    ; A member's __eq__ raised -- a metaclass can define one.  This is
+    ; reached from one or two subroutine calls down, so rsp is put back where
+    ; the body keeps it (the frame and the four pushes) before the accumulator
+    ; is released; (0, 0) with the exception pending is a binary slot's error.
+    lea rsp, [rbp - UTO_FRAME - 32]
+    mov rdi, rbx
+    call obj_decref
+    jmp .uto_notimpl
+
 ;; .uto_add_operand(rdi = one operand Value) -- add what it contributes to the
 ;; list in rbx.  A union contributes its members; anything else contributes
 ;; itself.  Uses r13 and r14.
@@ -175,13 +186,14 @@ DEF_FUNC union_type_or, UTO_FRAME
     mov rdi, rbx
     extern list_contains
     call list_contains
+    ERR_M1 .uto_raised
     pop rdi
     test eax, eax
     jnz .uto_ao_one_done        ; int | int, and (int|str) | str
     mov rsi, rdi
     mov rdi, rbx
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
 .uto_ao_one_done:
     ret
 END_FUNC union_type_or

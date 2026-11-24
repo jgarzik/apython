@@ -634,7 +634,7 @@ DEF_FUNC posix_listdir, PLD_FRAME
     mov rbx, rax
     mov rdi, [rbp - PLD_LIST]
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref                 ; list_append took its own
 

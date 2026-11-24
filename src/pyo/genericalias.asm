@@ -362,9 +362,14 @@ END_FUNC generic_alias_dunder_ror
 DEF_FUNC_LOCAL gad_or_common
     extern union_type_or
     call union_type_or
+    ERR_PENDING .goc_fail
     test rax, rax
     jz .goc_ni
     V_PACK rax, rdx
+    leave
+    ret
+.goc_fail:
+    xor eax, eax                ; a member's __eq__ raised
     leave
     ret
 .goc_ni:

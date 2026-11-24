@@ -246,7 +246,7 @@ DEF_FUNC_LOCAL import_add_path_cstr
     sub rsp, 8
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: startup, before anything can be sorting sys.path
     add rsp, 8
     pop rdi
     call obj_decref
@@ -382,7 +382,7 @@ DEF_FUNC import_init
     push rcx
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: startup, before anything can be sorting sys.path
     pop rcx
     pop rdi
     call obj_decref
@@ -2579,7 +2579,7 @@ DEF_FUNC_LOCAL import_ns_portions_add, INPA_FRAME
     mov [rbp - INPA_STR], rax
     mov rdi, [rel import_ns_portions]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     ; list_append took its own reference.
     mov rdi, [rbp - INPA_STR]
     call obj_decref
@@ -2986,7 +2986,7 @@ DEF_FUNC import_load_module, IF_FRAME
     push r8
     mov rdi, r8
     mov rsi, [rsp + 8]         ; pkg dir str
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     ; DECREF pkg dir str
     mov rdi, [rsp + 8]
     call obj_decref

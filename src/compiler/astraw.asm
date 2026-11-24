@@ -206,7 +206,7 @@ DEF_FUNC_LOCAL ar_children, ARC_FRAME
     mov rbx, rax
     mov rdi, [rbp - ARC_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     DECREF_V rdi, rcx           ; the list took its own
     inc qword [rbp - ARC_I]
@@ -224,7 +224,7 @@ DEF_FUNC_LOCAL ar_children, ARC_FRAME
     mov rbx, rax
     mov rdi, [rbp - ARC_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     DECREF_V rdi, rcx
     ; Then the operand.
@@ -241,7 +241,7 @@ DEF_FUNC_LOCAL ar_children, ARC_FRAME
     mov rbx, rax
     mov rdi, [rbp - ARC_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     DECREF_V rdi, rcx
     inc qword [rbp - ARC_I]
@@ -622,7 +622,7 @@ DEF_FUNC ar_typeignores, ATI2_FRAME
     mov rdi, [rbp - ATI2_LIST]
     mov rsi, r12
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, r12
     extern obj_decref
     call obj_decref
