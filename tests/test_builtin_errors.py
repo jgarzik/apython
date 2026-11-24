@@ -400,3 +400,28 @@ check("int trunc warn error", lambda: int(TruncFloat()))
 check("int sub warn error", lambda: int(SubIntSub(3)))
 check("int bool warn error", lambda: int(IntBool()))
 warnings.resetwarnings()
+
+# --- __reduce__, __setstate__ and __length_hint__ of the builtin iterators ------
+ITERATOR_TYPES = (
+    ("list iterator", type(iter([]))),
+    ("tuple iterator", type(iter(()))),
+    ("str iterator", type(iter(""))),
+    ("bytes iterator", type(iter(b""))),
+    ("bytearray iterator", type(iter(bytearray()))),
+    ("range iterator", type(iter(range(3)))),
+    ("dict iterator", type(iter({}))),
+    ("set iterator", type(iter(set()))),
+    ("dict reverse iterator", type(reversed({}))),
+)
+for label, iterator_type in ITERATOR_TYPES:
+    for method in ("__reduce__", "__length_hint__"):
+        unbound = getattr(iterator_type, method)
+        check(label + " " + method + " unbound", lambda: unbound())
+check("list iterator __setstate__ none", lambda: iter([1]).__setstate__())
+check("list iterator __setstate__ str", lambda: iter([1]).__setstate__("a"))
+check("range.__reduce__ unbound", lambda: range.__reduce__())
+check("slice.__reduce__ unbound", lambda: slice.__reduce__())
+check("builtin function __reduce__ unbound", lambda: type(len).__reduce__())
+check("bound method __reduce__ unbound", lambda: type([].append).__reduce__())
+check("Ellipsis __reduce__ unbound", lambda: type(...).__reduce__())
+check("NotImplemented __reduce__ unbound", lambda: type(NotImplemented).__reduce__())
