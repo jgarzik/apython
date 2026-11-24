@@ -176,7 +176,7 @@ DEF_FUNC str_sub_new, SSN_FRAME
     mov rdi, rsi
     mov rsi, rdx
     extern builtin_str_fn
-    call builtin_str_fn
+    call builtin_str_fn         ; err: .ssn_failed, by the tag below
     V_UNPACK rax, rdx
     test edx, edx
     jz .ssn_failed

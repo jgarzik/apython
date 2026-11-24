@@ -132,7 +132,7 @@ DEF_FUNC scalar_dunder_new
     mov rdi, r12
     mov rsi, rsi                ; the argument count, less the class
     extern builtin_str_fn
-    call builtin_str_fn
+    call builtin_str_fn         ; err: its 0 is this function's own
     pop r12
     pop rbx
     leave
