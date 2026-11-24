@@ -34,6 +34,7 @@ test_async_gen
 test_async_gen_sleep
 test_async_iterator_protocol
 test_async_many_tasks
+test_async_resolve
 test_async_run
 test_async_streams
 test_async_tasks
@@ -376,6 +377,7 @@ test_getattr_immediate
 test_getattr_raises
 test_getset_descriptors
 test_getset_receiver
+test_global_cache_guard
 test_hashlib_digests
 test_hashlib_openssl
 test_hashlib_sha3_blake2
@@ -619,6 +621,7 @@ test_re_bytes_pattern_hash
 test_recursion_and_repr
 test_recursion
 test_reduce_protocol
+test_reentrant_clear
 test_reflexive_compare
 test_relative_import
 test_re_module
@@ -627,6 +630,7 @@ test_re_possessive_groups
 test_repr_depth_unwind
 test_repr_element_raises
 test_repr
+test_repr_reentrant
 test_repr_str_cycle
 test_re_review
 test_re_sub_mismatched_repl
@@ -673,6 +677,7 @@ test_singleton_construct
 test_size_and_recursion_limits
 test_slice_and_star_args
 test_slice_assign
+test_slice_assign_reentrant
 test_slice_bound_mutates
 test_slice_compare
 test_slice_index_protocol
@@ -784,6 +789,10 @@ test_sys_exit
 test_sys_is_finalizing
 test_sys_version_platform
 test_termios
+test_thread_basic
+test_threading_runs
+test_thread_lock
+test_thread_stress
 test_throw_handled_context
 test_time_clock_info
 test_time_clocks
