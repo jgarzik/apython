@@ -224,6 +224,8 @@ DEF_FUNC property_method_init, PMI_FRAME
     mov rdi, rbx
     mov rdx, r13                            ; the doc, a Value
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
 .pmi_done:
 
     mov rdi, r12                            ; the throwaway, now emptied

@@ -1794,6 +1794,7 @@ section .text
     jz .rev_try_heap_len
     mov rdi, r12
     call rcx
+    ERR_M1_JUMP
     jmp .rev_have_len
 
 .rev_try_heap_len:

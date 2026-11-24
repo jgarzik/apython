@@ -260,6 +260,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     test rax, rax
     jz .divmod_no_slot          ; declined: fall back to // and %
     pop r15
@@ -311,6 +312,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     ; A slot may decline: this branch taught int_floordiv and int_mod to
     ; answer NULL for a non-int operand, and op_binary_op to fall back on the
     ; other operand's slot.  divmod() is the other direct caller and was not
@@ -333,6 +335,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     test rax, rax
     jz .divmod_type_error
 .divmod_have_quot:
@@ -357,6 +360,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     test rax, rax
     jnz .divmod_have_rem
     mov rdi, r12
@@ -374,6 +378,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     test rax, rax
     jz .divmod_pop_type_error
 .divmod_have_rem:

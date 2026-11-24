@@ -1025,6 +1025,9 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rdi, rbx
     mov rsi, [rbp - IG_NAME]
     call rax
+    GETATTR_HOOK_SKIP .ig_base_ok
+    ERR_PENDING_JUMP
+.ig_base_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .no_base_getattr

@@ -1816,6 +1816,7 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
     jz .src_bad
     mov rdi, rsi
     call rcx                    ; nb_index answers a Value
+    ERR_PENDING_JUMP
     test rax, rax
     jz .src_bad
     mov [rbp - SRC_HELD], rax
@@ -2615,13 +2616,18 @@ DEF_FUNC obj_hash
     test rax, rax
     jz .default_hash
 
-    ; tail-call tp_hash(rdi=obj, edx=tag)
+    ; tp_hash(rdi=obj, edx=tag)
     ; tp_hash implementations (int_hash) forward edx to int_unwrap, so the
     ; tag MUST be supplied here -- leaving edx undefined makes int_unwrap
     ; take a random branch and int_hash return the object address.
     mov edx, esi
+    call rax
+    ; A hash is any int64, -1 included; -1 with an exception pending is
+    ; __hash__ having raised.  Transitional: every caller of obj_hash takes
+    ; whatever comes back for a hash.
+    ERR_M1_JUMP
     leave
-    jmp rax
+    ret
 
 .smallint_hash:
     ; Shared with int_hash / builtin_hash: sign(v) * (|v| mod 2^61-1).
@@ -2714,6 +2720,8 @@ DEF_FUNC_BARE obj_is_true
     ; `not x` and `if x:` were right, because they go elsewhere.
     mov edx, TAG_PTR
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     add rsp, OIT_PAD
     pop rbx
     pop rbp
@@ -2730,6 +2738,7 @@ DEF_FUNC_BARE obj_is_true
     jz .check_map_len
     mov rdi, rbx
     call rax
+    ERR_M1_JUMP
     test rax, rax
     jnz .true
     jmp .false
@@ -2745,6 +2754,7 @@ DEF_FUNC_BARE obj_is_true
     jz .check_dunder_bool
     mov rdi, rbx
     call rax
+    ERR_M1_JUMP
     test rax, rax
     jnz .true
     jmp .false

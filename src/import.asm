@@ -1410,6 +1410,9 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     mov rdi, r13                ; parent module
     mov rsi, rax                ; "__path__" key
     call rcx                    ; tp_getattr
+    GETATTR_HOOK_SKIP .fl_path_ok
+    ERR_PENDING_JUMP
+.fl_path_ok:
     mov r12, rax                ; r12 = __path__ list (or NULL)
     pop rdi                     ; DECREF "__path__" str
     call obj_decref

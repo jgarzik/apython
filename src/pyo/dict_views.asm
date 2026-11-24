@@ -528,7 +528,11 @@ DEF_FUNC_BARE dvr_len
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     mov rax, [rax + PySequenceMethods.sq_length]
-    jmp rax
+    sub rsp, 8
+    call rax
+    add rsp, 8
+    ERR_M1_JUMP
+    ret
 END_FUNC dvr_len
 
 ;; ============================================================================
@@ -570,7 +574,9 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     mov rax, [rax + PySequenceMethods.sq_contains]
-    call rax                    ; sq_contains unwinds rather than reporting
+    call rax                    ; 0 or 1, or -1 with it raised
+    movsxd rax, eax
+    ERR_M1 .dac_contains_raised
     mov r13d, eax
     mov rdi, rbx
     DECREF_V rdi, rcx
@@ -590,6 +596,11 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     EXC_RAISED_SINCE [rbp - DAC_EXC], rcx, .dac_error
     mov eax, 1
     jmp .dac_out
+.dac_contains_raised:
+    mov rdi, rbx
+    DECREF_V rdi, rcx
+    mov rdi, r12
+    call obj_decref
 .dac_error:
     mov eax, -1
 .dac_out:
@@ -949,6 +960,8 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     mov rdi, [rbp - DVJ_SELF]
     mov rsi, rbx
     call rax
+    movsxd rax, eax             ; 0 or 1, or -1 with it raised
+    ERR_M1 .dvj_contains_raised
     push rax
     push rax
     mov rdi, rbx
@@ -995,6 +1008,9 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     leave
     ret
 
+.dvj_contains_raised:
+    mov rdi, rbx
+    DECREF_V rdi, rcx
 .dvj_raised_iter:
     mov rdi, [rbp - DVJ_ITER]
     DECREF_V rdi, rcx

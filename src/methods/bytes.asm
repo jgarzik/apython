@@ -328,6 +328,7 @@ DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     jz .bsc_no_len
 .bsc_measure:
     call rcx
+    ERR_M1_JUMP
     cmp rax, 1
     jne .bsc_bad_len
     RAISE exc_TypeError_type, "sep must be str or bytes."

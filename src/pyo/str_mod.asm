@@ -9,6 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern bool_true
@@ -1587,6 +1588,7 @@ DEF_FUNC_LOCAL str_mod_subscript
     test rax, rax
     jz .sms_none
     call rax
+    ERR_PENDING_JUMP            ; __getitem__ raised
     leave
     ret
 .sms_none:

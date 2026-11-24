@@ -1307,6 +1307,7 @@ DEF_FUNC builtin_len, LEN_FRAME
     jz .try_sequence
     mov rdi, rbx
     call rcx
+    ERR_M1 .len_failed
     jmp .make_int
 
 .try_sequence:
@@ -1320,6 +1321,7 @@ DEF_FUNC builtin_len, LEN_FRAME
     jz .try_dunder_len
     mov rdi, rbx
     call rcx
+    ERR_M1 .len_failed
     jmp .make_int
 
 .try_dunder_len:

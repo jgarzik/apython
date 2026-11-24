@@ -570,6 +570,7 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     mov rsi, [rbp - SAD_NARGS]
     call [rbp - SAD_FN]
     add rsp, 64
+    ERR_NULL .sad_failed
 
     V_UNPACK rax, rdx
     lea rcx, [rel bool_true]
@@ -583,6 +584,10 @@ DEF_FUNC_LOCAL str_affix_dispatch, SAD_FRAME
     mov rdi, [rbp - SAD_ARGS]
     mov rsi, [rbp - SAD_NARGS]
     call [rbp - SAD_FN]
+    leave
+    ret
+
+.sad_failed:
     leave
     ret
 
@@ -2579,6 +2584,7 @@ DEF_FUNC_LOCAL fm_subscript
     test rax, rax
     jz .fms_no_protocol
     call rax
+    ERR_PENDING_JUMP            ; __getitem__ raised
     leave
     ret
 .fms_no_protocol:
@@ -2788,6 +2794,7 @@ DEF_FUNC_LOCAL fm_lookup
     test rax, rax
     jz .fml_none
     call rax
+    ERR_PENDING_JUMP            ; __getitem__ raised
     mov r8d, 1
     leave
     ret

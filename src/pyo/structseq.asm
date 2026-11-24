@@ -38,6 +38,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern none_singleton
 extern ap_malloc
 extern ap_free
@@ -591,6 +592,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     test rax, rax
     jz .ssc_bad_len
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx
     test edx, edx
     jz .ssc_bad_len

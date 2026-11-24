@@ -1048,11 +1048,10 @@ DEF_FUNC property_descr_set
     mov rsi, rsp                ; args ptr
     mov edx, 2                  ; nargs = 2
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                 ; pop args
-
-    ; DECREF result (fset returns None typically)
-    DECREF_VAL rax, edx
+    ERR_NULL .pds_failed
+    DECREF_V rax, rdx           ; fset's None
+    xor eax, eax
 
 .pds_done:
     pop r14
@@ -1076,9 +1075,13 @@ DEF_FUNC property_descr_set
     mov rsi, rsp
     mov edx, 1
     call rax
-    V_UNPACK rax, rdx
     add rsp, 16
-    DECREF_VAL rax, edx
+    ERR_NULL .pds_failed
+    DECREF_V rax, rdx
+    xor eax, eax
+    jmp .pds_done
+.pds_failed:
+    mov rax, -1                 ; the setter raised
     jmp .pds_done
 
 .pds_no_deleter:
@@ -1751,7 +1754,10 @@ DEF_FUNC getset_descr_get, GDG_FRAME
     mov rsi, [rsi + PyGetSetDescrObject.gs_name]
     call rax
     test rax, rax
-    jz .gdg_unreadable
+    jnz .gdg_out
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .gdg_unreadable
+.gdg_out:
     leave
     ret
 .gdg_unreadable:

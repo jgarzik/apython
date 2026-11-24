@@ -996,6 +996,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     jz .trn_have_lookup
     mov rdi, rax
     call rdx
+    ERR_M1_JUMP
     mov [rbp - TRN_LEN], rax
 
 .trn_have_lookup:

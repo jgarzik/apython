@@ -17,6 +17,7 @@
 %include "opcodes.inc"
 
 ; --- what descriptors.asm keeps ---
+extern eval_exception_unwind
 extern ga_name_str
 extern generic_alias_as_number
 extern union_type
@@ -1501,8 +1502,12 @@ DEF_FUNC gas_subscript_any
     mov rax, [rax + PyMappingMethods.mp_subscript]
     test rax, rax
     jz .gsa_dunder
+    call rax
+    ; The caller stores what this answers straight into a tuple, so a
+    ; __getitem__ that raised must not come back as a value.  Transitional.
+    ERR_PENDING_JUMP
     leave
-    jmp rax
+    ret
 .gsa_dunder:
     call mapping_getitem_opt
     leave

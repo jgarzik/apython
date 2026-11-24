@@ -18,6 +18,7 @@
 %include "macros.inc"
 %include "value.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern tuple_new
@@ -169,6 +170,7 @@ DEF_FUNC type_custom_check, TCI_FRAME
     mov rsi, rsp
     mov edx, 2
     call rcx
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx
     add rsp, 16
     test edx, edx

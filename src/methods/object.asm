@@ -660,9 +660,14 @@ DEF_FUNC %1_dunder_len
     jz %%bad
 %%have:
     call rcx
+    ERR_M1 %%failed
     mov edx, TAG_SMALLINT
     leave
     V_PACK rax, rdx
+    ret
+%%failed:
+    xor eax, eax
+    leave
     ret
 %%arity:
     dec rsi
@@ -1561,6 +1566,8 @@ DEF_FUNC %1_dunder_bool
     test rax, rax
     jz %%bad
     call rax
+    movsxd rax, eax             ; 0 or 1, or -1 with it raised
+    ERR_M1 %%failed
     test eax, eax
     jz %%false
     extern bool_true
@@ -1572,6 +1579,10 @@ DEF_FUNC %1_dunder_bool
     extern bool_false
     lea rax, [rel bool_false]
     INCREF rax
+    leave
+    ret
+%%failed:
+    xor eax, eax
     leave
     ret
 %%bad:
@@ -2194,12 +2205,18 @@ DEF_FUNC object_method_eq
     mov rsi, rbx
     mov edx, CMP_EQ
     call rax
+    ERR_PENDING .ome_failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .ome_notimpl
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.ome_failed:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 .ome_notimpl:
     lea rax, [rel notimpl_singleton]
@@ -2249,6 +2266,7 @@ DEF_FUNC object_method_ne
     mov rsi, rbx
     mov edx, CMP_EQ
     call rax
+    ERR_PENDING .omn_failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .omn_notimpl
@@ -2295,6 +2313,11 @@ DEF_FUNC object_method_ne
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.omn_failed:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 .omn_error:
     RAISE exc_TypeError_type, "__ne__() takes exactly one argument"
@@ -2393,6 +2416,7 @@ DEF_FUNC %1_dunder_hash
     test rax, rax
     jz %%bad
     call rax
+    ERR_M1 %%failed
     ; A hash is a full int64 and most of them fall outside the +-2^50 an
     ; immediate holds, so it has to be boxed rather than biased: adding
     ; V_INT_BIAS to a large one lands in the float range, and
@@ -2402,6 +2426,10 @@ DEF_FUNC %1_dunder_hash
     call int_from_i64
     leave
     V_PACK rax, rdx
+    ret
+%%failed:
+    xor eax, eax
+    leave
     ret
 %%bad:
     dec rsi
@@ -2542,11 +2570,17 @@ DEF_FUNC generic_method_contains
     mov rsi, [rdi + 8]          ; the item, as a Value
     mov rdi, rax
     call rcx
+    movsxd rax, eax             ; 0 or 1, or -1 with it raised
+    ERR_M1 .gmc_failed
     test eax, eax
     jz .gmc_false
     RET_TRUE
     leave
     V_PACK rax, rdx
+    ret
+.gmc_failed:
+    xor eax, eax
+    leave
     ret
 .gmc_false:
     RET_FALSE
