@@ -182,6 +182,7 @@ DEF_FUNC tuple_subscript
     mov rdi, rsi               ; key
     lea rsi, [rel ts_index_msg] ; ...and the refusal names the container
     call obj_as_index_seq          ; int, bool, int subclass or __index__
+    ERR_M1_JUMP
     mov rsi, rax               ; index
     mov rdi, rbx
     call tuple_getitem         ; already returns a Value

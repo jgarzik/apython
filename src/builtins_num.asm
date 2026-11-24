@@ -815,6 +815,7 @@ DEF_FUNC builtin_chr, 16
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
 
     cmp rax, 0x7fffffff
     jg .chr_too_wide
@@ -950,6 +951,7 @@ DEF_FUNC builtin_hex, HEXB_FRAME
     jnz .hex_have_value
     mov rdi, [rbp - HEXB_VAL]
     call obj_as_index
+    ERR_M1 .idx_fail
     mov rdx, TAG_SMALLINT
     V_PACK rax, rdx
     mov [rbp - HEXB_VAL], rax
@@ -1019,6 +1021,12 @@ DEF_FUNC builtin_hex, HEXB_FRAME
     CSTRING rdi, "hex() takes exactly one argument ("
     extern raise_type_error_counted
     jmp raise_type_error_counted
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_hex
 
 ; builtin_eval_fn used to live here: a stub that parsed a single integer
@@ -1514,6 +1522,7 @@ DEF_FUNC builtin_bin, BINB_FRAME
     jnz .bin_have_value
     mov rdi, [rbp - BINB_VAL]
     call obj_as_index
+    ERR_M1 .idx_fail
     mov rdx, TAG_SMALLINT
     V_PACK rax, rdx
     mov [rbp - BINB_VAL], rax
@@ -1583,6 +1592,12 @@ DEF_FUNC builtin_bin, BINB_FRAME
     CSTRING rdi, "bin() takes exactly one argument ("
     extern raise_type_error_counted
     jmp raise_type_error_counted
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_bin
 
 ;; ============================================================================
@@ -1611,6 +1626,7 @@ DEF_FUNC builtin_oct, OCTB_FRAME
     jnz .oct_have_value
     mov rdi, [rbp - OCTB_VAL]
     call obj_as_index
+    ERR_M1 .idx_fail
     mov rdx, TAG_SMALLINT
     V_PACK rax, rdx
     mov [rbp - OCTB_VAL], rax
@@ -1680,6 +1696,12 @@ DEF_FUNC builtin_oct, OCTB_FRAME
     CSTRING rdi, "oct() takes exactly one argument ("
     extern raise_type_error_counted
     jmp raise_type_error_counted
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_oct
 
 ; const_one is read by round() and pow(); it lived in a .rodata block shared

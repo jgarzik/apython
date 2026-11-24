@@ -206,6 +206,7 @@ DEF_FUNC bytes_subscript
     mov rdi, r12
     lea rsi, [rel bs_index_msg]
     call obj_as_index_seq
+    ERR_M1_JUMP
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax
@@ -1952,6 +1953,7 @@ DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
     je .bib_not_int
     mov edx, TAG_PTR
     call obj_as_index
+    ERR_M1_JUMP
 
 .bib_check:
     test rax, rax

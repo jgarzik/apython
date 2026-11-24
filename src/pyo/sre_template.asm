@@ -24,6 +24,7 @@
 %include "object.inc"
 %include "sre.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -670,6 +671,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index           ; the index may be a heap int
+    ERR_M1_JUMP
     call .tp_addgroup
     inc qword [rbp - TP_POS]
     jmp .tp_loop
@@ -942,6 +944,7 @@ DEF_FUNC sre_template_expand, TE_FRAME
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index           ; boxed whenever INT_STRESS=1 is on
+    ERR_M1_JUMP
     mov rsi, rax
     mov rdi, [rbp - TE_MATCH]
     call sre_match_get_group_str

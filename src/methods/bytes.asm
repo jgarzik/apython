@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern eval_exception_unwind
 extern str_type
 extern bytes_new
 extern bytearray_type_call
@@ -87,6 +88,7 @@ section .text
     mov rdi, [rbp - %1]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     jl %%range
     cmp rax, 255
@@ -149,6 +151,7 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     ; A POSITIVE group counts from the right and a negative one from the
     ; left, which is only the same when the length divides: b"abcde"
     ; groups as 61-6263-6465 one way and 6162-6364-65 the other.  Zero
@@ -721,6 +724,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov r11, rax
     mov r8, [rbp - BAF_SLEN]
     test r11, r11
@@ -740,6 +744,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdi, [rdi + 24]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop r11
     mov rcx, [rbp - BAF_SLEN]
     test rax, rax
@@ -1013,6 +1018,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop r9
     pop r8
     mov r11, rax
@@ -1034,6 +1040,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rdi, [rdi + 24]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     add rsp, 8
     pop r11
     pop r9
@@ -1212,6 +1219,7 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov r11, rax
     mov r8, [rbp - BF_SLEN]
     test r11, r11
@@ -1227,6 +1235,7 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov rdi, [rdi + 24]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop r11
     mov rcx, [rbp - BF_SLEN]
     test rax, rax
@@ -1848,6 +1857,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     V_UNPACK rdi, rdx           ; obj_as_index takes the pair, as str.replace
     extern obj_as_index         ; hands it
     call obj_as_index
+    ERR_M1_JUMP
     mov [rbp - BR_COUNT], rax
     jmp .br_count_done
 .br_count_unlimited:
@@ -2103,6 +2113,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     add rsp, 8
     pop rdi
     mov [rbp - BSP_MAX], rax

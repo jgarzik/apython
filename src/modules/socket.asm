@@ -124,6 +124,7 @@ DEF_FUNC_LOCAL sk_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop rdi
     push rax
     sub rsp, 8

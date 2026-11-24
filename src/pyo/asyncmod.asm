@@ -12,6 +12,7 @@
 %include "object.inc"
 %include "eventloop.inc"
 
+extern eval_exception_unwind
 extern ap_strcmp
 extern obj_is_true
 extern task_type
@@ -285,6 +286,7 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     V_UNPACK rdi, rdx           ; of them eight bytes out of alignment
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     js .awf_value_error
     mov rbx, rax
@@ -294,6 +296,7 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     mov rdi, [rdi + 8]          ; the poll mask
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     shl rax, 32
     or rbx, rax
 

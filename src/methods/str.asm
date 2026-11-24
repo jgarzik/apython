@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern eval_exception_unwind
 extern str_alloc_bytes
 extern str_cp_width
 extern ap_malloc
@@ -949,6 +950,7 @@ DEF_FUNC str_method_replace
     mov rdi, [rdi + 24]         ; args[3]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, [rbp - RPL_ARGS]
     test rax, rax
     js .repl_count_done
@@ -1568,6 +1570,7 @@ DEF_FUNC_LOCAL str_split_impl, SPI_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop rdi
     test rax, rax
     js .spi_ready                   ; a negative maxsplit means no limit

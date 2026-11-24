@@ -1673,6 +1673,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     lea rsi, [rel ms_index_msg]
     extern obj_as_index_seq
     call obj_as_index_seq
+    ERR_M1_JUMP
     mov rsi, rax
     jmp .ms_int_index
 
@@ -1744,6 +1745,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_KEY]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rsi, rax
     mov rdi, [rbp - MA_OBJ]
     push rsi
@@ -1785,6 +1787,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
 
     ; The range is the format's, not the byte's.  An eight-byte field takes
     ; whatever obj_as_index answered, which is already an i64.

@@ -149,6 +149,7 @@ DEF_FUNC tuple_method_index, 16
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
     call obj_as_slice_index
+    ERR_M1_JUMP
     pop rcx
     mov rcx, rax
     ; Handle negative start
@@ -168,6 +169,7 @@ DEF_FUNC tuple_method_index, 16
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
     call obj_as_slice_index
+    ERR_M1_JUMP
     pop rcx
     ; Handle negative stop
     test rax, rax

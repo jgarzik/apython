@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "opcodes.inc"
+extern eval_exception_unwind
 extern none_singleton
 extern int_promote_mpz
 extern obj_dealloc
@@ -833,8 +834,7 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index_object
     call obj_as_index_object
-    test rax, rax
-    jz .rms_pending
+    ERR_NULL .rms_pending
     mov rdi, rbx
     mov rsi, rax
     call range_wide_item
@@ -852,6 +852,7 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, rbx
     mov rsi, rax
     call range_obj_sq_item          ; already a Value
@@ -2212,8 +2213,7 @@ DEF_FUNC_LOCAL range_wide_slice, RWS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index_object
     call obj_as_index_object
-    test rax, rax
-    jz .rws_fail
+    ERR_NULL .rws_fail
     mov [rbp - RWS_STEP], rax
     xor ecx, ecx
     V_PACK_I64 rcx, rdx

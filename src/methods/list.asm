@@ -103,6 +103,7 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, [rax + 8]    ; args[1]
     V_UNPACK rdi, rdx       ; args[1]
     call obj_as_index       ; an index, so __index__ counts and a str does not
+    ERR_M1_JUMP
     mov r13, rax
 
     ; Handle negative index
@@ -173,6 +174,7 @@ DEF_FUNC list_method_insert
     mov rdi, [rax + 8]     ; args[1] payload (16B stride)
     V_UNPACK rdi, rdx       ; args[1]
     call obj_as_index       ; an index, so __index__ counts and a str does not
+    ERR_M1_JUMP
     mov r12, rax            ; index
 
     pop rax
@@ -715,6 +717,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
     call obj_as_slice_index
+    ERR_M1_JUMP
     ; Handle negative start
     test rax, rax
     jns .li_start_pos
@@ -733,6 +736,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
     call obj_as_slice_index
+    ERR_M1_JUMP
     ; Handle negative stop
     test rax, rax
     jns .li_stop_pos

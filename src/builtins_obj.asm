@@ -2358,7 +2358,8 @@ DEF_FUNC builtin_format_fn, FMT_FRAME
     mov rdi, rax
     mov rsi, rdx
     extern format_require_str
-    call format_require_str     ; a str, or it does not return
+    call format_require_str
+    ERR_M1_JUMP
     pop rdx
     pop rax
     ; If an empty spec was allocated here, release it.
@@ -2889,6 +2890,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     jz .imp_level_ok
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     jnz .imp_level_error
 .imp_level_ok:

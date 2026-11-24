@@ -471,6 +471,7 @@ DEF_FUNC list_subscript
     mov rdi, rsi
     lea rsi, [rel ls_index_msg]
     call obj_as_index_seq
+    ERR_M1_JUMP
     mov rsi, rax
     jmp .ls_do_getitem
 
@@ -555,6 +556,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     lea rsi, [rel ls_index_msg]
     extern obj_as_index_seq
     call obj_as_index_seq
+    ERR_M1_JUMP
     mov rsi, rax
 .las_have_key:
 

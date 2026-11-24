@@ -4,6 +4,7 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern eval_exception_unwind
 extern exc_TypeError_type
 extern exc_IndexError_type
 extern raise_exception
@@ -1207,6 +1208,7 @@ DEF_FUNC code_method_replace, CR_FRAME
     mov rdi, rbx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     lea r12, [rbp - CR_SPEC]
     mov r9, [rbp - CR_OFF]
     mov [r12 + r9], eax
@@ -1628,6 +1630,7 @@ DEF_FUNC code_method_varname_from_oparg, 8   ; 1 push, so rsp is 16-aligned
     V_UNPACK rdi, rdx                   ; obj_as_index takes the pair
     extern obj_as_index
     call obj_as_index                   ; names the type for a non-integer
+    ERR_M1_JUMP
     mov rbx, [rbx + PyCodeObject.co_localsplusnames]
     test rbx, rbx
     jz .vfo_range

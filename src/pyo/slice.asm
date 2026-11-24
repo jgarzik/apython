@@ -11,6 +11,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern int_promote_mpz
 extern ap_malloc
 extern gc_alloc
@@ -385,7 +386,11 @@ DEF_FUNC_BARE pyobj_to_i64
     ; bound wants; only the wording is this caller's own.
     mov edx, esi
     lea rsi, [rel slice_index_msg]
-    jmp obj_as_index_clamped_msg
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index_clamped_msg
+    add rsp, 8
+    ERR_M1_JUMP
+    ret
 END_FUNC pyobj_to_i64
 
 section .rodata
@@ -687,6 +692,7 @@ DEF_FUNC slice_method_indices, SMI_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .smi_failed
     ; obj_as_index reports a non-integer by raising, and comes back 0 on the
     ; paths that do not.  A negative length is CPython's own check.
     test rax, rax

@@ -1302,6 +1302,7 @@ DEF_FUNC posix_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     test eax, eax
     jz .pia_range
     call obj_as_index
+    ERR_M1_JUMP
     pop rdi
     leave
     ret

@@ -244,6 +244,7 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     push rdx
     mov rdi, rax
     call obj_as_index
+    ERR_M1_JUMP
     add rsp, 16
     leave
     ret
@@ -798,6 +799,7 @@ DEF_FUNC slot_length
     push rdx
     mov rdi, rax
     call obj_as_index
+    ERR_M1_JUMP
     add rsp, 16
     test rax, rax
     js .negative

@@ -21,6 +21,7 @@
 %include "value.inc"
 %include "compiler.inc"
 
+extern eval_exception_unwind
 extern ap_free
 extern ap_strcmp
 extern dict_get
@@ -2651,6 +2652,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     jz .co_have_flags
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov [rbp - CO_FLAGS], rax
 .co_have_flags:
     mov rbx, [rbp - CO_SLOTS]           ; source

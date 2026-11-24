@@ -25,6 +25,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern module_new
@@ -264,6 +265,7 @@ DEF_FUNC_LOCAL signal_arg
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     js .sa_range
     cmp rax, SIG_NSIG
@@ -475,6 +477,7 @@ DEF_FUNC signal_method_alarm, 16
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index
+    ERR_M1 .idx_fail
     mov rdi, rax
     call sys_alarm
     mov rdi, rax
@@ -484,6 +487,10 @@ DEF_FUNC signal_method_alarm, 16
     ret
 .sal_argerr:
     RAISE exc_TypeError_type, "alarm() takes exactly 1 argument"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC signal_method_alarm
 
 ;; ============================================================================
@@ -513,6 +520,7 @@ DEF_FUNC signal_method_strsignal, 16
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index
+    ERR_M1 .idx_fail
     test rax, rax
     jle .sts_none
     cmp rax, SIG_NSIG
@@ -535,6 +543,10 @@ DEF_FUNC signal_method_strsignal, 16
     ret
 .sts_argerr:
     RAISE exc_TypeError_type, "strsignal() takes exactly 1 argument"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC signal_method_strsignal
 
 ;; ============================================================================
@@ -794,6 +806,7 @@ DEF_FUNC signal_method_setitimer, SSI_FRAME
     mov rdi, [rdi]              ; which
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, rax
     add rsp, 16
 
@@ -842,6 +855,7 @@ DEF_FUNC signal_method_getitimer, SGI_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov rdi, rax
     mov eax, 36                 ; __NR_getitimer
     lea rsi, [rbp - SGI_CUR]
@@ -864,6 +878,10 @@ DEF_FUNC signal_method_getitimer, SGI_FRAME
     CSTRING rdi, "_signal.getitimer() takes exactly one argument ("
     CSTRING rdx, " given)"
     jmp raise_type_error_counted
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC signal_method_getitimer
 
 ;; ============================================================================

@@ -145,7 +145,8 @@ DEF_FUNC fileobj_write
     push rdi
     push rsi
     mov rdi, [rdi]
-    call fileobj_check_open     ; raises for a closed stream and does not return
+    call fileobj_check_open
+    ERR_M1 .closed
     pop rsi
     pop rdi
 
@@ -205,6 +206,10 @@ DEF_FUNC fileobj_write
 
 .write_type_error:
     RAISE exc_TypeError_type, "write() argument must be str"
+.closed:                        ; the ValueError is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileobj_write
 
 ;; ============================================================================
@@ -453,6 +458,7 @@ DEF_FUNC fileobj_flush
     push rdi
     sub rsp, 8
     call fileobj_check_open
+    ERR_M1 .closed
     add rsp, 8
     pop rdi
     call fileobj_drain
@@ -470,6 +476,10 @@ DEF_FUNC fileobj_flush
     RET_NULL
     leave
     ret
+.closed:                        ; the ValueError is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileobj_flush
 
 ;; ============================================================================
@@ -481,12 +491,17 @@ DEF_FUNC fileobj_fileno
     sub rsp, 8
     mov rdi, rax
     call fileobj_check_open
+    ERR_M1 .closed
     add rsp, 8
     pop rax
     mov rdi, [rax + PyFileObject.file_fd]
     call int_from_i64
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.closed:                        ; the ValueError is pending
+    xor eax, eax
+    leave
     ret
 END_FUNC fileobj_fileno
 
@@ -615,8 +630,9 @@ DEF_FUNC fileobj_exit
 END_FUNC fileobj_exit
 
 ;; ============================================================================
-;; fileobj_check_open(rdi = the file object) -> returns when it is open;
-;;   raises ValueError and does not return when it has been closed
+;; fileobj_check_open(rdi = the file object) -> rax = 0 when it is open
+;; Fails: -1
+;;   with ValueError pending when it has been closed
 ;;
 ;; CPython's "I/O operation on closed file." -- the same sentence _io's
 ;; fileio_check raises, because it is the same question.  Every entry point
@@ -625,13 +641,18 @@ END_FUNC fileobj_exit
 ;; and the failure surfaced at exit rather than at the call.
 ;; ============================================================================
 extern exc_ValueError_type
+extern set_exception
 DEF_FUNC fileobj_check_open
     cmp qword [rdi + PyFileObject.file_closed], 0
     jne .fco_closed
+    xor eax, eax
     leave
     ret
 .fco_closed:
-    RAISE exc_ValueError_type, "I/O operation on closed file."
+    SET_EXC exc_ValueError_type, "I/O operation on closed file."
+    mov rax, -1
+    leave
+    ret
 END_FUNC fileobj_check_open
 
 ; fileobj_close_method(PyObject **args, int64_t nargs) -> rax = Value
@@ -668,7 +689,8 @@ DEF_FUNC fileobj_read, FR_FRAME
     push rdi
     push rsi
     mov rdi, [rdi]
-    call fileobj_check_open     ; raises for a closed stream and does not return
+    call fileobj_check_open
+    ERR_M1 .closed
     pop rsi
     pop rdi
     ; Anything waiting on stdout goes out before anything is read: a prompt
@@ -714,6 +736,10 @@ DEF_FUNC fileobj_read, FR_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.closed:                        ; the ValueError is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileobj_read
 
 ;; ============================================================================
@@ -725,7 +751,8 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     push rdi
     push rsi
     mov rdi, [rdi]
-    call fileobj_check_open     ; raises for a closed stream and does not return
+    call fileobj_check_open
+    ERR_M1 .closed
     pop rsi
     pop rdi
     ; Anything waiting on stdout goes out before anything is read: a prompt
@@ -779,6 +806,10 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.closed:                        ; the ValueError is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileobj_readline
 
 ;; ============================================================================
@@ -803,6 +834,7 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     call fileobj_check_open
     pop rsi
     pop rdi
+    ERR_M1 .fwl_raised
     mov [rbp - FWL_SELF], rbx
     mov rdi, [rdi + 8]          ; the iterable
     ; get_iterator_opt still takes the old (payload, tag) pair, so a Value has

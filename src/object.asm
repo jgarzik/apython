@@ -621,8 +621,8 @@ DEF_FUNC obj_str
     ret
 END_FUNC obj_str
 ;; ============================================================================
-;; obj_as_slice_index(rdi = payload, edx = tag) -> rax = the i64, or does not
-;; return
+;; obj_as_slice_index(rdi = payload, edx = tag) -> rax = the i64
+;; Fails: -1
 ;;
 ;; obj_as_index with CPython's other wording.  The start and stop of
 ;; list.index and tuple.index are slice bounds, and CPython blames them as
@@ -650,15 +650,22 @@ DEF_FUNC obj_as_slice_index, OAI_FRAME
     leave
     jmp obj_as_index_clamped
 .oasi_bad:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
         "slice indices must be integers or have an __index__ method"
+    mov rax, -1
+    leave
+    ret
 END_FUNC obj_as_slice_index
 
 
 ;; ============================================================================
 ;; obj_as_index(rdi = payload, edx = tag) -> rax = int64
+;; Fails: -1
 ;;
-;; Convert a Value to a C index, or raise TypeError.  Callers used to hand
+;; Convert a Value to a C index, or refuse it with a TypeError.  Every int64
+;; is an answer, so a refusal is -1 AND an exception pending: ERR_M1, straight
+;; after the call.  The four entry points below share the body and the rule.
+;; Callers used to hand
 ;; whatever they were given straight to int_to_i64, which reads
 ;; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
 ;; range(1.5) dereferenced 0x3ff8000000000000, and None's fields decoded as a
@@ -682,6 +689,7 @@ OAI_MODE  equ 8             ; 0 = refuse what will not fit, 1 = clamp to it,
 ; subscript says "list indices must be integers or slices, not float" and
 ; names the container as well as the key.
 OAI_MSG   equ 16
+OAI_GOT   equ 24            ; what a bad __index__ answered, held to be named
 OAI_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC obj_as_index, OAI_FRAME
     mov qword [rbp - OAI_MODE], 0
@@ -722,6 +730,7 @@ oai_body:
     test rax, rax
     jz .oai_error
     call rax                    ; nb_index returns a Value
+    ERR_PENDING .oai_fail       ; it raised: that exception stands
     V_UNPACK rax, rdx
     ; __index__ must itself return an int; one level only, so a class whose
     ; __index__ returns another such class is an error rather than a loop.
@@ -768,13 +777,15 @@ oai_body:
     cmp qword [rbp - OAI_MODE], 2
     je .oai_too_wide_seq
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+    FAIL exc_OverflowError_type, \
+        "Python int too large to convert to C ssize_t", .oai_fail
 .oai_too_wide_seq:
     ; CPython passes the exception TYPE to PyNumber_AsSsize_t, and every
     ; sequence subscript passes IndexError: `[1][2**70]` is an IndexError
     ; there, not an OverflowError, and the sentence is a different one.
     extern exc_IndexError_type
-    RAISE exc_IndexError_type, "cannot fit 'int' into an index-sized integer"
+    FAIL exc_IndexError_type, \
+        "cannot fit 'int' into an index-sized integer", .oai_fail
 .oai_clamp:
     ; A slice bound past either end is that end, which is what CPython's
     ; _PyEval_SliceIndex does.  The sign is the mpz's: a heap int this wide
@@ -798,8 +809,12 @@ oai_body:
     ; missing.
     mov rsi, rax
     V_PACK rsi, rdx
+    mov [rbp - OAI_GOT], rsi
     lea rdi, [rel oai_bad_index_msg]
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - OAI_GOT]
+    DECREF_V rdi, rcx           ; named; nb_index handed it over owned
+    jmp .oai_fail
 
 .oai_error:
     ; Name the type.  This is the single funnel for every __index__ context --
@@ -810,13 +825,19 @@ oai_body:
     V_PACK rsi, rdx
     mov rdi, [rbp - OAI_MSG]
     test rdi, rdi
-    jnz raise_type_error_with_name
+    jnz .oai_refuse
     lea rdi, [rel oai_not_an_index]
-    jmp raise_type_error_with_name
+.oai_refuse:
+    call set_type_error_with_name
+.oai_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC obj_as_index
 
 ;; ============================================================================
 ;; obj_as_index_object(rdi = payload, edx = tag) -> rax = an int Value, owned
+;; Fails: 0
 ;;
 ;; The same refusal as obj_as_index, answering the OBJECT rather than an
 ;; int64.  For a caller whose CPython counterpart keeps the object: range's
@@ -879,13 +900,16 @@ DEF_FUNC obj_as_index_object, OAO_FRAME
     ; obj_as_index's own wording, which names the type.
     mov rsi, [rbp - OAO_ARG]
     lea rdi, [rel oai_not_an_index]
-    jmp raise_type_error_with_name
+    call set_type_error_with_name       ; rax = 0
+    leave
+    ret
 END_FUNC obj_as_index_object
 
 ;; ============================================================================
 ;; obj_as_index_seq(rdi = payload, edx = tag, rsi = the refusal's template,
 ;;                  whose \x01 stands for the key's type, or 0)
 ;;   -> rax = int64
+;; Fails: -1
 ;; The same, refusing a too-wide int as a sequence subscript does: an
 ;; IndexError naming the index, not an OverflowError naming a C type.
 ;; ============================================================================
@@ -897,6 +921,7 @@ END_FUNC obj_as_index_seq
 
 ;; ============================================================================
 ;; obj_as_index_clamped(rdi = payload, edx = tag) -> rax = int64
+;; Fails: -1
 ;; The same, clamping instead of refusing.  See obj_as_index above.
 ;; ============================================================================
 global obj_as_index_clamped
@@ -910,6 +935,7 @@ END_FUNC obj_as_index_clamped
 ;; obj_as_index_clamped_msg(rdi = payload, edx = tag, rsi = the refusal's
 ;;                          template, whose \x01 stands for the type, or 0)
 ;;   -> rax = int64
+;; Fails: -1
 ;; The same again, with the caller's wording.  A slice bound has its own:
 ;; CPython says "slice indices must be integers or None or have an __index__
 ;; method" and names no type at all.

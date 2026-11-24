@@ -24,6 +24,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern str_new_heap
 extern ap_malloc
 extern obj_str
@@ -773,6 +774,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     jl .fs_char_range
     cmp rax, 0x110000
@@ -1173,6 +1175,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     test eax, eax
     jz .fib_wide
     call obj_as_index
+    ERR_M1_JUMP
     mov r12, rax                        ; the value
 
     ; base and digit set from the type letter
@@ -2636,6 +2639,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     mov rdi, [rbp - FPC_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -2766,14 +2770,14 @@ END_FUNC fmt_percent_coerce
 
 ;; ============================================================================
 ;; format_require_str(rdi = the payload __format__ answered, rsi = its tag)
-;;   -> returns when it is a str or a str subclass; raises and does not
-;;      return otherwise
+;;   -> rax = 0 when it is a str or a str subclass
+;; Fails: -1
 ;;
 ;; CPython's "__format__ must return a str, not int".  Nothing checked, so a
 ;; __format__ answering an int reached the f-string machinery, which read a
 ;; string out of it.
 ;; ============================================================================
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern str_type
 global format_require_str
 DEF_FUNC_BARE format_require_str
@@ -2786,13 +2790,18 @@ DEF_FUNC_BARE format_require_str
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jz .frs_bad
 .frs_ok:
+    xor eax, eax
     ret
 .frs_bad:
     mov rdx, rsi
     mov rsi, rdi
     VALUE_FOR_TYPE rsi, rdx     ; a payload, back to something that names a type
     CSTRING rdi, `__format__ must return a str, not \x01`
-    jmp raise_type_error_with_name
+    sub rsp, 8                  ; bare: realign for the call
+    call set_type_error_with_name
+    add rsp, 8
+    mov rax, -1
+    ret
 END_FUNC format_require_str
 
 ;; ============================================================================

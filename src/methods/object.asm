@@ -15,6 +15,7 @@
 %include "opcodes.inc"
 
 ; External functions
+extern eval_exception_unwind
 extern frozenset_type
 extern int_is_integer
 extern complex_type
@@ -320,6 +321,7 @@ DEF_FUNC object_method_reduce, ORX_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     add rsp, 8
     pop rdi
 .orx_have_proto:

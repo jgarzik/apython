@@ -9,6 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "value.inc"
+extern eval_exception_unwind
 extern ap_memcmp
 extern ap_memmove
 extern ap_realloc
@@ -299,6 +300,7 @@ END_FUNC bytearray_data
 DEF_FUNC bytearray_index_arg
     V_UNPACK rdi, rdx           ; obj_as_index takes the pair, not the Value
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     jl .bia_range
     cmp rax, 255
@@ -401,6 +403,7 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
     mov rdx, [rbp - BSU_KEYTAG]
     lea rsi, [rel bsu_index_msg]
     call obj_as_index_seq
+    ERR_M1_JUMP
     mov rcx, [rbp - BSU_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
     test rax, rax
@@ -556,6 +559,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     lea rsi, [rel bsu_index_msg]
     extern obj_as_index_seq
     call obj_as_index_seq
+    ERR_M1_JUMP
     mov rbx, rax
     mov rcx, [rbp - BAS_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
@@ -981,6 +985,7 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     mov rdi, [rbp - BCT_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, rax
     test rdi, rdi
     jl .bct_range
@@ -1221,6 +1226,7 @@ DEF_FUNC bytearray_method_insert, BAM_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rbp - BAM_IDX], rax
     mov rdi, [rbp - BAM_ARG]
     mov rdi, [rdi + 16]
@@ -1275,6 +1281,10 @@ DEF_FUNC bytearray_method_insert, BAM_FRAME
     ret
 .bin_argerr:
     RAISE exc_TypeError_type, "insert() takes exactly 2 arguments"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytearray_method_insert
 
 ;; bytearray.pop([i]) -> the byte removed
@@ -1297,6 +1307,7 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop rdx
     mov rcx, rax
     test rcx, rcx

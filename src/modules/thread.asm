@@ -35,6 +35,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -118,6 +119,7 @@ DEF_FUNC_LOCAL tc_int_arg
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     leave
     ret
 END_FUNC tc_int_arg

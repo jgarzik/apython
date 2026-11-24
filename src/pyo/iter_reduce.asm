@@ -34,6 +34,7 @@
 %include "object.inc"
 %include "value.inc"
 
+extern eval_exception_unwind
 extern int_from_i64
 extern tuple_new
 extern list_new
@@ -370,6 +371,7 @@ DEF_FUNC seqiter_setstate, SSS_FRAME
     mov rdi, [rdi + 8]          ; the state
     V_UNPACK rdi, rdx           ; obj_as_index still takes (payload, tag)
     call obj_as_index
+    ERR_M1_JUMP
     ; obj_as_index raises for anything that is not an index, so rax is one.
     test rax, rax
     jns .sss_clamp_low

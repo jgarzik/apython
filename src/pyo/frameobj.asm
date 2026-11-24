@@ -30,6 +30,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern ap_malloc
 extern obj_decref
 extern obj_dealloc
@@ -760,6 +761,7 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     ; CPython treats a negative depth as zero rather than refusing it.
     test rax, rax
     js .sgf_have_depth
@@ -891,6 +893,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop rcx
     mov rcx, rax
 .sgm_have_depth:

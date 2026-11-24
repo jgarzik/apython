@@ -378,7 +378,8 @@ DEF_FUNC op_format_value, FV_FRAME
     mov rdi, rax
     mov rsi, rdx
     extern format_require_str
-    call format_require_str     ; raises and does not return when it is not
+    call format_require_str
+    ERR_M1_JUMP
     pop rdx
     pop rax
     jmp .fv_have_result         ; __format__ produced the string
@@ -461,7 +462,8 @@ DEF_FUNC op_format_value, FV_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
-    call format_require_str     ; a str, or it does not return
+    call format_require_str
+    ERR_M1_JUMP
     pop rdx
     pop rax
     jmp .fv_have_result

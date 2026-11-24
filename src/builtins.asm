@@ -8,6 +8,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern str_from_cstr
@@ -639,7 +640,8 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
     ; <stdout>: OSError: [Errno 9] Bad file descriptor" -- or, if the fd had
     ; been reused by then, as text written into an unrelated file.
     extern fileobj_check_open
-    call fileobj_check_open     ; raises ValueError and does not return
+    call fileobj_check_open
+    ERR_M1 .psw_raised
     mov rdi, [rbp - PSW_SINK]
     mov rsi, [rbp - PSW_BUF]
     mov rdx, [rbp - PSW_LEN]
@@ -1432,6 +1434,7 @@ DEF_FUNC_LOCAL range_arg_value, RAV_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index_object
     call obj_as_index_object
+    ERR_NULL_JUMP
     leave
     ret
 END_FUNC range_arg_value

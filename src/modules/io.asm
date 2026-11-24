@@ -1079,6 +1079,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rdi, [rbp - FI_FILE]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     jl .fi_fd_bad
     mov rdi, [rbp - FI_SELF]
@@ -1315,6 +1316,7 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     pop rsi
     mov r8, rax
 .fr_have_size:
@@ -1755,6 +1757,7 @@ DEF_FUNC fileio_seek_fn, FS_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov [rbp - FS_POS], rax
     pop rsi
     pop rdi
@@ -1764,6 +1767,7 @@ DEF_FUNC fileio_seek_fn, FS_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov r8, rax
 .fs_have_whence:
     push r8
@@ -1843,6 +1847,7 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rbp - FT_SIZE], rax
     mov qword [rbp - FT_GIVEN], 1
 .ftr_have_size:
@@ -1895,6 +1900,10 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
     jmp fileio_not_writable_error
 .ftr_argerr:
     RAISE exc_TypeError_type, "truncate() missing self"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_truncate_fn
 
 ;; ============================================================================

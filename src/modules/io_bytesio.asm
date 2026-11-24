@@ -16,6 +16,7 @@
 ASM_INIT
 
 ; --- from io.asm, the half this came out of ---
+extern eval_exception_unwind
 extern io_bases1
 extern io_raise_number
 extern io_raise_typename_q
@@ -337,6 +338,7 @@ DEF_FUNC bytesio_read_fn, BR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov r8, rax
 .br_have_size:
     mov rdi, [rbp - BR_SELF]
@@ -365,6 +367,10 @@ DEF_FUNC bytesio_read_fn, BR_FRAME
     ret
 .br_argerr:
     RAISE exc_TypeError_type, "read() missing self"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_read_fn
 
 ;; ============================================================================
@@ -385,6 +391,7 @@ DEF_FUNC bytesio_readline_fn, BR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov r8, rax
 .brl_have_size:
     mov rdi, [rbp - BR_SELF]
@@ -576,6 +583,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov [rbp - BS_POS], rax
     pop rsi
     pop rdi
@@ -585,6 +593,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov r8, rax
 .bs_have_whence:
     push r8
@@ -683,6 +692,7 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     test rax, rax
     jl .btr_negative
     mov [rbp - BTR_SIZE], rax
@@ -716,6 +726,10 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     call io_raise_number
 .btr_argerr:
     RAISE exc_TypeError_type, "truncate() missing self"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_truncate_fn
 
 DEF_FUNC bytesio_getvalue_fn

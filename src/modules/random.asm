@@ -24,6 +24,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern none_singleton
 extern ap_malloc
 extern ap_free
@@ -99,6 +100,7 @@ DEF_FUNC_LOCAL rc_state_arg, RSA_FRAME
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, rax
     call rc_handle_at
     test rax, rax
@@ -193,6 +195,7 @@ DEF_FUNC rc_free, RF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rbp - RF_IDX], rax
     mov rdi, rax
     call rc_handle_at
@@ -208,6 +211,10 @@ DEF_FUNC rc_free, RF_FRAME
     RET_NONE
     leave
     V_PACK rax, rdx
+    ret
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
     ret
 END_FUNC rc_free
 
@@ -418,6 +425,7 @@ DEF_FUNC rc_bits, RI_FRAME
     sub rsp, 8
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     add rsp, 8
     pop rdi                     ; the MTState*
     mov rcx, rax
@@ -486,6 +494,7 @@ DEF_FUNC rc_words, RW_FRAME
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     test rax, rax
     js .rw_negative
     test rax, rax
@@ -634,6 +643,7 @@ DEF_FUNC rc_seed_words, RS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov edx, eax
     pop rax
     add eax, edx

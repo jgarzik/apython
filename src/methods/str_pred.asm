@@ -9,6 +9,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern eval_exception_unwind
 extern obj_as_index
 %include "opcodes.inc"
 
@@ -520,6 +521,7 @@ DEF_FUNC str_pad_width, SPW_FRAME
     mov rdi, [rbp - SPW_ARG]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     cmp qword [rbp - SPW_MODE], 0
     je .spw_done
     cmp rax, 0x7FFFFFFF

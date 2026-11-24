@@ -5,6 +5,7 @@
 %include "object.inc"
 %include "gil.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern obj_decref
 extern obj_incref
@@ -118,6 +119,7 @@ extern daylight
     mov rdi, [rax + %1*8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     add rax, %3
     mov [rbx + %2], eax
 %endmacro
@@ -410,6 +412,7 @@ DEF_FUNC_LOCAL tm_clock_id_arg, 16
     ; it owes.
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     leave
     ret
 END_FUNC tm_clock_id_arg
@@ -1559,6 +1562,7 @@ DEF_FUNC_LOCAL time_read_struct, TRS_FRAME
     mov rdi, [rax + 6*8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     inc rax
     cdq
     mov ecx, 7
@@ -1631,6 +1635,7 @@ DEF_FUNC_LOCAL time_seconds_arg, TSA_FRAME
 .tsa_int:
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     leave
     ret
 .tsa_now:

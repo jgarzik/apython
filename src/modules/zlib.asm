@@ -22,6 +22,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern module_new
@@ -305,7 +306,11 @@ END_FUNC zc_handle_at
 DEF_FUNC_BARE zc_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    jmp obj_as_index            ; raises for anything that is not an index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index
+    add rsp, 8
+    ERR_M1_JUMP
+    ret
 END_FUNC zc_arg_int
 
 ;; ============================================================================

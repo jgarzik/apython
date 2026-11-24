@@ -19,6 +19,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern obj_decref
@@ -69,6 +70,7 @@ DEF_FUNC gc_mod_collect, GMCF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     test rax, rax
     jl .gmc_range
     cmp rax, 2
@@ -87,6 +89,10 @@ DEF_FUNC gc_mod_collect, GMCF_FRAME
     RAISE exc_TypeError_type, "collect() takes at most 1 argument"
 .gmc_range:
     RAISE exc_ValueError_type, "invalid generation"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC gc_mod_collect
 
 ;; ============================================================================
@@ -226,6 +232,7 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_gen0_threshold], rax
 
     cmp qword [rbp - GST_NARGS], 2
@@ -234,6 +241,7 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_gen1_threshold], rax
 
     cmp qword [rbp - GST_NARGS], 3
@@ -242,6 +250,7 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_gen2_threshold], rax
 
 .gst_done:
@@ -252,6 +261,10 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     ret
 .gst_args:
     RAISE exc_TypeError_type, "set_threshold() takes 1 to 3 arguments"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC gc_mod_set_threshold
 
 ;; ============================================================================
@@ -280,6 +293,7 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
     je .ggo_have_gen
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     cmp rax, 2
     jg .ggo_range
     mov [rbp - GGO_GEN], rax    ; negative means all of them, as CPython has it
@@ -685,6 +699,7 @@ DEF_FUNC gc_mod_set_debug
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_debug], rax
     LOAD_NONE rax
     mov edx, TAG_PTR
@@ -693,6 +708,10 @@ DEF_FUNC gc_mod_set_debug
     ret
 .gsd_args:
     RAISE exc_TypeError_type, "set_debug() takes exactly one argument"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC gc_mod_set_debug
 
 DEF_FUNC gc_mod_get_debug

@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern ap_malloc
 extern ap_strlen
 extern obj_decref
@@ -1862,6 +1863,7 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index           ; names the type for anything else
+    ERR_M1 .idx_fail
     test rax, rax
     js .set_codt_value_error
 
@@ -1878,6 +1880,10 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
 .set_codt_error:
     RAISE exc_TypeError_type, \
           "set_coroutine_origin_tracking_depth() takes exactly 1 argument"
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC sys_set_coroutine_origin_tracking_depth_func
 
 ;; ============================================================================

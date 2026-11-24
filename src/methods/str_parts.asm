@@ -13,6 +13,7 @@
 
 
 ; External functions
+extern eval_exception_unwind
 extern int_type
 extern bool_type
 extern dict_type
@@ -1131,6 +1132,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rdi, r12
     V_UNPACK rdi, rdx
     call obj_as_index           ; not V_TO_I64: it may be a heap int
+    ERR_M1_JUMP
     test rax, rax
     jl .trn_range
     cmp rax, 0x10ffff

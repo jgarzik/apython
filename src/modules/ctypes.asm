@@ -36,6 +36,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern none_singleton
 extern dict_new
 extern module_new
@@ -87,7 +88,11 @@ section .text
 DEF_FUNC_BARE cx_arg_i64
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    jmp obj_as_index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index
+    add rsp, 8
+    ERR_M1_JUMP
+    ret
 END_FUNC cx_arg_i64
 
 ;; ============================================================================

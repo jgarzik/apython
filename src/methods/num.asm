@@ -10,6 +10,7 @@
 
 
 ; External functions
+extern eval_exception_unwind
 extern float_type
 extern ap_malloc
 extern ap_free
@@ -441,6 +442,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     mov [rbp - ITB_LEN], rax
     jmp .itb_kw_next
 
@@ -506,6 +508,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1_JUMP
     mov [rbp - ITB_LEN], rax
 
     cmp r12, 3

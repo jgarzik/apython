@@ -59,6 +59,7 @@
 
 ASM_INIT
 
+extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern module_new
@@ -272,7 +273,11 @@ END_FUNC ssl_handle_alloc
 ;; ============================================================================
 DEF_FUNC_BARE ssl_val_int
     V_UNPACK rdi, rdx
-    jmp obj_as_index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index
+    add rsp, 8
+    ERR_M1_JUMP
+    ret
 END_FUNC ssl_val_int
 
 ;; ============================================================================

@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern none_singleton
 
 ;; ============================================================================
@@ -473,6 +474,7 @@ DEF_FUNC str_search_window, SSW_FRAME
     je .ssw_start_done              ; None means the default, as in CPython
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, [rbp - SSW_SELF]
     test rax, rax
     jns .ssw_start_set
@@ -491,6 +493,7 @@ DEF_FUNC str_search_window, SSW_FRAME
     je .ssw_bounds_done
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     mov rdi, [rbp - SSW_SELF]
     test rax, rax
     jns .ssw_end_set
@@ -2168,6 +2171,7 @@ DEF_FUNC str_subscript
     mov rdi, rsi
     lea rsi, [rel ss_index_msg] ; ...and the refusal names the key's type
     call obj_as_index_seq
+    ERR_M1_JUMP
     mov rsi, rax
 
     ; Call str_getitem — already returns a Value

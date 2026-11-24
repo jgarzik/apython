@@ -17,6 +17,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern eval_exception_unwind
 extern obj_is_true
 %include "opcodes.inc"
 
@@ -48,6 +49,7 @@ section .text
 DEF_FUNC_LOCAL bs_arg_i64
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     leave
     ret
 END_FUNC bs_arg_i64

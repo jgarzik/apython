@@ -694,8 +694,7 @@ DEF_FUNC_LOCAL array_int_arg
     ret
 .aia_hand_over:
     call obj_as_index
-    cmp qword [gs:ThreadState.current_exception], 0
-    jne .aia_failed
+    ERR_M1 .aia_failed
     mov edx, 1
     leave
     ret
@@ -1260,6 +1259,7 @@ DEF_FUNC array_subscript, 8   ; + 1 push = 16, 16-aligned
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     cmp qword [gs:ThreadState.current_exception], 0
     jne .asub_fail
     mov rdi, rbx
@@ -1290,6 +1290,7 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1_JUMP
     cmp qword [gs:ThreadState.current_exception], 0
     jne .aas_fail
     mov rdi, [rbp - AAS_ARR]
@@ -1799,6 +1800,7 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index           ; an i64, or it raises and does not return
+    ERR_M1 .idx_fail
     test rax, rax
     js .aff_negative
     mov rdi, [rbp - AFF_ARR]
@@ -1947,6 +1949,10 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     CSTRING rdi, "fromfile() takes exactly 2 positional arguments ("
     CSTRING rdx, " given)"
     call raise_type_error_counted
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC array_m_fromfile
 
 ;; ============================================================================
