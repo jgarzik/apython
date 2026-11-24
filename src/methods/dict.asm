@@ -170,6 +170,7 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     mov rdi, rbx
     mov rsi, r13
     call dict_del
+    ERR_M1 .dpop2_del_failed
 
     mov rax, r15
     pop r15
@@ -193,9 +194,16 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     leave
     ret
 
+.dpop2_del_failed:
+    ; The key's __eq__ raised on the second probe, or took the entry away
+    ; between the two: the value held for the caller goes back.
+    DECREF_V r15, rax
+    jmp .dpop2_fail
+
 .dpop2_error:
     mov rdi, [r14 + 8]         ; the key Value, still in the argument array
     call set_key_error
+.dpop2_fail:
     xor eax, eax
     pop r15
     pop r14
@@ -965,6 +973,7 @@ DEF_FUNC dict_method_popitem
     mov rdi, rbx
     mov rsi, r13
     call dict_del
+    ERR_M1 .dpopitem_del_failed
 
     mov rax, r12
     mov edx, TAG_PTR         ; tuple is heap ptr
@@ -976,8 +985,14 @@ DEF_FUNC dict_method_popitem
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.dpopitem_del_failed:
+    mov rdi, r12                ; the pair built for the caller
+    call obj_decref
+    jmp .dpopitem_fail
+
 .dpopitem_empty:
     SET_EXC exc_KeyError_type, "popitem(): dictionary is empty"
+.dpopitem_fail:
     xor eax, eax
     pop r14
     pop r13
@@ -1065,6 +1080,7 @@ DEF_FUNC dict_dunder_delitem
     mov rsi, [rdi + 8]
     mov rdi, rax
     call dict_del
+    ERR_M1 .ddd_fail
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
@@ -1073,6 +1089,7 @@ DEF_FUNC dict_dunder_delitem
     ret
 .ddd_error:
     SET_EXC exc_TypeError_type, "object does not support item deletion"
+.ddd_fail:
     xor eax, eax
     leave
     ret

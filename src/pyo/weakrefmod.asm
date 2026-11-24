@@ -251,7 +251,7 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jz .no_entry
     mov rsi, [rbp - WC_OBJ]
     add rsi, [rel v_int_bias]
-    call dict_del
+    call dict_del             ; err: an int key in a table of ints; its entry was found above
     mov rax, [rel weakref_table]
     mov rax, [rax + PyDictObject.ob_size]
     mov [rel weakref_live], rax
@@ -1407,6 +1407,7 @@ DEF_FUNC wr_remove_dead_func, WRD_FRAME
     cmp qword [rax + PyWeakRefObject.wr_object], 0
     jne .none_pop
     call dict_del
+    ERR_M1 .wrd_fail
 .none_pop:
     RET_NONE
     pop rbx

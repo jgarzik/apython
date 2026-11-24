@@ -348,6 +348,7 @@ END_FUNC dict_alloc_tables
 ;; ============================================================================
 ;; dict_type_call(PyTypeObject *type, PyObject **args, int64_t nargs) -> PyDictObject*
 ;; Constructor: dict() or dict(mapping)
+;; Fails: 0
 ;; ============================================================================
 extern dict_method_update
 
@@ -512,8 +513,9 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     mov rsi, r13
     CSTRING rdi, "dict expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .dtc_propagate
 
 .dtc_error:
     ; Reached both when the argument is the wrong TYPE and when reading it
@@ -524,23 +526,57 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     cmp qword [gs:ThreadState.current_exception], 0
     jne .dtc_propagate
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "dict() argument must be a mapping or iterable"
+    extern set_exception
+    SET_EXC exc_TypeError_type, "dict() argument must be a mapping or iterable"
 
 .dtc_propagate:
     extern eval_exception_unwind
+    RET_NULL
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC dict_type_call
 
 
 ;; ============================================================================
+;; dict_get_ret(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
+;; Fails: 0?
+;;
+;; The value is BORROWED.  dict_get below is the same lookup; the two differ
+;; in what a key's __eq__ raising does.  This one answers 0 with the
+;; exception pending, which is where every caller is headed.
+;; ============================================================================
+DEF_FUNC dict_get_ret, 8        ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    call dict_lookup            ; rax = entries index, -1, or -2
+    test rax, rax
+    js .dgr_miss
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rcx + rax + DictEntry.value]
+    pop rbx
+    leave
+    ret
+.dgr_miss:                      ; absent, or 0 with the exception pending
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC dict_get_ret
+
+;; ============================================================================
 ;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
-;; Linear probing lookup
+;;
+;; The value is BORROWED.  A key's __eq__ that raises still UNWINDS from
+;; here, transitionally: there are well over a hundred callers, nearly all of
+;; them probing a namespace with a name, and each has to be read before it
+;; can be told to check or be waived.  Until that sweep this has no error
+;; return to declare; dict_get_ret above is what a new caller wants.
 ;; ============================================================================
 DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
     ; One push, not two: r12 was saved and never touched, and this is on the
@@ -558,17 +594,29 @@ DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
     leave
     ret
 .dg_miss:
+    cmp rax, -1
+    jne .dg_raised
     xor eax, eax
     pop rbx
     leave
     ret
+.dg_raised:                     ; transitional: see the docblock
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_get
 
 ;; ============================================================================
-;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1
+;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1,
+;;   or -2 with the exception pending when a key's __eq__ raised
 ;;   rdx = the indices slot the key hashes to (where an insert would go, or
 ;;         the first dummy on the probe path), r8 = hash
 ;; The one probe loop; every read path goes through it.
+;;
+;; -2 and not the tree's usual "-1 and something pending": a miss is the
+;; common answer on every namespace probe, and telling it from a failure
+;; must not cost a load from the thread state.  So it has no `Fails:` line,
+;; and its four callers, all in this file, compare the register.
 ;;
 ;; TWO probe loops, chosen once on entry, as CPython 3.12 does.  Everything
 ;; invariant for the call is in a REGISTER -- the index array, the entry
@@ -808,14 +856,15 @@ DEF_FUNC dict_lookup, DL_FRAME
     ret
 
 .dl_error:
-    ; The probe loop has no error channel; the exception is already pending.
+    ; A key's __eq__ raised; the exception is pending.  Nothing here is owned.
+    mov rax, -2
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC dict_lookup
 
 ;; ============================================================================
@@ -831,8 +880,15 @@ DEF_FUNC dict_get_index, 16     ; + 0 pushes = 16, 16-aligned
     ; rbx was pushed and popped purely to align rsp for the call; the frame
     ; does that now, without the two instructions.
     call dict_lookup
+    cmp rax, -2
+    je .dgi_raised
     leave
     ret
+.dgi_raised:
+    ; Transitional, as in dict_get: the four callers are opcode handlers
+    ; probing a namespace with a name, and each reads -1 as "absent".
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_get_index
 
 ;; ============================================================================
@@ -999,12 +1055,18 @@ DEF_FUNC_BARE dict_reserve
 END_FUNC dict_reserve
 
 ;; ============================================================================
-;; dict_set(rdi=dict, rsi=key Value, rdx=value Value)
+;; dict_set_ret(rdi=dict, rsi=key Value, rdx=value Value) -> rax = 0
+;; Fails: -1
 ;; Insert or update a key-value pair.
+;;
+;; One body, entered twice, as dict_del and dict_del_opt are; dict_set is the
+;; other entry.  This one answers -1 with the exception pending when a key's
+;; __eq__ raised, which is where every caller is headed.
 ;; ============================================================================
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
+DS_RET   equ 32            ; 1 = return the failure, 0 = unwind with it
 DS_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 ;; ============================================================================
 ;; dict_maybe_track(rdi = the dict, rsi = a key Value, rdx = a value Value)
@@ -1067,10 +1129,29 @@ DEF_FUNC_BARE dict_value_trackable
     ret
 END_FUNC dict_value_trackable
 
+global dict_set_ret
+DEF_FUNC dict_set_ret, DS_FRAME
+    push rbx
+    push r12
+    push r13
+    mov qword [rbp - DS_RET], 1
+    jmp dict_set.ds_body
+END_FUNC dict_set_ret
+
+;; ============================================================================
+;; dict_set(rdi=dict, rsi=key Value, rdx=value Value) -> rax = 0
+;;
+;; The same body.  A key's __eq__ that raises still UNWINDS from here,
+;; transitionally: there are nearly two hundred callers, most of them storing
+;; under a name, and each has to be read before it can be told to check or
+;; be waived.  Until that sweep this has no error return to declare.
+;; ============================================================================
 DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
     push r13
+    mov qword [rbp - DS_RET], 0
+.ds_body:
     mov [rbp - DS_DICT], rdi
     mov [rbp - DS_KEY], rsi
     mov [rbp - DS_VAL], rdx
@@ -1098,6 +1179,8 @@ DEF_FUNC dict_set, DS_FRAME
     jmp .ds_bump
 
 .ds_insert:
+    cmp rax, -1
+    jne .ds_raised
     mov r12, rdx                ; the indices slot to claim
     mov r13, r8                 ; hash
 
@@ -1193,6 +1276,22 @@ DEF_FUNC dict_set, DS_FRAME
     pop rbx
     leave
     ret
+.ds_raised:
+    ; A key's __eq__ raised.  Nothing was stored and nothing is held.
+    cmp qword [rbp - DS_RET], 0
+    je .ds_unwind
+    mov rax, -1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.ds_unwind:                     ; transitional: see the docblock
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    jmp eval_exception_unwind
 END_FUNC dict_set
 
 ;; ============================================================================
@@ -1259,6 +1358,7 @@ dict_len:
 ;; dict_subscript(rdi = dict, rsi = key Value) -> rax = the value, as a Value
 ;; mp_subscript: look up the key; a dict SUBCLASS with a __missing__ answers
 ;; its own misses, and anything else raises KeyError naming the key.
+;; Fails: 0
 ;; ============================================================================
 DSUB_DICT  equ 8
 DSUB_FRAME equ 24           ; + 1 push = 32, 16-aligned
@@ -1267,7 +1367,8 @@ DEF_FUNC dict_subscript, DSUB_FRAME
 
     mov [rbp - DSUB_DICT], rdi ; the mapping, for __missing__ below
     mov rbx, rsi               ; save the key Value for the error message
-    call dict_get              ; both take a key Value
+    call dict_get_ret          ; both take a key Value
+    ERR_PENDING .ds_missing_raised
     test rax, rax              ; a Value, and 0 is the only miss
     jz .key_error
     INCREF_V rax, rdx          ; dict_get's answer is borrowed
@@ -1304,8 +1405,9 @@ DEF_FUNC dict_subscript, DSUB_FRAME
     ; The key itself is the argument, as in CPython: d["k"] reports
     ; KeyError('k'), not a fixed "key not found".  rbx already holds it.
     mov rdi, rbx               ; the key Value, saved on entry
-    extern raise_key_error
-    call raise_key_error
+    extern set_key_error
+    call set_key_error
+    jmp .ds_missing_raised
 
 .ds_missing_answered:
     ; dunder_call_2 hands back a Value and this function ANSWERS with a Value
@@ -1317,29 +1419,35 @@ DEF_FUNC dict_subscript, DSUB_FRAME
     ret
 
 .ds_missing_raised:
+    xor eax, eax
     pop rbx
     leave
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
+    ret
 END_FUNC dict_subscript
 
 ;; ============================================================================
 ;; dict_ass_subscript(rdi=dict, rsi=key Value, rdx=value Value)
 ;; A value Value of 0 (NULL) means "delete this key".
 ;; mp_ass_subscript: set key=value or delete key from dict
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE dict_ass_subscript
     ; A NULL Value is 0 and no real Value is, so this test needs no tag
     test rdx, rdx
     jz .das_delete
-    jmp dict_set
+    jmp dict_set_ret
 .das_delete:
     jmp dict_del
 END_FUNC dict_ass_subscript
 
 ;; ============================================================================
-;; dict_del(rdi=dict, rsi=key Value) -> 0 on success; RAISES KeyError on a miss
 ;; dict_del_opt(rdi=dict, rsi=key Value) -> 0 on success, -1 on a miss
+;; dict_del(rdi=dict, rsi=key Value) -> 0 on success; KeyError on a miss
+;; Fails: -1
+;;
+;; For dict_del every -1 is a failure with the exception pending.  For
+;; dict_del_opt -1 alone is "it was never there", and -1 with an exception
+;; pending is a key's __eq__ that raised.
 ;;
 ;; Delete key from dict.  DECREFs both key and value.
 ;;
@@ -1364,6 +1472,9 @@ DEF_FUNC dict_del_opt, DD_FRAME
     jmp dict_del.dd_body
 END_FUNC dict_del_opt
 
+;; dict_del(rdi=dict, rsi=key Value) -> rax = 0
+;; Fails: -1
+;; The other entry to the body above: a miss is a KeyError.
 DEF_FUNC dict_del, DD_FRAME
     push rbx
     push r12
@@ -1419,8 +1530,11 @@ DEF_FUNC dict_del, DD_FRAME
     ret
 
 .dd_missing:
+    cmp rax, -1
+    jne .dd_fail                ; -2: __eq__ raised, and it is pending
     cmp qword [rbp - DD_QUIET], 0
     je .dd_raise
+.dd_fail:
     mov rax, -1
     pop r12
     pop rbx
@@ -1428,7 +1542,8 @@ DEF_FUNC dict_del, DD_FRAME
     ret
 .dd_raise:
     mov rdi, [rbp - DD_KEYV]
-    call raise_key_error
+    call set_key_error
+    jmp .dd_fail
 END_FUNC dict_del
 
 ; dict_repr is in src/repr.asm
@@ -1483,6 +1598,7 @@ END_FUNC dict_tp_iter
 ;; Return next key, or (0, TAG_NULL) if exhausted.
 ;; Scans entries for next non-empty slot.
 ;; rdi = iterator
+;; Fails: 0?
 ;; ============================================================================
 extern exc_RuntimeError_type
 
@@ -1583,7 +1699,11 @@ DEF_FUNC_BARE dict_iter_next
     ret
 
 .di_mutation_error:
-    RAISE exc_RuntimeError_type, "dictionary changed size during iteration"
+    sub rsp, 8                  ; no frame here; the call wants rsp aligned
+    SET_EXC exc_RuntimeError_type, "dictionary changed size during iteration"
+    add rsp, 8
+    RET_NULL
+    ret
 END_FUNC dict_iter_next
 
 ;; ============================================================================
@@ -1617,13 +1737,20 @@ dict_iter_self:
 
 ;; ============================================================================
 ;; dict_contains(rdi=dict, rsi=key, edx=key_tag) -> int (0 or 1)
+;; Fails: -1
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
-    call dict_get
+    sub rsp, 8                  ; a bare function: the call wants rsp aligned
+    call dict_get_ret
+    add rsp, 8
+    ERR_PENDING .dc_raised
     test rax, rax               ; a Value, and 0 is the only miss
     setnz al
     movzx eax, al
+    ret
+.dc_raised:
+    mov rax, -1
     ret
 END_FUNC dict_contains
 
@@ -1632,6 +1759,7 @@ END_FUNC dict_contains
 ;; dict_nb_or(left, right, ltag, rtag) -> new dict (merge)
 ;; Implements dict | dict -> new dict containing all items from both.
 ;; Right dict values override left on key collision.
+;; Fails: 0?
 ;; ============================================================================
 DNO_LEFT  equ 8
 DNO_RIGHT equ 16
@@ -1691,7 +1819,8 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .dno_raised
     pop rdi
     pop r8
     pop rcx
@@ -1706,6 +1835,11 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.dno_raised:
+    ; A key's __eq__ raised while the right side was copied in.  The three
+    ; words saved around the call go with `leave`; the copy is ours.
+    mov rdi, [rbp - DNO_NEW]
+    call obj_decref
 .nb_or_decline:
     xor eax, eax                ; NULL Value = NotImplemented
     leave
@@ -1716,6 +1850,7 @@ END_FUNC dict_nb_or
 ;; dict_nb_ior(left, right, ltag, rtag) -> left dict (inplace merge |=)
 ;; Iterates right dict entries and dict_set each into left.
 ;; Returns (left, TAG_PTR) with INCREF on left.
+;; Fails: 0?
 ;; ============================================================================
 DIO_LEFT  equ 8
 DIO_RIGHT equ 16
@@ -1765,7 +1900,8 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov rdi, [rbp - DIO_LEFT]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .nb_ior_failed
     pop rdi
     pop r8
     pop rcx
@@ -1825,6 +1961,7 @@ END_FUNC dict_nb_ior
 ;;
 ;; Only supports Py_EQ (2) and Py_NE (3).
 ;; Two dicts are equal if they have the same size and all key-value pairs match.
+;; Fails: 0?
 ;; ============================================================================
 
 DRC_LEFT  equ 8
@@ -1852,7 +1989,9 @@ DEF_FUNC dict_richcompare
     ret
 .drc_too_deep:
     C_RECURSION_LEAVE
-    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+    SET_EXC exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+    leave
+    ret                         ; rax = 0, with it pending
 END_FUNC dict_richcompare
 
 ;; dict_richcompare_inner(the same arguments) -> (rax = payload, edx = tag)
@@ -1943,7 +2082,8 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     ; Value, or 0 when the key is not there.
     mov rdi, [rbp - DRC_RIGHT]
     mov rsi, [rbp - DRC_KEY]
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .drc_lookup_raised
     mov [rbp - DRC_RVAL], rax
     test rax, rax
     jz .drc_not_equal_rel           ; key not in right
@@ -1990,14 +2130,19 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     DECREF_V rdi, rax
     jmp .drc_not_equal
 
+.drc_lookup_raised:
+    ; The right dict's probe ran a key's __eq__ and it raised: drop what this
+    ; turn is holding.
+    mov rdi, [rbp - DRC_KEY]
+    DECREF_V rdi, rax
+    mov rdi, [rbp - DRC_LVAL]
+    DECREF_V rdi, rax
 .drc_raised:
-    ; The comparison raised.  Returning NULL would be read as NotImplemented,
-    ; and the caller would fall back to identity and answer False with the
-    ; exception still pending -- so hand it to the unwinder, which is what
-    ; list_richcompare_inner does with the same -1.
-    extern eval_exception_unwind
+    ; The comparison raised: 0 with the exception pending, which the caller
+    ; tells from NotImplemented by the pending exception.
+    RET_NULL
     leave
-    jmp eval_exception_unwind
+    ret
 
 .drc_not_equal:
     ; Return based on op: EQ→False, NE→True
@@ -2076,6 +2221,7 @@ END_FUNC dict_reversed
 ;; ============================================================================
 ;; dict_rev_iter_next(PyDictIterObject *self) -> (rax=key, edx=key_tag) or NULL
 ;; Like dict_iter_next but scans backwards (decrements index).
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC_BARE dict_rev_iter_next
     ; Mutation detection
@@ -2162,7 +2308,11 @@ DEF_FUNC_BARE dict_rev_iter_next
     ret
 
 .dri_mutation_error:
-    RAISE exc_RuntimeError_type, "dictionary changed size during iteration"
+    sub rsp, 8                  ; no frame here; the call wants rsp aligned
+    SET_EXC exc_RuntimeError_type, "dictionary changed size during iteration"
+    add rsp, 8
+    RET_NULL
+    ret
 END_FUNC dict_rev_iter_next
 
 ;; ============================================================================

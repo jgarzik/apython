@@ -526,7 +526,7 @@ DEF_FUNC module_setattr
     push rsi                    ; the name, likewise
     mov rdi, [rax + PyModuleObject.mod_dict]
     extern dict_del_opt
-    call dict_del_opt           ; -1 when the name was never there
+    call dict_del_opt           ; -1 when the name was never there -- err: the key is an attribute name, a str
     pop rsi
     pop rdi
     test eax, eax
@@ -1122,7 +1122,7 @@ DEF_FUNC namespace_setattr, NSS_FRAME
 
 .nss_delete:
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is an attribute name, a str
     test eax, eax
     js .nss_missing
     xor eax, eax

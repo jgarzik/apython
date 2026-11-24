@@ -230,7 +230,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     mov r12, rax
 .dvr_loop:
     mov rdi, r12
-    call dict_iter_next
+    call dict_iter_next       ; err: no Python runs between two steps, so the dict cannot change size under it
     V_UNPACK rax, rdx
     test edx, edx
     jz .dvr_done
@@ -392,7 +392,9 @@ DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     mov rdi, [rdi + PyDictViewObject.dv_dict]
     mov rax, [rbx + PyTupleObject.ob_item]
     mov rsi, [rax]                      ; the key
-    call dict_get                       ; a borrowed Value, or 0
+    extern dict_get_ret
+    call dict_get_ret                   ; a borrowed Value, or 0
+    ERR_PENDING .divc_error
     test rax, rax
     jz .divc_no
 

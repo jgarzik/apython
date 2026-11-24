@@ -318,7 +318,7 @@ DEF_FUNC subclass_unregister, SU_FRAME
     mov rdi, [rel subclass_table]
     mov rsi, [rbp - SU_TYPE]
     add rsi, [rel v_int_bias]
-    call dict_del
+    call dict_del             ; err: an int key in a table of ints, and sub_list_for_type just found it
     mov rdi, [r12 + SubList.items]
     call ap_free
     mov rdi, r12

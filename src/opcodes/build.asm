@@ -2481,6 +2481,7 @@ DEF_FUNC op_dict_merge
     mov rsi, rsp
     mov edx, 1
     call dict_type_call
+    ERR_NULL_JUMP
     add rsp, 16
     test rax, rax
     jz .dm_propagate

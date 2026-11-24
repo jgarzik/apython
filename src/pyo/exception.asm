@@ -1143,7 +1143,7 @@ DEF_FUNC exc_setattr, ESA_FRAME
     mov rdi, rax
     mov rsi, r12
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is an attribute name, a str
     test eax, eax
     jnz .esa_del_missing
     xor eax, eax            ; return 0 (success)

@@ -570,7 +570,7 @@ DEF_FUNC type_setattr
     ; across, since rsi does not survive a call and there is no frame.
     mov [rsp], rsi
     extern dict_del_opt
-    call dict_del_opt           ; -1 when it was never there
+    call dict_del_opt           ; -1 when it was never there -- err: the key is an attribute name, a str
     mov rsi, [rsp]
     pop rcx
     test eax, eax

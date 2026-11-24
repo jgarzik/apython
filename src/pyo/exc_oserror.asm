@@ -817,7 +817,7 @@ DEF_FUNC oserror_reduce, ORD_FRAME
     mov [rbp - ORD_ORIG], rax           ; ORD_ORIG is spent; hold the key
     mov rdi, rbx
     mov rsi, rax
-    call dict_del_opt                   ; -1 when it was never there
+    call dict_del_opt                   ; -1 when it was never there -- err: the key is an interned attribute name
     mov rdi, [rbp - ORD_ORIG]
     call obj_decref
     add r12, 8

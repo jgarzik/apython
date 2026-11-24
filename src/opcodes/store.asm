@@ -492,6 +492,7 @@ DEF_FUNC_BARE op_delete_name
     push rsi
     extern dict_del_opt
     call dict_del_opt
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
     test eax, eax
@@ -520,6 +521,7 @@ DEF_FUNC_BARE op_delete_name
                                ; handler, so a call needs an even push list
     push rsi
     call dict_del_opt
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
     test eax, eax
@@ -543,6 +545,7 @@ DEF_FUNC_BARE op_delete_global
     push rsi
     extern dict_del_opt
     call dict_del_opt
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
     test eax, eax

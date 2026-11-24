@@ -3198,6 +3198,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
     call dict_del
+    ERR_M1_JUMP
 .br_not_cached:
 
     mov rdi, r13                ; our own reference to the module

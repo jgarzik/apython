@@ -1444,7 +1444,7 @@ DEF_FUNC instance_setattr
 .sa_dict_del:
     mov rsi, r12                ; name
     extern dict_del_opt
-    call dict_del_opt           ; -1 when it was never there
+    call dict_del_opt           ; -1 when it was never there -- err: the key is an attribute name, a str
     test eax, eax
     jnz .sa_del_missing
     jmp .sa_ok

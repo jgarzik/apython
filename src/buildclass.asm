@@ -614,7 +614,7 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov rdi, [rbp - BFC_DICT]
     mov rsi, [rbp - BFC_KEY]
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is a str built in this function
 .bfc_drop_key:
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
@@ -746,7 +746,7 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     mov rdi, [r12 + PyTypeObject.tp_dict]
     mov rsi, [rbp - BTQ_KEY]
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is a str built in this function
 
 .btq_release_key:
     mov rdi, [rbp - BTQ_KEY]
