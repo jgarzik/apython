@@ -29,10 +29,11 @@ def err(label, fn, *args, **kw):
             fn(*args, **kw)
         except Exception:
             pass
-    # Two rounds, and the quieter one counts: an interpreter may grow a
-    # cache of its own during the first.
+    # Up to five rounds, and the quietest one counts: an interpreter fills
+    # freelists of its own during the first few hundred calls, and that is
+    # growth without being a leak.  A real leak climbs in every round.
     climbed = None
-    for _round in range(2):
+    for _round in range(5):
         before = sys.getallocatedblocks()
         for _ in range(200):
             try:
@@ -42,7 +43,24 @@ def err(label, fn, *args, **kw):
         grew = sys.getallocatedblocks() - before
         if climbed is None or grew < climbed:
             climbed = grew
+        if climbed < 50:
+            break
     print(label, "steady" if climbed < 50 else "CLIMBED")
+
+
+def err_type(label, fn, *args, **kw):
+    """The exception only.  For a failure that is raised underneath the
+    module -- by the binary-operator dispatch, by tuple(), by a __float__
+    slot -- where what is left behind is not this module's to release."""
+    msg = kw.pop("_msg", False)
+    try:
+        fn(*args, **kw)
+        print(label, "-> no error")
+    except Exception as e:
+        if msg:
+            print(label, "->", type(e).__name__, str(e))
+        else:
+            print(label, "->", type(e).__name__)
 
 
 def core(label, modname, fnname, *args):
@@ -822,3 +840,166 @@ err("compare_digest(non-ascii str)", hmac.compare_digest, "\xe9", "\xe9")
 err("compare_digest(1 arg)", hmac.compare_digest, b"a")
 print(hashlib.sha256(b"abc").hexdigest()[:16], hmac.new(b"k", b"m", "sha256").hexdigest()[:16],
       hashlib.pbkdf2_hmac("sha256", b"p", b"s", 2, 8).hex(), hmac.compare_digest(b"a", b"a"))
+
+# --- math ----------------------------------------------------------------
+import math
+
+print("== math")
+
+
+class RaisesIter:
+    def __iter__(self):
+        raise ValueError("from __iter__")
+
+
+class RaisesNext:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise KeyError("from __next__")
+
+
+class RaisesFloor:
+    def __floor__(self):
+        raise ValueError("from __floor__")
+
+    def __trunc__(self):
+        raise ValueError("from __trunc__")
+
+
+_BIG = 10 ** 400
+err("sqrt()", math.sqrt, _msg=True)
+err("sqrt(2 args)", math.sqrt, 1, 2, _msg=True)
+err("sqrt(str)", math.sqrt, "x", _msg=True)
+err("sqrt(-1)", math.sqrt, -1, _msg=True)
+err("sqrt(__float__ raises)", math.sqrt, RaisesFloat(), _msg=True)
+err("sqrt(__index__ raises)", math.sqrt, RaisesIndex(), _msg=True)
+err("sqrt(huge int)", math.sqrt, _BIG, _msg=True)
+err("exp(overflow)", math.exp, 1e6, _msg=True)
+err("cosh(overflow)", math.cosh, 1e6, _msg=True)
+err("acos(2)", math.acos, 2, _msg=True)
+err("gamma(-1)", math.gamma, -1, _msg=True)
+err("cbrt(str)", math.cbrt, "x", _msg=True)
+err("atan2(1 arg)", math.atan2, 1, _msg=True)
+err("atan2(str, 1)", math.atan2, "x", 1, _msg=True)
+err("atan2(1, str)", math.atan2, 1, "x", _msg=True)
+err("atan2(__float__ raises, 1)", math.atan2, RaisesFloat(), 1, _msg=True)
+err("atan2(1, __float__ raises)", math.atan2, 1, RaisesFloat(), _msg=True)
+err("pow(overflow)", math.pow, 1e300, 1e300, _msg=True)
+err("fmod(1, 0)", math.fmod, 1, 0, _msg=True)
+err("remainder(1, 0)", math.remainder, 1, 0, _msg=True)
+err("copysign(1 arg)", math.copysign, 1, _msg=True)
+err("nextafter(str)", math.nextafter, "x", 1, _msg=True)
+err("floor()", math.floor, _msg=True)
+err("floor(str)", math.floor, "x", _msg=True)
+err("floor(__floor__ raises)", math.floor, RaisesFloor(), _msg=True)
+err("floor(inf)", math.floor, float("inf"), _msg=True)
+err("floor(__float__ raises)", math.floor, RaisesFloat(), _msg=True)
+err("ceil(nan)", math.ceil, float("nan"), _msg=True)
+err("trunc()", math.trunc, _msg=True)
+err("trunc(str)", math.trunc, "x", _msg=True)
+err("trunc(__trunc__ raises)", math.trunc, RaisesFloor(), _msg=True)
+err("modf(str)", math.modf, "x", _msg=True)
+err("modf()", math.modf, _msg=True)
+err("frexp(str)", math.frexp, "x", _msg=True)
+err("degrees(str)", math.degrees, "x", _msg=True)
+err("radians(__float__ raises)", math.radians, RaisesFloat(), _msg=True)
+err("gcd(1, str)", math.gcd, 1, "x", _msg=True)
+err("gcd(float)", math.gcd, 1.5, _msg=True)
+err("lcm(big, str)", math.lcm, _BIG, "x", _msg=True)
+err("isqrt()", math.isqrt, _msg=True)
+err("isqrt(-1)", math.isqrt, -1, _msg=True)
+err("isqrt(-big)", math.isqrt, -_BIG, _msg=True)
+err("isqrt(str)", math.isqrt, "x", _msg=True)
+err("factorial()", math.factorial, _msg=True)
+err("factorial(-1)", math.factorial, -1, _msg=True)
+err("factorial(-big)", math.factorial, -_BIG, _msg=True)
+err("factorial(float)", math.factorial, 1.5, _msg=True)
+err("factorial(huge)", math.factorial, _BIG)
+err("comb(1 arg)", math.comb, 1, _msg=True)
+err("comb(-1, 1)", math.comb, -1, 1, _msg=True)
+err("comb(big, -1)", math.comb, _BIG, -1, _msg=True)
+err("comb(str, 1)", math.comb, "x", 1, _msg=True)
+err("comb(big, str)", math.comb, _BIG, "x", _msg=True)
+err("perm()", math.perm)
+err("perm(-big, 1)", math.perm, -_BIG, 1, _msg=True)
+err("perm(big, -1)", math.perm, _BIG, -1, _msg=True)
+err("perm(str)", math.perm, "x", _msg=True)
+err("perm(big, str)", math.perm, _BIG, "x", _msg=True)
+err("ulp()", math.ulp, _msg=True)
+err("ulp(str)", math.ulp, "x", _msg=True)
+err("ulp(__float__ raises)", math.ulp, RaisesFloat(), _msg=True)
+err("prod()", math.prod, _msg=True)
+err("prod(int)", math.prod, 1, _msg=True)
+err("prod(2 positional)", math.prod, [1], 2, _msg=True)
+err("prod(3 positional)", math.prod, [1], 2, 3, _msg=True)
+err("prod(__iter__ raises)", math.prod, RaisesIter(), _msg=True)
+err("prod(__next__ raises)", math.prod, RaisesNext(), _msg=True)
+err_type("prod(unmultipliable)", math.prod, [_BIG, "x", []])
+err("prod(bad keyword)", math.prod, [1, 2], begin=1)
+err_type("prod(start unmultipliable)", math.prod, [_BIG, []], start="x")
+err("isclose(1 arg)", math.isclose, 1)
+err("isclose(str, 1)", math.isclose, "x", 1)
+err("isclose(1, str)", math.isclose, 1, "x")
+err("isclose(__float__ raises)", math.isclose, RaisesFloat(), 1, _msg=True)
+err("isclose(str rel_tol)", math.isclose, 1, 1, rel_tol="x", _msg=True)
+err("isclose(negative abs_tol)", math.isclose, 1, 1, abs_tol=-1.0, _msg=True)
+err("isclose(rel_tol __float__ raises)", math.isclose, 1, 1, rel_tol=RaisesFloat(), _msg=True)
+err("isclose(bad keyword)", math.isclose, 1, 1, tol=1)
+err("dist(1 arg)", math.dist, (1,), _msg=True)
+err("dist(lengths differ)", math.dist, (1,), (1, 2), _msg=True)
+err("dist(str coordinate)", math.dist, (1.5, 2.5), (1.5, "x"))
+err_type("dist(ints)", math.dist, 1, 2)
+err_type("dist(__float__ raises)", math.dist, (1.5, RaisesFloat()), (1.5, 2.5), _msg=True)
+err_type("dist(__iter__ raises)", math.dist, (1.5,), RaisesIter(), _msg=True)
+err("log()", math.log)
+err("log(0)", math.log, 0, _msg=True)
+err("log(-1)", math.log, -1, _msg=True)
+err("log(str)", math.log, "x", _msg=True)
+err("log(1, str)", math.log, 1, "x", _msg=True)
+err("log(10, 1)", math.log, 10, 1, _msg=True)
+err("log(0, 10)", math.log, 0, 10, _msg=True)
+err("log(-big)", math.log, -_BIG, _msg=True)
+err("log(big, -big)", math.log, _BIG, -_BIG, _msg=True)
+err("log(__float__ raises)", math.log, RaisesFloat(), _msg=True)
+err("log(2, __float__ raises)", math.log, 2, RaisesFloat(), _msg=True)
+err("log(3 args)", math.log, 1, 2, 3)
+err("log2(0)", math.log2, 0, _msg=True)
+err("log2(-big)", math.log2, -_BIG, _msg=True)
+err("log2(str)", math.log2, "x", _msg=True)
+err("log10(-big)", math.log10, -_BIG, _msg=True)
+err("log10()", math.log10, _msg=True)
+err("ldexp(1 arg)", math.ldexp, 1, _msg=True)
+err("ldexp(str, 1)", math.ldexp, "x", 1, _msg=True)
+err("ldexp(1, float)", math.ldexp, 1, 1.5, _msg=True)
+err("ldexp(overflow)", math.ldexp, 1.0, 5000, _msg=True)
+err("ldexp(__float__ raises)", math.ldexp, RaisesFloat(), 1, _msg=True)
+err("fsum()", math.fsum, _msg=True)
+err("fsum(int)", math.fsum, 1, _msg=True)
+err("fsum(str item)", math.fsum, [1.5, 2.5, "x"], _msg=True)
+err("fsum(overflow)", math.fsum, [1e308, 1e308], _msg=True)
+err("fsum(__next__ raises)", math.fsum, RaisesNext(), _msg=True)
+err_type("fsum(__float__ raises)", math.fsum, [1.5, 2.5, RaisesFloat()], _msg=True)
+err("fsum(__iter__ raises)", math.fsum, RaisesIter(), _msg=True)
+err("fsum(huge int item)", math.fsum, [1.5, _BIG], _msg=True)
+err("hypot(str)", math.hypot, "x", _msg=True)
+err("hypot(1, str)", math.hypot, 1, "x", _msg=True)
+err("hypot(1, 2, str)", math.hypot, 1, 2, "x", _msg=True)
+err("hypot(__float__ raises, 1)", math.hypot, RaisesFloat(), 1, _msg=True)
+err("hypot(1, 2, __float__ raises)", math.hypot, 1, 2, RaisesFloat(), _msg=True)
+err("sumprod(1 arg)", math.sumprod, [1], _msg=True)
+err("sumprod(int, list)", math.sumprod, 1, [1], _msg=True)
+err("sumprod(list, int)", math.sumprod, [1], 1, _msg=True)
+err("sumprod(lengths differ)", math.sumprod, [1], [1, 2], _msg=True)
+err("sumprod(__next__ raises)", math.sumprod, RaisesNext(), [1], _msg=True)
+err("sumprod(unmultipliable)", math.sumprod, [_BIG, []], [_BIG, []])
+err("isnan(str)", math.isnan, "x", _msg=True)
+err("isinf()", math.isinf, _msg=True)
+err("isfinite(__float__ raises)", math.isfinite, RaisesFloat(), _msg=True)
+# The two callers of math's keyword binder that are not in math.
+err("print(bad keyword)", print, 1, sepp="x", _msg=True)
+_mv = memoryview(bytearray(16)).cast("d")
+err_type("memoryview[d] = __float__ raises", _mv.__setitem__, 0, RaisesFloat())
+print(math.sqrt(4), math.log(_BIG) > 900, math.prod([2, 3], start=2), math.fsum([0.1] * 10),
+      math.hypot(3, 4), math.dist((0, 0), (3, 4)), math.isclose(1, 1 + 1e-12), math.perm(5, 2))

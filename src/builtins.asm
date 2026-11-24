@@ -909,6 +909,7 @@ DEF_FUNC builtin_print, PR_FRAME
     lea rcx, [rbp - PR_KW_SEP]
     lea r8, [rel pr_kw_fn]
     call math_bind_kw_named
+    ERR_M1_JUMP
     mov r12, rax                ; r12 = n_pos
 
     ; sep and end: None or a str (a subclass too), checked before anything

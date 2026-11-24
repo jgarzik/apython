@@ -2003,7 +2003,9 @@ DEF_FUNC func_construct, FCN_FRAME
     lea rdx, [rel fcn_kwnames]
     lea rcx, [rbp - FCN_CODE]
     extern math_bind_kw
+    extern eval_exception_unwind
     call math_bind_kw
+    ERR_M1_JUMP
     cmp rax, 5
     ja .fcn_arity
     mov [rbp - FCN_NPOS], rax

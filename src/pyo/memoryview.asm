@@ -1848,6 +1848,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     extern math_to_double
     call math_to_double         ; xmm0, eax = 0 when it is not a number
+    ERR_M1_JUMP
     test eax, eax
     jz .ma_value_type
     mov rdi, [rbp - MA_OBJ]
