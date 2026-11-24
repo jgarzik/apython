@@ -2458,6 +2458,7 @@ extern str_set_length
     mov rsi, [rbp - BLS_NARGS]
     extern str_method_encode
     call str_method_encode
+    ERR_NULL .bls_bad_type      ; which propagates what is pending
     V_UNPACK rax, rdx
     test rax, rax
     jz .bls_bad_type

@@ -1741,6 +1741,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     mov rdi, [rdi + 8]              ; args[1]
     CSTRING rsi, "bad argument type for built-in operation"
     call str_require_str
+    ERR_NULL .ffh_fail
     mov [rbp - FFH_STR], rax
     mov qword [rbp - FFH_BUF], 0
     mov qword [rbp - FFH_ESTART], 0
@@ -2091,6 +2092,7 @@ DEF_FUNC float_classmethod_getformat, 8   ; 1 pushes, so rsp is 16-aligned
     je .fgf_none
     CSTRING rsi, `__getformat__() argument must be str, not \x01`
     call str_require_str
+    ERR_NULL .fgf_fail
     lea rbx, [rax + PyStrObject.data]
 
     mov rdi, rbx
