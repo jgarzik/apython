@@ -30,6 +30,7 @@ extern bool_type
 extern gc_alloc
 extern gc_track
 extern raise_exception
+extern set_exception
 extern eval_frame
 extern frame_new
 extern ap_malloc
@@ -86,6 +87,7 @@ section .text
 ;; `super().__new__(mcls, name, bases, ns)`, and without this that resolved to
 ;; object.__new__ and produced an *instance* of the metaclass rather than a
 ;; class.  ABCMeta is written exactly that way, so abc.py depends on it.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC type_method_new
     push rbx
@@ -137,7 +139,8 @@ DEF_FUNC type_method_new
     ret
 
 .tmn_error:
-    RAISE exc_TypeError_type, "type.__new__() takes at least 3 arguments"
+    SET_EXC exc_TypeError_type, "type.__new__() takes at least 3 arguments"
+    jmp .tmn_failed
 END_FUNC type_method_new
 
 ;; ============================================================================
@@ -147,6 +150,7 @@ END_FUNC type_method_new
 ;; __init__ in its dict, so a metaclass ending in `super().__init__(name,
 ;; bases, ns)` walked past it to object's, which now refuses arguments it
 ;; has nowhere to put.  CPython takes one or three besides the class.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC type_method_init
     ; One or three besides the class.  A builtin here is handed its keyword
@@ -164,7 +168,9 @@ DEF_FUNC type_method_init
     V_PACK rax, rdx
     ret
 .tmi_error:
-    RAISE exc_TypeError_type, "type.__init__() takes 1 or 3 arguments"
+    SET_EXC exc_TypeError_type, "type.__init__() takes 1 or 3 arguments"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC type_method_init
 
 ;; ============================================================================
@@ -202,6 +208,7 @@ END_FUNC type_method_prepare
 ;; PyObject_IsInstance.  One that consulted the dunder would recurse forever
 ;; through a metaclass whose __instancecheck__ ends in
 ;; `super().__instancecheck__(obj)` -- which is how ABCMeta's is written.
+;; Fails: 0
 ;; ============================================================================
 TIC_CLS   equ 8
 TIC_OBJ   equ 16
@@ -239,8 +246,7 @@ DEF_FUNC type_method_instancecheck, TIC_FRAME
     mov rdi, [rbp - TIC_OBJ]
     extern obj_declared_class
     call obj_declared_class
-    extern eval_exception_unwind
-    ERR_PENDING_JUMP
+    ERR_PENDING .tic_fail
     test rax, rax
     jz .tic_false
     mov rbx, rax
@@ -270,12 +276,18 @@ DEF_FUNC type_method_instancecheck, TIC_FRAME
     V_PACK rax, rdx
     ret
 .tic_error:
-    RAISE exc_TypeError_type, "__instancecheck__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__instancecheck__() takes exactly one argument"
+.tic_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC type_method_instancecheck
 
 ;; type_method_subclasscheck(args, nargs) -> Value, documented with its twin
 ;; above: the same plain check, over two classes rather than a class and an
 ;; instance.
+;; Fails: 0
 DEF_FUNC type_method_subclasscheck, TIC_FRAME
     push rbx
     cmp rsi, 2
@@ -309,9 +321,15 @@ DEF_FUNC type_method_subclasscheck, TIC_FRAME
     V_PACK rax, rdx
     ret
 .tsc_not_a_class:
-    RAISE exc_TypeError_type, "issubclass() arg 1 must be a class"
+    SET_EXC exc_TypeError_type, "issubclass() arg 1 must be a class"
+    jmp .tsc_fail
 .tsc_error:
-    RAISE exc_TypeError_type, "__subclasscheck__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__subclasscheck__() takes exactly one argument"
+.tsc_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC type_method_subclasscheck
 
 
