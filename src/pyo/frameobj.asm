@@ -1175,7 +1175,7 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
     mov rdi, rcx
     extern gen_close
     call gen_close
-    ERR_NULL_JUMP
+    ERR_NULL .fmc_failed        ; a finally block raised: that is the answer
     mov rax, [rbp - FMC_SELF]
     mov qword [rax + PyFrameObject.f_frame], 0
 .fmc_detached:
@@ -1213,6 +1213,8 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
 .fmc_executing:
     extern exc_RuntimeError_type
     SET_EXC exc_RuntimeError_type, "cannot clear an executing frame"
+.fmc_failed:
+    xor eax, eax
     leave
     ret
 .fmc_arity:
