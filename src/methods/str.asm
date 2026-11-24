@@ -2487,8 +2487,8 @@ DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
     pop rax
     test rax, rax
     jz .frf_no_attr
-    DECREF_V rbx, rcx
-    mov rbx, rax
+    xchg rbx, rax               ; the new object where a release cannot
+    DECREF_V rax, rcx           ; reach it: the old one may be a temporary
     jmp .frf_suffix
 
 .frf_item:
@@ -2550,8 +2550,8 @@ DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
     je .frf_not_subscriptable
     test rax, rax
     jz .frf_bad_item
-    DECREF_V rbx, rcx
-    mov rbx, rax
+    xchg rbx, rax               ; the new object where a release cannot
+    DECREF_V rax, rcx           ; reach it: the old one may be a temporary
     jmp .frf_suffix
 
 .frf_done:
@@ -3000,7 +3000,9 @@ DEF_FUNC str_method_format_map, FM_FRAME
     mov rdi, rax
     call obj_str
     pop rdi
-    DECREF_V rdi, rcx
+    push rax                    ; the text, across a release that may dealloc:
+    DECREF_V rdi, rcx           ; "{a.b}" where b is a temporary crashed here
+    pop rax
     jmp .fmap_have_text
 .fmap_no_suffix:
     call obj_str
