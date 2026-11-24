@@ -12,7 +12,7 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern raise_exception
+extern set_exception
 extern none_singleton
 extern obj_incref
 extern dict_new
@@ -30,7 +30,6 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
 extern dunder_get
@@ -479,6 +478,7 @@ END_FUNC base_slot
 IR_EXC   equ 8
 IR_ASSTR equ 16            ; 1 when str() sent us here, so a non-str answer is
                            ; reported as __str__ and not as __repr__
+IR_BAD   equ 24            ; what __repr__ answered instead of a str, owned
 IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 ;; ============================================================================
@@ -601,14 +601,19 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
     ; str() with no __str__ of its own is object.__str__, which is repr -- and
     ; CPython checks the result at the str() level, so it says __str__ there.
+    mov [rbp - IR_BAD], rsi
     cmp qword [rbp - IR_ASSTR], 0
     jne .ir_not_a_string_from_str
     CSTRING rdi, `__repr__ returned non-string (type \x01)`
-    jmp raise_type_error_with_name
+    jmp .ir_refuse
 .ir_not_a_string_from_str:
     CSTRING rdi, `__str__ returned non-string (type \x01)`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+.ir_refuse:
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - IR_BAD]     ; and the thing itself goes back: the jump
+    DECREF_V rdi, rcx           ; this used to be left it referenced for ever
+    jmp .failed
 
 .ir_dunder_none:
     DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
@@ -761,6 +766,7 @@ END_FUNC instance_repr_default
 ;; rdi = instance
 ;; ============================================================================
 IS_EXC   equ 8
+IS_BAD   equ 16            ; what __str__ answered instead of a str, owned
 IS_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 ;; The same guard instance_repr carries, and for the same loop: the two reach
@@ -835,9 +841,12 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
 .is_not_a_string:
     mov rsi, rax
     VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
+    mov [rbp - IS_BAD], rsi
     CSTRING rdi, `__str__ returned non-string (type \x01)`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+    call set_type_error_with_name
+    mov rdi, [rbp - IS_BAD]
+    DECREF_V rdi, rcx
+    jmp .failed
 
 .is_dunder_none:
     DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
@@ -903,6 +912,7 @@ END_FUNC instance_str_inner
 ;; Returns: new instance
 ;; ============================================================================
 ; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
+TC_SAVED    equ 40              ; the five registers .normal_type_call pushes
 TC_NEW_FUNC equ 48              ; saved __new__ func pointer
 TC_NEW_TAG  equ 56              ; saved __new__ result tag
 ; The keywords this call was made with.  __new__ consumes kw_names_pending, so
@@ -1029,6 +1039,12 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     test rcx, rcx
     jz .twm_next
     mov rcx, [rcx + PyObject.ob_type]
+    ; A base that is not a class at all has no metatype to elect: its type
+    ; is str or NoneType, and electing that CALLED it -- `type("X", ("a",),
+    ; {})` answered "decoding str is not supported".  It contributes nothing
+    ; here and the plain path refuses it by name.
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .twm_next
     lea rdx, [rel type_type]
     cmp rcx, rdx
     je .twm_next
@@ -1077,7 +1093,8 @@ END_FUNC tc_winner_metatype
 ;; Described in full above the frame constants and helpers it uses.  A __new__
 ;; or an __init__ that fails -- by raising, or by RETURNING 0 with the
 ;; exception set, which is what a builtin one does -- is absorbed here: the
-;; half-built instance is released and 0 goes to the caller.
+;; half-built instance is released and 0 goes to the caller.  So is every
+;; refusal made before an instance exists.
 ;; Fails: 0
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
@@ -1092,7 +1109,9 @@ DEF_FUNC type_call
     ; type() and type(a, b) are neither form.  Falling through to tp_new
     ; reported it as `type.__new__() takes at least 3 arguments`, which
     ; names a method the caller did not write.
-    RAISE exc_TypeError_type, "type() takes 1 or 3 arguments"
+    SET_EXC exc_TypeError_type, "type() takes 1 or 3 arguments"
+    leave
+    ret
 .type_one_arg:
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
@@ -1181,8 +1200,23 @@ DEF_FUNC type_call
     jne .type_three_bad_bases
     mov rcx, [rsi + PyTupleObject.ob_size]
     test rcx, rcx
-    jnz .type_three_have_base
+    jnz .type_three_check_bases
     xor esi, esi
+    jmp .type_three_have_base
+.type_three_check_bases:
+    ; Every base has to BE a class.  Nothing looked, so `type("X", (5,), {})`
+    ; handed an int to type_from_parts, which read tp_basicsize off it -- a
+    ; segfault from one line of Python.  CPython reaches its metaclass
+    ; calculation first and words the refusal from there.
+    mov rax, [rsi + PyTupleObject.ob_item]
+    mov rax, [rax + rcx*8 - 8]
+    V_TEST_PTR rax, rdx
+    ja .type_three_bad_base
+    mov rax, [rax + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .type_three_bad_base
+    dec rcx
+    jnz .type_three_check_bases
 .type_three_have_base:
 
     mov rdx, [rbx + 16]                 ; namespace dict
@@ -1207,11 +1241,18 @@ DEF_FUNC type_call
     ret
 
 .type_three_bad_name:
-    RAISE exc_TypeError_type, "type() argument 1 must be str"
+    FAIL exc_TypeError_type, "type() argument 1 must be str", .type_three_fail
 .type_three_bad_bases:
-    RAISE exc_TypeError_type, "type() argument 2 must be a tuple of at most one base"
+    FAIL exc_TypeError_type, "type() argument 2 must be a tuple of at most one base", .type_three_fail
+.type_three_bad_base:
+    FAIL exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases", .type_three_fail
 .type_three_bad_ns:
-    RAISE exc_TypeError_type, "type() argument 3 must be dict"
+    SET_EXC exc_TypeError_type, "type() argument 3 must be dict"
+.type_three_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 
 .type_bool:
     extern bool_type
@@ -1283,8 +1324,9 @@ DEF_FUNC type_call
     jne .normal_type_call
     mov rsi, rdi                        ; the type, whose name fills the \x01
     CSTRING rdi, `cannot create '\x01' instances`
-    extern raise_type_error_with_typename
-    jmp raise_type_error_with_typename  ; does not return
+    call set_type_error_with_typename   ; rax = 0
+    leave
+    ret
 
 .normal_type_call:
     push rbx
@@ -1330,7 +1372,7 @@ DEF_FUNC type_call
     mov rsi, rax
     extern type_abstract_error
     call type_abstract_error    ; rax = 0, the TypeError pending
-    jmp eval_exception_unwind
+    jmp .tc_fail
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -1449,7 +1491,7 @@ DEF_FUNC type_call
     mov rsi, r12
     mov rdx, r13
     call tuple_sub_fill
-    ERR_M1_JUMP
+    ERR_M1 .tc_drop_instance    ; r14 is the instance it could not fill
     jmp .lookup_init
 
 .new_found:
@@ -1996,29 +2038,33 @@ DEF_FUNC type_call
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
+.init_not_callable:
+    ; The argument carve is on the stack and r14 is the instance: the exit a
+    ; raising __init__ takes undoes the first and releases the second.
+    SET_EXC exc_TypeError_type, "__init__ is not callable"
+    jmp .init_raised
+
+.new_not_callable:
+    ; No instance yet; .tc_fail cuts the argument carve away with the locals.
+    SET_EXC exc_TypeError_type, "__new__ is not callable"
+
 .int_sub_error:
-    add rsp, 24
+.tc_fail:
+    ; A construction refused before there is an instance to release, reached
+    ; at more than one stack depth -- so rsp is cut back to the five saved
+    ; registers rather than adjusted by what each site thinks it carved.
+    ; .int_sub_error used to `add rsp, 24` over 56 bytes of locals and pop the
+    ; five callee-saved registers out of the middle of them; nothing noticed
+    ; because every caller was an opcode that unwinds and reloads its own.
+    xor eax, eax
+    lea rsp, [rbp - TC_SAVED]
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; tp_call returns one Value
     ret
-
-.init_not_callable:
-    RAISE exc_TypeError_type, "__init__ is not callable"
-    ; does not return
-
-.new_not_callable:
-    ; Restore stack from args allocation, then error
-    lea rax, [r13 + 2]          ; nargs + 1 slots...
-    and rax, -2                 ; ...rounded up to a pair, so rsp stays
-    shl rax, 3                  ; 16-aligned for the tp_call below
-    add rsp, rax
-    RAISE exc_TypeError_type, "__new__ is not callable"
-    ; does not return
 END_FUNC type_call
 
 
