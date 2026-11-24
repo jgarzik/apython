@@ -62,6 +62,7 @@ extern float_type
 extern tuple_type
 extern bytes_type
 extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ReferenceError_type
 extern bool_true
@@ -623,7 +624,11 @@ DEF_FUNC_LOCAL ref_hash, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 .dead:
-    RAISE exc_TypeError_type, "weak object has gone away"
+    SET_EXC exc_TypeError_type, "weak object has gone away"
+    mov rax, -1                 ; tp_hash: -1 with the exception pending
+    pop rbx
+    leave
+    ret
 END_FUNC ref_hash
 
 ; Two live references compare as their referents do; a dead one only ever
@@ -691,8 +696,8 @@ END_FUNC ref_richcompare
 ;; ============================================================================
 
 ;; ============================================================================
-;; weakref_check_referent(rdi = the referent Value) -> rax = the object, or 0
-;;                                                     with a TypeError pending
+;; weakref_check_referent(rdi = the referent Value) -> rax = the object
+;; Fails: 0
 ;;
 ;; CPython refuses a weak reference to most builtin types: `weakref.ref([])`
 ;; is a TypeError, not a reference.  That is what a zero tp_weaklistoffset
@@ -738,8 +743,12 @@ DEF_FUNC weakref_check_referent, 8            ; 1 pushes, so rsp is 16-aligned
     xor esi, esi
 .wcr_raise:
     lea rdi, [rel wcr_message]
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC weakref_check_referent
 
 section .rodata
@@ -907,9 +916,10 @@ DEF_FUNC ref_construct, WRC_FRAME
     push rdx                    ; nargs, across the check
     push rsi
     mov rdi, [rsi]
-    call weakref_check_referent ; raises, naming the type, when it refuses
+    call weakref_check_referent ; refuses by naming the type
     pop rsi
     pop rdx
+    ERR_NULL .rc_fail
     mov rdi, rax
     xor ecx, ecx
     cmp rdx, 2
@@ -931,17 +941,22 @@ DEF_FUNC ref_construct, WRC_FRAME
     leave
     ret
 .bad_few:
-    RAISE exc_TypeError_type, "__new__ expected at least 1 argument, got 0"
+    FAIL exc_TypeError_type, "__new__ expected at least 1 argument, got 0", .rc_fail
 .bad_kw:
-    RAISE exc_TypeError_type, "ref() takes no keyword arguments"
+    FAIL exc_TypeError_type, "ref() takes no keyword arguments", .rc_fail
 .bad_many:
     ; CPython counts them in the message, and a caller that passed three has
     ; to be told it passed three.
-    extern raise_type_error_counted
+    extern set_type_error_counted
     lea rdi, [rel rc_too_many]
     mov rsi, [rbp - WRC_NARGS]
     xor edx, edx
-    call raise_type_error_counted   ; does not return
+    call set_type_error_counted
+.rc_fail:
+    RET_NULL                    ; tp_new: rax = 0 and edx = 0
+    pop rbx
+    leave
+    ret
 END_FUNC ref_construct
 
 ;; ============================================================================
@@ -1002,10 +1017,14 @@ DEF_FUNC ref_dunder_init
     V_PACK rax, rdx
     ret
 .rdi_error:
-    RAISE exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
+    leave
+    ret
 .rdi_kwerror:
     mov qword [gs:ThreadState.kw_names_pending], 0
-    RAISE exc_TypeError_type, "ref() takes no keyword arguments"
+    SET_EXC exc_TypeError_type, "ref() takes no keyword arguments"
+    leave
+    ret
 END_FUNC ref_dunder_init
 
 ;; ============================================================================
@@ -1079,6 +1098,8 @@ END_FUNC ref_clear
 ;; ============================================================================
 ;; proxy objects: the same structure, forwarding attribute access
 ;; ============================================================================
+;; proxy_referent(rdi = the proxy) -> rax = its referent, borrowed
+;; Fails: 0
 DEF_FUNC_LOCAL proxy_referent
     mov rax, [rdi + PyWeakRefObject.wr_object]
     test rax, rax
@@ -1086,13 +1107,16 @@ DEF_FUNC_LOCAL proxy_referent
     leave
     ret
 .dead:
-    RAISE exc_ReferenceError_type, "weakly-referenced object no longer exists"
+    SET_EXC exc_ReferenceError_type, "weakly-referenced object no longer exists"
+    leave
+    ret
 END_FUNC proxy_referent
 
 DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi
     call proxy_referent
+    ERR_NULL .none              ; 0 with the ReferenceError pending
     mov rdi, rax
     mov rsi, rbx
     mov rax, [rdi + PyObject.ob_type]
@@ -1131,6 +1155,7 @@ DEF_FUNC proxy_setattr
     mov rbx, rsi
     mov r12, rdx
     call proxy_referent
+    ERR_NULL .fail
     mov rdi, rax
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
@@ -1144,13 +1169,21 @@ DEF_FUNC proxy_setattr
     leave
     ret
 .no_setattr:
-    RAISE exc_TypeError_type, "proxy object does not support attribute assignment"
+    SET_EXC exc_TypeError_type, "proxy object does not support attribute assignment"
+.fail:
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC proxy_setattr
 
 DEF_FUNC proxy_repr
     call proxy_referent
+    ERR_NULL .fail
     mov rdi, rax
     call obj_repr
+.fail:
     leave
     ret
 END_FUNC proxy_repr
@@ -1161,6 +1194,7 @@ DEF_FUNC proxy_call
     mov rbx, rsi
     mov r12, rdx
     call proxy_referent
+    ERR_NULL .fail
     mov rdi, rax
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
@@ -1174,7 +1208,13 @@ DEF_FUNC proxy_call
     leave
     ret
 .not_callable:
-    RAISE exc_TypeError_type, "proxy object is not callable"
+    SET_EXC exc_TypeError_type, "proxy object is not callable"
+.fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC proxy_call
 
 ;; ============================================================================
@@ -1188,8 +1228,9 @@ DEF_FUNC wr_proxy_func
     mov rbx, rdi
     push rsi                    ; nargs, across the check
     mov rdi, [rbx]
-    call weakref_check_referent ; raises, naming the type, when it refuses
+    call weakref_check_referent ; refuses by naming the type
     pop rsi
+    ERR_NULL .fail
     mov rdi, rax
     ; A callable referent gets CallableProxyType, as CPython does.
     mov rax, [rdi + PyObject.ob_type]
@@ -1219,8 +1260,15 @@ DEF_FUNC wr_proxy_func
     V_PACK rax, rdx
     leave
     ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 .bad:
-    RAISE exc_TypeError_type, "cannot create weak proxy to this object"
+    SET_EXC exc_TypeError_type, "cannot create weak proxy to this object"
+    leave
+    ret
 END_FUNC wr_proxy_func
 
 DEF_FUNC wr_getweakrefcount_func
