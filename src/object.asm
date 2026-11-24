@@ -992,10 +992,10 @@ DEF_FUNC_BARE value_type
     ret
 END_FUNC value_type
 
-; raise_type_error_with_name(rdi = template C string with a single %s marker
-;                            written as \x01, rsi = Value whose type to name)
-; Composes the message into a static buffer and raises TypeError.  Does not
-; return.
+; set_type_error_with_name(rdi = template C string with a single %s marker
+;                          written as \x01, rsi = Value whose type to name)
+; Composes the message into a static buffer and records a TypeError; the
+; docblock is above the function, below the buffers.
 ; Wide enough for the longest message that goes through it, which is now a
 ; deprecation rather than an error: CPython's "__index__ returned non-int
 ; (type bool).  The ability to return an instance of a strict subclass of int
@@ -1031,7 +1031,9 @@ section .bss
 rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
 
 section .text
-DEF_FUNC raise_type_error_with_name
+;; set_type_error_with_name(rdi = the template, rsi = the Value to name)
+;;   -> rax = 0, always, with the TypeError pending
+DEF_FUNC set_type_error_with_name
     push rbx
     push r12
     mov rbx, rdi
@@ -1039,15 +1041,16 @@ DEF_FUNC raise_type_error_with_name
     call value_type
     mov r12, rax                    ; type, or 0
     jmp rtn_compose
-END_FUNC raise_type_error_with_name
+END_FUNC set_type_error_with_name
 
 ;; ============================================================================
-;; raise_type_error_with_typename(rdi = the same template, rsi = a type object)
+;; set_type_error_with_typename(rdi = the same template, rsi = a type object)
+;;   -> rax = 0, always, with the TypeError pending
 ;; For a caller that has released the object it is complaining about and kept
 ;; only its type -- the object is gone by then, and reading ob_type off freed
 ;; memory is exactly the bug this message is reporting.
 ;; ============================================================================
-DEF_FUNC raise_type_error_with_typename
+DEF_FUNC set_type_error_with_typename
     push rbx
     push r12
     mov rbx, rdi
@@ -1059,9 +1062,28 @@ rtn_compose:
     lea rdi, [rel exc_TypeError_type]
     mov rsi, rax
     extern exc_TypeError_type
-    extern raise_exception
-    call raise_exception
-    ud2
+    extern set_exception
+    call set_exception
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_type_error_with_typename
+
+;; The raising half of each set_* twin in this file is the twin and then the
+;; unwind, for an opcode handler -- which alone may jump.
+;; raise_type_error_with_name(set_type_error_with_name's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    jmp eval_exception_unwind
+END_FUNC raise_type_error_with_name
+
+;; raise_type_error_with_typename(set_type_error_with_typename's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC raise_type_error_with_typename
+    call set_type_error_with_typename
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_type_error_with_typename
 
 ;; ============================================================================
@@ -1236,8 +1258,8 @@ DEF_FUNC dunder_require_self, DRS_FRAME
 END_FUNC dunder_require_self
 
 ;; ============================================================================
-;; raise_binop_type_error(rdi = left Value, rsi = right Value,
-;; rdx = prefix C string) -> never returns
+;; set_binop_type_error(rdi = left Value, rsi = right Value,
+;; rdx = prefix C string) -> rax = 0, always, with the TypeError pending
 ;; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
 ;; operator's TypeError.  With two operands the bare prefix does not say which
 ;; one was wrong.
@@ -1247,9 +1269,16 @@ RBT_RIGHT equ 16
 RBT_OPEN  equ 24
 RBT_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
-DEF_FUNC_BARE raise_binop_type_error
+DEF_FUNC_BARE set_binop_type_error
     lea rcx, [rel rbt_open]     ; the default opener, ": '"
-    jmp raise_binop_type_error_ex
+    jmp set_binop_type_error_ex
+END_FUNC set_binop_type_error
+
+;; raise_binop_type_error(set_binop_type_error's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC raise_binop_type_error
+    call set_binop_type_error
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_binop_type_error
 
 ;; ============================================================================
@@ -1258,7 +1287,7 @@ END_FUNC raise_binop_type_error
 ;;                          type name, or 0 for the usual ": '")
 ;;   -> rax = the composed C string, in the shared rbt_buf
 ;;
-;; The composition raise_binop_type_error_ex does, without the raise.  A
+;; The composition set_binop_type_error_ex records, without the exception.  A
 ;; caller that still has two references to release cannot unwind from where
 ;; it notices, so it sets the exception instead -- and was reporting the bare
 ;; "unsupported operand type(s)", with neither the operator nor the types.
@@ -1301,43 +1330,27 @@ DEF_FUNC compose_binop_type_error, RBT_FRAME
 END_FUNC compose_binop_type_error
 
 ;; ============================================================================
-;; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
+;; set_binop_type_error_ex(rdi = left Value, rsi = right Value,
 ;; rdx = prefix C string, rcx = opener C string)
-;; -> never returns
+;; -> rax = 0, always, with the TypeError pending
 ;; The opener is what sits between the prefix and the first type name.  A
 ;; binary operator wants ": '", and COMPARE_OP wants " of '", because CPython
 ;; words that one "'<' not supported between instances of 'int' and 'str'".
 ;; ============================================================================
-DEF_FUNC raise_binop_type_error_ex, RBT_FRAME
-    push rbx
-    mov [rbp - RBT_LEFT], rdi
-    mov [rbp - RBT_RIGHT], rsi
-    mov rbx, rdx
-    mov [rbp - RBT_OPEN], rcx
-
-    lea rdi, [rel rbt_buf]
-    mov rsi, rbx
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - RBT_OPEN]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - RBT_LEFT]
-    call rbt_typename
-    mov rdi, rax
-    lea rsi, [rel rbt_and]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - RBT_RIGHT]
-    call rbt_typename
-    mov rdi, rax
-    lea rsi, [rel rbt_close]
-    call rbt_append_cstr
-
+DEF_FUNC set_binop_type_error_ex
+    call compose_binop_type_error       ; the same four arguments
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rbt_buf]
-    call raise_exception
-    ud2
+    mov rsi, rax
+    call set_exception
+    leave
+    ret
+END_FUNC set_binop_type_error_ex
+
+;; raise_binop_type_error_ex(set_binop_type_error_ex's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC raise_binop_type_error_ex
+    call set_binop_type_error_ex
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_binop_type_error_ex
 
 ; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
@@ -1541,8 +1554,8 @@ DEF_FUNC msg_append_escaped_cp, MAE_FRAME
 END_FUNC msg_append_escaped_cp
 
 ;; ============================================================================
-;; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
-;; -> never returns
+;; set_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
+;; -> rax = 0, always, with an exception pending
 ;;
 ;; ValueError("<prefix><repr(obj)>"), which CPython writes as "%s: %R".  int's
 ;; own copy of this is inline and stays there, because its prefix carries the
@@ -1560,9 +1573,9 @@ extern str_from_cstr_heap
 extern str_concat
 extern exc_new
 extern exc_ValueError_type
-extern raise_exception_obj
+extern exc_install
 
-DEF_FUNC raise_value_error_with_repr, RVR_FRAME
+DEF_FUNC set_value_error_with_repr, RVR_FRAME
     xor edx, edx
 rvr_body:
     mov [rbp - RVR_SUFFIX], rdx
@@ -1578,8 +1591,7 @@ rvr_body:
     ; with one about a message we could not build.
     mov rdi, [rbp - RVR_PREFIX]
     call obj_decref
-    leave
-    jmp eval_exception_unwind
+    jmp .rvr_out
 
 .rvr_have_repr:
     mov [rbp - RVR_REPR], rax
@@ -1623,19 +1635,35 @@ rvr_body:
     call obj_decref                 ; exc_new took its own reference
 
     mov rdi, [rbp - RVR_PREFIX]
+    call exc_install                ; chains; takes the reference
+.rvr_out:
+    xor eax, eax
     leave
-    jmp raise_exception_obj         ; chains and unwinds; takes the reference
+    ret
+END_FUNC set_value_error_with_repr
+
+;; raise_value_error_with_repr(set_value_error_with_repr's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC raise_value_error_with_repr
+    call set_value_error_with_repr
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_value_error_with_repr
 
 ;; ============================================================================
-;; raise_value_error_with_repr2(rdi = prefix, rsi = the object Value,
-;;                              rdx = the text after the repr)
-;;   -> does not return
+;; set_value_error_with_repr2(rdi = prefix, rsi = the object Value,
+;;                            rdx = the text after the repr)
+;;   -> rax = 0, always, with an exception pending
 ;; The same, with the repr in the middle: "None is not in list".
 ;; ============================================================================
-global raise_value_error_with_repr2
-DEF_FUNC raise_value_error_with_repr2, RVR_FRAME
+DEF_FUNC set_value_error_with_repr2, RVR_FRAME
     jmp rvr_body
+END_FUNC set_value_error_with_repr2
+
+;; raise_value_error_with_repr2(set_value_error_with_repr2's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC raise_value_error_with_repr2
+    call set_value_error_with_repr2
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_value_error_with_repr2
 
 section .bss
@@ -1648,7 +1676,8 @@ rtn_buf: resb RTN_BUFSZ
 section .text
 
 ;; ============================================================================
-;; seq_repeat_not_index(rsi = the count that was not one) -- does not return
+;; set_seq_repeat_not_index(rsi = the count that was not one)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; What __mul__, __rmul__ and __imul__ say when called by name and handed
 ;; something that is not an index.  The OPERATOR words the same refusal
@@ -1657,9 +1686,16 @@ section .text
 ;; code: the operator through sequence_repeat, the dunder through the
 ;; wrapper's own PyNumber_AsSsize_t.
 ;; ============================================================================
-DEF_FUNC seq_repeat_not_index
+DEF_FUNC_BARE set_seq_repeat_not_index
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    jmp raise_type_error_with_name
+    jmp set_type_error_with_name
+END_FUNC set_seq_repeat_not_index
+
+;; seq_repeat_not_index(set_seq_repeat_not_index's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC seq_repeat_not_index
+    call set_seq_repeat_not_index
+    leave
+    jmp eval_exception_unwind
 END_FUNC seq_repeat_not_index
 
 ;; ============================================================================
@@ -2479,15 +2515,14 @@ orb_swap_table:
 section .text
 
 ;; ============================================================================
-;; hash_not_implemented(rdi = the object) -> never returns
-;; Used as tp_hash for unhashable types (dict, list, set, bytearray), and
+;; set_hash_not_implemented(rdi = the object)
+;;   -> rax = 0, always, with the TypeError pending
+;; hash_not_implemented, below, is the form used as tp_hash for unhashable types (dict, list, set, bytearray), and
 ;; installed on a class that defines __eq__ without __hash__ or sets
 ;; __hash__ = None.  Raises TypeError("unhashable type: 'list'") -- it used to
 ;; name nothing, which is the one thing the message is for.
 ;; ============================================================================
-global hash_not_implemented
-DEF_FUNC hash_not_implemented
-    extern raise_exception
+DEF_FUNC set_hash_not_implemented
     extern exc_TypeError_type
     push rdi
     sub rsp, 8
@@ -2503,8 +2538,16 @@ DEF_FUNC hash_not_implemented
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel rbt_buf]
-    call raise_exception
-    ud2
+    call set_exception
+    leave
+    ret
+END_FUNC set_hash_not_implemented
+
+;; hash_not_implemented(set_hash_not_implemented's arguments) -> does not return: the twin, then the unwind
+DEF_FUNC hash_not_implemented
+    call set_hash_not_implemented
+    leave
+    jmp eval_exception_unwind
 END_FUNC hash_not_implemented
 
 ;; ============================================================================

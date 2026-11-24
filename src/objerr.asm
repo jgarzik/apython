@@ -8,6 +8,10 @@
 ; reports the count and the receiver it actually got, and this tree used to
 ; report the rule and leave the caller to guess what it had passed.
 ;
+; Each is now a pair with ONE body.  set_<name> composes the message, records
+; the exception and returns 0, for anything that is called; raise_<name> is
+; that and then the unwind, for an opcode handler.
+;
 ; The remaining raise_* helpers stay in object.asm: they are interleaved with
 ; value_type, dunder_require_self and the msg_append_* primitives they are
 ; built on, and cutting between them would mean moving those too.
@@ -26,6 +30,8 @@ extern ap_strcmp
 
 ; --- raising ---
 extern raise_exception
+extern set_exception
+extern eval_exception_unwind
 extern exc_TypeError_type
 extern exc_ValueError_type
 
@@ -33,9 +39,10 @@ section .text
 
 
 ;; ============================================================================
-;; raise_type_error_counted(rdi = the text before the number, rsi = the count,
+;; set_type_error_counted(rdi = the text before the number, rsi = the count,
 ;;                          rdx = the text after it, or 0)
-;;   -> does not return: the composed message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a TypeError
 ;;
 ;; "str() takes at most 3 arguments (4 given)".  CPython reports the count in
 ;; every arity message and this tree reported it in almost none, so a caller
@@ -45,8 +52,8 @@ RTC_N     equ 8
 RTC_TAIL  equ 16
 RTC_BUF   equ 192
 RTC_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-global raise_type_error_counted
-DEF_FUNC raise_type_error_counted, RTC_FRAME
+global set_type_error_counted
+DEF_FUNC set_type_error_counted, RTC_FRAME
     mov [rbp - RTC_N], rsi
     mov [rbp - RTC_TAIL], rdx
     mov rsi, rdi
@@ -63,20 +70,32 @@ DEF_FUNC raise_type_error_counted, RTC_FRAME
 .rtc_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RTC_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_type_error_counted
+
+;; raise_type_error_counted(the same arguments) -> does not return
+;; set_type_error_counted, then the unwind: for a handler, which alone may jump.
+global raise_type_error_counted
+DEF_FUNC raise_type_error_counted
+    call set_type_error_counted
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_type_error_counted
 
 ;; ============================================================================
-;; raise_value_error_counted(rdi = the text before the number, rsi = the
+;; set_value_error_counted(rdi = the text before the number, rsi = the
 ;;                           count, rdx = the text after it, or 0)
-;;   -> does not return: the composed message is raised as a ValueError
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a ValueError
 ;;
 ;; The same composition as raise_type_error_counted, for the messages that
 ;; are ValueErrors: "Item 0 of second argument (exceptions) is not an
 ;; exception".
 ;; ============================================================================
-global raise_value_error_counted
-DEF_FUNC raise_value_error_counted, RTC_FRAME
+global set_value_error_counted
+DEF_FUNC set_value_error_counted, RTC_FRAME
     mov [rbp - RTC_N], rsi
     mov [rbp - RTC_TAIL], rdx
     mov rsi, rdi
@@ -94,14 +113,26 @@ DEF_FUNC raise_value_error_counted, RTC_FRAME
     extern exc_ValueError_type
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rbp - RTC_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_value_error_counted
+
+;; raise_value_error_counted(the same arguments) -> does not return
+;; set_value_error_counted, then the unwind: for a handler, which alone may jump.
+global raise_value_error_counted
+DEF_FUNC raise_value_error_counted
+    call set_value_error_counted
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_value_error_counted
 
 
 ;; ============================================================================
-;; raise_typed_message(rdi = a Value, rsi = the text before the type name,
+;; set_typed_message(rdi = a Value, rsi = the text before the type name,
 ;;                     rdx = the text after it, or 0)
-;;   -> does not return: a TypeError naming the argument's type
+;;   -> rax = 0, always, with the exception pending:
+;;      a TypeError naming the argument's type
 ;;
 ;; The shape CPython uses for a refusal that is about WHAT it was handed:
 ;; "argument of type 'ValueError' is not iterable", "__bytes__ returned
@@ -113,8 +144,8 @@ RTM_VAL    equ 8
 RTM_SUFFIX equ 16
 RTM_BUF    equ 224
 RTM_FRAME  equ 224          ; + 0 pushes = 224, 16-aligned
-global raise_typed_message
-DEF_FUNC raise_typed_message, RTM_FRAME
+global set_typed_message
+DEF_FUNC set_typed_message, RTM_FRAME
     mov [rbp - RTM_VAL], rdi
     mov [rbp - RTM_SUFFIX], rdx
     lea rdi, [rbp - RTM_BUF]
@@ -131,21 +162,32 @@ DEF_FUNC raise_typed_message, RTM_FRAME
 .rtm_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RTM_BUF]
-    call raise_exception
-    ud2
+    call set_exception
+    leave
+    ret
+END_FUNC set_typed_message
+
+;; raise_typed_message(the same arguments) -> does not return
+;; set_typed_message, then the unwind: for a handler, which alone may jump.
+global raise_typed_message
+DEF_FUNC raise_typed_message
+    call set_typed_message
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_typed_message
 
 ;; ============================================================================
-;; raise_final_base(rdi = the type's name, as a C string)
-;;   -> does not return: the message is raised as a TypeError
+;; set_final_base(rdi = the type's name, as a C string)
+;;   -> rax = 0, always, with the exception pending:
+;;      the message, as a TypeError
 ;;
 ;; "type 'bool' is not an acceptable base type", for a type CPython gives no
 ;; Py_TPFLAGS_BASETYPE.
 ;; ============================================================================
 RFB_BUF   equ 176
 RFB_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-global raise_final_base
-DEF_FUNC raise_final_base, RFB_FRAME
+global set_final_base
+DEF_FUNC set_final_base, RFB_FRAME
     mov rdx, rdi
     lea rdi, [rbp - RFB_BUF]
     CSTRING rsi, "type '"
@@ -158,7 +200,18 @@ DEF_FUNC raise_final_base, RFB_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RFB_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_final_base
+
+;; raise_final_base(the same arguments) -> does not return
+;; set_final_base, then the unwind: for a handler, which alone may jump.
+global raise_final_base
+DEF_FUNC raise_final_base
+    call set_final_base
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_final_base
 
 ;; ============================================================================
@@ -325,9 +378,10 @@ DEF_FUNC raise_missing_receiver, RMR_FRAME
 END_FUNC raise_missing_receiver
 
 ;; ============================================================================
-;; raise_wrapper_arity(rdi = the number of arguments wanted, not counting
+;; set_wrapper_arity(rdi = the number of arguments wanted, not counting
 ;;                     self; rsi = the number given, likewise)
-;;   -> does not return: the message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the message, as a TypeError
 ;;
 ;; "expected 0 arguments, got 1" -- CPython's wording for a slot wrapper.
 ;; Every one of these said "expected exactly one argument", which is neither
@@ -337,8 +391,8 @@ RWA_WANT  equ 8
 RWA_GOT   equ 16
 RWA_BUF   equ 192
 RWA_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-global raise_wrapper_arity
-DEF_FUNC raise_wrapper_arity, RWA_FRAME
+global set_wrapper_arity
+DEF_FUNC set_wrapper_arity, RWA_FRAME
     mov [rbp - RWA_WANT], rdi
     mov [rbp - RWA_GOT], rsi
     lea rdi, [rbp - RWA_BUF]
@@ -372,14 +426,26 @@ DEF_FUNC raise_wrapper_arity, RWA_FRAME
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RWA_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_wrapper_arity
+
+;; raise_wrapper_arity(the same arguments) -> does not return
+;; set_wrapper_arity, then the unwind: for a handler, which alone may jump.
+global raise_wrapper_arity
+DEF_FUNC raise_wrapper_arity
+    call set_wrapper_arity
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_wrapper_arity
 
 ;; ============================================================================
-;; raise_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
+;; set_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
 ;;                     rdx = the count wanted, ecx = 0 too few / 1 too many)
 ;;   -- neither count includes self
-;;   -> does not return: the message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the message, as a TypeError
 ;;
 ;; CPython's shapes, which differ by whether the method takes a fixed number:
 ;;   list.append() takes exactly one argument (2 given)
@@ -398,8 +464,8 @@ RBA_WANT  equ 24
 RBA_OVER  equ 32            ; 1 = too many, 0 = too few
 RBA_BUF   equ 240
 RBA_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
-global raise_builtin_arity
-DEF_FUNC raise_builtin_arity, RBA_FRAME
+global set_builtin_arity
+DEF_FUNC set_builtin_arity, RBA_FRAME
     mov [rbp - RBA_DESC], rdi
     mov [rbp - RBA_GOT], rsi
     mov [rbp - RBA_WANT], rdx
@@ -435,7 +501,8 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
 .rba_wrapper:
     mov rdi, [rbp - RBA_WANT]
     mov rsi, [rbp - RBA_GOT]
-    jmp raise_wrapper_arity
+    leave
+    jmp set_wrapper_arity
 
 .rba_method:
     lea rdi, [rbp - RBA_BUF]
@@ -506,7 +573,18 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RBA_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_builtin_arity
+
+;; raise_builtin_arity(the same arguments) -> does not return
+;; set_builtin_arity, then the unwind: for a handler, which alone may jump.
+global raise_builtin_arity
+DEF_FUNC raise_builtin_arity
+    call set_builtin_arity
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_builtin_arity
 
 ;; ============================================================================
@@ -669,9 +747,10 @@ DEF_FUNC_LOCAL obj_getattr_str_opt, RAC_FRAME
 END_FUNC obj_getattr_str_opt
 
 ;; ============================================================================
-;; raise_callable_arg(rdi = the callable, rsi = a C string to append,
+;; set_callable_arg(rdi = the callable, rsi = a C string to append,
 ;;                    rdx = the text between them, rcx = a suffix or 0)
-;;   -> does not return: the composed message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a TypeError
 ;;
 ;; "__main__.f() argument after ** must be a mapping, not int", and
 ;; "__main__.f() got multiple values for keyword argument 'a'".  CPython names
@@ -691,8 +770,8 @@ RCA_HELD  equ 40
 RCA_SUF   equ 48            ; a trailing quote, or 0
 RCA_BUF   equ 456
 RCA_FRAME equ 464           ; + 0 pushes = 464, 16-aligned
-global raise_callable_arg
-DEF_FUNC raise_callable_arg, RCA_FRAME
+global set_callable_arg
+DEF_FUNC set_callable_arg, RCA_FRAME
     mov [rbp - RCA_FUNC], rdi
     mov [rbp - RCA_ARG], rsi
     mov [rbp - RCA_MID], rdx
@@ -771,7 +850,18 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
 .rca_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RCA_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_callable_arg
+
+;; raise_callable_arg(the same arguments) -> does not return
+;; set_callable_arg, then the unwind: for a handler, which alone may jump.
+global raise_callable_arg
+DEF_FUNC raise_callable_arg
+    call set_callable_arg
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_callable_arg
 
 ;; ============================================================================
@@ -1353,9 +1443,9 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     ret
 
 .rna_return:
-    ; set_no_attribute's exit: the exception is installed and pending, and
-    ; the caller hands back NULL itself.
+    ; set_no_attribute's exit: the exception is installed and pending.
     lea rsp, [rbp - RNA_FRAME - 16]
+    xor eax, eax
     pop r12
     pop rbx
     leave
@@ -1364,7 +1454,7 @@ END_FUNC raise_no_attribute
 
 ;; ============================================================================
 ;; set_no_attribute(rdi = the object as a Value, rsi = the attribute name)
-;;   -> returns, with that same AttributeError installed in current_exception
+;;   -> rax = 0, always, with that same AttributeError pending
 ;;
 ;; raise_no_attribute's read form, for a lookup that has to say "absent" to a
 ;; caller that may swallow it.  A __slots__ slot never assigned is one:
@@ -1384,9 +1474,10 @@ DEF_FUNC set_no_attribute, RNA_FRAME
 END_FUNC set_no_attribute
 
 ;; ============================================================================
-;; raise_unexpected_keyword(rdi = the function, rsi = its frame,
+;; set_unexpected_keyword(rdi = the function, rsi = its frame,
 ;;                          rdx = the keyword's name, a str)
-;;   -> does not return: "h() got an unexpected keyword argument 'nosuch'"
+;;   -> rax = 0, always, with the exception pending:
+;;      "h() got an unexpected keyword argument 'nosuch'"
 ;;
 ;; CPython names the function by its __qualname__ and quotes the keyword; the
 ;; bare "got an unexpected keyword argument" said neither.  The frame is freed
@@ -1403,8 +1494,8 @@ RUK_BUFLEN  equ 256
 RUK_BUF     equ RUK_SLOTS + RUK_BUFLEN
 RUK_FRAME   equ RUK_BUF                 ; 288, 16-aligned with no pushes
 
-global raise_unexpected_keyword
-DEF_FUNC raise_unexpected_keyword, RUK_FRAME
+global set_unexpected_keyword
+DEF_FUNC set_unexpected_keyword, RUK_FRAME
     mov [rbp - RUK_FUNC], rdi
     mov [rbp - RUK_FRAME_P], rsi
     mov [rbp - RUK_NAME], rdx
@@ -1441,5 +1532,16 @@ DEF_FUNC raise_unexpected_keyword, RUK_FRAME
     call frame_free
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RUK_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+END_FUNC set_unexpected_keyword
+
+;; raise_unexpected_keyword(the same arguments) -> does not return
+;; set_unexpected_keyword, then the unwind: for a handler, which alone may jump.
+global raise_unexpected_keyword
+DEF_FUNC raise_unexpected_keyword
+    call set_unexpected_keyword
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_unexpected_keyword

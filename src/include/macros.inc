@@ -371,6 +371,35 @@
 %%no_kw:
 %endmacro
 
+; The returning forms of the two above: the same tests, FAIL instead of RAISE.
+; %label is the function's error exit, which answers its `Fails:` value.
+;
+;   NO_KEYWORDS_RET "set() takes no keyword arguments", .fail
+;   NO_KEYWORDS_TP_INIT_RET owner_type, "tuple() takes no ...", .fail
+%macro NO_KEYWORDS_RET 2        ; %1 = the whole message, %2 = the error exit
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je %%no_kw
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    FAIL exc_TypeError_type, %1, %2
+%%no_kw:
+%endmacro
+
+%macro NO_KEYWORDS_TP_INIT_RET 3 ; %1 = the owning type, %2 = the whole
+                                ; message, %3 = the error exit
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je %%no_kw
+    lea rcx, [rel %1]
+    cmp rax, rcx
+    je %%refuse
+    mov rdx, [rax + PyTypeObject.tp_init]
+    cmp rdx, [rcx + PyTypeObject.tp_init]
+    jne %%no_kw
+%%refuse:
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    FAIL exc_TypeError_type, %2, %3
+%%no_kw:
+%endmacro
+
 ; The same, but it comes back: set_exception records the exception and returns,
 ; leaving the unwind to the interpreter frame.  For a helper that holds owned
 ; references at the point it fails -- RAISE would abandon the C stack and leak

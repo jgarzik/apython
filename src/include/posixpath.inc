@@ -90,4 +90,23 @@ POSIX_PATH_KIND_IO      equ 3
     POSIX_PATH_DONE %3
 %endmacro
 
+;; The returning form: the OSError is recorded through set_oserror_owned, which
+;; releases the resolved path as it does so, and control goes to the caller's
+;; error exit.  On success it falls through with the path released, as above.
+%macro POSIX_PATH_CHECK_RET 4   ; %1 = result, %2 = the original Value,
+                                ; %3 = the slot holding the resolved path,
+                                ; %4 = the error exit
+    cmp %1, -4095
+    jb %%ok
+    mov rdi, %1
+    neg rdi
+    mov rsi, %2
+    mov rdx, %3
+    call set_oserror_owned
+    mov qword %3, 0             ; released there; the exit must not again
+    jmp %4
+%%ok:
+    POSIX_PATH_DONE %3
+%endmacro
+
 %endif ; POSIXPATH_INC

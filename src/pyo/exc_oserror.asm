@@ -34,6 +34,7 @@ extern exc_new
 extern exc_setattr
 extern exc_OSError_type
 extern raise_exception_obj
+extern eval_exception_unwind
 extern none_singleton
 
 ; --- the subclasses the errno table maps to ---
@@ -461,11 +462,11 @@ END_FUNC oserror_new
 RO_ARGS  equ 40             ; five Values: errno, strerror, filename,
                             ; winerror, filename2 -- CPython's full form
 RO_FRAME equ 48             ; + 0 pushes = 48
-;; raise_oserror_owned(rdi = errno, rsi = the caller's path Value,
-;;                     rdx = a resolved path the caller owns, or 0)
-;;   -> does not return: the OSError is raised
+;; set_oserror_owned(rdi = errno, rsi = the caller's path Value,
+;;                   rdx = a resolved path the caller owns, or 0)
+;;   -> rax = 0, always, with the OSError pending
 ;;
-;; The same raise, naming the resolved path when there is one and releasing
+;; The same error, naming the resolved path when there is one and releasing
 ;; it afterwards.  posix resolves os.PathLike arguments into a new string, and
 ;; the message has to name that rather than the object that produced it --
 ;; which means it cannot be released before the exception is built.
@@ -473,18 +474,26 @@ ROO_OWNED equ 8
 ROO_OWNED2 equ 16           ; the second resolved path, for rename
 ROO_FRAME equ 32            ; + 0 pushes = 32
 
-DEF_FUNC raise_oserror_owned, ROO_FRAME
+global set_oserror_owned
+DEF_FUNC_BARE set_oserror_owned
     xor ecx, ecx                ; no second path
     xor r8d, r8d
+    jmp set_oserror_owned2
+END_FUNC set_oserror_owned
+
+;; raise_oserror_owned(the same arguments) -> does not return
+;; set_oserror_owned, then the unwind: for a handler, which alone may jump.
+DEF_FUNC raise_oserror_owned
+    call set_oserror_owned
     leave
-    jmp raise_oserror_owned2
+    jmp eval_exception_unwind
 END_FUNC raise_oserror_owned
 
-;; raise_oserror_owned2(rdi = errno, rsi = the first path Value,
-;;                      rdx = the owned resolved first path or 0,
-;;                      rcx = the second path Value,
-;;                      r8 = the owned resolved second path or 0)
-;;   -> does not return: the OSError is raised
+;; set_oserror_owned2(rdi = errno, rsi = the first path Value,
+;;                    rdx = the owned resolved first path or 0,
+;;                    rcx = the second path Value,
+;;                    r8 = the owned resolved second path or 0)
+;;   -> rax = 0, always, with the OSError pending
 ;;
 ;; The two-path form, for rename and symlink: CPython reports
 ;; "'src' -> 'dst'".  Each path is named by its RESOLVED form when
@@ -492,8 +501,8 @@ END_FUNC raise_oserror_owned
 ;; argument itself otherwise.  Both resolved paths are released after the
 ;; exception is built and before the raise, which is the whole reason this
 ;; and its sibling exist.
-global raise_oserror_owned2
-DEF_FUNC raise_oserror_owned2, ROO_FRAME
+global set_oserror_owned2
+DEF_FUNC set_oserror_owned2, ROO_FRAME
     mov [rbp - ROO_OWNED], rdx
     mov [rbp - ROO_OWNED2], r8
     test rdx, rdx
@@ -505,9 +514,7 @@ DEF_FUNC raise_oserror_owned2, ROO_FRAME
     jz .roo_second_plain
     mov rdx, r8
 .roo_second_plain:
-    ; raise_oserror does not return, so the release has to happen inside the
-    ; build: hand it the pieces and let it call back here.  Simplest is to
-    ; do the build here too.
+    ; The release has to come after the build, which names the paths.
     call raise_oserror_build    ; rax = the exception, and it took its own
                                 ; reference to both filenames
     push rax
@@ -524,7 +531,23 @@ DEF_FUNC raise_oserror_owned2, ROO_FRAME
 .roo_no_owned2:
     add rsp, 8
     pop rdi
-    call raise_exception_obj    ; does not return
+    test rdi, rdi
+    jz .roo_out
+    extern exc_install
+    call exc_install            ; adopts the reference
+.roo_out:
+    xor eax, eax
+    leave
+    ret
+END_FUNC set_oserror_owned2
+
+;; raise_oserror_owned2(the same arguments) -> does not return
+;; set_oserror_owned2, then the unwind: for a handler, which alone may jump.
+global raise_oserror_owned2
+DEF_FUNC raise_oserror_owned2
+    call set_oserror_owned2
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_oserror_owned2
 
 ;; ============================================================================
@@ -535,16 +558,15 @@ END_FUNC raise_oserror_owned2
 ;; share.  It sits below its two siblings because they were written against
 ;; the same RO_FRAME and the layout block is stated once.
 ;; ============================================================================
-DEF_FUNC raise_oserror, RO_FRAME
-    xor edx, edx                    ; no second path
-    call raise_oserror_build
-    mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj        ; does not return
+DEF_FUNC raise_oserror
+    call set_oserror
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_oserror
 
 ;; ============================================================================
-;; set_oserror(rdi = errno, rsi = filename PyStrObject* or 0) -> nothing
+;; set_oserror(rdi = errno, rsi = filename PyStrObject* or 0)
+;;   -> rax = 0, always, with the OSError pending
 ;;
 ;; raise_oserror without the unwind: exc_install rather than
 ;; raise_exception_obj.  A function whose contract is already "report failure by
@@ -563,6 +585,7 @@ DEF_FUNC set_oserror
     extern exc_install
     call exc_install            ; adopts the reference
 .so_out:
+    xor eax, eax
     leave
     ret
 END_FUNC set_oserror

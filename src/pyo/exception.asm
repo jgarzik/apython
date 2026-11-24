@@ -46,6 +46,7 @@ extern type_getattr
 extern type_repr
 extern type_type
 extern raise_exception_obj
+extern eval_exception_unwind
 extern str_new_heap
 extern none_singleton
 extern int_from_i64
@@ -253,15 +254,14 @@ END_FUNC exc_set_context
 ;; ============================================================================
 DEF_FUNC raise_key_error
     call set_key_error
-    mov rdi, [gs:ThreadState.current_exception]
-    mov qword [gs:ThreadState.current_exception], 0
-    call raise_exception_obj
-    ud2
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_key_error
 
 ;; ============================================================================
-;; set_key_error(rdi = key Value) -- the same KeyError, RECORDED rather than
-;; raised, for a caller that has a C stack it still has to unwind by hand.
+;; set_key_error(rdi = key Value) -> rax = 0, always, with it pending
+;; The same KeyError, RECORDED rather than raised, for a caller that has a C
+;; stack it still has to unwind by hand.
 ;; ============================================================================
 global set_key_error
 DEF_FUNC set_key_error
@@ -272,6 +272,7 @@ DEF_FUNC set_key_error
     mov rdi, rax
     extern exc_install
     call exc_install
+    xor eax, eax
     leave
     ret
 END_FUNC set_key_error
