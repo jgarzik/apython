@@ -11,6 +11,7 @@
 import gc
 import io
 import sys
+import time
 import types
 import warnings
 
@@ -654,3 +655,56 @@ check("float.__new__ subclass None", lambda: float.__new__(FloatSub, None))
 check("float subclass keyword", lambda: FloatSub(x=1))
 check("float subclass bad str", lambda: FloatSub("zz"))
 check("bool.__new__ keyword", lambda: bool.__new__(bool, x=1))
+
+# --- time ---------------------------------------------------------------------
+for name in ("process_time", "monotonic", "perf_counter", "time", "time_ns",
+             "monotonic_ns", "perf_counter_ns", "process_time_ns",
+             "thread_time", "thread_time_ns", "tzset"):
+    clock = getattr(time, name)
+    check("time." + name + " one", lambda: clock(1))
+check("time.clock_gettime none", lambda: time.clock_gettime())
+check("time.clock_gettime str", lambda: time.clock_gettime("a"))
+check("time.clock_gettime no such clock", lambda: time.clock_gettime(12345))
+check("time.clock_gettime __index__ raises", lambda: time.clock_gettime(IndexRaises()))
+check("time.clock_gettime_ns none", lambda: time.clock_gettime_ns())
+check("time.clock_gettime_ns str", lambda: time.clock_gettime_ns("a"))
+check("time.clock_gettime_ns no such clock", lambda: time.clock_gettime_ns(12345))
+check("time.clock_getres none", lambda: time.clock_getres())
+check("time.clock_getres str", lambda: time.clock_getres("a"))
+check("time.clock_getres no such clock", lambda: time.clock_getres(12345))
+check("time.get_clock_info none", lambda: time.get_clock_info())
+check("time.get_clock_info int", lambda: time.get_clock_info(5))
+check("time.get_clock_info None", lambda: time.get_clock_info(None))
+check("time.get_clock_info embedded NUL", lambda: time.get_clock_info("time\0x"))
+check("time.get_clock_info unknown", lambda: time.get_clock_info("zz"))
+check("time.sleep none", lambda: time.sleep())
+check("time.sleep str", lambda: time.sleep("a"))
+check("time.sleep nan", lambda: time.sleep(float("nan")))
+check("time.sleep inf", lambda: time.sleep(float("inf")))
+check("time.sleep huge int", lambda: time.sleep(10 ** 30))
+check("time.sleep negative", lambda: time.sleep(-1))
+check("time.strptime none", lambda: time.strptime())
+check("time.strptime three", lambda: time.strptime("a", "b", "c"))
+check("time.strptime no match", lambda: time.strptime("zz", "%Y"))
+check("time.strptime bad keyword", lambda: time.strptime("zz", bogus=1))
+check("time.localtime str", lambda: time.localtime("a"))
+check("time.localtime huge", lambda: time.localtime(10 ** 30))
+check("time.localtime __index__ raises", lambda: time.localtime(IndexRaises()))
+check("time.gmtime str", lambda: time.gmtime("a"))
+check("time.mktime none", lambda: time.mktime())
+check("time.mktime int", lambda: time.mktime(5))
+check("time.mktime short tuple", lambda: time.mktime((1, 2, 3)))
+check("time.mktime str field",
+      lambda: time.mktime((2000, 1, 1, 0, 0, "a", 0, 1, 0)))
+check("time.mktime field __index__ raises",
+      lambda: time.mktime((2000, 1, 1, 0, 0, 0, IndexRaises(), 1, 0)))
+check("time.strftime none", lambda: time.strftime())
+check("time.strftime format int", lambda: time.strftime(5))
+check("time.strftime short tuple", lambda: time.strftime("%Y", (1, 2)))
+check("time.strftime not a tuple", lambda: time.strftime("%Y", 5))
+check("time.strftime str field",
+      lambda: time.strftime("%Y", (2000, 1, 1, 0, 0, 0, 0, 1, "a")))
+check("time.asctime int", lambda: time.asctime(5))
+check("time.asctime short tuple", lambda: time.asctime((1, 2)))
+check("time.ctime str", lambda: time.ctime("a"))
+check("time.ctime __index__ raises", lambda: time.ctime(IndexRaises()))
