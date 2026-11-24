@@ -668,7 +668,7 @@ DEF_FUNC par_number, PN_FRAME
 
     mov rdi, [rbp - PN_BUF]
     xor esi, esi                        ; base 0: detect the prefix
-    call int_from_cstr_base
+    call int_from_cstr_base   ; err: the length was checked above, the digit limit cannot trip
     test edx, edx                       ; TAG_NULL means the parse failed
     jz .bad
     V_PACK rax, rdx

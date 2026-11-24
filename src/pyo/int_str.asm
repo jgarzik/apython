@@ -49,6 +49,9 @@ section .text
 ;; int_from_cstr_base(char *str, int base) -> PyObject* or NULL
 ;; Parse integer from string with given base (0 = auto-detect, 2-36).
 ;; Handles leading/trailing whitespace, sign, 0b/0o/0x prefixes, underscores.
+;; NULL (rax = 0, edx = TAG_NULL) with nothing pending is "not a number", and
+;; the caller words that; NULL with a ValueError pending is the digit limit.
+;; Fails: 0?
 ;; ============================================================================
 ;; ============================================================================
 ;; Frame layout for int_from_cstr_base
@@ -738,9 +741,12 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Free cleaned buffer, then raise ValueError for digit limit
     mov rdi, [rbp - IB_BUF]
     call ap_free
-    extern raise_exception
+    extern set_exception
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "Exceeds the limit for integer string conversion"
+    SET_EXC exc_ValueError_type, "Exceeds the limit for integer string conversion"
+    RET_NULL
+    leave
+    ret
 
 .parse_error:
     ; Free cleaned buffer if allocated
@@ -878,6 +884,7 @@ END_FUNC int_base_str
 ;; ============================================================================
 ;; int_repr(PyObject *self) -> PyStrObject*
 ;; String representation. SmallInt uses snprintf, GMP uses gmpz_get_str.
+;; Fails: 0
 ;; ============================================================================
 IR_SAVED  equ 16            ; rbp less the two callee-saved pushes
 IR_BUF    equ 32            ; 24-byte digit buffer, written backwards
@@ -987,6 +994,12 @@ DEF_FUNC_BARE int_repr
     ret
 
 .repr_limit_exceeded:
-    RAISE exc_ValueError_type, "Exceeds the limit for integer string conversion"
+    SET_EXC exc_ValueError_type, "Exceeds the limit for integer string conversion"
+    RET_NULL
+    lea rsp, [rbp - IR_SAVED] ; undo the alignment, back to the two pushes
+    pop r12
+    pop rbx
+    pop rbp
+    ret
 END_FUNC int_repr
 

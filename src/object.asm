@@ -268,7 +268,7 @@ DEF_FUNC obj_repr
 .smallint:
     ; rdi = raw int value — int_repr checks edx for TAG_SMALLINT
     RET_TAG_SMALLINT
-    call int_repr
+    call int_repr             ; err: a small int has no digit limit to exceed
     leave
     ret
 
@@ -570,7 +570,7 @@ DEF_FUNC obj_str
     ; SmallInt: delegate to int_repr
     mov rdi, rbx
     RET_TAG_SMALLINT
-    call int_repr
+    call int_repr             ; err: a small int has no digit limit to exceed
     pop r12
     pop rbx
     leave

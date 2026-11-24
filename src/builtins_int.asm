@@ -327,6 +327,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_DATA]
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_xlat
     test edx, edx
     jz .int_str_parse_error_x
     push rax
@@ -377,6 +378,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]            ; buffer (still on stack)
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
     mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
@@ -441,6 +443,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
     mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
@@ -482,6 +485,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
     mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
@@ -592,6 +596,20 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jnz .int_call_dunder_trunc
 
     jmp .int_type_error
+
+.int_fail_xlat:
+    ; int_from_cstr_base refused the number itself (the digit limit); the
+    ; translated copy of the string, when there is one, is still ours.
+    mov rdi, [rbp - BI_XLAT]
+    test rdi, rdi
+    jz .int_fail
+    call ap_free
+    jmp .int_fail
+.int_fail_buf:
+    ; The same, with the NUL-terminated copy on top of the stack.
+    pop rdi
+    call ap_free
+    jmp .int_fail
 
 .int_sub_warn_raised:
     ; As below, with the dunder's answer still held.
@@ -1070,6 +1088,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_DATA]
     mov rsi, [rbp - BI_NARGS]      ; base
     call int_from_cstr_base
+    ERR_PENDING .int_fail_xlat
     test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jz .int_base_str_parse_error_x
     push rax
@@ -1130,6 +1149,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]                 ; buffer
     mov rsi, [rbp - BI_NARGS]      ; base
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax                   ; save result payload
     push rdx                       ; save result tag
     mov rdi, [rsp + 8]            ; buffer ptr (under tag on stack)
