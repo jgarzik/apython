@@ -74,6 +74,40 @@ class MinusOne:
         return -1
 
 
+class Iter:
+    def __iter__(self):
+        boom("iter")
+
+
+class Next:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        boom("next")
+
+
+class Rev:
+    def __reversed__(self):
+        boom("reversed")
+
+
+class LenSeq:
+    def __len__(self):
+        boom("len")
+
+    def __getitem__(self, i):
+        return i
+
+
+class GetItem:
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, i):
+        boom("getitem")
+
+
 HASH = Hash()
 HASHCALL = HashCall()
 
@@ -215,6 +249,35 @@ check("isinstance, in a tuple", lambda: isinstance(1, (str, Checked)))
 check("issubclass, in a tuple", lambda: issubclass(int, (str, Checked)))
 check("isinstance, answer's bool", lambda: isinstance(1, CheckedTruth))
 check("issubclass, answer's bool", lambda: issubclass(int, CheckedTruth))
+
+# ---- the iterator builtins ---------------------------------------------------
+check("enumerate(Iter)", lambda: enumerate(Iter()))
+check("enumerate(1)", lambda: enumerate(1))
+check("enumerate()", lambda: enumerate(), message=False)
+check("enumerate([], 'x')", lambda: enumerate([], "x"))
+check("enumerate(1, 'x')", lambda: enumerate(1, "x"), message=False)
+check("zip([], [], Iter)", lambda: zip([1], [2], Iter()))
+check("zip([], 1)", lambda: zip([1], 1), message=False)
+check("map(f, [], Iter)", lambda: map(len, [1], Iter()))
+check("map(f, 1)", lambda: map(len, 1))
+check("map(f)", lambda: map(len), message=False)
+check("filter(f, Iter)", lambda: filter(len, Iter()))
+check("filter(None, 1)", lambda: filter(None, 1))
+check("filter()", lambda: filter(), message=False)
+check("reversed(1)", lambda: reversed(1))
+check("reversed(Rev)", lambda: reversed(Rev()))
+check("reversed(Len-only seq)", lambda: reversed(LenSeq()))
+check("reversed()", lambda: reversed(), message=False)
+check("sorted(Iter)", lambda: sorted(Iter()))
+check("sorted(1)", lambda: sorted(1))
+check("sorted(Next)", lambda: sorted(Next()))
+check("sorted()", lambda: sorted(), message=False)
+check("sorted(key raises)", lambda: sorted([3, 1, 2], key=boom))
+check("list(map(boom, ...))", lambda: list(map(boom, [1, 2])))
+check("list(zip([1], Next))", lambda: list(zip([1], Next())))
+check("list(enumerate(Next))", lambda: list(enumerate(Next())))
+check("list(filter(None, Next))", lambda: list(filter(None, Next())))
+check("list(reversed(GetItem))", lambda: list(reversed(GetItem())))
 
 # ---- a dunder reached by name, handed the wrong receiver ---------------------
 check("int.__neg__(2.5)", lambda: int.__neg__(2.5))

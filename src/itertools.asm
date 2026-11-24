@@ -6,7 +6,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern eval_exception_unwind
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -19,7 +18,6 @@ extern obj_decref
 extern obj_dealloc
 extern obj_is_true
 extern fatal_error
-extern raise_exception
 extern exc_TypeError_type
 extern exc_StopIteration_type
 extern none_singleton
@@ -366,6 +364,7 @@ END_FUNC get_iterator_opt
 ;; ============================================================================
 
 ;; builtin_enumerate(args, nargs) -> EnumerateIterObject*
+;; Fails: 0
 ;; nargs=1: enumerate(iterable), start=0
 ;; nargs=2: enumerate(iterable, start)
 ;; Supports start= keyword arg
@@ -561,7 +560,7 @@ DEF_FUNC builtin_enumerate, EN_FRAME
     mov rdi, [rbp - EN_ITER]
     mov rsi, [rbp - EN_ITERTAG]
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .enum_fail
     mov rbx, rax                  ; rbx = underlying iterator
 
     ; Allocate EnumerateIterObject
@@ -603,19 +602,32 @@ DEF_FUNC builtin_enumerate, EN_FRAME
 .enum_te_have_iterable:
     mov rdi, [rbp - EN_ITER]
     mov rsi, [rbp - EN_ITERTAG]
-    call get_iterator                   ; raises if it is not one
-    ERR_NULL_JUMP
+    call get_iterator                   ; 0 if it is not one
+    ERR_NULL .enum_fail
     mov rdi, rax
     V_UNPACK rdi, rdx
     call obj_decref
     mov rsi, [rbp - EN_BADVAL]
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .enum_fail
 
 .enum_error:
     mov qword [gs:ThreadState.kw_names_pending], 0
-    RAISE exc_TypeError_type, "enumerate() requires 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "enumerate() requires 1 or 2 arguments"
+.enum_fail:
+    ; Reached from inside the keyword loop too, with its pushes outstanding:
+    ; rsp goes back to the three saved registers.  Nothing is owned -- the
+    ; iterable is the caller's.
+    lea rsp, [rbp - EN_FRAME - 24]
+    xor eax, eax
+    xor edx, edx
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_enumerate
 
 ;; enumerate_iternext(self) -> PyObject* (2-tuple) or NULL
@@ -869,6 +881,7 @@ END_FUNC enumerate_dealloc
 ;; ============================================================================
 
 ;; builtin_zip(args, nargs) -> ZipIterObject*
+;; Fails: 0
 ;; Supports strict= kwarg (PEP 618)
 extern ap_strcmp
 extern exc_ValueError_type
@@ -977,7 +990,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
     push r13
     push r14
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .zip_iter_failed
     pop r14
     pop r13
     mov [r13 + r14 * 8], rax    ; store iterator
@@ -1009,6 +1022,30 @@ DEF_FUNC builtin_zip, ZP_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.zip_iter_failed:
+    ; An argument that is not iterable, or whose __iter__ raised.  The r14
+    ; iterators already built are this frame's, and so is the array.
+    pop r14
+    pop r13
+    xor ebx, ebx                ; the argument array is finished with
+.zip_release:
+    cmp rbx, r14
+    jae .zip_released
+    mov rdi, [r13 + rbx*8]
+    call obj_decref
+    inc rbx
+    jmp .zip_release
+.zip_released:
+    mov rdi, r13
+    call ap_free
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 
 .zip_zero:
@@ -1260,6 +1297,7 @@ END_FUNC zip_dealloc
 ;; ============================================================================
 
 ;; builtin_map(args, nargs) -> MapIterObject*
+;; Fails: 0
 ;; nargs>=2: map(func, iterable1, ..., iterableN)
 DEF_FUNC builtin_map
     push rbx
@@ -1300,7 +1338,7 @@ DEF_FUNC builtin_map
     V_UNPACK rdi, rsi
     push rcx
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .map_iter_failed
     pop rcx
     mov rdx, [rsp]              ; iters array ptr
     mov [rdx + rcx * 8], rax    ; store iterator
@@ -1334,8 +1372,35 @@ DEF_FUNC builtin_map
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.map_iter_failed:
+    ; An argument that is not iterable, or whose __iter__ raised.  The
+    ; iterators built so far, the array and the function are this frame's.
+    pop r12                     ; how many were built
+    pop rbx                     ; the array
+    xor r14d, r14d
+.map_release:
+    cmp r14, r12
+    jae .map_released
+    mov rdi, [rbx + r14*8]
+    call obj_decref
+    inc r14
+    jmp .map_release
+.map_released:
+    mov rdi, rbx
+    call ap_free
+    DECREF_V r13, rcx           ; the function
+    jmp .map_fail
+
 .map_error:
-    RAISE exc_TypeError_type, "map() must have at least two arguments."
+    SET_EXC exc_TypeError_type, "map() must have at least two arguments."
+.map_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_map
 
 ;; map_iternext(self) -> rax = Value or NULL
@@ -1512,6 +1577,7 @@ END_FUNC map_dealloc
 ;; ============================================================================
 
 ;; builtin_filter(args, nargs) -> FilterIterObject*
+;; Fails: 0
 ;; nargs=2: filter(func_or_none, iterable)
 DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
@@ -1545,7 +1611,7 @@ DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, [rbx + 8]
     V_UNPACK rdi, rsi       ; args[1]
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .filter_iter_failed
     mov rbx, rax             ; rbx = underlying iterator
 
     ; Allocate FilterIterObject
@@ -1573,8 +1639,18 @@ DEF_FUNC builtin_filter, 8            ; 3 pushes, so rsp is 16-aligned
 .filter_error:
     CSTRING rdi, "filter expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .filter_fail
+.filter_iter_failed:
+    XDECREF_V r13, rcx          ; the function, or 0 for filter(None, ...)
+.filter_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_filter
 
 ;; filter_iternext(self) -> rax = Value or NULL
@@ -1731,6 +1807,7 @@ END_FUNC filter_dealloc
 ;; ============================================================================
 
 ;; builtin_reversed(args, nargs) -> ReversedIterObject*
+;; Fails: 0
 ;; nargs=1: reversed(sequence)
 extern dunder_call_1
 
@@ -1777,11 +1854,12 @@ DEF_FUNC builtin_reversed, 8            ; 3 pushes, so rsp is 16-aligned
     ; Call __reversed__ via dunder_call_1
     mov rdi, r12
     lea rsi, [rel .dunder_reversed_name]
-    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .rev_dunder_ok`
+    call dunder_call_1
+    ERR_PENDING .rev_fail       ; __reversed__ raised: its exception, not ours
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .rev_dunder_ok      ; got a result
-    jmp .rev_type_error     ; __reversed__ raised
+    jmp .rev_type_error     ; no such method after all
 
 .rev_dunder_ok:
     pop r13
@@ -1829,7 +1907,7 @@ section .text
     jz .rev_try_heap_len
     mov rdi, r12
     call rcx
-    ERR_M1_JUMP
+    ERR_M1 .rev_fail
     jmp .rev_have_len
 
 .rev_try_heap_len:
@@ -1861,7 +1939,7 @@ section .text
     extern dunder_len
     lea rsi, [rel dunder_len]
     call dunder_call_1
-    ERR_PENDING_JUMP            ; __len__ raised
+    ERR_PENDING .rev_fail       ; __len__ raised
     V_UNPACK rax, rdx           ; returns a Value
     ; rax = length (SmallInt payload), edx = TAG_SMALLINT
     jmp .rev_have_len
@@ -1905,14 +1983,20 @@ section .text
 .rev_error:
     CSTRING rdi, "reversed expected 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .rev_fail
 
 .rev_type_error:
     mov rsi, r12
     CSTRING rdi, `'\x01' object is not reversible`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+.rev_fail:
+    xor eax, eax                ; nothing is owned: the sequence is the caller's
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_reversed
 
 ;; reversed_iternext(self) -> rax = Value or NULL
@@ -2006,6 +2090,7 @@ END_FUNC reversed_dealloc
 ;; ============================================================================
 
 ;; builtin_sorted(args, nargs) -> PyListObject*
+;; Fails: 0
 ;; nargs=1: sorted(iterable) -> new sorted list
 ; sorted() frame layout: fixed-size args buffer for list_method_sort
 ; Max 3 args (list + key + reverse) = 48 bytes
@@ -2045,7 +2130,7 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rdi, [rax]              ; args[0]
     V_UNPACK rdi, rsi
     call get_iterator
-    ERR_NULL_JUMP
+    ERR_NULL .sorted_fail
     mov rbx, rax               ; rbx = iterator
 
     ; Create new empty list
@@ -2151,11 +2236,13 @@ DEF_FUNC builtin_sorted, SO_FRAME
     mov rsi, rax
     CSTRING rdi, "sorted expected 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .sorted_fail
+.sorted_propagate:              ; the iterable raised part-way
 .sorted_sort_raised:
     mov rdi, r12                ; the list we built and were about to return
     call obj_decref
+.sorted_fail:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx
     pop r13
@@ -2163,13 +2250,6 @@ DEF_FUNC builtin_sorted, SO_FRAME
     pop rbx
     leave
     ret
-
-.sorted_propagate:
-    mov rdi, r12
-    call obj_decref             ; the partially built list
-    leave
-    PUBLISH_SP
-    jmp eval_exception_unwind
 END_FUNC builtin_sorted
 
 ;; ============================================================================
