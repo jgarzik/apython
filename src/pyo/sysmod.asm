@@ -4,7 +4,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern eval_exception_unwind
 extern ap_malloc
 extern ap_strlen
 extern obj_decref
@@ -36,7 +35,7 @@ extern dunder_call_1
 extern fileobj_new
 extern builtin_func_new
 extern fatal_error
-extern raise_exception
+extern set_exception
 
 ;; SYS_ADD_FUNC impl, name -- the module dict is in r15 here, not r12, so
 ;; MODULE_ADD_FUNC does not fit; this is the same four steps.
@@ -1512,6 +1511,7 @@ END_FUNC sys_module_init
 ;;
 ;; The default argument is reached only when there is no __sizeof__ at all,
 ;; which is what CPython uses it for too.
+;; Fails: 0
 ;; ============================================================================
 SGS_ARGS  equ 8
 SGS_NARGS equ 16
@@ -1530,7 +1530,8 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     test rdi, rdi
     jz .sgs_immediate
     CSTRING rsi, "__sizeof__"
-    call dunder_call_1          ; err: 0, absent or raised, goes to .sgs_no_sizeof
+    call dunder_call_1
+    ERR_PENDING .sgs_raised
     test rax, rax
     jz .sgs_no_sizeof
     ; CPython adds the collector's header when the object is tracked, and
@@ -1573,12 +1574,35 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     V_PACK rax, rdx
     ret
 
+.sgs_raised:
+    ; __sizeof__ ran and raised.  That is the answer -- except that CPython
+    ; hands back the default over a TypeError, and over nothing else.  This
+    ; arm used to share the one below, which answered the default over any
+    ; exception by zeroing the word without releasing it, and with no
+    ; default replaced whatever was raised with "has no __sizeof__".
+    cmp qword [rbp - SGS_NARGS], 2
+    jl .sgs_fail
+    mov rax, [gs:ThreadState.current_exception]
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_TypeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .sgs_fail
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+    jmp .sgs_default
+.sgs_fail:
+    xor eax, eax
+    leave
+    ret
+
 .sgs_no_sizeof:
-    ; Absent, not callable, or it raised.  A default was given, or this is
-    ; the TypeError CPython gives.
+    ; Absent.  A default was given, or this is the TypeError CPython gives.
     cmp qword [rbp - SGS_NARGS], 2
     jl .sgs_no_default
-    mov qword [gs:ThreadState.current_exception], 0
+.sgs_default:
     mov rdi, [rbp - SGS_ARGS]
     mov rax, [rdi + 8]
     INCREF_V rax, rdx
@@ -1586,9 +1610,13 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .sgs_no_default:
-    RAISE exc_TypeError_type, "getsizeof() argument has no __sizeof__"
+    SET_EXC exc_TypeError_type, "getsizeof() argument has no __sizeof__"
+    leave
+    ret
 .sgs_args:
-    RAISE exc_TypeError_type, "getsizeof() takes at least 1 argument"
+    SET_EXC exc_TypeError_type, "getsizeof() takes at least 1 argument"
+    leave
+    ret
 END_FUNC sys_getsizeof_func
 
 ;; ============================================================================
@@ -1699,6 +1727,8 @@ DEF_FUNC sys_getrecursionlimit_func
     ret
 END_FUNC sys_getrecursionlimit_func
 
+;; sys_setrecursionlimit_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC sys_setrecursionlimit_func
     cmp rsi, 1
     jne .srl_error
@@ -1722,15 +1752,20 @@ DEF_FUNC sys_setrecursionlimit_func
     V_PACK rax, rdx
     ret
 .srl_error:
-    RAISE exc_TypeError_type, "setrecursionlimit() argument must be an int"
+    SET_EXC exc_TypeError_type, "setrecursionlimit() argument must be an int"
+    leave
+    ret
 .srl_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "recursion limit must be greater or equal than 1"
+    SET_EXC exc_ValueError_type, "recursion limit must be greater or equal than 1"
+    leave
+    ret
 END_FUNC sys_setrecursionlimit_func
 
 ;; ============================================================================
 ;; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
-;; sys.exit([code]) — exit the process
+;; sys.exit([code]) — raises SystemExit: always 0, with it pending
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_exit_func
     ; sys.exit raises SystemExit; it does not call the exit syscall.  Calling
@@ -1753,9 +1788,11 @@ DEF_FUNC sys_exit_func
     extern exc_new
     call exc_new
     mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj
-    ud2
+    extern exc_install
+    call exc_install            ; takes the reference
+    xor eax, eax
+    leave
+    ret
 END_FUNC sys_exit_func
 
 ;; ============================================================================
@@ -1773,6 +1810,7 @@ END_FUNC sys_getdefaultencoding_func
 ;; ============================================================================
 ;; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Returns the current int max str digits limit
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_get_int_max_str_digits_func
     test rsi, rsi
@@ -1784,7 +1822,9 @@ DEF_FUNC sys_get_int_max_str_digits_func
     ret
 .get_imsd_error:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
+    leave
+    ret
 END_FUNC sys_get_int_max_str_digits_func
 
 ;; ============================================================================
@@ -1873,6 +1913,7 @@ END_FUNC sys_set_int_max_str_digits_func
 ;; every IsolatedAsyncioTestCase in the standard library dying before its
 ;; first await, which is the whole of test_unittest and test_inspect and most
 ;; of test_os.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_get_coroutine_origin_tracking_depth_func
     test rsi, rsi
@@ -1884,8 +1925,9 @@ DEF_FUNC sys_get_coroutine_origin_tracking_depth_func
     ret
 .get_codt_error:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, \
-          "get_coroutine_origin_tracking_depth() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_coroutine_origin_tracking_depth() takes no arguments"
+    leave
+    ret
 END_FUNC sys_get_coroutine_origin_tracking_depth_func
 
 ;; ============================================================================
@@ -1897,6 +1939,7 @@ END_FUNC sys_get_coroutine_origin_tracking_depth_func
 ;; whatever it is handed, so a float or a list was a dereference of the number
 ;; and `set_coroutine_origin_tracking_depth("hello")` stored a str's ob_size.
 ;; asyncio's _set_coroutine_origin_tracking forwards whatever it is given.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
     cmp rsi, 1
@@ -1918,11 +1961,14 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
 
 .set_codt_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "depth must be >= 0"
+    SET_EXC exc_ValueError_type, "depth must be >= 0"
+    leave
+    ret
 
 .set_codt_error:
-    RAISE exc_TypeError_type, \
-          "set_coroutine_origin_tracking_depth() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "set_coroutine_origin_tracking_depth() takes exactly 1 argument"
+    leave
+    ret
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     leave
@@ -2050,6 +2096,8 @@ DEF_FUNC sys_getfsencoding_func
     ret
 END_FUNC sys_getfsencoding_func
 
+;; sys_intern_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC sys_intern_func
     cmp rsi, 1
     jne .si_error               ; exactly one argument, as CPython requires
@@ -2078,11 +2126,15 @@ DEF_FUNC sys_intern_func
 .si_not_str:
     mov rsi, rbx
     pop rbx
-    extern raise_type_error_with_name
+    extern set_type_error_with_name
     CSTRING rdi, `intern() argument must be str, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .si_error:
-    RAISE exc_TypeError_type, "sys.intern() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "sys.intern() takes exactly one argument"
+    leave
+    ret
 END_FUNC sys_intern_func
 
 section .rodata
@@ -2312,6 +2364,7 @@ section .text
 ;; object and has no count.  CPython's nearest thing is an immortal object,
 ;; and 3.12 reports 4294967295 for one; `sys.getrefcount(5)` answers that
 ;; there and answers it here.
+;; Fails: 0
 ;; ============================================================================
 SGR_IMMORTAL equ 4294967295
 DEF_FUNC sys_getrefcount_func
@@ -2332,7 +2385,9 @@ DEF_FUNC sys_getrefcount_func
     leave
     ret
 .sgr_args:
-    RAISE exc_TypeError_type, "getrefcount() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "getrefcount() takes exactly one argument"
+    leave
+    ret
 END_FUNC sys_getrefcount_func
 
 ;; ============================================================================
@@ -2370,6 +2425,7 @@ END_FUNC sys_getallocatedblocks_func
 ;;
 ;; main's teardown sets the flag before the shutdown collection, which is
 ;; where those finalizers run, and nothing clears it: there is no way back.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_is_finalizing_func
     test rsi, rsi
@@ -2388,7 +2444,9 @@ DEF_FUNC sys_is_finalizing_func
     leave
     ret
 .sif_args:
-    RAISE exc_TypeError_type, "is_finalizing() takes no arguments"
+    SET_EXC exc_TypeError_type, "is_finalizing() takes no arguments"
+    leave
+    ret
 END_FUNC sys_is_finalizing_func
 
 ;; ============================================================================
@@ -2398,6 +2456,7 @@ END_FUNC sys_is_finalizing_func
 ;; loop restores the pair by splatting it back -- `set_asyncgen_hooks(*old)` --
 ;; while reading .firstiter and .finalizer by name elsewhere.  NULL storage
 ;; reads as None, which is what "no hook" looks like from Python.
+;; Fails: 0
 ;; ============================================================================
 GAH_OBJ   equ 8
 GAH_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -2447,7 +2506,7 @@ DEF_FUNC sys_get_asyncgen_hooks_func, GAH_FRAME
     V_PACK rax, rdx
     ret
 .gah_args:
-    RAISE exc_TypeError_type, "get_asyncgen_hooks() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_asyncgen_hooks() takes no arguments"
 .gah_nomem:
     xor eax, eax
     pop rbx
@@ -2462,6 +2521,7 @@ END_FUNC sys_get_asyncgen_hooks_func
 ;; loop uses the keyword form to install and the positional splat to restore.
 ;; An argument left out leaves that half alone, as CPython's does; None clears
 ;; it; anything else must be callable.
+;; Fails: 0
 ;; ============================================================================
 SAH_ARGS  equ 8
 SAH_NARGS equ 16
@@ -2493,7 +2553,7 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
     mov esi, ecx                ; 0 = firstiter, 1 = finalizer
     push rcx
     push rdx
-    call sah_store
+    call sah_store              ; err: .sah_bad, once the pops are done
     pop rdx
     pop rcx
     test eax, eax
@@ -2540,7 +2600,7 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
     mov rdi, [rdx + rax*8]
     push rcx
     push rsi
-    call sah_store
+    call sah_store              ; err: .sah_bad, once the pops are done
     pop rsi
     pop rcx
     test eax, eax
@@ -2557,22 +2617,24 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
     V_PACK rax, rdx
     ret
 
+.sah_too_many:
+    FAIL exc_TypeError_type, "set_asyncgen_hooks() takes at most 2 arguments", .sah_bad
+.sah_bad_keyword:
+    SET_EXC exc_TypeError_type, \
+        "set_asyncgen_hooks() got an unexpected keyword argument"
 .sah_bad:
-    ; Unreachable: sah_store raises rather than returning 0.  Kept so the
-    ; caller reads as a checked call.
+    ; The error exit, with the pushes of whichever loop it left still out.
+    lea rsp, [rbp - SAH_FRAME - 8]
+    xor eax, eax
     pop rbx
     leave
     ret
-.sah_too_many:
-    RAISE exc_TypeError_type, "set_asyncgen_hooks() takes at most 2 arguments"
-.sah_bad_keyword:
-    RAISE exc_TypeError_type, \
-        "set_asyncgen_hooks() got an unexpected keyword argument"
 END_FUNC sys_set_asyncgen_hooks_func
 
 ;; ============================================================================
 ;; sah_store(rdi = Value, esi = 0 for firstiter / 1 for finalizer)
 ;;   -> eax = 1 stored, 0 with a TypeError recorded
+;; Fails: 0
 ;;
 ;; None clears the hook; anything else has to be callable, which is the one
 ;; thing CPython checks here.  The hook is held for the life of the setting,
@@ -2629,8 +2691,9 @@ DEF_FUNC_LOCAL sah_store, SAHS_FRAME
 .sahs_bad_final:
     CSTRING rdi, `callable finalizer expected, got \x01`
 .sahs_raise:
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name  ; does not return
+    call set_type_error_with_name   ; answers the 0 this function fails with
+    leave
+    ret
 END_FUNC sah_store
 
 ;; ============================================================================
@@ -2645,6 +2708,7 @@ END_FUNC sah_store
 ;;
 ;; builtins._ is set AFTER the print, as CPython sets it: a repr that raises
 ;; must not leave the name bound to a value the user never saw.
+;; Fails: 0
 ;; ============================================================================
 SDH_VAL   equ 8
 SDH_REPR  equ 16
@@ -2713,9 +2777,13 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     ret
 
 .sdh_args:
-    RAISE exc_TypeError_type, "displayhook() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "displayhook() takes exactly one argument"
+    leave
+    ret
 END_FUNC sys_displayhook_func
 
+;; sys_excepthook_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC sys_excepthook_func
     cmp rsi, 3
     jl .seh_args
@@ -2766,9 +2834,13 @@ DEF_FUNC sys_excepthook_func
     V_PACK rax, rdx
     ret
 .seh_bad:
-    RAISE exc_TypeError_type, "excepthook(): Exception expected for value"
+    SET_EXC exc_TypeError_type, "excepthook(): Exception expected for value"
+    leave
+    ret
 .seh_args:
-    RAISE exc_TypeError_type, "excepthook() takes exactly 3 arguments"
+    SET_EXC exc_TypeError_type, "excepthook() takes exactly 3 arguments"
+    leave
+    ret
 END_FUNC sys_excepthook_func
 
 ;; ============================================================================

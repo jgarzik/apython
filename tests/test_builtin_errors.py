@@ -28,7 +28,7 @@ def attempt(fn):
     for _ in range(200):
         try:
             fn()
-        except Exception as e:
+        except BaseException as e:      # sys.exit() is one of the cases
             seen = type(e).__name__
     return seen
 
@@ -425,3 +425,56 @@ check("builtin function __reduce__ unbound", lambda: type(len).__reduce__())
 check("bound method __reduce__ unbound", lambda: type([].append).__reduce__())
 check("Ellipsis __reduce__ unbound", lambda: type(...).__reduce__())
 check("NotImplemented __reduce__ unbound", lambda: type(NotImplemented).__reduce__())
+
+# --- sys ----------------------------------------------------------------------
+class SizeofRaises:
+    def __sizeof__(self):
+        raise Boom()
+
+
+class SizeofTypeError:
+    def __sizeof__(self):
+        raise TypeError("no size")
+
+
+check("sys.getsizeof none", lambda: sys.getsizeof())
+check("sys.getsizeof __sizeof__ raises", lambda: sys.getsizeof(SizeofRaises()))
+check("sys.getsizeof __sizeof__ raises, default",
+      lambda: sys.getsizeof(SizeofRaises(), 5))
+check("sys.getsizeof __sizeof__ TypeError", lambda: sys.getsizeof(SizeofTypeError()))
+check("sys.getsizeof __sizeof__ TypeError, default",
+      lambda: sys.getsizeof(SizeofTypeError(), 5))
+check("sys.setrecursionlimit none", lambda: sys.setrecursionlimit())
+check("sys.setrecursionlimit str", lambda: sys.setrecursionlimit("a"))
+check("sys.setrecursionlimit zero", lambda: sys.setrecursionlimit(0))
+check("sys.exit", lambda: sys.exit())
+check("sys.exit int", lambda: sys.exit(3))
+check("sys.exit str", lambda: sys.exit("bye" * 5))
+check("sys.get_int_max_str_digits one", lambda: sys.get_int_max_str_digits(1))
+check("sys.set_int_max_str_digits str", lambda: sys.set_int_max_str_digits("a"))
+check("sys.set_int_max_str_digits too small", lambda: sys.set_int_max_str_digits(5))
+check("sys.get_coroutine_origin_tracking_depth one",
+      lambda: sys.get_coroutine_origin_tracking_depth(1))
+check("sys.set_coroutine_origin_tracking_depth none",
+      lambda: sys.set_coroutine_origin_tracking_depth())
+check("sys.set_coroutine_origin_tracking_depth negative",
+      lambda: sys.set_coroutine_origin_tracking_depth(-1))
+check("sys.set_coroutine_origin_tracking_depth str",
+      lambda: sys.set_coroutine_origin_tracking_depth("a"))
+check("sys.intern none", lambda: sys.intern())
+check("sys.intern int", lambda: sys.intern(5))
+check("sys.intern str subclass", lambda: sys.intern(StrSub("x")))
+check("sys.getrefcount none", lambda: sys.getrefcount())
+check("sys.is_finalizing one", lambda: sys.is_finalizing(1))
+check("sys.get_asyncgen_hooks one", lambda: sys.get_asyncgen_hooks(1))
+check("sys.set_asyncgen_hooks three", lambda: sys.set_asyncgen_hooks(None, None, None))
+check("sys.set_asyncgen_hooks bad keyword", lambda: sys.set_asyncgen_hooks(bogus=None))
+check("sys.set_asyncgen_hooks firstiter int", lambda: sys.set_asyncgen_hooks(5))
+check("sys.set_asyncgen_hooks finalizer int", lambda: sys.set_asyncgen_hooks(None, 5))
+check("sys.set_asyncgen_hooks finalizer= int", lambda: sys.set_asyncgen_hooks(finalizer=5))
+check("sys.displayhook none", lambda: sys.displayhook())
+check("sys.excepthook none", lambda: sys.excepthook())
+try:
+    sys.exit(7)
+except SystemExit as e:
+    print("sys.exit code", e.code)
