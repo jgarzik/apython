@@ -546,7 +546,7 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     lea rsi, [rsp + 8]
     mov edx, 1
     extern bytearray_type_call
-    call bytearray_type_call
+    call bytearray_type_call  ; err: the 0 is tested below, once the bytes are released
     mov rcx, rax
     add rsp, 8
     pop rdi

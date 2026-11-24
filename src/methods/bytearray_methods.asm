@@ -447,7 +447,7 @@ DEF_FUNC bytearray_dunder_getitem
     jne .badg_bad
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
-    call bytearray_subscript
+    call bytearray_subscript  ; err: its 0 is this method's own answer
     mov edx, TAG_PTR
     leave
     ret
@@ -471,12 +471,14 @@ DEF_FUNC bytearray_dunder_setitem
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
     call bytearray_ass_subscript
+    ERR_M1 .bads_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .bads_bad:
     SET_EXC exc_TypeError_type, "expected exactly two arguments"
+.bads_fail:
     xor eax, eax
     leave
     ret
@@ -495,12 +497,14 @@ DEF_FUNC bytearray_dunder_delitem
     mov rdi, [rdi]
     xor edx, edx                ; a NULL value Value means delete
     call bytearray_ass_subscript
+    ERR_M1 .badd_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .badd_bad:
     SET_EXC exc_TypeError_type, "expected exactly one argument"
+.badd_fail:
     xor eax, eax
     leave
     ret
@@ -518,6 +522,7 @@ DEF_FUNC bytearray_dunder_contains
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
     call bytearray_contains
+    ERR_M1 .badc_fail
     test eax, eax
     jz .badc_false
     lea rax, [rel bool_true]
@@ -531,6 +536,7 @@ DEF_FUNC bytearray_dunder_contains
     ret
 .badc_bad:
     SET_EXC exc_TypeError_type, "expected exactly one argument"
+.badc_fail:
     xor eax, eax
     leave
     ret
