@@ -234,7 +234,7 @@ DEF_FUNC slice_hash
     push rax
     mov rdi, rax
     extern obj_hash
-    call obj_hash
+    call obj_hash               ; err: the tuple's -1, with the exception, is the slice's
     pop rdi
     push rax
     call obj_decref

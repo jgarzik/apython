@@ -1228,7 +1228,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     mov [rbp - ROH_LEN], rax
     mov rdi, rax
     extern obj_hash
-    call obj_hash
+    call obj_hash               ; err: an int, whose hash cannot raise
     mov rcx, rax
 
     mov eax, 0x345678
@@ -1246,7 +1246,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     jnz .roh_wide_done          ; empty, or the comparison raised
 
     mov rdi, [rbx + PyRangeObject.vstart]
-    call obj_hash
+    call obj_hash               ; err: an int, whose hash cannot raise
     mov rcx, rax
     mov rax, [rbp - ROH_ACC]
     imul rax, 1000003
@@ -1262,7 +1262,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     jnz .roh_wide_done          ; one element: the step cannot be observed
 
     mov rdi, [rbx + PyRangeObject.vstep]
-    call obj_hash
+    call obj_hash               ; err: an int, whose hash cannot raise
     mov rcx, rax
     mov rax, [rbp - ROH_ACC]
     imul rax, 1000003

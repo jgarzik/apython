@@ -12,6 +12,7 @@
 # that does not release what it held climbs by at least one block a round.
 import gc
 import sys
+import weakref
 
 results = []
 
@@ -50,6 +51,31 @@ def check(label, fn, message=True):
 class Bool:
     def __bool__(self):
         boom("bool")
+
+
+class Hash:
+    def __hash__(self):
+        boom("hash")
+
+
+class HashCall:
+    def __hash__(self):
+        boom("hash")
+
+    def __call__(self):
+        pass
+
+    def m(self):
+        pass
+
+
+class MinusOne:
+    def __hash__(self):
+        return -1
+
+
+HASH = Hash()
+HASHCALL = HashCall()
 
 
 class Len:
@@ -159,6 +185,28 @@ check("max(EqBool, EqBool)", lambda: max(EqBool(), EqBool()))
 check("sorted([EqBool, EqBool])", lambda: sorted([EqBool(), EqBool()]))
 check("1 in Contains", lambda: 1 in Contains())
 check("object.__ne__ over Bool", lambda: object.__ne__(EqBool(), 1))
+
+# ---- __hash__ ----------------------------------------------------------------
+check("hash(Hash)", lambda: hash(Hash()))
+check("hash([])", lambda: hash([]), message=False)
+check("hash((1, Hash))", lambda: hash((1, Hash())))
+check("hash((1, []))", lambda: hash((1, [])), message=False)
+check("hash(slice(Hash))", lambda: hash(slice(Hash())))
+check("hash(bound method)", lambda: hash(HASHCALL.m) == hash(HASHCALL.m))
+check("hash(list[Hash])", lambda: hash(list[Hash()]))
+check("hash(int | str)", lambda: hash(int | str) == hash(str | int))
+check("hash(weakref.ref(Hash))", lambda: hash(weakref.ref(HASH)))
+check("object.__hash__ by name", lambda: tuple.__hash__((Hash(),)))
+check("d[Hash]", lambda: {}[Hash()])
+check("d[Hash] = 1", lambda: {}.__setitem__(Hash(), 1))
+check("Hash in d", lambda: Hash() in {})
+check("d.get(Hash)", lambda: {}.get(Hash()))
+check("d.setdefault(Hash)", lambda: {}.setdefault(Hash()))
+check("s.add(Hash)", lambda: set().add(Hash()))
+check("Hash in s", lambda: Hash() in set())
+check("s.discard(Hash)", lambda: set().discard(Hash()))
+check("s.remove(Hash)", lambda: set().remove(Hash()))
+check("hash == -1 is remapped", lambda: hash(MinusOne()) == -2)
 
 # ---- __instancecheck__ and __subclasscheck__ --------------------------------
 check("isinstance, hook raises", lambda: isinstance(1, Checked))

@@ -52,7 +52,8 @@ SET_EMPTY_CAP equ 1
 ;
 ; This is set's parallel of dict_lookup's cached string hash: n-queens hashes
 ; nothing but ints, and the call was most of what `c in cols` cost.
-%macro SET_HASH_VALUE 2         ; %1 = key Value (preserved), %2 = the hash out
+%macro SET_HASH_VALUE 3         ; %1 = key Value (preserved), %2 = the hash out,
+                                ; %3 = where an unhashable key goes
     V_IS_INT %1, %2
     jb %%slow
     mov %2, %1
@@ -64,6 +65,7 @@ SET_EMPTY_CAP equ 1
 %%slow:
     mov rdi, %1
     call obj_hash
+    ERR_M1 %3
     mov %2, rax
 %%done:
 %endmacro
@@ -867,8 +869,7 @@ END_FUNC set_clone_into
 ;; set_add(rdi = set, rsi = key Value) -> rax = 0
 ;; Fails: -1
 ;;
-;; It fails when the key cannot be hashed or a key's __eq__ raises.  (The
-;; first still jumps, from inside obj_hash.)
+;; It fails when the key cannot be hashed or a key's __eq__ raises.
 ;; ============================================================================
 SAD_TABLE equ 8             ; the entries array the probe started on
 SAD_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
@@ -881,7 +882,7 @@ DEF_FUNC set_add, SAD_FRAME
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
-    SET_HASH_VALUE r12, r13     ; r13 = hash
+    SET_HASH_VALUE r12, r13, .sad_fail      ; r13 = hash
 
 .sad_retry:
     ; Make the room BEFORE probing rather than after inserting.
@@ -959,7 +960,7 @@ DEF_FUNC set_add, SAD_FRAME
     leave
     ret
 .sad_fail:
-    mov rax, -1                 ; __eq__ raised; nothing was stored
+    mov rax, -1                 ; unhashable, or __eq__ raised; nothing was stored
     jmp .sad_out
 END_FUNC set_add
 
@@ -1018,7 +1019,7 @@ DEF_FUNC set_contains, SCT_FRAME
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
-    SET_HASH_VALUE r12, r13     ; r13 = hash
+    SET_HASH_VALUE r12, r13, .sct_raised    ; r13 = hash
 
     ; Find slot.  A lookup never resizes: set_add's room-making belongs to
     ; the insert, and a membership test that rehashed the table would move
@@ -1342,8 +1343,8 @@ END_FUNC set_contains_sq
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
 ;; Fails: -1
-;; -1 alone is "not there"; -1 with an exception pending is an __eq__ that
-;; raised.
+;; -1 alone is "not there"; -1 with an exception pending is an unhashable
+;; key or an __eq__ that raised.
 ;;
 ;; The probe is set_find_slot's, and now it is ONLY set_find_slot's.  This
 ;; used to carry an independent second copy of the whole loop -- its own
@@ -1363,7 +1364,7 @@ DEF_FUNC set_remove
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
-    SET_HASH_VALUE r12, r13     ; r13 = hash
+    SET_HASH_VALUE r12, r13, .sr_not_found  ; r13 = hash
 
     mov rdi, rbx
     mov rsi, r12

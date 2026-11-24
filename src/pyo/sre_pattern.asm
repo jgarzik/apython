@@ -2621,6 +2621,7 @@ DEF_FUNC sre_pattern_hash, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, [rbx + SRE_PatternObject.pattern]
     extern obj_hash
     call obj_hash
+    ERR_M1 .sph_ret             ; bytearray is a pattern too, and is unhashable
 
     ; XOR flags
     mov ecx, [rbx + SRE_PatternObject.flags]
@@ -2633,6 +2634,7 @@ DEF_FUNC sre_pattern_hash, 8            ; 1 pushes, so rsp is 16-aligned
     shl rcx, 16
     xor rax, rcx
 
+.sph_ret:
     pop rbx
     leave
     ret

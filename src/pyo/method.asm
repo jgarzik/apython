@@ -872,7 +872,7 @@ DEF_FUNC method_hash, 16    ; + 2 pushes = 32, 16-aligned
     mov r12, rax
 
     mov rdi, [rbx + PyMethodObject.im_func]
-    call obj_hash
+    call obj_hash               ; err: a -1 goes out as it came, two lines down
     cmp rax, -1
     je .mh_out
     xor rax, r12

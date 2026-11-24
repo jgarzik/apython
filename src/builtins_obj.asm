@@ -117,11 +117,16 @@ DEF_FUNC builtin_hash_fn
     jne .hash_nargs_error
     mov rdi, [rdi]
     extern obj_hash
-    call obj_hash               ; raises for an unhashable type
+    call obj_hash               ; -1, pending, for an unhashable type
+    ERR_M1 .hash_raised
     mov rdi, rax
     call int_from_i64
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.hash_raised:
+    xor eax, eax
+    leave
     ret
 
 .hash_nargs_error:

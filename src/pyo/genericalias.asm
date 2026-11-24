@@ -1945,6 +1945,7 @@ DEF_FUNC generic_alias_hash, GAH_FRAME
     test rdi, rdi
     jz .gah_no_origin
     call obj_hash
+    ERR_M1 .gah_ret             ; the origin's -1 is this hash's
     jmp .gah_have_origin
 .gah_no_origin:
     xor eax, eax
@@ -1954,6 +1955,7 @@ DEF_FUNC generic_alias_hash, GAH_FRAME
     test rdi, rdi
     jz .gah_done
     call obj_hash
+    ERR_M1 .gah_ret
     imul r12, r12, 1000003
     xor r12, rax
 .gah_done:

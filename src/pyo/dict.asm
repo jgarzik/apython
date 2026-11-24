@@ -608,7 +608,8 @@ END_FUNC dict_get
 
 ;; ============================================================================
 ;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1,
-;;   or -2 with the exception pending when a key's __eq__ raised
+;;   or -2 with the exception pending when the key cannot be hashed or a
+;;   key's __eq__ raised
 ;;   rdx = the indices slot the key hashes to (where an insert would go, or
 ;;         the first dummy on the probe path), r8 = hash
 ;; The one probe loop; every read path goes through it.
@@ -734,6 +735,7 @@ DEF_FUNC dict_lookup, DL_FRAME
     push rdi                    ; twice: rsp keeps its alignment
     mov rdi, rsi
     call obj_hash
+    ERR_M1 .dl_unhashable
     pop rdi
     pop rdi
 .dl_have_hash:
@@ -855,8 +857,11 @@ DEF_FUNC dict_lookup, DL_FRAME
     leave
     ret
 
+.dl_unhashable:
+    add rsp, 16                 ; the two copies of the dict pushed around obj_hash
 .dl_error:
-    ; A key's __eq__ raised; the exception is pending.  Nothing here is owned.
+    ; The key could not be hashed, or a key's __eq__ raised; the exception is
+    ; pending.  Nothing here is owned.
     mov rax, -2
     pop r15
     pop r14

@@ -366,6 +366,7 @@ DEF_FUNC union_hash, UH_FRAME
     mov rdi, [rbx + rcx*8]
     extern obj_hash
     call obj_hash
+    ERR_M1 .uh_raised
     pop rcx
     pop rdx
     xor rdx, rax
@@ -389,6 +390,10 @@ DEF_FUNC union_hash, UH_FRAME
     pop rbx
     leave
     ret
+.uh_raised:
+    add rsp, 16                 ; the index and the running hash
+    mov rax, -1
+    jmp .uh_ret
 .uh_empty:
     xor eax, eax
     pop r12

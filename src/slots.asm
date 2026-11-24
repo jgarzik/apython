@@ -252,6 +252,10 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     call obj_as_index
     ERR_M1 .sth_raised
     add rsp, 16
+    cmp rax, -1                 ; -1 is the error value, so no hash IS it:
+    jne .sth_ret                ; CPython hands -2 back for a __hash__ of -1
+    mov rax, -2
+.sth_ret:
     leave
     ret
 .sth_raised:                    ; not an integer; `leave` drops the parked pair

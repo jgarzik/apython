@@ -343,6 +343,7 @@ DEF_FUNC tuple_hash
     ; TAG_PTR or other: call obj_hash on payload
     V_PACK rdi, rsi
     call obj_hash               ; rax = hash of item
+    ERR_M1 .cached              ; an unhashable item: -1 goes out, and is not cached
     jmp .hash_combine
 .hash_smallint:
     mov rax, rdi                ; hash = payload value

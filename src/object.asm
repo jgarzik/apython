@@ -2598,6 +2598,9 @@ END_FUNC object_hash
 ;; ============================================================================
 ;; obj_hash(rdi=value) -> int64
 ;; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.
+;; A hash is any int64, -1 included; -1 with an exception pending is a
+;; __hash__ that raised, or an unhashable type.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC obj_hash
     V_UNPACK rdi, rsi
@@ -2623,13 +2626,8 @@ DEF_FUNC obj_hash
     ; tag MUST be supplied here -- leaving edx undefined makes int_unwrap
     ; take a random branch and int_hash return the object address.
     mov edx, esi
-    call rax
-    ; A hash is any int64, -1 included; -1 with an exception pending is
-    ; __hash__ having raised.  Transitional: every caller of obj_hash takes
-    ; whatever comes back for a hash.
-    ERR_M1_JUMP
     leave
-    ret
+    jmp rax                     ; the slot's contract is this function's own
 
 .smallint_hash:
     ; Shared with int_hash / builtin_hash: sign(v) * (|v| mod 2^61-1).

@@ -617,7 +617,7 @@ DEF_FUNC_LOCAL ref_hash, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, [rbx + PyWeakRefObject.wr_object]
     test rdi, rdi
     jz .dead
-    call obj_hash
+    call obj_hash               ; err: a -1 is stored as "not cached" and handed up
     mov [rbx + PyWeakRefObject.wr_hash], rax
 .cached:
     pop rbx

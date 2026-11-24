@@ -2506,11 +2506,16 @@ DEF_FUNC generic_method_hash
     mov rdi, [rdi]
     extern obj_hash
     call obj_hash
+    ERR_M1 .gmh_raised
     mov rdi, rax                ; boxed, not biased: see DEF_DUNDER_HASH
     extern int_from_i64
     call int_from_i64
     leave
     V_PACK rax, rdx
+    ret
+.gmh_raised:
+    xor eax, eax
+    leave
     ret
 .gmh_error:
     SET_EXC exc_TypeError_type, "__hash__() takes no arguments"
