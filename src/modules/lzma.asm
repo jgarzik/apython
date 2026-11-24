@@ -30,7 +30,6 @@
 
 ASM_INIT
 
-extern eval_exception_unwind
 extern none_singleton
 extern dict_new
 extern dict_set
@@ -54,11 +53,11 @@ extern ap_free
 extern ap_memcpy
 extern ap_memset
 extern obj_as_index
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_BufferError_type
-extern raise_exception
+extern set_exception
 extern bool_true
 extern bool_false
 
@@ -207,21 +206,20 @@ END_FUNC lc_handle_at
 
 ;; ============================================================================
 ;; lc_arg_int(rdi = args, rsi = index) -> rax = the int
-;;
-;; Does not return when the argument is not an index.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE lc_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     sub rsp, 8                  ; a call, so the refusal can be seen
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and its exception are this one's
     add rsp, 8
-    ERR_M1_JUMP
     ret
 END_FUNC lc_arg_int
 
 ;; ============================================================================
 ;; lc_item_int(rdi = a tuple or list, rsi = index) -> rax = the int
+;; Fails: -1
 ;;
 ;; The same, reading out of a sequence rather than out of the argument array.
 ;; ============================================================================
@@ -238,9 +236,8 @@ DEF_FUNC_BARE lc_item_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
     sub rsp, 8                  ; a call, so the refusal can be seen
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and its exception are this one's
     add rsp, 8
-    ERR_M1_JUMP
     ret
 END_FUNC lc_item_int
 
@@ -276,6 +273,10 @@ END_FUNC lc_seq_info
 ;; ============================================================================
 ;; lc_buffer(rdi = a Value) -> rax = data pointer, rdx = length, rax = 0 when
 ;;   it is not a buffer at all
+;; Fails: 0?
+;;
+;; Two zeroes: with nothing pending the caller words the TypeError; with the
+;; BufferError pending -- a memoryview that is not contiguous -- it propagates.
 ;;
 ;; bytes, bytearray and a CONTIGUOUS memoryview -- LZMAFile.write hands one
 ;; on rather than copying what it was given.
@@ -311,7 +312,9 @@ DEF_FUNC_BARE lc_buffer
     lea rax, [rdi + PyBytesObject.data]
     ret
 .lb_strided:
-    RAISE exc_BufferError_type, "memoryview: underlying buffer is not C-contiguous"
+    sub rsp, 8                  ; a bare function: realign for the call
+    SET_EXC exc_BufferError_type, "memoryview: underlying buffer is not C-contiguous"
+    add rsp, 8
 .lb_no:
     xor eax, eax
     xor edx, edx
@@ -319,7 +322,7 @@ DEF_FUNC_BARE lc_buffer
 END_FUNC lc_buffer
 
 ;; ============================================================================
-;; lc_raise_lz(rdi = the liblzma return code) -> does not return
+;; lc_set_lz(rdi = the liblzma return code) -> rax = 0, with the error pending
 ;;
 ;; The sentence CPython's _lzmamodule.c uses for that code, raised as a
 ;; ValueError because a module written in assembly cannot raise a class
@@ -327,7 +330,7 @@ END_FUNC lc_buffer
 ;; MemoryError for the one code CPython reports that way; the mapping is by
 ;; exact text and both halves say so.
 ;; ============================================================================
-DEF_FUNC lc_raise_lz
+DEF_FUNC lc_set_lz
     cmp edi, 3
     je .lrz_check
     cmp edi, 5
@@ -342,28 +345,33 @@ DEF_FUNC lc_raise_lz
     je .lrz_data
     cmp edi, 10
     je .lrz_buf
-    RAISE exc_ValueError_type, "Internal error"
+    FAIL exc_ValueError_type, "Internal error", .lrz_out
 .lrz_check:
-    RAISE exc_ValueError_type, "Unsupported integrity check"
+    FAIL exc_ValueError_type, "Unsupported integrity check", .lrz_out
 .lrz_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .lrz_out
 .lrz_memlimit:
-    RAISE exc_ValueError_type, "Memory usage limit exceeded"
+    FAIL exc_ValueError_type, "Memory usage limit exceeded", .lrz_out
 .lrz_format:
-    RAISE exc_ValueError_type, "Input format not supported by decoder"
+    FAIL exc_ValueError_type, "Input format not supported by decoder", .lrz_out
 .lrz_options:
-    RAISE exc_ValueError_type, "Invalid or unsupported options"
+    FAIL exc_ValueError_type, "Invalid or unsupported options", .lrz_out
 .lrz_data:
-    RAISE exc_ValueError_type, "Corrupt input data"
+    FAIL exc_ValueError_type, "Corrupt input data", .lrz_out
 .lrz_buf:
-    RAISE exc_ValueError_type, "Insufficient buffer space"
-END_FUNC lc_raise_lz
+    SET_EXC exc_ValueError_type, "Insufficient buffer space"
+.lrz_out:
+    xor eax, eax
+    leave
+    ret
+END_FUNC lc_set_lz
 
 ;; ============================================================================
-;; lc_slot(rdi = LHandle*) -> rax = the handle index, edx = TAG_SMALLINT
+;; lc_slot(rdi = LHandle*) -> rax = the handle index, as a Value
+;; Fails: 0
 ;;
-;; Files the stream in the table, reusing a slot a free gave back.  Does not
-;; return when the table cannot grow.
+;; Files the stream in the table, reusing a slot a free gave back.  When the
+;; table cannot grow the stream is still the caller's to end and free.
 ;; ============================================================================
 LS_CAP   equ 16
 LS_FRAME equ 24             ; + 1 push = 32, 16-aligned
@@ -412,25 +420,30 @@ DEF_FUNC_LOCAL lc_slot, LS_FRAME
     mov [rdx + rcx*8], rbx
     mov rdi, rcx
     call int_from_i64
+    V_PACK rax, rdx
     pop rbx
     leave
     ret
 
 .ls_oom:
+    SET_EXC exc_ValueError_type, "Out of memory"
+    xor eax, eax
     pop rbx
-    RAISE exc_ValueError_type, "Out of memory"
+    leave
+    ret
 END_FUNC lc_slot
 
 ;; ============================================================================
 ;; lc_fill_options(rdi = the filter's int tuple, rsi = an LzOptions* to fill,
 ;;                 rdx = the filter id)
-;;   -> rax = the options pointer to hand liblzma, or 0 for "no options"
+;;   -> rax = the options pointer to hand liblzma
+;; Fails: 0
 ;;
 ;; Turns one of the three fixed tuple shapes into the struct liblzma wants.
 ;; The LZMA arm fills the whole struct from the preset FIRST and then applies
 ;; the overrides, which is the order CPython uses and the only one that gives
 ;; a caller who names two fields the preset's values for the other seven.
-;; Does not return when the preset is one liblzma refuses.
+;; A field that is not an int, and a preset liblzma refuses, are the failures.
 ;; ============================================================================
 LFO_TUP   equ 8
 LFO_OPT   equ 16
@@ -456,6 +469,7 @@ DEF_FUNC_LOCAL lc_fill_options, LFO_FRAME
     mov rdi, [rbp - LFO_TUP]
     mov esi, 1
     call lc_item_int
+    ERR_M1 .lfo_fail
     mov rcx, [rbp - LFO_OPT]
     mov [rcx + LC_BCJ_START], eax
     mov rax, rcx
@@ -465,6 +479,7 @@ DEF_FUNC_LOCAL lc_fill_options, LFO_FRAME
     mov rdi, [rbp - LFO_TUP]
     mov esi, 1
     call lc_item_int
+    ERR_M1 .lfo_fail
     mov rcx, [rbp - LFO_OPT]
     mov dword [rcx + LC_DELTA_TYPE], LZMA_DELTA_TYPE_BYTE
     mov [rcx + LC_DELTA_DIST], eax
@@ -475,6 +490,7 @@ DEF_FUNC_LOCAL lc_fill_options, LFO_FRAME
     mov rdi, [rbp - LFO_TUP]
     mov esi, 1
     call lc_item_int
+    ERR_M1 .lfo_fail
     mov r12, rax                     ; the preset
     mov rdi, [rbp - LFO_OPT]
     mov esi, r12d
@@ -491,6 +507,7 @@ DEF_FUNC_LOCAL lc_fill_options, LFO_FRAME
     mov rdi, [rbp - LFO_TUP]
     mov rsi, rbx
     call lc_item_int
+    ERR_M1 .lfo_fail
     test rax, rax
     js .lfo_next                     ; -1: not given
     mov rcx, [rbp - LFO_OPT]
@@ -510,16 +527,24 @@ DEF_FUNC_LOCAL lc_fill_options, LFO_FRAME
     ret
 
 .lfo_bad_preset:
-    RAISE exc_ValueError_type, "Invalid compression preset"
+    SET_EXC exc_ValueError_type, "Invalid compression preset"
+.lfo_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC lc_fill_options
 
 ;; ============================================================================
 ;; lc_build_filters(rdi = LHandle*, rsi = the filters Value)
 ;;   -> rax = the filter array, or 0 when the Value is None
+;; Fails: 0?
 ;;
 ;; Fills the handle's own filter array and option blocks, so they outlive the
-;; call that hands them to liblzma.  Does not return when the chain is not a
-;; sequence of tuples, or is longer than liblzma's four.
+;; call that hands them to liblzma.  A chain that is not a sequence of tuples,
+;; or is longer than liblzma's four, is refused; nothing here is allocated, so
+;; the handle is all the caller has to free.
 ;; ============================================================================
 LBF_H     equ 8
 LBF_ITEMS equ 16
@@ -561,6 +586,7 @@ DEF_FUNC_LOCAL lc_build_filters, LBF_FRAME
     mov rdi, r12
     xor esi, esi
     call lc_item_int                ; the id
+    ERR_M1 .lbf_fail
     mov rcx, [rbp - LBF_H]
     lea rcx, [rcx + LHandle.filters]
     mov rdx, rbx
@@ -578,6 +604,7 @@ DEF_FUNC_LOCAL lc_build_filters, LBF_FRAME
     imul rax, rbx
     add rsi, rax
     call lc_fill_options
+    ERR_NULL .lbf_fail_pushed
     add rsp, 8
     pop rcx
     mov rcx, [rbp - LBF_H]
@@ -615,16 +642,25 @@ DEF_FUNC_LOCAL lc_build_filters, LBF_FRAME
     ret
 
 .lbf_too_many:
-    RAISE exc_ValueError_type, "Filter chain is too long"
+    FAIL exc_ValueError_type, "Filter chain is too long", .lbf_fail
 .lbf_type:
-    RAISE exc_TypeError_type, "Filter specifier must be a sequence of tuples"
+    FAIL exc_TypeError_type, "Filter specifier must be a sequence of tuples", .lbf_fail
+.lbf_fail_pushed:
+    add rsp, 16                 ; the id and its pad, parked across the call
+.lbf_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC lc_build_filters
 
 ;; ============================================================================
 ;; lc_alloc_handle(rdi = mode) -> rax = a zeroed LHandle*
+;; Fails: 0
 ;;
-;; Does not return when there is no memory.  lzma_stream's initialiser is all
-;; zeros, which is what makes ap_memset the whole of it.
+;; lzma_stream's initialiser is all zeros, which is what makes ap_memset the
+;; whole of it.
 ;; ============================================================================
 LAH_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL lc_alloc_handle, LAH_FRAME
@@ -651,7 +687,9 @@ DEF_FUNC_LOCAL lc_alloc_handle, LAH_FRAME
     leave
     ret
 .lah_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    SET_EXC exc_ValueError_type, "Out of memory"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC lc_alloc_handle
 
 ;; ============================================================================
@@ -675,24 +713,31 @@ DEF_FUNC lc_encoder, LE_FRAME
     mov [rbp - LE_ARGS], rdi
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .le_fail
     mov [rbp - LE_FORMAT], rax
     mov rdi, [rbp - LE_ARGS]
     mov esi, 1
     call lc_arg_int
+    ERR_M1 .le_fail
     mov [rbp - LE_CHECK], rax
     mov rdi, [rbp - LE_ARGS]
     mov esi, 2
     call lc_arg_int
+    ERR_M1 .le_fail
     mov [rbp - LE_PRESET], rax
 
     mov edi, LC_ENCODE
     call lc_alloc_handle
+    ERR_NULL .le_fail
     mov [rbp - LE_H], rax
 
+    ; From here every refusal leaves through .le_fail_handle: the handle is
+    ; this call's until lc_slot has filed it.
     mov rdi, rax
     mov rcx, [rbp - LE_ARGS]
     mov rsi, [rcx + 24]
     call lc_build_filters
+    ERR_PENDING .le_fail_handle
     mov [rbp - LE_FILTER], rax
 
     mov rax, [rbp - LE_FORMAT]
@@ -702,7 +747,7 @@ DEF_FUNC lc_encoder, LE_FRAME
     je .le_alone
     cmp rax, LC_FORMAT_RAW
     je .le_raw
-    RAISE exc_ValueError_type, "Invalid container format"
+    FAIL exc_ValueError_type, "Invalid container format", .le_fail_handle
 
 .le_xz:
     mov rdi, [rbp - LE_H]
@@ -760,25 +805,36 @@ DEF_FUNC lc_encoder, LE_FRAME
     jnz .le_failed
     mov rdi, [rbp - LE_H]
     call lc_slot
+    ERR_NULL .le_no_slot
     leave
-    V_PACK rax, rdx
     ret
 
+.le_no_slot:
+    ; The encoder was built and nothing will ever name it: end it, so the
+    ; dictionary goes back, then free the handle.
+    mov rdi, [rbp - LE_H]
+    lea rdi, [rdi + LHandle.ls]
+    call lzma_end wrt ..plt
+    jmp .le_fail_handle
 .le_failed:
-    mov [rbp - LE_CHECK], rax
+    mov edi, eax
+    call lc_set_lz
+    jmp .le_fail_handle
+.le_bad_preset:
+    FAIL exc_ValueError_type, "Invalid compression preset", .le_fail_handle
+.le_alone_chain:
+    FAIL exc_ValueError_type, "Invalid filter chain for FORMAT_ALONE - must be a single LZMA1 filter", .le_fail_handle
+.le_raw_nofilters:
+    FAIL exc_ValueError_type, "Must specify filters for FORMAT_RAW", .le_fail_handle
+.le_nargs:
+    FAIL exc_TypeError_type, "_lzmacore: wrong number of arguments", .le_fail
+.le_fail_handle:
     mov rdi, [rbp - LE_H]
     call ap_free
-    mov edi, [rbp - LE_CHECK]
+.le_fail:
+    xor eax, eax
     leave
-    jmp lc_raise_lz
-.le_bad_preset:
-    RAISE exc_ValueError_type, "Invalid compression preset"
-.le_alone_chain:
-    RAISE exc_ValueError_type, "Invalid filter chain for FORMAT_ALONE - must be a single LZMA1 filter"
-.le_raw_nofilters:
-    RAISE exc_ValueError_type, "Must specify filters for FORMAT_RAW"
-.le_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    ret
 END_FUNC lc_encoder
 
 ;; ============================================================================
@@ -800,10 +856,12 @@ DEF_FUNC lc_decoder, LD_FRAME
     mov [rbp - LD_ARGS], rdi
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .ld_fail
     mov [rbp - LD_FORMAT], rax
     mov rdi, [rbp - LD_ARGS]
     mov esi, 1
     call lc_arg_int
+    ERR_M1 .ld_fail
     test rax, rax
     jns .ld_have_mem
     mov rax, -1                 ; UINT64_MAX: no limit
@@ -812,12 +870,15 @@ DEF_FUNC lc_decoder, LD_FRAME
 
     mov edi, LC_DECODE
     call lc_alloc_handle
+    ERR_NULL .ld_fail
     mov [rbp - LD_H], rax
 
+    ; As in the encoder: the handle is this call's until lc_slot files it.
     mov rdi, rax
     mov rcx, [rbp - LD_ARGS]
     mov rsi, [rcx + 16]
     call lc_build_filters
+    ERR_PENDING .ld_fail_handle
     mov [rbp - LD_FILTER], rax
 
     mov rax, [rbp - LD_FORMAT]
@@ -829,7 +890,7 @@ DEF_FUNC lc_decoder, LD_FRAME
     je .ld_alone
     cmp rax, LC_FORMAT_RAW
     je .ld_raw
-    RAISE exc_ValueError_type, "Invalid container format"
+    FAIL exc_ValueError_type, "Invalid container format", .ld_fail_handle
 
 .ld_auto:
     mov rdi, [rbp - LD_H]
@@ -860,21 +921,30 @@ DEF_FUNC lc_decoder, LD_FRAME
     jnz .ld_failed
     mov rdi, [rbp - LD_H]
     call lc_slot
+    ERR_NULL .ld_no_slot
     leave
-    V_PACK rax, rdx
     ret
 
+.ld_no_slot:
+    mov rdi, [rbp - LD_H]
+    lea rdi, [rdi + LHandle.ls]
+    call lzma_end wrt ..plt
+    jmp .ld_fail_handle
 .ld_failed:
-    mov [rbp - LD_MEM], rax
+    mov edi, eax
+    call lc_set_lz
+    jmp .ld_fail_handle
+.ld_raw_nofilters:
+    FAIL exc_ValueError_type, "Must specify filters for FORMAT_RAW", .ld_fail_handle
+.ld_nargs:
+    FAIL exc_TypeError_type, "_lzmacore: wrong number of arguments", .ld_fail
+.ld_fail_handle:
     mov rdi, [rbp - LD_H]
     call ap_free
-    mov edi, [rbp - LD_MEM]
+.ld_fail:
+    xor eax, eax
     leave
-    jmp lc_raise_lz
-.ld_raw_nofilters:
-    RAISE exc_ValueError_type, "Must specify filters for FORMAT_RAW"
-.ld_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    ret
 END_FUNC lc_decoder
 
 ;; ============================================================================
@@ -916,6 +986,7 @@ DEF_FUNC lc_stream_feed, LF_FRAME
 
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .lf_fail
     mov rdi, rax
     call lc_handle_at
     test rax, rax
@@ -927,20 +998,21 @@ DEF_FUNC lc_stream_feed, LF_FRAME
     mov rdi, [rbp - LF_ARGS]
     mov esi, 2
     call lc_arg_int
+    ERR_M1 .lf_fail
     mov [rbp - LF_ACTION], rax
     mov rdi, [rbp - LF_ARGS]
     mov esi, 3
     call lc_arg_int
+    ERR_M1 .lf_fail
     mov [rbp - LF_MAX], rax
 
     ; --- the input: the handle's leftover, then what was handed in ---------
     mov rdi, [rbp - LF_ARGS]
     mov rdi, [rdi + 8]
     call lc_buffer
+    ERR_PENDING .lf_fail        ; a memoryview that is not contiguous
     test rax, rax
     jnz .lf_have_buf
-    mov rdx, [rbp - LF_ARGS]
-    cmp qword [rdx + 8], 0
     jmp .lf_type
 .lf_have_buf:
     mov r10, rax
@@ -1194,25 +1266,35 @@ DEF_FUNC lc_stream_feed, LF_FRAME
     ret
 
 .lf_lzerror:
-    call lc_release_buffers
     mov edi, [rbp - LF_CODE]
-    leave
-    jmp lc_raise_lz
+    call lc_set_lz
+    jmp .lf_fail
 .lf_mem:
-    call lc_release_buffers
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .lf_fail
 .lf_type:
     lea rdi, [rel lc_e_notbytes]
     mov rsi, [rbp - LF_ARGS]
     mov rsi, [rsi + 8]
-    leave
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .lf_fail
 .lf_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .lf_fail
 .lf_ended:
-    RAISE exc_ValueError_type, "Internal error"
+    FAIL exc_ValueError_type, "Internal error", .lf_fail
 .lf_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    ; Before the two buffer slots are initialised, so not through the release.
+    FAIL exc_TypeError_type, "_lzmacore: wrong number of arguments", .lf_fail_bare
+.lf_fail:
+    ; The one error exit: the exception is pending, and the input copy and
+    ; the output buffer -- whichever exist -- are this call's to free.
+    call lc_release_buffers
+.lf_fail_bare:
+    xor eax, eax
+    mov rsp, r12
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ;; The two malloc'd buffers this call owns, released on every way out.  A
 ;; local label rather than a function, because it reads the caller's frame.
@@ -1255,6 +1337,7 @@ DEF_FUNC lc_stream_state, LT_FRAME
     jne .lt_nargs
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .lt_fail
     mov rdi, rax
     call lc_handle_at
     test rax, rax
@@ -1295,7 +1378,7 @@ DEF_FUNC lc_stream_state, LT_FRAME
     mov rsi, [rcx + LHandle.unused_len]
     call lc_bytes_or_empty
     test rax, rax
-    jz .lt_mem
+    jz .lt_mem_tuple
     mov rdx, [rbp - LT_TUP]
     mov rdx, [rdx + PyTupleObject.ob_item]
     mov [rdx + 16], rax
@@ -1322,12 +1405,19 @@ DEF_FUNC lc_stream_state, LT_FRAME
     V_PACK rax, rdx
     ret
 
+.lt_mem_tuple:
+    mov rdi, [rbp - LT_TUP]     ; two slots filled; the rest are the zeroes
+    call obj_decref             ; tuple_new left there
 .lt_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .lt_fail
 .lt_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .lt_fail
 .lt_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_lzmacore: wrong number of arguments"
+.lt_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC lc_stream_state
 
 ;; ============================================================================
@@ -1359,6 +1449,7 @@ DEF_FUNC lc_stream_free, LR_FRAME
     jne .lr_nargs
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .lr_fail
     mov [rbp - LR_IDX], rax
     mov rdi, rax
     call lc_handle_at
@@ -1399,7 +1490,11 @@ DEF_FUNC lc_stream_free, LR_FRAME
     V_PACK rax, rdx
     ret
 .lr_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_lzmacore: wrong number of arguments"
+.lr_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC lc_stream_free
 
 ;; ============================================================================
@@ -1411,6 +1506,7 @@ DEF_FUNC lc_check_is_supported, LK_FRAME
     jne .lk_nargs
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .lk_fail
     mov edi, eax
     call lzma_check_is_supported wrt ..plt
     lea rcx, [rel bool_false]
@@ -1425,7 +1521,11 @@ DEF_FUNC lc_check_is_supported, LK_FRAME
     V_PACK rax, rdx
     ret
 .lk_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_lzmacore: wrong number of arguments"
+.lk_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC lc_check_is_supported
 
 ;; ============================================================================
@@ -1457,6 +1557,7 @@ DEF_FUNC lc_encode_filter_props, LP_FRAME
     mov rdi, [rbp - LP_TUP]
     xor esi, esi
     call lc_item_int
+    ERR_M1 .lp_fail
     mov [rbp - LP_ID], rax
     mov [rbp - LP_FILT + LzFilter.id], rax
 
@@ -1464,6 +1565,7 @@ DEF_FUNC lc_encode_filter_props, LP_FRAME
     lea rsi, [rbp - LP_OPTS]
     mov rdx, rax
     call lc_fill_options
+    ERR_NULL .lp_fail
     mov [rbp - LP_FILT + LzFilter.options], rax
 
     lea rdi, [rbp - LP_SIZE]
@@ -1493,16 +1595,20 @@ DEF_FUNC lc_encode_filter_props, LP_FRAME
 
 .lp_failed:
     mov edi, eax
-    leave
-    jmp lc_raise_lz
+    call lc_set_lz
+    jmp .lp_fail
 .lp_toobig:
-    RAISE exc_ValueError_type, "Invalid or unsupported options"
+    FAIL exc_ValueError_type, "Invalid or unsupported options", .lp_fail
 .lp_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .lp_fail
 .lp_type:
-    RAISE exc_TypeError_type, "Filter specifier must be a sequence"
+    FAIL exc_TypeError_type, "Filter specifier must be a sequence", .lp_fail
 .lp_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_lzmacore: wrong number of arguments"
+.lp_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC lc_encode_filter_props
 
 ;; ============================================================================
@@ -1532,17 +1638,18 @@ DEF_FUNC lc_decode_filter_props, 72
     mov rbx, rdi
     xor esi, esi
     call lc_arg_int
+    ERR_M1 .lq_fail
     mov [rbp - LQ_ID], rax
     mov [rbp - LQ_FILT + LzFilter.id], rax
     mov qword [rbp - LQ_FILT + LzFilter.options], 0
 
     mov rdi, [rbx + 8]
     call lc_buffer
+    ERR_PENDING .lq_fail        ; a memoryview that is not contiguous
     test rax, rax
     jnz .lq_have_buf
-    mov rcx, [rbx + 8]
-    test rcx, rcx               ; an empty bytes is a pointer, so 0 is a type
-    jmp .lq_type                ; error however it got here
+    jmp .lq_type                ; an empty bytes is a pointer, so 0 is a type
+                                ; error however it got here
 .lq_have_buf:
     mov [rbp - LQ_PROPS], rax
     mov [rbp - LQ_LEN], rdx
@@ -1633,14 +1740,25 @@ DEF_FUNC lc_decode_filter_props, 72
 
 .lq_failed:
     mov edi, eax
-    leave
-    jmp lc_raise_lz
+    call lc_set_lz
+    jmp .lq_fail
 .lq_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    ; liblzma's options exist by now and are this call's to give back.
+    mov rdi, [rbp - LQ_FILT + LzFilter.options]
+    test rdi, rdi
+    jz .lq_mem_raise
+    call free wrt ..plt
+.lq_mem_raise:
+    FAIL exc_ValueError_type, "Out of memory", .lq_fail
 .lq_type:
-    RAISE exc_TypeError_type, "the properties must be bytes"
+    FAIL exc_TypeError_type, "the properties must be bytes", .lq_fail
 .lq_nargs:
-    RAISE exc_TypeError_type, "_lzmacore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_lzmacore: wrong number of arguments"
+.lq_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 
 ;; One slot of the answer, written from the caller's frame.  A local label
 ;; rather than a function, for the reason lc_release_buffers is one.

@@ -581,3 +581,133 @@ err("BZ2Decompressor.decompress(after eof)", _b_after_eof, _msg=True)
 err("BZ2Decompressor.decompress(str max)", bz2.BZ2Decompressor().decompress, _bdata, "x")
 err("BZ2File(bad mode)", bz2.BZ2File, "/tmp/x.bz2", "z")
 print(bz2.decompress(_bdata) == b"some data to compress " * 50)
+
+# --- lzma ----------------------------------------------------------------
+import lzma
+
+print("== lzma")
+_lh = None
+try:
+    import _lzmacore
+    _lh = _lzmacore.decoder(0, -1, None)
+except ImportError:
+    pass
+_LZ2 = (0x21, 6, -1, -1, -1, -1, -1, -1, -1, -1)
+core("lzma encoder(3 args)", "_lzmacore", "encoder", 1, 4, 6)
+core("lzma encoder(str format)", "_lzmacore", "encoder", "x", 4, 6, None)
+core("lzma encoder(str check)", "_lzmacore", "encoder", 1, "x", 6, None)
+core("lzma encoder(str preset)", "_lzmacore", "encoder", 1, 4, "x", None)
+core("lzma encoder(bad format)", "_lzmacore", "encoder", 99, 4, 6, None)
+core("lzma encoder(bad check)", "_lzmacore", "encoder", 1, 99, 6, None)
+core("lzma encoder(bad preset)", "_lzmacore", "encoder", 1, 4, 99, None)
+core("lzma encoder(int filters)", "_lzmacore", "encoder", 1, 4, 6, 5)
+core("lzma encoder(filters of ints)", "_lzmacore", "encoder", 1, 4, 6, [5])
+core("lzma encoder(empty filter)", "_lzmacore", "encoder", 1, 4, 6, [()])
+core("lzma encoder(long chain)", "_lzmacore", "encoder", 1, 4, 6, [_LZ2] * 5)
+core("lzma encoder(str id)", "_lzmacore", "encoder", 1, 4, 6, [("x", 6)])
+core("lzma encoder(str field)", "_lzmacore", "encoder", 1, 4, 6, [(0x21, 6, "x", -1, -1, -1, -1, -1, -1, -1)])
+core("lzma encoder(filter bad preset)", "_lzmacore", "encoder", 1, 4, 6, [(0x21, 99, -1, -1, -1, -1, -1, -1, -1, -1)])
+core("lzma encoder(alone, two filters)", "_lzmacore", "encoder", 2, 4, 6, [_LZ2, _LZ2])
+core("lzma encoder(raw, no filters)", "_lzmacore", "encoder", 3, 4, 6, None)
+core("lzma encoder(alone bad preset)", "_lzmacore", "encoder", 2, 4, 99, None)
+core("lzma decoder(2 args)", "_lzmacore", "decoder", 0, -1)
+core("lzma decoder(str format)", "_lzmacore", "decoder", "x", -1, None)
+core("lzma decoder(str memlimit)", "_lzmacore", "decoder", 0, "x", None)
+core("lzma decoder(bad format)", "_lzmacore", "decoder", 99, -1, None)
+core("lzma decoder(raw, no filters)", "_lzmacore", "decoder", 3, -1, None)
+core("lzma decoder(int filters)", "_lzmacore", "decoder", 3, -1, 5)
+core("lzma decoder(str field)", "_lzmacore", "decoder", 3, -1, [(3, "x")])
+core("lzma stream_feed(3 args)", "_lzmacore", "stream_feed", _lh, b"", 0)
+core("lzma stream_feed(dead)", "_lzmacore", "stream_feed", 99999, b"", 0, -1)
+core("lzma stream_feed(str handle)", "_lzmacore", "stream_feed", "x", b"", 0, -1)
+core("lzma stream_feed(str action)", "_lzmacore", "stream_feed", _lh, b"", "x", -1)
+core("lzma stream_feed(str max)", "_lzmacore", "stream_feed", _lh, b"", 0, "x")
+core("lzma stream_feed(int data)", "_lzmacore", "stream_feed", _lh, 5, 0, -1)
+core("lzma stream_feed(strided view)", "_lzmacore", "stream_feed", _lh, memoryview(b"abcdef")[::2], 0, -1)
+core("lzma stream_feed(garbage)", "_lzmacore", "stream_feed", _lh, b"this is not an xz stream" * 40, 0, -1)
+core("lzma stream_state()", "_lzmacore", "stream_state")
+core("lzma stream_state(dead)", "_lzmacore", "stream_state", 99999)
+core("lzma stream_state(str)", "_lzmacore", "stream_state", "x")
+core("lzma stream_free()", "_lzmacore", "stream_free")
+core("lzma stream_free(str)", "_lzmacore", "stream_free", "x")
+core("lzma check_is_supported()", "_lzmacore", "check_is_supported")
+core("lzma check_is_supported(str)", "_lzmacore", "check_is_supported", "x")
+core("lzma encode_filter_props()", "_lzmacore", "encode_filter_props")
+core("lzma encode_filter_props(int)", "_lzmacore", "encode_filter_props", 5)
+core("lzma encode_filter_props(empty)", "_lzmacore", "encode_filter_props", ())
+core("lzma encode_filter_props(str id)", "_lzmacore", "encode_filter_props", ("x", 1))
+core("lzma encode_filter_props(str field)", "_lzmacore", "encode_filter_props", (3, "x"))
+core("lzma encode_filter_props(bad preset)", "_lzmacore", "encode_filter_props", (0x21, 99, -1, -1, -1, -1, -1, -1, -1, -1))
+core("lzma encode_filter_props(bad id)", "_lzmacore", "encode_filter_props", (12345, 0))
+core("lzma decode_filter_props(1 arg)", "_lzmacore", "decode_filter_props", 3)
+core("lzma decode_filter_props(str id)", "_lzmacore", "decode_filter_props", "x", b"\x00")
+core("lzma decode_filter_props(int props)", "_lzmacore", "decode_filter_props", 3, 5)
+core("lzma decode_filter_props(strided)", "_lzmacore", "decode_filter_props", 3, memoryview(b"abcdef")[::2])
+core("lzma decode_filter_props(bad props)", "_lzmacore", "decode_filter_props", 0x21, b"\xff\xff\xff")
+core("lzma decode_filter_props(bad id)", "_lzmacore", "decode_filter_props", 12345, b"\x00")
+
+_ldata = lzma.compress(b"some data to compress " * 50)
+
+
+def _l_corrupt():
+    lzma.decompress(_ldata[:30] + b"\xff\xff\xff\xff" + _ldata[34:])
+
+
+def _l_after_flush():
+    c = lzma.LZMACompressor()
+    c.compress(b"abc")
+    c.flush()
+    c.compress(b"more")
+
+
+def _l_flush_twice():
+    c = lzma.LZMACompressor()
+    c.flush()
+    c.flush()
+
+
+def _l_after_eof():
+    d = lzma.LZMADecompressor()
+    d.decompress(_ldata)
+    d.decompress(b"more")
+
+
+def _l_garbage_obj():
+    lzma.LZMADecompressor().decompress(b"\x01" * 1000)
+
+
+def _l_memlimit():
+    lzma.LZMADecompressor(memlimit=1).decompress(_ldata)
+
+
+err("lzma.compress()", lzma.compress)
+err("lzma.compress(str)", lzma.compress, "text")
+err("lzma.compress(bad preset)", lzma.compress, b"abc", preset=99)
+err("lzma.compress(bad format)", lzma.compress, b"abc", format=99, _msg=True)
+err("lzma.compress(bad check)", lzma.compress, b"abc", check=99)
+err("lzma.compress(raw, no filters)", lzma.compress, b"abc", format=lzma.FORMAT_RAW, _msg=True)
+err("lzma.compress(filters=int)", lzma.compress, b"abc", filters=5)
+err("lzma.compress(filter without id)", lzma.compress, b"abc", filters=[{}], _msg=True)
+err("lzma.compress(filter bad id)", lzma.compress, b"abc", filters=[{"id": 12345}], _msg=True)
+err("lzma.compress(filter bad option)", lzma.compress, b"abc", filters=[{"id": lzma.FILTER_LZMA2, "nope": 1}])
+err("lzma.compress(filter str option)", lzma.compress, b"abc", filters=[{"id": lzma.FILTER_LZMA2, "lc": "x"}])
+err("lzma.compress(long chain)", lzma.compress, b"abc", filters=[{"id": lzma.FILTER_DELTA}] * 5)
+err("lzma.compress(preset and filters)", lzma.compress, b"abc", preset=6, filters=[{"id": lzma.FILTER_LZMA2}], _msg=True)
+err("lzma.decompress(garbage)", lzma.decompress, b"not an xz stream at all, no", _msg=True)
+err("lzma.decompress(corrupt)", _l_corrupt)
+err("lzma.decompress(str)", lzma.decompress, "text")
+err("lzma.decompress(bad format)", lzma.decompress, _ldata, format=99, _msg=True)
+err("lzma.decompress(raw, no filters)", lzma.decompress, _ldata, format=lzma.FORMAT_RAW, _msg=True)
+err("LZMACompressor.compress(str)", lzma.LZMACompressor().compress, "text")
+err("LZMACompressor.compress(after flush)", _l_after_flush, _msg=True)
+err("LZMACompressor.flush(twice)", _l_flush_twice, _msg=True)
+err("LZMADecompressor.decompress(str)", lzma.LZMADecompressor().decompress, "text")
+err("LZMADecompressor.decompress(garbage)", _l_garbage_obj, _msg=True)
+err("LZMADecompressor.decompress(after eof)", _l_after_eof, _msg=True)
+err("LZMADecompressor.decompress(memlimit)", _l_memlimit, _msg=True)
+err("LZMADecompressor(memlimit with raw)", lzma.LZMADecompressor, lzma.FORMAT_RAW, 100, _msg=True)
+err("_encode_filter_properties(int)", lzma._encode_filter_properties, 5)
+err("_encode_filter_properties(no id)", lzma._encode_filter_properties, {}, _msg=True)
+err("_decode_filter_properties(bad props)", lzma._decode_filter_properties, lzma.FILTER_LZMA2, b"\xff\xff\xff")
+err("_decode_filter_properties(str)", lzma._decode_filter_properties, lzma.FILTER_LZMA2, "x")
+print(lzma.decompress(_ldata) == b"some data to compress " * 50)
