@@ -368,6 +368,14 @@ DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned
     extern dict_alloc_tables
     call dict_alloc_tables
     mov qword [rbx + PyDictObject.dk_nentries], 0
+    ; A version of its own, from the clock every dict draws on (see
+    ; DICT_STAMP_VERSION in dict.asm): a zeroed one is shared by every dict
+    ; subclass instance that has not been written to yet.
+    extern dict_version_clock
+    mov rax, [rel dict_version_clock]
+    inc rax
+    mov [rel dict_version_clock], rax
+    mov [rbx + PyDictObject.dk_version], rax
     jmp .bsib_done
 
 .bsib_set_table:

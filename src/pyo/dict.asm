@@ -28,6 +28,19 @@ extern obj_incref
 extern type_type
 extern tuple_type
 
+; DICT_STAMP_VERSION dict, scratch -- give a dict a fresh dk_version.
+;
+; The version is drawn from one process-wide clock rather than counted per
+; dict, so no two dicts ever hold the same value and none repeats: an inline
+; cache that remembers "this dict, unchanged" in a version alone cannot be
+; satisfied by a different dict.  LOAD_GLOBAL_BUILTIN is that cache.
+%macro DICT_STAMP_VERSION 2
+    mov %2, [rel dict_version_clock]
+    inc %2
+    mov [rel dict_version_clock], %2
+    mov [%1 + PyDictObject.dk_version], %2
+%endmacro
+
 ; Initial capacity (must be power of 2)
 ; DICT_INIT_CAP now lives in object.inc, shared with the subclass path
 
@@ -49,7 +62,7 @@ DEF_FUNC dict_new, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rax
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.capacity], DICT_INIT_CAP
-    mov qword [rbx + PyDictObject.dk_version], 1
+    DICT_STAMP_VERSION rbx, rdx
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
     mov qword [rbx + PyDictObject.dk_kind], 1   ; vacuously all-str
@@ -260,7 +273,7 @@ DEF_FUNC dict_clear_all, DCA_FRAME
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0
-    inc qword [rbx + PyDictObject.dk_version]
+    DICT_STAMP_VERSION rbx, rax
 
 .dca_loop:
     cmp qword [rbp - DCA_COUNT], 0
@@ -1173,9 +1186,7 @@ DEF_FUNC dict_set, DS_FRAME
     inc qword [rbx + PyDictObject.ob_size]
 
 .ds_bump:
-    inc qword [rbx + PyDictObject.dk_version]
-    jnz .ds_done
-    mov qword [rbx + PyDictObject.dk_version], 1
+    DICT_STAMP_VERSION rbx, rax
 .ds_done:
     xor eax, eax
     pop r13
@@ -1393,9 +1404,7 @@ DEF_FUNC dict_del, DD_FRAME
     mov qword [rcx + r12*8], DICT_IX_DUMMY
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
-    inc qword [rbx + PyDictObject.dk_version]
-    jnz .dd_release
-    mov qword [rbx + PyDictObject.dk_version], 1
+    DICT_STAMP_VERSION rbx, rax
 
 .dd_release:
     ; The table no longer refers to either of these, so whatever a __del__
@@ -2161,6 +2170,9 @@ END_FUNC dict_rev_iter_next
 ;; ============================================================================
 section .data
 
+global dict_version_clock
+dict_version_clock: dq 1
+
 ; dict_repr_str removed - repr now in src/repr.asm
 dict_iter_name: db "dict_keyiterator", 0
 dict_value_iter_name: db "dict_valueiterator", 0
@@ -2535,7 +2547,7 @@ DEF_FUNC dict_clear_gc, 8        ; rsp 16-aligned at the call the macros below e
     mov qword [rbx + PyDictObject.ob_size], 0
     mov qword [rbx + PyDictObject.dk_nentries], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0
-    inc qword [rbx + PyDictObject.dk_version]
+    DICT_STAMP_VERSION rbx, rax
 
     pop r13
     pop r12

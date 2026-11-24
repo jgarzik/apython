@@ -142,20 +142,24 @@ DEF_FUNC_BARE op_load_global
     cmp rax, -1
     je .try_builtins
 
-    ; Found in globals — try to specialize to LOAD_GLOBAL_MODULE
-    ; rax = slot index, rbx points at CACHE[0]
-    mov word [rbx + 2], ax     ; CACHE[1] = index (low 16 bits)
-    mov rdi, [r12 + PyFrame.globals]
-    mov rdi, [rdi + PyDictObject.dk_version]
-    mov word [rbx + 4], di     ; CACHE[2] = module_keys_version
-    mov byte [rbx - 2], 200    ; rewrite opcode to LOAD_GLOBAL_MODULE
-
-    ; Load the value now (via entry slot)
+    ; Found in globals.  Read the value through the FULL index; the cache
+    ; holds sixteen bits of it, and a namespace past 65,535 entries used to
+    ; read its value back through the truncated one -- another variable's.
     mov rdi, [r12 + PyFrame.globals]
     mov rdi, [rdi + PyDictObject.entries]
-    movzx eax, word [rbx + 2]  ; index
-    imul rax, rax, DICT_ENTRY_SIZE
-    add rdi, rax               ; rdi = entry ptr
+    imul rdx, rax, DICT_ENTRY_SIZE
+    add rdi, rdx               ; rdi = entry ptr
+
+    ; Specialize to LOAD_GLOBAL_MODULE when the index fits and the key IS the
+    ; name object, which is what that handler's guard compares.
+    cmp rax, 0xFFFF
+    ja .lg_mod_generic
+    mov rdx, [rsp]
+    cmp [rdi + DictEntry.key], rdx
+    jne .lg_mod_generic
+    mov word [rbx + 2], ax     ; CACHE[1] = index
+    mov byte [rbx - 2], 200    ; rewrite opcode to LOAD_GLOBAL_MODULE
+.lg_mod_generic:
     mov rax, [rdi + DictEntry.value]
     add rsp, 16                ; discard the saved name and its pad
     jmp .lg_push_result
@@ -170,25 +174,29 @@ DEF_FUNC_BARE op_load_global
     cmp rax, -1
     je .not_found
 
-    ; Found in builtins — specialize to LOAD_GLOBAL_BUILTIN
-    add rsp, 16                ; discard the saved name and its pad
-    mov word [rbx + 2], ax     ; CACHE[1] = index
-    mov rdi, [r12 + PyFrame.globals]
-    mov rdi, [rdi + PyDictObject.dk_version]
-    mov word [rbx + 4], di     ; CACHE[2] = module_keys_version (guard globals hasn't added it)
-    mov rdi, [r12 + PyFrame.builtins]
-    mov rdi, [rdi + PyDictObject.dk_version]
-    mov word [rbx + 6], di     ; CACHE[3] = builtin_keys_version
-
-    mov byte [rbx - 2], 201    ; rewrite opcode to LOAD_GLOBAL_BUILTIN
-
-    ; Load the value now
+    ; Found in builtins: the value through the full index, as above.
     mov rdi, [r12 + PyFrame.builtins]
     mov rdi, [rdi + PyDictObject.entries]
-    movzx eax, word [rbx + 2]
-    imul rax, rax, DICT_ENTRY_SIZE
-    add rdi, rax               ; rdi = entry ptr
+    imul rdx, rax, DICT_ENTRY_SIZE
+    add rdi, rdx               ; rdi = entry ptr
+
+    ; Specialize to LOAD_GLOBAL_BUILTIN on the same two conditions.  The
+    ; cache then holds the index and 32 bits of the GLOBALS version: the
+    ; builtins entry is re-verified by its key, the globals dict only by the
+    ; fact that nothing has been written to it since.
+    cmp rax, 0xFFFF
+    ja .lg_bi_generic
+    mov rdx, [rsp]
+    cmp [rdi + DictEntry.key], rdx
+    jne .lg_bi_generic
+    mov word [rbx + 2], ax     ; CACHE[1] = index
+    mov rdx, [r12 + PyFrame.globals]
+    mov rdx, [rdx + PyDictObject.dk_version]
+    mov dword [rbx + 4], edx   ; CACHE[2..3] = globals version
+    mov byte [rbx - 2], 201    ; rewrite opcode to LOAD_GLOBAL_BUILTIN
+.lg_bi_generic:
     mov rax, [rdi + DictEntry.value]
+    add rsp, 16                ; discard the saved name and its pad
     jmp .lg_push_result
 
 .not_found:
