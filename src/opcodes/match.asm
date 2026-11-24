@@ -1014,9 +1014,19 @@ DEF_FUNC op_setup_annotations
     ; and lets anything else through; clearing whatever it was keeps an
     ; exception from a mapping's __getitem__ out of an opcode that has nothing
     ; to do with it.
+    ;
+    ; Only a KeyError, now that a builtin __getitem__ returns its refusal: the
+    ; TypeError a str or a list answers a name with is not a miss.
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .sa_map_make
+    extern exc_isinstance
+    extern exc_KeyError_type
+    lea rsi, [rel exc_KeyError_type]
+    call exc_isinstance     ; err: a static type is never refused
+    test eax, eax
+    jz .sa_map_raised
+    mov rdi, [gs:ThreadState.current_exception]
     mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .sa_map_make:
@@ -1047,6 +1057,13 @@ DEF_FUNC op_setup_annotations
     pop rbx
     pop rbp
     DISPATCH
+
+.sa_map_raised:
+    ; Not a miss: the key is still ours, and the unwinder resets everything
+    ; this handler pushed.
+    mov rdi, r13
+    call obj_decref
+    jmp eval_exception_unwind
 END_FUNC op_setup_annotations
 
 ;; ============================================================================

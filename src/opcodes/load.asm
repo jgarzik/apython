@@ -268,9 +268,21 @@ DEF_FUNC_BARE op_load_name
     ; CPython clears a KeyError and lets anything else through; clearing
     ; whatever it was keeps the mapping's exception out of a name lookup that
     ; then succeeds in globals or in builtins.
+    ;
+    ; Only a KeyError, now: a builtin __getitem__ RETURNS its refusal, so the
+    ; TypeError a str or a list namespace answers a name with arrives here
+    ; too, and clearing it left the class body running in something that is
+    ; not a mapping at all.
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .try_globals
+    extern exc_isinstance
+    extern exc_KeyError_type
+    lea rsi, [rel exc_KeyError_type]
+    call exc_isinstance     ; err: a static type is never refused
+    test eax, eax
+    jz .locals_mapping_raised
+    mov rdi, [gs:ThreadState.current_exception]
     mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
@@ -301,6 +313,10 @@ DEF_FUNC_BARE op_load_name
     add rsp, 16                ; discard saved name and the pad
     VPUSH rax
     DISPATCH
+
+.locals_mapping_raised:
+    add rsp, 16                ; the name and the pad
+    jmp eval_exception_unwind
 
 .found:
     add rsp, 16                ; discard saved name and the pad
