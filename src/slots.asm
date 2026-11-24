@@ -260,16 +260,27 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     push rax
     push rdx
     mov rdi, rax
-    call obj_as_index
+    call obj_as_index           ; err: tested below, once what __hash__ returned is released
+    pop rdx
+    pop rdi
+    cmp edx, TAG_PTR
+    jne .sth_released           ; an immediate int owns nothing
+    ; __hash__ handed over a reference, and an int too wide for an immediate
+    ; is an object: `return hash(self.name)` leaked one on every lookup.
+    push rax
+    push rax                    ; twice: the call stays 16-byte aligned
+    call obj_decref
+    pop rax
+    pop rax
+.sth_released:
     ERR_M1 .sth_raised
-    add rsp, 16
     cmp rax, -1                 ; -1 is the error value, so no hash IS it:
     jne .sth_ret                ; CPython hands -2 back for a __hash__ of -1
     mov rax, -2
 .sth_ret:
     leave
     ret
-.sth_raised:                    ; not an integer; `leave` drops the parked pair
+.sth_raised:                    ; not an integer
     mov rax, -1
     leave
     ret
