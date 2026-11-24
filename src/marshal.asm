@@ -2096,7 +2096,7 @@ section .text
 ;; WRITER -- which this interpreter never reaches, because it caches through
 ;; its own loader.
 ;; ============================================================================
-extern raise_exception
+extern set_exception
 extern exc_ValueError_type
 extern exc_EOFError_type
 extern exc_TypeError_type
@@ -2110,7 +2110,8 @@ extern str_type
 
 ;; ============================================================================
 ;; marshal_loads_fn(rdi = args, rsi = nargs) -> rax = the object the stream
-;; names, as a Value, or does not return
+;; names, as a Value
+;; Fails: 0
 ;; ============================================================================
 ML_DATA   equ 8
 ML_LEN    equ 16
@@ -2227,15 +2228,22 @@ DEF_FUNC marshal_loads_fn, ML_FRAME
     cmp qword [rbp - ML_DATA], MARSHAL_ERR_OBJ
     je .mlf_eof_obj
 .mlf_bad:
-    RAISE exc_ValueError_type, "bad marshal data"
+    FAIL exc_ValueError_type, "bad marshal data", .mlf_fail
 .mlf_eof:
-    RAISE exc_EOFError_type, "marshal data too short"
+    FAIL exc_EOFError_type, "marshal data too short", .mlf_fail
 .mlf_eof_obj:
-    RAISE exc_EOFError_type, "EOF read where object expected"
+    FAIL exc_EOFError_type, "EOF read where object expected", .mlf_fail
 .mlf_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    FAIL exc_TypeError_type, "a bytes-like object is required", .mlf_fail
 .mlf_arity:
-    RAISE exc_TypeError_type, "loads() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "loads() takes exactly one argument"
+.mlf_fail:
+    ; The reader's per-thread state is already the caller's again, and what
+    ; it built has been released; the two argument refusals never touched it.
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC marshal_loads_fn
 
 ;; ============================================================================

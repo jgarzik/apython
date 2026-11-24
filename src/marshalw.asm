@@ -79,7 +79,7 @@ extern complex_type
 extern code_type
 extern exc_ValueError_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern int_to_i64
 extern int_is_compact
 extern __gmpz_sizeinbase
@@ -963,14 +963,14 @@ DEF_FUNC marshal_dumps_fn, MDS_FRAME
     ; allocator.  CPython words the first "unmarshallable object".
     cmp qword [rel mw_error], 2
     jne .mds_oom
-    RAISE exc_ValueError_type, "unmarshallable object"
+    SET_EXC exc_ValueError_type, "unmarshallable object"
 .mds_oom:
     xor eax, eax
     xor edx, edx
     leave
     ret
 .mds_args:
-    RAISE exc_TypeError_type, "dumps() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, "dumps() takes 1 or 2 arguments", .mds_oom
 END_FUNC marshal_dumps_fn
 
 ;; ============================================================================
@@ -984,7 +984,7 @@ extern obj_getattr_opt
 extern obj_dealloc
 extern str_from_cstr_heap
 extern obj_call_n
-extern raise_no_attribute
+extern set_no_attribute
 extern str_intern_cstr
 MDP_ARGS  equ 24            ; the one Value handed to .write; see the note on
                             ; an argument array growing upward
@@ -1067,8 +1067,8 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
     mov rdi, [rbp - MDP_FILE]
     mov rsi, [rbp - MDP_NAME]
     xor edx, edx
-    pop rbx
-    call raise_no_attribute
+    call set_no_attribute
+    jmp .mdp_propagate
 .mdp_release:
     mov rdi, [rbp - MDP_BYTES]
     call obj_decref
@@ -1081,9 +1081,9 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
 .mdp_failed:
     cmp qword [rel mw_error], 2
     jne .mdp_propagate
-    RAISE exc_ValueError_type, "unmarshallable object"
+    FAIL exc_ValueError_type, "unmarshallable object", .mdp_propagate
 .mdp_args:
-    RAISE exc_TypeError_type, "dump() takes 2 or 3 arguments"
+    FAIL exc_TypeError_type, "dump() takes 2 or 3 arguments", .mdp_propagate
 END_FUNC marshal_dump_fn
 
 ;; ============================================================================
@@ -1145,7 +1145,7 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
     mov [rbp - MDL_ARGS], rax
     lea rdi, [rbp - MDL_ARGS]
     mov esi, 1
-    call marshal_loads_fn
+    call marshal_loads_fn       ; err: its 0 is this function's, once the data is released
     mov [rbp - MDL_ARGS], rax
     mov rdi, [rbp - MDL_DATA]
     DECREF_V rdi, rsi
@@ -1158,14 +1158,14 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
     mov rdi, [rbp - MDL_FILE]
     mov rsi, [rbp - MDL_NAME]
     xor edx, edx
-    call raise_no_attribute
+    call set_no_attribute
 .mdl_fail:
     xor eax, eax
     xor edx, edx
     leave
     ret
 .mdl_args:
-    RAISE exc_TypeError_type, "load() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, "load() takes 1 or 2 arguments", .mdl_fail
 END_FUNC marshal_load_fn
 
 ;; ============================================================================

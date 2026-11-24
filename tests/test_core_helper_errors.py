@@ -11,6 +11,7 @@
 # the caller the first time, and whether the block count stayed put: a caller
 # that does not release what it held climbs by at least one block a round.
 import gc
+import marshal
 import sys
 import weakref
 
@@ -107,6 +108,31 @@ class GetItem:
     def __getitem__(self, i):
         boom("getitem")
 
+
+class Repr:
+    def __repr__(self):
+        boom("repr")
+
+
+class ReprHashable(Repr):
+    def __hash__(self):
+        return 1
+
+
+class Sink:
+    def write(self, data):
+        return len(data)
+
+
+class BadSink:
+    def write(self, data):
+        boom("write")
+
+    def read(self, n=-1):
+        boom("read")
+
+
+GOOD = marshal.dumps((1, "two", 3.0, [4, b"five"]))
 
 HASH = Hash()
 HASHCALL = HashCall()
@@ -278,6 +304,37 @@ check("list(zip([1], Next))", lambda: list(zip([1], Next())))
 check("list(enumerate(Next))", lambda: list(enumerate(Next())))
 check("list(filter(None, Next))", lambda: list(filter(None, Next())))
 check("list(reversed(GetItem))", lambda: list(reversed(GetItem())))
+
+# ---- repr -------------------------------------------------------------------
+check("repr([Repr])", lambda: repr([1, Repr()]))
+check("repr((Repr,))", lambda: repr((1, Repr())))
+check("repr({1: Repr})", lambda: repr({1: Repr()}))
+check("repr({Repr})", lambda: repr({ReprHashable()}))
+check("repr(d.values())", lambda: repr({1: Repr()}.values()))
+check("str([Repr])", lambda: str([Repr()]))
+check("'%r' % [Repr]", lambda: "%r" % ([Repr()],))
+check("f'{[Repr]}'", lambda: f"{[Repr()]}")
+
+# ---- marshal ------------------------------------------------------------------
+check("marshal.loads(b'')", lambda: marshal.loads(b""), message=False)
+check("marshal.loads(truncated)", lambda: marshal.loads(GOOD[:-3]), message=False)
+check("marshal.loads(corrupt)", lambda: marshal.loads(b"\xff" + GOOD), message=False)
+check("marshal.loads(1)", lambda: marshal.loads(1), message=False)
+check("marshal.loads()", lambda: marshal.loads(), message=False)
+check("marshal.dumps(object())", lambda: marshal.dumps(object()))
+check("marshal.dumps()", lambda: marshal.dumps(), message=False)
+check("marshal.dump(1, 1)", lambda: marshal.dump(1, 1), message=False)
+check("marshal.dump(obj, file)", lambda: marshal.dump(object(), Sink()))
+check("marshal.dump, write raises", lambda: marshal.dump(1, BadSink()))
+check("marshal.dump()", lambda: marshal.dump(), message=False)
+check("marshal.load(1)", lambda: marshal.load(1), message=False)
+check("marshal.load, read raises", lambda: marshal.load(BadSink()))
+check("marshal.load()", lambda: marshal.load(), message=False)
+
+# ---- sys.call_tracing ---------------------------------------------------------
+check("sys.call_tracing(f)", lambda: sys.call_tracing(len), message=False)
+check("sys.call_tracing(f, 2)", lambda: sys.call_tracing(len, 2))
+check("sys.call_tracing(boom, (1,))", lambda: sys.call_tracing(boom, (1,)))
 
 # ---- a dunder reached by name, handed the wrong receiver ---------------------
 check("int.__neg__(2.5)", lambda: int.__neg__(2.5))

@@ -53,7 +53,6 @@
 ASM_INIT
 
 extern obj_call_n
-extern raise_exception
 extern builtin_func_type
 extern method_type
 extern obj_decref
@@ -1094,14 +1093,18 @@ DEF_FUNC sys_call_tracing_func, SCT_FRAME
 .sct_arity:
     ; CPython says how many it got, and the two refusals are different
     ; sentences: the count is an arity error, the type is an argument error.
-    extern raise_type_error_counted
+    extern set_type_error_counted
     CSTRING rdi, "call_tracing expected 2 arguments, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted ; rax = 0
+    leave
+    ret
 
 .sct_not_tuple:
     mov rsi, [rbp - SCT_ARG2]
     CSTRING rdi, `call_tracing() argument 2 must be tuple, not \x02`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name   ; rax = 0
+    leave
+    ret
 END_FUNC sys_call_tracing_func
