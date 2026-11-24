@@ -118,15 +118,6 @@ DEF_FUNC set_value_error_counted, RTC_FRAME
     ret
 END_FUNC set_value_error_counted
 
-;; raise_value_error_counted(the same arguments) -> does not return
-;; set_value_error_counted, then the unwind: for a handler, which alone may jump.
-global raise_value_error_counted
-DEF_FUNC raise_value_error_counted
-    call set_value_error_counted
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_value_error_counted
-
 
 ;; ============================================================================
 ;; set_typed_message(rdi = a Value, rsi = the text before the type name,
@@ -304,15 +295,6 @@ DEF_FUNC set_descriptor_receiver, RDR_FRAME
     jmp rbt_append_cstr
 END_FUNC set_descriptor_receiver
 
-;; raise_descriptor_receiver(the same arguments) -> does not return
-;; set_descriptor_receiver, then the unwind: for a handler, which alone may jump.
-global raise_descriptor_receiver
-DEF_FUNC raise_descriptor_receiver
-    call set_descriptor_receiver
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_descriptor_receiver
-
 ;; ============================================================================
 ;; set_missing_receiver(rdi = the PyBuiltinObject)
 ;;   -> rax = 0, always, with the TypeError pending
@@ -390,15 +372,6 @@ DEF_FUNC set_missing_receiver, RMR_FRAME
     jmp rbt_append_cstr
 END_FUNC set_missing_receiver
 
-;; raise_missing_receiver(the same argument) -> does not return
-;; set_missing_receiver, then the unwind: for a handler, which alone may jump.
-global raise_missing_receiver
-DEF_FUNC raise_missing_receiver
-    call set_missing_receiver
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_missing_receiver
-
 ;; ============================================================================
 ;; set_wrapper_arity(rdi = the number of arguments wanted, not counting
 ;;                     self; rsi = the number given, likewise)
@@ -452,15 +425,6 @@ DEF_FUNC set_wrapper_arity, RWA_FRAME
     leave
     ret
 END_FUNC set_wrapper_arity
-
-;; raise_wrapper_arity(the same arguments) -> does not return
-;; set_wrapper_arity, then the unwind: for a handler, which alone may jump.
-global raise_wrapper_arity
-DEF_FUNC raise_wrapper_arity
-    call set_wrapper_arity
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_wrapper_arity
 
 ;; ============================================================================
 ;; set_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
@@ -600,15 +564,6 @@ DEF_FUNC set_builtin_arity, RBA_FRAME
     ret
 END_FUNC set_builtin_arity
 
-;; raise_builtin_arity(the same arguments) -> does not return
-;; set_builtin_arity, then the unwind: for a handler, which alone may jump.
-global raise_builtin_arity
-DEF_FUNC raise_builtin_arity
-    call set_builtin_arity
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_builtin_arity
-
 ;; ============================================================================
 ;; set_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
 ;;                   argument as a Value, edx = 0 no argument / 1 not a type
@@ -717,15 +672,6 @@ DEF_FUNC set_new_bad_class, RNB_FRAME
     mov rsi, [rcx + PyTypeObject.tp_name]
     jmp rbt_append_cstr
 END_FUNC set_new_bad_class
-
-;; raise_new_bad_class(the same arguments) -> does not return
-;; set_new_bad_class, then the unwind: for a handler, which alone may jump.
-global raise_new_bad_class
-DEF_FUNC raise_new_bad_class
-    call set_new_bad_class
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_new_bad_class
 
 ;; ============================================================================
 ;; obj_getattr_str_opt(rdi = an object, rsi = an attribute name as a C string)
@@ -1644,12 +1590,3 @@ DEF_FUNC set_unexpected_keyword, RUK_FRAME
     leave
     ret
 END_FUNC set_unexpected_keyword
-
-;; raise_unexpected_keyword(the same arguments) -> does not return
-;; set_unexpected_keyword, then the unwind: for a handler, which alone may jump.
-global raise_unexpected_keyword
-DEF_FUNC raise_unexpected_keyword
-    call set_unexpected_keyword
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_unexpected_keyword

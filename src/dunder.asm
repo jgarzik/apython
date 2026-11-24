@@ -118,7 +118,6 @@ dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 extern builtin_func_type
 extern value_type
 extern type_is_subtype
-extern raise_descriptor_receiver
 
 section .text
 

@@ -1713,13 +1713,6 @@ DEF_FUNC set_value_error_with_repr2, RVR_FRAME
     jmp rvr_body
 END_FUNC set_value_error_with_repr2
 
-;; raise_value_error_with_repr2(set_value_error_with_repr2's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC raise_value_error_with_repr2
-    call set_value_error_with_repr2
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_value_error_with_repr2
-
 section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it
 ; handed the exception back rather than unwinding.  Cleared on entry to every
@@ -1744,13 +1737,6 @@ DEF_FUNC_BARE set_seq_repeat_not_index
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
     jmp set_type_error_with_name
 END_FUNC set_seq_repeat_not_index
-
-;; seq_repeat_not_index(set_seq_repeat_not_index's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC seq_repeat_not_index
-    call set_seq_repeat_not_index
-    leave
-    jmp eval_exception_unwind
-END_FUNC seq_repeat_not_index
 
 ;; ============================================================================
 ;; binop_is_count(rdi = a Value) -> eax = 1 when it could be a repetition count
@@ -2600,11 +2586,15 @@ DEF_FUNC set_hash_not_implemented
     ret
 END_FUNC set_hash_not_implemented
 
-;; hash_not_implemented(set_hash_not_implemented's arguments) -> does not return: the twin, then the unwind
+;; hash_not_implemented(rdi = the object) -> rax = -1, always, with the TypeError pending
+;; The tp_hash of an unhashable type: the slot's own error value, so obj_hash
+;; hands it up like any other __hash__ that raised.
+;; Fails: -1
 DEF_FUNC hash_not_implemented
     call set_hash_not_implemented
+    mov rax, -1
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC hash_not_implemented
 
 ;; ============================================================================
