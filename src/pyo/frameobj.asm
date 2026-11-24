@@ -529,8 +529,9 @@ DEF_FUNC frameobj_setattr, 48
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
     lea rsi, [rel fsa_buf]
-    leave
-    jmp raise_exception
+    extern set_exception
+    call set_exception
+    jmp .fsa_fail
 
 .fsa_trace:
     ; None is a delete, as it is in CPython: bdb assigns None to turn local
@@ -578,7 +579,11 @@ DEF_FUNC frameobj_setattr, 48
     ; line means re-deriving the block stack for the destination, which this
     ; interpreter does not have the machinery to do; refusing is CPython's
     ; own answer for a jump it cannot make.
-    RAISE exc_ValueError_type, "f_lineno can only be set in a trace function"
+    SET_EXC exc_ValueError_type, "f_lineno can only be set in a trace function"
+.fsa_fail:
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
+    leave
+    ret
 
 .fsa_ok:
     xor eax, eax
@@ -761,7 +766,7 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .sgf_null
     ; CPython treats a negative depth as zero rather than refusing it.
     test rax, rax
     js .sgf_have_depth
@@ -799,8 +804,10 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     ret
 
 .sgf_too_deep:
+    SET_EXC exc_ValueError_type, "call stack is not deep enough"
     pop rbx
-    RAISE exc_ValueError_type, "call stack is not deep enough"
+    leave
+    ret
 END_FUNC sys_getframe_func
 
 ;; ============================================================================
@@ -893,7 +900,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .sgm_fail
     pop rcx
     mov rcx, rax
 .sgm_have_depth:
@@ -943,6 +950,12 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.sgm_fail:                      ; the depth was refused, and that is pending
+    add rsp, 8                  ; the rcx pushed around obj_as_index
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC sys_getframemodulename_func
 
@@ -1201,13 +1214,17 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
 
 .fmc_executing:
     extern exc_RuntimeError_type
-    RAISE exc_RuntimeError_type, "cannot clear an executing frame"
+    SET_EXC exc_RuntimeError_type, "cannot clear an executing frame"
+    leave
+    ret
 .fmc_arity:
     dec rsi                     ; the count CPython reports excludes self
     CSTRING rdi, "clear() takes no arguments ("
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC frameobj_method_clear
 
 DEF_FUNC frameobj_repr
