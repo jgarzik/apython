@@ -14,7 +14,7 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern obj_incref
 extern str_from_cstr
@@ -29,7 +29,6 @@ extern str_from_cstr_heap
 extern obj_call_n
 extern exc_AttributeError_type
 extern type_is_subtype
-extern eval_exception_unwind
 extern dir_default
 global module_dunder_dir
 
@@ -316,9 +315,11 @@ END_FUNC module_dunder_dir
 ;;
 ;; An AttributeError out of the hook is the protocol saying "absent", and
 ;; getattr(m, n, default) and hasattr() have to be able to see that; anything
-;; else is a genuine failure in the middle of a lookup and keeps unwinding.
+;; else is a genuine failure in the middle of a lookup: 0 with it pending and
+;; the flag clear.
 ;; That is the same handshake instance_getattr's .getattr_raised uses, down to
 ;; the attr_error_pending flag raise_no_attribute reads.
+;; Fails: 0?
 ;; ============================================================================
 MG_HOOK   equ 8              ; the module's own __getattr__, owned across the call
 MG_NAME   equ 16             ; the attribute name, as the hook's one argument
@@ -410,9 +411,8 @@ DEF_FUNC module_getattr, MG_FRAME
     mov edx, 1
     call obj_call_n             ; err: .mg_hook_raised, below
     ; Release it here, before anything branches: the hook is finished with,
-    ; and one release point on the straight line is worth four on the exits --
-    ; the unwind tail below abandons this frame into eval_exception_unwind and
-    ; would be the easy one to forget.  The result, or the 0 that says the
+    ; and one release point on the straight line is worth four on the exits.
+    ; The result, or the 0 that says the
     ; hook raised, goes to a frame slot across the DECREF, because obj_dealloc
     ; clobbers every caller-saved register, rax included.
     mov [rbp - MG_NAME], rax
@@ -430,7 +430,7 @@ DEF_FUNC module_getattr, MG_FRAME
     ; An AttributeError is "absent" and has to reach getattr()'s default and
     ; hasattr(); raise_no_attribute reads attr_error_pending and propagates
     ; this one rather than replacing it, so `m.missing` still reports what the
-    ; hook said.  Anything else keeps unwinding.
+    ; hook said.  Anything else is a failure, handed back as one.
     mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .mg_really_not_found
@@ -448,10 +448,12 @@ DEF_FUNC module_getattr, MG_FRAME
     ret
 
 .mg_hook_unwind:
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    xor eax, eax
     pop r12
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .mg_really_not_found:
     RET_NULL
@@ -463,8 +465,10 @@ DEF_FUNC module_getattr, MG_FRAME
 END_FUNC module_getattr
 
 ;; ============================================================================
-;; module_setattr(PyObject *self, PyObject *name_str, PyObject *value) -> int
+;; module_setattr(PyObject *self, PyObject *name_str, PyObject *value)
+;;   -> rax = 0, or -1 with the AttributeError pending
 ;; Set attribute in module's dict
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC module_setattr
     ; A NULL value is tp_setattr's DELETE convention -- the same one
@@ -506,9 +510,12 @@ DEF_FUNC module_setattr
     ; CPython raises AttributeError naming the module, exactly as a failed
     ; READ of the same name does.  Storing a NULL under a fresh key, which is
     ; what this used to do, invented an entry instead.
-    xor edx, edx
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    extern set_no_attribute
+    call set_no_attribute
+    mov rax, -1
+    leave
+    ret
 END_FUNC module_setattr
 
 ;; ============================================================================
@@ -810,7 +817,6 @@ extern str_from_cstr_heap
 extern str_new_heap
 extern obj_repr
 extern type_type
-extern raise_exception
 extern exc_TypeError_type
 
 section .text
@@ -871,6 +877,7 @@ END_FUNC namespace_new
 ;; namespace_dealloc, sixteen bytes above the block gc_alloc had handed out.
 ;;
 ;; CPython takes keywords only, and says so.
+;; Fails: 0
 ;; ============================================================================
 NTC_TYPE  equ 8
 NTC_NS    equ 16
@@ -939,7 +946,7 @@ DEF_FUNC namespace_type_call, NTC_FRAME
     ret
 
 .ntc_positional:
-    RAISE exc_TypeError_type, "no positional arguments expected"
+    FAIL exc_TypeError_type, "no positional arguments expected", .ntc_fail
 END_FUNC namespace_type_call
 
 ;; namespace_set(rdi = ns, rsi = name cstr, rdx = value Value)
@@ -1038,7 +1045,9 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     ret
 END_FUNC namespace_getattr
 
-;; namespace_setattr(rdi = self, rsi = name, rdx = value Value) -> 0
+;; namespace_setattr(rdi = self, rsi = name, rdx = value Value)
+;;   -> rax = 0, or -1 with the exception pending
+;; Fails: -1
 NSS_SELF  equ 8
 NSS_NAME  equ 16
 NSS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
@@ -1070,12 +1079,16 @@ DEF_FUNC namespace_setattr, NSS_FRAME
 .nss_missing:
     mov rdi, [rbp - NSS_SELF]
     mov rsi, [rbp - NSS_NAME]
-    xor edx, edx
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    call set_no_attribute
+    jmp .nss_fail
 
 .nss_no_dict:
-    RAISE exc_TypeError_type, "namespace has no attribute storage"
+    SET_EXC exc_TypeError_type, "namespace has no attribute storage"
+.nss_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC namespace_setattr
 
 ;; namespace_repr(rdi = self) -> str   "namespace(a=1, b=2)"
@@ -1398,8 +1411,9 @@ section .text
 
 ;; ============================================================================
 ;; module_type_new(rdi = type, rsi = args, rdx = nargs)
-;;   -> fat (rax = the new module, rdx = TAG_PTR); raises and does not return
-;;      on a bad argument
+;;   -> fat (rax = the new module, rdx = TAG_PTR); (0, 0) with the TypeError
+;;      pending on a bad argument
+;; Fails: 0
 ;;
 ;; `types.ModuleType(name[, doc])`.  module_type had no tp_new and no tp_init,
 ;; so type_call fell through to instance_new, which allocated
@@ -1482,13 +1496,17 @@ DEF_FUNC module_type_new, MTN_FRAME
 
 .mtn_bad_name:
     add rsp, 16
-    RAISE exc_TypeError_type, "module.__init__() argument 1 must be str, not None"
+    FAIL exc_TypeError_type, "module.__init__() argument 1 must be str, not None", .mtn_fail
 .mtn_arity:
     CSTRING rdi, "module() takes at most 2 arguments ("
     mov rsi, rdx
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+.mtn_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC module_type_new
 
 ;; MMI_SET key_cstr, value -- write one entry into the module being
@@ -1550,6 +1568,7 @@ END_FUNC module_type_new
 ;; -- and with neither name in module's tp_dict, `super().__init__` resolved
 ;; to object's and raised, while `super().__new__` hit the object.__new__
 ;; gate.  module_type had no tp_dict at all.
+;; Fails: 0
 ;; ============================================================================
 MMN_TYPE  equ 8
 MMN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -1591,11 +1610,15 @@ DEF_FUNC module_method_new, MMN_FRAME
     ret
 
 .mmn_no_args:
-    RAISE exc_TypeError_type, "module.__new__(): not enough arguments"
+    FAIL exc_TypeError_type, "module.__new__(): not enough arguments", .mmn_fail
 .mmn_not_a_type:
-    RAISE exc_TypeError_type, "module.__new__(X): X is not a type object"
+    FAIL exc_TypeError_type, "module.__new__(X): X is not a type object", .mmn_fail
 .mmn_not_a_module:
-    RAISE exc_TypeError_type, "module.__new__(X): X is not a subtype of module"
+    SET_EXC exc_TypeError_type, "module.__new__(X): X is not a subtype of module"
+.mmn_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC module_method_new
 
 ;; ============================================================================
@@ -1603,6 +1626,7 @@ END_FUNC module_method_new
 ;;
 ;; `module.__init__(self, name[, doc])` -- the half that writes the name, the
 ;; docstring and the three attributes CPython leaves as None.
+;; Fails: 0
 ;; ============================================================================
 MMI_SELF  equ 8
 MMI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -1681,13 +1705,17 @@ DEF_FUNC module_method_init, MMI_FRAME
 
 .mmi_bad_self:
     add rsp, 16
-    RAISE exc_TypeError_type, \
-        "module.__init__() argument 1 must be a module"
+    FAIL exc_TypeError_type, \
+        "module.__init__() argument 1 must be a module", .mmi_fail
 .mmi_bad_name:
-    RAISE exc_TypeError_type, \
-        "module.__init__() argument 1 must be str, not None"
+    FAIL exc_TypeError_type, \
+        "module.__init__() argument 1 must be str, not None", .mmi_fail
 .mmi_arity:
-    RAISE exc_TypeError_type, "module.__init__() takes at most 2 arguments"
+    SET_EXC exc_TypeError_type, "module.__init__() takes at most 2 arguments"
+.mmi_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC module_method_init
 
 extern new_from_slot
