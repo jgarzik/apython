@@ -726,6 +726,7 @@ DEF_FUNC asyncio_gather_func, AGF_FRAME
     call obj_is_true
     pop rdx
     pop rcx
+    ERR_M1 .ag_nomem            ; return_exceptions= could not be asked
     mov [rbp - AGF_RETEX], rax
     mov rax, rcx
     inc rdx

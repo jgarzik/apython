@@ -2176,7 +2176,7 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
 .orb_have_result:
     mov [rbp - ORB_RES], rax    ; the result Value, owned
     mov rdi, rax
-    call obj_is_true
+    call obj_is_true            ; err: its -1, with the exception, is this function's too
     mov [rbp - ORB_OP], rax     ; the op is finished with; reuse the slot
     mov rdi, [rbp - ORB_RES]
     DECREF_V rdi, rdx
@@ -2192,7 +2192,7 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     jmp .orb_done
 
 .orb_error:
-    mov eax, -1
+    mov rax, -1                 ; all 64 bits, as obj_is_true's is
 
 .orb_done:
     mov [rbp - ORB_RES], rax
@@ -2666,8 +2666,11 @@ DEF_FUNC obj_hash
 END_FUNC obj_hash
 
 ;; ============================================================================
-;; obj_is_true(rdi=value) -> int (0 or 1)
+;; obj_is_true(rdi=value) -> rax = 0 or 1, or -1 with the exception pending
 ;; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
+;; A __bool__ or __len__ that raised, or answered with something that is not
+;; a truth value, is the -1: all 64 bits of rax, so ERR_M1 reads it.
+;; Fails: -1
 ;; ============================================================================
 OIT_PAD equ 8               ; rbp and one callee-saved push leave the body
                             ; eight bytes out of 16-alignment, and __bool__,
@@ -2722,8 +2725,7 @@ DEF_FUNC_BARE obj_is_true
     ; `not x` and `if x:` were right, because they go elsewhere.
     mov edx, TAG_PTR
     call rax
-    movsxd rax, eax
-    ERR_M1_JUMP
+    movsxd rax, eax             ; -1 with an exception pending goes up as it is
     add rsp, OIT_PAD
     pop rbx
     pop rbp
@@ -2740,7 +2742,7 @@ DEF_FUNC_BARE obj_is_true
     jz .check_map_len
     mov rdi, rbx
     call rax
-    ERR_M1_JUMP
+    ERR_M1 .fail
     test rax, rax
     jnz .true
     jmp .false
@@ -2756,7 +2758,7 @@ DEF_FUNC_BARE obj_is_true
     jz .check_dunder_bool
     mov rdi, rbx
     call rax
-    ERR_M1_JUMP
+    ERR_M1 .fail
     test rax, rax
     jnz .true
     jmp .false
@@ -2788,7 +2790,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_bool]
     call dunder_call_1
-    ERR_PENDING_JUMP            ; __bool__ raised (transitional, as the slots above)
+    ERR_PENDING .fail
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx              ; TAG_NULL = there is no __bool__
     jz .check_dunder_len
@@ -2824,7 +2826,7 @@ DEF_FUNC_BARE obj_is_true
 .dunder_bool_none_error:
     extern raise_exception
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "cannot interpret 'NoneType' object as an integer"
+    FAIL exc_TypeError_type, "cannot interpret 'NoneType' object as an integer", .fail
 
 .dunder_bool_type_error:
     ; __bool__ didn't return bool — DECREF result and raise TypeError
@@ -2832,7 +2834,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rax
     mov esi, edx
     DECREF_VAL rdi, rsi
-    RAISE exc_TypeError_type, "__bool__ should return bool, returned non-bool"
+    FAIL exc_TypeError_type, "__bool__ should return bool, returned non-bool", .fail
 
 .check_dunder_len:
     ; Try __len__ dunder
@@ -2840,7 +2842,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
-    ERR_PENDING_JUMP            ; __len__ raised
+    ERR_PENDING .fail
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx              ; TAG_NULL = not found
     jz .true                ; no __len__ → truthy by default
@@ -2867,12 +2869,12 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rax
     mov rsi, rdx
     V_PACK rdi, rsi
-    call obj_is_true
-    mov ecx, eax
+    call obj_is_true            ; err: the -1 is handed up as it came
+    mov rbx, rax                ; the receiver is done with; DECREF clobbers rcx
     pop rdi                    ; payload
     pop rsi                    ; tag
     DECREF_VAL rdi, rsi
-    mov eax, ecx
+    mov rax, rbx
     add rsp, OIT_PAD
     pop rbx
     pop rbp
@@ -2880,7 +2882,14 @@ DEF_FUNC_BARE obj_is_true
 
 .len_negative_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "__len__() should return >= 0"
+    FAIL exc_ValueError_type, "__len__() should return >= 0", .fail
+
+.fail:
+    mov rax, -1
+    add rsp, OIT_PAD
+    pop rbx
+    pop rbp
+    ret
 
 .false:
     xor eax, eax

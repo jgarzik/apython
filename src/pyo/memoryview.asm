@@ -1972,6 +1972,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     extern obj_is_true
     call obj_is_true
+    ERR_M1 .ma_fail
     mov rdi, [rbp - MA_OBJ]
     MV_LIVE_OR rdi, .ma_released       ; a __bool__ ran
     mov rcx, [rbp - MA_START]

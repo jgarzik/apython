@@ -118,7 +118,10 @@ END_FUNC type_check_is_class
 
 ;; ============================================================================
 ;; type_custom_check(rdi = class, rsi = object Value, rdx = dunder name cstr)
-;;   -> eax: 1 = yes, 0 = no, -1 = no override, decide the normal way
+;;   -> rax: 1 = yes, 0 = no, -1 = no override, decide the normal way
+;; Fails: -1
+;;   -- the hook raised, or the truth of what it answered could not be asked.
+;;   -1 with nothing pending is still "no override".
 ;;
 ;; A metaclass may define __instancecheck__ / __subclasscheck__; ABCMeta does,
 ;; and that is how isinstance() consults a virtual-subclass registry instead of
@@ -170,7 +173,7 @@ DEF_FUNC type_custom_check, TCI_FRAME
     mov rsi, rsp
     mov edx, 2
     call rcx
-    ERR_PENDING_JUMP
+    ERR_PENDING .tcc_raised
     V_UNPACK rax, rdx
     add rsp, 16
     test edx, edx
@@ -181,18 +184,20 @@ DEF_FUNC type_custom_check, TCI_FRAME
     mov rdi, rax
     V_PACK rdi, rdx
     extern obj_is_true
-    call obj_is_true
-    mov ebx, eax
+    call obj_is_true            ; err: its -1, with the exception, is this function's too
+    mov rbx, rax
     pop rdx
     pop rdi
     DECREF_VAL rdi, rdx
-    mov eax, ebx
+    mov rax, rbx
     pop rbx
     leave
     ret
 
+.tcc_raised:                    ; the hook raised: -1 again, but with it pending
+    add rsp, 16
 .tcc_none:
-    mov eax, -1
+    mov rax, -1
     pop rbx
     leave
     ret

@@ -475,8 +475,10 @@ DEF_FUNC descr_func_attr, DF_FRAME
 END_FUNC descr_func_attr
 
 ;; ============================================================================
-;; descr_is_abstract(rdi = a callable Value, or 0) -> eax = 1 when it carries a
-;;   truthy __isabstractmethod__
+;; descr_is_abstract(rdi = a callable Value, or 0) -> rax = 1 when it carries a
+;;   truthy __isabstractmethod__, 0 when it does not
+;; Fails: -1
+;;   -- the truth of that attribute could not be asked.
 ;;
 ;; What abc marks a function with.  A wrapper is abstract when what it wraps
 ;; is, which is how `@property` over `@abstractmethod` reaches
@@ -509,7 +511,7 @@ DEF_FUNC descr_is_abstract, DIA_FRAME
     jz .dia_no
     mov rdi, rbx
     extern obj_is_true
-    call obj_is_true
+    call obj_is_true                    ; err: its -1, with the exception, is this function's too
     push rax
     push rax                            ; pad
     mov rdi, rbx
@@ -517,9 +519,6 @@ DEF_FUNC descr_is_abstract, DIA_FRAME
     DECREF_V rdi, rcx
     pop rax
     pop rcx
-    test eax, eax
-    jle .dia_no
-    mov eax, 1
     pop rbx
     leave
     ret
@@ -544,6 +543,7 @@ section .text
 DEF_FUNC descr_wrapper_isabstract
     mov rdi, [rdi + PyStaticMethodObject.sm_callable]
     call descr_is_abstract
+    ERR_M1 .dwa_raised
     test eax, eax
     jnz .dwa_true
     lea rax, [rel bool_false]
@@ -552,6 +552,10 @@ DEF_FUNC descr_wrapper_isabstract
     lea rax, [rel bool_true]
 .dwa_done:
     inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+.dwa_raised:
+    xor eax, eax
     leave
     ret
 END_FUNC descr_wrapper_isabstract
@@ -569,16 +573,19 @@ DEF_FUNC property_isabstract, PIA_FRAME
     mov [rbp - PIA_SELF], rdi
     mov rdi, [rdi + PyPropertyObject.prop_get]
     call descr_is_abstract
+    ERR_M1 .pia_raised
     test eax, eax
     jnz .pia_true
     mov rdi, [rbp - PIA_SELF]
     mov rdi, [rdi + PyPropertyObject.prop_set]
     call descr_is_abstract
+    ERR_M1 .pia_raised
     test eax, eax
     jnz .pia_true
     mov rdi, [rbp - PIA_SELF]
     mov rdi, [rdi + PyPropertyObject.prop_del]
     call descr_is_abstract
+    ERR_M1 .pia_raised
     test eax, eax
     jnz .pia_true
     lea rax, [rel bool_false]
@@ -587,6 +594,10 @@ DEF_FUNC property_isabstract, PIA_FRAME
     lea rax, [rel bool_true]
 .pia_done:
     inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+.pia_raised:
+    xor eax, eax
     leave
     ret
 END_FUNC property_isabstract

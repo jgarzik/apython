@@ -239,6 +239,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     CSTRING rdx, "__instancecheck__"
     extern type_custom_check
     call type_custom_check
+    ERR_M1 .isinstance_fail     ; the hook raised, or its answer's __bool__ did
     pop rdx
     pop rcx
     cmp eax, -1
@@ -470,6 +471,7 @@ DEF_FUNC builtin_issubclass, ISC_FRAME
     mov rsi, rdx                ; the candidate subclass
     CSTRING rdx, "__subclasscheck__"
     call type_custom_check
+    ERR_M1 .issubclass_fail
     pop rdx
     pop rcx
     cmp eax, -1

@@ -456,6 +456,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     mov rdi, [rbp - ITB_KWVAL]
     extern obj_is_true
     call obj_is_true
+    ERR_M1 .itb_kw_fail
     mov [rbp - ITB_SIGNED], rax
     jmp .itb_kw_next
 
@@ -827,6 +828,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     jnz .ifb_kw_not_signed
     mov rdi, [rbp - IFB_KWVAL]
     call obj_is_true
+    ERR_M1 .ifb_kw_fail
     mov [rbp - IFB_SIGNED], rax
     jmp .ifb_kw_next
 
@@ -1072,6 +1074,8 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     leave
     ret
 
+.ifb_kw_fail:
+    add rsp, 32                 ; the four words parked across a keyword
 .ifb_failed:
     xor eax, eax
     xor edx, edx

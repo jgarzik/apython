@@ -2687,6 +2687,7 @@ DEF_FUNC_BARE op_unary_not
     sub rsp, 8                  ; the second of the two
     push rdi                    ; the operand, for the release below
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov rdi, [rsp]
     mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi

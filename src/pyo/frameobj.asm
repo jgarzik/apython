@@ -560,6 +560,7 @@ DEF_FUNC frameobj_setattr, 48
 .fsa_lines:
     mov rdi, [rbp - FSA_VAL]
     call frameobj_flag_value
+    ERR_M1 .fsa_fail
     mov rcx, [rbp - FSA_SELF]
     mov [rcx + PyFrameObject.f_trace_lines], rax
     jmp .fsa_ok
@@ -567,6 +568,7 @@ DEF_FUNC frameobj_setattr, 48
 .fsa_opcodes:
     mov rdi, [rbp - FSA_VAL]
     call frameobj_flag_value
+    ERR_M1 .fsa_fail
     mov rcx, [rbp - FSA_SELF]
     mov [rcx + PyFrameObject.f_trace_opcodes], rax
     jmp .fsa_ok
@@ -597,19 +599,17 @@ section .text
 
 ;; ============================================================================
 ;; frameobj_flag_value(rdi = a Value, or 0) -> rax = 0 or 1
+;; Fails: -1
 ;;
-;; The truth of one of the two trace flags.  A delete, and an error from
-;; __bool__, both read as false: the flags are advisory and a debugger that
-;; sets one to a broken object should not take the frame down with it.
+;; The truth of one of the two trace flags.  A delete reads as false.  A
+;; __bool__ that raises is the assignment's failure, as CPython's is; reading
+;; it as false left the exception pending behind a store that had succeeded.
 ;; ============================================================================
 DEF_FUNC_LOCAL frameobj_flag_value
     test rdi, rdi
     jz .ffv_false               ; a delete reads as false
     extern obj_is_true
-    call obj_is_true
-    test eax, eax
-    jle .ffv_false              ; an error reads as false; the flag is advisory
-    mov eax, 1
+    call obj_is_true            ; err: its answer is this function's, -1 included
     leave
     ret
 .ffv_false:

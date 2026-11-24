@@ -937,6 +937,7 @@ DEF_FUNC builtin_print, PR_FRAME
     test rdi, rdi
     jz .print_kw_file
     call obj_is_true
+    ERR_M1 .print_sink_failed
     mov [rbp - PR_FLUSH], rax
 
 .print_kw_file:
@@ -1614,9 +1615,14 @@ DEF_FUNC builtin_bool
     mov rdi, [rdi]             ; args[0]
     extern obj_is_true
     call obj_is_true           ; eax = 0 or 1
+    ERR_M1 .bool_raised
     test eax, eax
     jz .bool_ret_false
     RET_TRUE
+    leave
+    ret
+.bool_raised:
+    RET_NULL                    ; __bool__ or __len__ raised
     leave
     ret
 .bool_ret_false:

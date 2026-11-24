@@ -438,14 +438,16 @@ DEF_FUNC list_method_sort, LS_FRAME
     push r11
     push rdi
     mov rdi, [rdi + r11]
-    call obj_is_true
-    mov r10d, eax
+    call obj_is_true            ; err: tested as r10 below, once the registers are back
+    mov r10, rax
     pop rdi
     pop r11
     pop r9
     pop r8
     pop rcx
     pop rax
+    cmp r10, -1                 ; never an answer: __bool__ raised
+    je .ls_kw_raised
     mov [rbp - LS_REV], r10
     jmp .ls_kw_next
 
@@ -694,6 +696,10 @@ DEF_FUNC list_method_sort, LS_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ls_kw_raised:
+    add rsp, 16                 ; the args and nargs parked across the keywords
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    jmp .ls_error_have
 .ls_too_many:
     SET_EXC exc_TypeError_type, "sort() takes no positional arguments"
     jmp .ls_error_have

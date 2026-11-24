@@ -1002,6 +1002,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     push r9
     sub rsp, 8
     call obj_is_true
+    ERR_M1 .fi_fail             ; `leave` drops what is parked; nothing is owned yet
     add rsp, 8
     pop r9
     pop r8
@@ -1018,6 +1019,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rdi, [rbp - FI_ARGS]
     mov rdi, [rdi + 24]
     call obj_is_true
+    ERR_M1 .fi_fail
     mov [rbp - FI_CLOSEFD], rax
 .fi_closefd_parsed:
     mov rax, [rbp - FI_SELF]        ; reload: the parsing above returns in rax
@@ -2610,7 +2612,7 @@ DEF_FUNC iobase_enter_fn, IBE_FRAME
     mov rdi, rax
     push rax
     sub rsp, 8
-    call obj_is_true
+    call obj_is_true            ; err: tested below, once `closed` is released
     add rsp, 8
     pop rdi
     push rax
@@ -2618,6 +2620,7 @@ DEF_FUNC iobase_enter_fn, IBE_FRAME
     DECREF_V rdi, rcx
     add rsp, 8
     pop rax
+    ERR_M1 .fail                ; its __bool__ raised
     test rax, rax
     jnz .ibe_closed
 

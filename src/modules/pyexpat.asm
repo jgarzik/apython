@@ -1097,10 +1097,9 @@ DEF_FUNC px_parse, PP_FRAME
     mov rdi, [rbp - PP_ARGS]
     mov rdi, [rdi + 16]
     call obj_is_true
-    mov [rbp - PP_FINAL], rax
     ; A __bool__ that raised: nothing is fed to a parser with that pending.
-    cmp qword [gs:ThreadState.current_exception], 0
-    jne .pending
+    ERR_M1 .pending
+    mov [rbp - PP_FINAL], rax
 
     mov rcx, [rbp - PP_H]
     mov rdi, [rcx + PxHandle.parser]

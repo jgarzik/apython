@@ -932,7 +932,7 @@ DEF_FUNC bytes_method_splitlines, BSL_FRAME
     jl .bsl_have_keep
     mov rdi, [r15 + 8]
     call obj_is_true
-    movsx rax, eax
+    ERR_M1 .bsl_fail
     mov [rbp - BSL_KEEP], rax
 .bsl_have_keep:
 

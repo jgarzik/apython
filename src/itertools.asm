@@ -1629,7 +1629,7 @@ DEF_FUNC_LOCAL filter_iternext
     mov rdi, r14
     mov esi, r15d
     V_PACK rdi, rsi
-    call obj_is_true
+    call obj_is_true         ; err: tested below, once the result is released
     push rax                 ; save truthiness
 
     ; DECREF result
@@ -1638,6 +1638,7 @@ DEF_FUNC_LOCAL filter_iternext
     DECREF_VAL rdi, rsi
 
     pop rax                  ; restore truthiness
+    ERR_M1 .filter_call_failed  ; __bool__ raised: as the call raising
     test eax, eax
     jnz .filter_accept
 
@@ -1653,6 +1654,7 @@ DEF_FUNC_LOCAL filter_iternext
     mov esi, [rsp]           ; item tag (saved on stack)
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1 .filter_call_failed
     test eax, eax
     jnz .filter_accept
 

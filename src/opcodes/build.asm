@@ -1424,6 +1424,7 @@ DEF_FUNC_BARE op_contains_op
     extern obj_richcompare_bool
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov ecx, eax              ; save truthiness
     pop rdi                    ; payload
     pop rsi                    ; tag
@@ -1706,6 +1707,7 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, rdx
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov r8d, eax
     pop rsi
     pop rdi

@@ -511,6 +511,7 @@ DEF_FUNC builtin_any, ANY_FRAME
     mov rsi, r14
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1 .any_item_raised
     test eax, eax
     jnz .any_found_true
 
@@ -550,6 +551,10 @@ DEF_FUNC builtin_any, ANY_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.any_item_raised:               ; __bool__ raised: the item and the iterator go
+    DECREF_VAL r13, r14
+    mov rdi, rbx
+    call obj_decref
 .any_raised:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx
@@ -623,6 +628,7 @@ DEF_FUNC builtin_all, ALL_FRAME
     mov rsi, r14
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1 .all_item_raised
     test eax, eax
     jz .all_found_false
 
@@ -662,6 +668,10 @@ DEF_FUNC builtin_all, ALL_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.all_item_raised:               ; __bool__ raised: the item and the iterator go
+    DECREF_VAL r13, r14
+    mov rdi, rbx
+    call obj_decref
 .all_raised:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx
@@ -3025,6 +3035,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 
     mov rdi, rax
     call obj_is_true
+    ERR_M1 .imp_fail
     test eax, eax
     jz .imp_no_fromlist
     mov edi, 1
@@ -3064,7 +3075,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     jz .imp_done
     push rax
     mov rdi, rcx
-    call obj_is_true
+    call obj_is_true            ; err: a tuple or a list by now, whose length cannot raise
     mov edx, TAG_PTR            ; obj_is_true clobbers rdx, and the pack below
     test eax, eax               ; branches on it
     pop rax

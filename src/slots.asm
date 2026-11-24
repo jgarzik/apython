@@ -250,8 +250,12 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     push rdx
     mov rdi, rax
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .sth_raised
     add rsp, 16
+    leave
+    ret
+.sth_raised:                    ; not an integer; `leave` drops the parked pair
+    mov rax, -1
     leave
     ret
 .failed:
@@ -451,8 +455,8 @@ DEF_FUNC slot_sq_contains, SC_FRAME
     push rdx
     V_PACK rax, rdx
     mov rdi, rax
-    call obj_is_true
-    mov ecx, eax
+    call obj_is_true            ; err: its -1, with the exception, is this slot's too
+    mov rcx, rax
     pop rdx
     pop rax
     push rcx
@@ -460,7 +464,7 @@ DEF_FUNC slot_sq_contains, SC_FRAME
     mov rdi, rax
     DECREF_V rdi, rsi
     pop rcx
-    mov eax, ecx
+    mov rax, rcx
     leave
     ret
 
@@ -832,10 +836,14 @@ DEF_FUNC slot_length
     push rdx
     mov rdi, rax
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .sl_raised
     add rsp, 16
     test rax, rax
     js .negative
+    leave
+    ret
+.sl_raised:                     ; not an integer; `leave` drops the parked pair
+    mov rax, -1
     leave
     ret
 .negative:

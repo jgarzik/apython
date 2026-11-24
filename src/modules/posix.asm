@@ -404,6 +404,7 @@ DEF_FUNC posix_stat, PST_FRAME
     add r10, r8
     mov rdi, [rdi + r10*8]
     call obj_is_true
+    ERR_M1 .pst_fail            ; `leave` drops what is parked
     mov r11d, eax
     pop rdi
     pop r9
@@ -2448,9 +2449,13 @@ DEF_FUNC posix_set_inheritable, PSI_FRAME
     xor edx, edx
     call sys_fcntl
     POSIX_CHECK_RET rax, 0, .psi_fail
-    mov edx, eax
+    push rax                    ; the flags: a __bool__ clobbers every scratch register
+    sub rsp, 8
     mov rdi, [rbp - PSI_WANT]
     call obj_is_true
+    add rsp, 8
+    pop rdx
+    ERR_M1 .psi_fail
     test eax, eax
     jz .psi_clear_inherit
     and edx, ~FD_CLOEXEC        ; inheritable: clear close-on-exec

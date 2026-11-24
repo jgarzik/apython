@@ -348,7 +348,9 @@ DEF_FUNC_LOCAL abc_getattr
 END_FUNC abc_getattr
 
 ;; ============================================================================
-;; abc_is_abstract(rdi = value Value) -> eax 0/1
+;; abc_is_abstract(rdi = value Value) -> rax 0/1
+;; Fails: -1
+;;   -- the truth of its __isabstractmethod__ could not be asked.
 ;; ============================================================================
 DEF_FUNC_LOCAL abc_is_abstract, 24
     push rbx
@@ -367,7 +369,7 @@ DEF_FUNC_LOCAL abc_is_abstract, 24
     test rdi, rdi
     jz .aia_no
     mov rbx, rdi
-    call obj_is_true
+    call obj_is_true            ; err: its -1, with the exception, is this function's too
     push rax
     mov rdi, rbx
     DECREF_V rdi, rcx
@@ -391,7 +393,8 @@ END_FUNC abc_is_abstract
 ;; and this class did not override.
 ;; -> rax = 0
 ;; Fails: -1
-;; for a name whose __hash__ or __eq__ raises as the set is built.
+;; for a name whose __hash__ or __eq__ raises as the set is built, or an
+;; __isabstractmethod__ whose truth raised, as CPython's does.
 ;; ============================================================================
 CA_CLS   equ 8
 CA_SET   equ 16
@@ -427,6 +430,7 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     jz .ca_own_loop
     mov rdi, r12
     call abc_is_abstract
+    ERR_M1 .ca_fail
     test eax, eax
     jz .ca_own_loop
     mov rdi, [rbp - CA_SET]
@@ -476,13 +480,15 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     push rdx
     mov rdi, rax
     V_PACK rdi, rdx
-    call abc_is_abstract
-    mov ecx, eax
+    call abc_is_abstract        ; err: tested as rcx below, once the attribute is released
+    mov rcx, rax
     pop rdx
     pop rdi
     push rcx
     DECREF_VAL rdi, rdx
     pop rcx
+    cmp rcx, -1                 ; never an answer
+    je .ca_fail
     test ecx, ecx
     jz .ca_names_loop
     mov rdi, [rbp - CA_SET]
@@ -581,7 +587,7 @@ DEF_FUNC_LOCAL abc_call_issubclass, 24
     jz .err
     mov rbx, rax
     mov rdi, rax
-    call obj_is_true
+    call obj_is_true            ; err: a bool, straight from the builtin
     mov rdi, rbx
     mov ebx, eax
     call obj_decref
@@ -749,10 +755,12 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     cmp rbx, rax
     je .hook_undecided
     mov rdi, rbx
-    call obj_is_true
-    mov r12d, eax
+    call obj_is_true            ; err: tested as r12 below, once the answer is released
+    mov r12, rax
     mov rdi, rbx
     call obj_decref
+    cmp r12, -1                 ; never an answer: its __bool__ raised
+    je .error
     test r12d, r12d
     jz .cache_no
     jmp .cache_yes

@@ -230,7 +230,9 @@ DEF_FUNC direntry_repr, DER_FRAME
 END_FUNC direntry_repr
 
 ;; ============================================================================
-;; posixdir_follow_arg(rdi = args, rsi = nargs) -> eax = 1 to follow symlinks
+;; posixdir_follow_arg(rdi = args, rsi = nargs) -> rax = 1 to follow symlinks, 0 not to
+;; Fails: -1
+;;   -- the keyword's __bool__ raised.
 ;;
 ;; follow_symlinks is keyword-only on every DirEntry method and defaults to
 ;; True.  The keyword names arrive in kw_names_pending, which has to be taken
@@ -281,7 +283,7 @@ DEF_FUNC posixdir_follow_arg, PFA_FRAME
     add r10, r8
     mov rdi, [rbp - PFA_ARGS]
     mov rdi, [rdi + r10*8]
-    call obj_is_true
+    call obj_is_true            ; err: the -1 is this function's own answer
     pop r8
     pop rcx
     mov [rbp - PFA_RES], eax
@@ -292,7 +294,7 @@ DEF_FUNC posixdir_follow_arg, PFA_FRAME
     jmp .pfa_loop
 
 .pfa_out:
-    mov eax, [rbp - PFA_RES]
+    movsxd rax, dword [rbp - PFA_RES]
     add rsp, 8
     pop rbx
     leave
@@ -446,11 +448,17 @@ DEF_FUNC direntry_m_is_dir, 8            ; + 1 push = 16, 16-aligned
     push rbx
     mov rbx, [rdi]
     call posixdir_follow_arg
+    ERR_M1 .raised
     mov rdi, rbx
     mov esi, eax
     mov edx, S_IFDIR
     call direntry_kind
     RET_BOOL_RAX
+    pop rbx
+    leave
+    ret
+.raised:
+    xor eax, eax                ; follow_symlinks= could not be asked
     pop rbx
     leave
     ret
@@ -461,11 +469,17 @@ DEF_FUNC direntry_m_is_file, 8            ; + 1 push = 16, 16-aligned
     push rbx
     mov rbx, [rdi]
     call posixdir_follow_arg
+    ERR_M1 .raised
     mov rdi, rbx
     mov esi, eax
     mov edx, S_IFREG
     call direntry_kind
     RET_BOOL_RAX
+    pop rbx
+    leave
+    ret
+.raised:
+    xor eax, eax                ; follow_symlinks= could not be asked
     pop rbx
     leave
     ret
@@ -526,6 +540,7 @@ DEF_FUNC direntry_m_stat, DMS_FRAME
     mov rax, [rdi]                  ; self -- rdi is still the argument array,
     mov [rbp - DMS_SELF], rax       ; which is what reads the keyword below
     call posixdir_follow_arg
+    ERR_M1 .dms_raised
     mov rdi, [rbp - DMS_SELF]
     mov esi, eax
     lea rdx, [rbp - DMS_BUF]
@@ -542,6 +557,10 @@ DEF_FUNC direntry_m_stat, DMS_FRAME
     mov rsi, [rbp - DMS_SELF]
     mov rsi, [rsi + PyDirEntryObject.de_path]
     call set_oserror                ; rax = 0, the OSError pending
+    leave
+    ret
+.dms_raised:
+    xor eax, eax
     leave
     ret
 END_FUNC direntry_m_stat

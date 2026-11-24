@@ -555,6 +555,7 @@ DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
     jz .ifi_no
     extern obj_is_true
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov [rbp - IFI_KEY], rax
     mov rdi, [rbp - IFI_SPEC]
     DECREF_V rdi, rcx

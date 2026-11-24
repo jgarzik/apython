@@ -133,6 +133,7 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push rcx                    ; the jump target
     push rdi                    ; the value, for the release below
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov rdi, [rsp]              ; the value
     mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi
@@ -181,6 +182,7 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push rcx                    ; the jump target
     push rdi                    ; the value, for the release below
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov rdi, [rsp]              ; the value
     mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi

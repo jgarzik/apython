@@ -2400,11 +2400,13 @@ DEF_FUNC object_method_ne
     mov rdi, rax
     V_PACK rdi, rdx
     extern obj_is_true
-    call obj_is_true
-    mov ebx, eax
+    call obj_is_true            ; err: tested as rbx below, once the answer is released
+    mov rbx, rax
     pop rdx
     pop rdi
     DECREF_VAL rdi, rdx
+    cmp rbx, -1                 ; never an answer: __bool__ raised
+    je .omn_failed
     test ebx, ebx
     jz .omn_true
     lea rax, [rel bool_false]
