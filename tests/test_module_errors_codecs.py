@@ -500,3 +500,84 @@ err("decompressobj.decompress(garbage)", _z_corrupt_obj, _msg=True)
 err("decompressobj.decompress(str max)", zlib.decompressobj().decompress, _zdata, "x")
 # And the stream still works after all of that.
 print(zlib.decompress(_zdata) == b"some data to compress " * 50, zlib.crc32(b"abc"), zlib.adler32(b"abc"))
+
+# --- bz2 -----------------------------------------------------------------
+import bz2
+
+print("== bz2")
+_bh = None
+try:
+    import _bz2core
+    _bh = _bz2core.stream_new(1, 9)
+except ImportError:
+    pass
+core("bz2 stream_new(1 arg)", "_bz2core", "stream_new", 0)
+core("bz2 stream_new(str)", "_bz2core", "stream_new", "x", 9)
+core("bz2 stream_new(str level)", "_bz2core", "stream_new", 0, "x")
+core("bz2 stream_new(bad level)", "_bz2core", "stream_new", 0, 99)
+core("bz2 stream_feed(3 args)", "_bz2core", "stream_feed", _bh, b"", 0)
+core("bz2 stream_feed(dead)", "_bz2core", "stream_feed", 99999, b"", 0, -1)
+core("bz2 stream_feed(str handle)", "_bz2core", "stream_feed", "x", b"", 0, -1)
+core("bz2 stream_feed(str action)", "_bz2core", "stream_feed", _bh, b"", "x", -1)
+core("bz2 stream_feed(str max)", "_bz2core", "stream_feed", _bh, b"", 0, "x")
+core("bz2 stream_feed(int data)", "_bz2core", "stream_feed", _bh, 5, 0, -1)
+core("bz2 stream_feed(strided view)", "_bz2core", "stream_feed", _bh, memoryview(b"abcdef")[::2], 0, -1)
+core("bz2 stream_feed(garbage)", "_bz2core", "stream_feed", _bh, b"this is not a bz2 stream" * 40, 0, -1)
+core("bz2 stream_state()", "_bz2core", "stream_state")
+core("bz2 stream_state(dead)", "_bz2core", "stream_state", 99999)
+core("bz2 stream_state(str)", "_bz2core", "stream_state", "x")
+core("bz2 stream_free()", "_bz2core", "stream_free")
+core("bz2 stream_free(str)", "_bz2core", "stream_free", "x")
+
+_bdata = bz2.compress(b"some data to compress " * 50)
+
+
+def _b_truncated():
+    bz2.decompress(_bdata[:30])
+
+
+def _b_corrupt():
+    bz2.decompress(_bdata[:20] + b"\xff\xff\xff\xff" + _bdata[24:])
+
+
+def _b_after_flush():
+    c = bz2.BZ2Compressor()
+    c.compress(b"abc")
+    c.flush()
+    c.compress(b"more")
+
+
+def _b_flush_twice():
+    c = bz2.BZ2Compressor()
+    c.flush()
+    c.flush()
+
+
+def _b_after_eof():
+    d = bz2.BZ2Decompressor()
+    d.decompress(_bdata)
+    d.decompress(b"more")
+
+
+def _b_garbage_obj():
+    bz2.BZ2Decompressor().decompress(b"\x00" * 1000)
+
+
+err("bz2.compress()", bz2.compress)
+err("bz2.compress(str)", bz2.compress, "text")
+err("bz2.compress(bad level)", bz2.compress, b"abc", 99, _msg=True)
+err("bz2.decompress(garbage)", bz2.decompress, b"not a bz2 stream at all", _msg=True)
+err("bz2.decompress(truncated)", _b_truncated, _msg=True)
+err("bz2.decompress(corrupt)", _b_corrupt)
+err("bz2.decompress(str)", bz2.decompress, "text")
+err("BZ2Compressor(0)", bz2.BZ2Compressor, 0, _msg=True)
+err("BZ2Compressor(str)", bz2.BZ2Compressor, "x")
+err("BZ2Compressor.compress(str)", bz2.BZ2Compressor().compress, "text")
+err("BZ2Compressor.compress(after flush)", _b_after_flush, _msg=True)
+err("BZ2Compressor.flush(twice)", _b_flush_twice, _msg=True)
+err("BZ2Decompressor.decompress(str)", bz2.BZ2Decompressor().decompress, "text")
+err("BZ2Decompressor.decompress(garbage)", _b_garbage_obj, _msg=True)
+err("BZ2Decompressor.decompress(after eof)", _b_after_eof, _msg=True)
+err("BZ2Decompressor.decompress(str max)", bz2.BZ2Decompressor().decompress, _bdata, "x")
+err("BZ2File(bad mode)", bz2.BZ2File, "/tmp/x.bz2", "z")
+print(bz2.decompress(_bdata) == b"some data to compress " * 50)
