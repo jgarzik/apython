@@ -167,6 +167,7 @@ DEF_FUNC_BARE op_check_exc_match
 
     ; Call exc_isinstance(exc, type)
     call exc_isinstance
+    ERR_M1_JUMP
     ; eax = 0 or 1
 
     ; DECREF the type
@@ -224,6 +225,7 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     ; Case 1/2: isinstance(exc_value, match_type)?
     ; rdi = exc, rsi = type already set
     call exc_isinstance
+    ERR_M1_JUMP
     test eax, eax
     jz .cem_check_group_split
 
@@ -287,6 +289,7 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     mov rdi, [rbp - CEM_EXC]
     mov rsi, [rbp - CEM_MTYPE]
     call eg_split
+    ERR_PENDING_JUMP
     ; rax = match_eg (or NULL), rdx = rest_eg (or NULL)
     mov [rbp - CEM_MATCH], rax
     mov [rbp - CEM_REST], rdx
@@ -332,6 +335,7 @@ DEF_FUNC op_check_eg_match, CEM_FRAME
     mov rdi, [rbp - CEM_EXC]
     mov rsi, [rbp - CEM_MTYPE]
     call eg_split
+    ERR_PENDING_JUMP
     ; rax = match_eg (or NULL), rdx = rest_eg (or NULL)
     mov [rbp - CEM_MATCH], rax
     mov [rbp - CEM_REST], rdx

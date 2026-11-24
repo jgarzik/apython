@@ -1197,7 +1197,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     extern exc_AttributeError_type
     lea rsi, [rel exc_AttributeError_type]
     extern exc_isinstance
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .rna_pending_raise
     mov rdi, [rbx + PyExceptionObject.exc_dict]
@@ -1475,7 +1475,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov rsi, rax
     mov ecx, TAG_PTR                    ; rdx is already a Value
     extern exc_setattr
-    call exc_setattr
+    call exc_setattr        ; err: no field name, so no refusal
     mov rdi, [rbp - RSA_NAME]
     call obj_decref                     ; str_intern_cstr's; dict_set took one
 .rsa_done:

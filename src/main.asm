@@ -687,7 +687,7 @@ DEF_FUNC main, 8
     lea rsi, [rel exc_SystemExit_type]
     extern exc_SystemExit_type
     extern exc_isinstance
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     pop rdi
     test eax, eax
     jnz .system_exit

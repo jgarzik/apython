@@ -693,7 +693,7 @@ DEF_FUNC_BARE op_end_async_for
                                ; handler, so a call needs an even push list
     push rcx                   ; save arg
     mov rsi, rdx
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     pop rcx                    ; restore arg
     add rsp, 8
     test eax, eax

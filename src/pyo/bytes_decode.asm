@@ -294,7 +294,7 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     mov rsi, [rsp + 8]
     mov rdx, [rsp + 16]
     xor ecx, ecx
-    call exc_setattr
+    call exc_setattr        ; err: no field name, so no refusal
     add rsp, 8
     pop rdi
     call obj_decref             ; the key

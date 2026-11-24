@@ -431,7 +431,7 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov rsi, rax
     mov rdx, [r12]
     mov ecx, TAG_PTR
-    call exc_setattr
+    call exc_setattr            ; err: none of the five is a field name
     pop rdi
     call obj_decref             ; exc_setattr's dict_set took its own ref
     add rbx, 8

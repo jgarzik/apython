@@ -1119,7 +1119,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     extern exc_isinstance
     mov rdi, [gs:ThreadState.current_exception]
     lea rsi, [rel exc_LookupError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .trn_fail                    ; not a lookup miss: let it out
     mov rdi, [gs:ThreadState.current_exception]
