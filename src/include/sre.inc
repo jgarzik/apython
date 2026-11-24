@@ -196,7 +196,13 @@ struc SRE_State
     ; that allocates has to say so; sre_state_fini frees only what it owns.
     ; A qword rather than a dword because the zero loop clears
     ; SRE_State_size/8 qwords, and an odd tail would go unzeroed.
-    .owns_cpbuf:    resq 1  ; +152: 1 = this state must free codepoint_buf
+    .owns_cpbuf:    resd 1  ; +152: 1 = this state must free codepoint_buf
+    ; Set when the matcher raised (the recursion limit).  Every sre_match
+    ; entered or left after that answers "no match", so the error climbs out
+    ; through the ordinary failure paths -- which are the ones that free the
+    ; saved marks and the repeat contexts -- and sre_search and the two
+    ; direct callers read it to tell a raise from a miss.
+    .error:         resd 1  ; +156: 1 = an exception is pending from the match
     .cpcache:       resq 1  ; +160: the SRE_CpCache this state BORROWED from,
                             ;       or 0.  sre_state_fini releases the borrow
                             ;       so the cache knows when it may evict.

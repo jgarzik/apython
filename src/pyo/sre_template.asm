@@ -24,7 +24,7 @@
 %include "object.inc"
 %include "sre.inc"
 
-extern eval_exception_unwind
+extern set_exception
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -38,8 +38,6 @@ extern str_method_join
 extern sre_match_get_group_str
 extern none_singleton
 extern obj_as_index
-extern raise_exception
-extern raise_exception_obj
 extern exc_IndexError_type
 extern exc_ValueError_type
 extern exc_MemoryError_type
@@ -54,9 +52,10 @@ extern v_int_bias
 section .text
 
 ;; ============================================================================
-;; tp_error(rdi = the message prefix, rsi = extra bytes, rdx = a number, a
-;;          length or a character, ecx = how to finish the message,
-;;          r8 = the template, r9 = the position) -- raises, and does not return
+;; tp_set_error(rdi = the message prefix, rsi = extra bytes, rdx = a number, a
+;;              length or a character, ecx = how to finish the message,
+;;              r8 = the template, r9 = the position)
+;;   -> rax = 0, always, with the exception pending
 ;;
 ;;   ecx = 0   the prefix alone                    "missing <"
 ;;   ecx = 1   the prefix and rdx as a number      "invalid group reference 99"
@@ -83,7 +82,7 @@ TPE_ARGS  equ 96             ; three Values
 TPE_BUF   equ 96 + 256
 TPE_FRAME equ TPE_BUF + 8     ; + 1 push = TPE_BUF + 16
 
-DEF_FUNC_LOCAL tp_error, TPE_FRAME
+DEF_FUNC_LOCAL tp_set_error, TPE_FRAME
     push rbx
     mov [rbp - TPE_MODE], rcx
     mov [rbp - TPE_TMPL], r8
@@ -231,7 +230,7 @@ DEF_FUNC_LOCAL tp_error, TPE_FRAME
     mov rdi, [rbp - TPE_MSG]
     call obj_decref
     pop rdi
-    call raise_exception_obj
+    jmp .tpe_install
 
 .tpe_index:
     lea rdi, [rel exc_IndexError_type]
@@ -242,7 +241,7 @@ DEF_FUNC_LOCAL tp_error, TPE_FRAME
     mov rdi, [rbp - TPE_MSG]
     call obj_decref
     pop rdi
-    call raise_exception_obj
+    jmp .tpe_install
 
 .tpe_plain:
     ; No `re` in sys.modules, or it has no error: the message on its own.
@@ -254,11 +253,18 @@ DEF_FUNC_LOCAL tp_error, TPE_FRAME
     mov rdi, [rbp - TPE_MSG]
     call obj_decref
     pop rdi
-    call raise_exception_obj
-END_FUNC tp_error
+.tpe_install:                   ; rdi = the exception, owned
+    extern exc_install
+    call exc_install
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC tp_set_error
 
 ;; ============================================================================
 ;; sre_template_parse(rdi = the template, rsi = pattern) -> rax = a list
+;; Fails: 0
 ;;
 ;; Literal runs become str -- or bytes, for a bytes template -- elements, and
 ;; group references become int elements; element 0 is always a literal.
@@ -266,8 +272,8 @@ END_FUNC tp_error
 ;; difference between the two: the escape syntax is identical, and a bytes
 ;; template is scanned as bytes because that is what it already does.  Group
 ;; references are checked against the pattern whatever the kinds.
-;; Raises rather than answering NULL: every caller is a builtin method with a
-;; live frame above it.
+;; A template that does not parse is re.error -- or IndexError, for a group
+;; name the pattern does not have -- pending, with nothing left allocated.
 ;; ============================================================================
 TP_TMPL   equ 8
 TP_PAT    equ 16
@@ -671,7 +677,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index           ; the index may be a heap int
-    ERR_M1_JUMP
+    ERR_M1 .tp_raised
     call .tp_addgroup
     inc qword [rbp - TP_POS]
     jmp .tp_loop
@@ -784,7 +790,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov ecx, 1
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_ERRPOS]
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_bad_char:
     call .tp_release
@@ -795,7 +802,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov ecx, 2
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_ERRPOS]
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_unknown_name:
     ; The one CPython leaves as an IndexError, and the one with no position.
@@ -807,7 +815,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov ecx, 2
     xor r8d, r8d                ; no template: an IndexError, as CPython has it
     xor r9d, r9d
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_bad_name:
     call .tp_release
@@ -817,7 +826,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     xor ecx, ecx
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_ERRPOS]
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_missing_lt:
     call .tp_release
@@ -828,7 +838,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_ERRPOS]
     inc r9                      ; just past the 'g'
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_unterminated:
     call .tp_release
@@ -838,7 +849,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     xor ecx, ecx
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_ERRPOS]
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_trailing:
     ; rcx is one past the trailing backslash, which is what the message points
@@ -852,7 +864,8 @@ DEF_FUNC sre_template_parse, TP_FRAME
     xor ecx, ecx
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_SCRATCH]
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 
 .tp_bad_escape:
     ; al is the escape character; the position is the backslash before it.
@@ -866,15 +879,24 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov r8, [rbp - TP_TMPL]
     mov r9, [rbp - TP_ERRPOS]
     dec r9
-    call tp_error
+    call tp_set_error
+    jmp .tp_fail
 .tp_oom:
     call .tp_release
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+.tp_fail:                       ; the buffer and the list are released
+    xor eax, eax
+    leave
+    ret
+.tp_raised:
+    call .tp_release
+    jmp .tp_fail
 END_FUNC sre_template_parse
 
 
 ;; ============================================================================
 ;; sre_template_expand(rdi = a parsed template, rsi = a match) -> rax = str
+;; Fails: 0
 ;;
 ;; A group that did not match contributes nothing, as in expand_template.
 ;; The pieces are joined in the TEMPLATE's kind -- that of its element 0,
@@ -944,10 +966,11 @@ DEF_FUNC sre_template_expand, TE_FRAME
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index           ; boxed whenever INT_STRESS=1 is on
-    ERR_M1_JUMP
+    ERR_M1 .te_fail
     mov rsi, rax
     mov rdi, [rbp - TE_MATCH]
     call sre_match_get_group_str
+    ERR_NULL .te_fail
     ; None is an ordinary singleton and so arrives with TAG_PTR like any other
     ; pointer -- the tag says nothing about which object it is.
     lea rcx, [rel none_singleton]
@@ -989,12 +1012,12 @@ DEF_FUNC sre_template_expand, TE_FRAME
     cmp qword [rbp - TE_ISBYTES], 0
     jne .te_join_bytes
     call str_method_join
-    ERR_NULL_JUMP
+    ERR_NULL .te_fail
     jmp .te_joined
 .te_join_bytes:
     extern bytes_method_join
     call bytes_method_join
-    ERR_NULL_JUMP
+    ERR_NULL .te_fail
 .te_joined:
     add rsp, 16
     V_UNPACK rax, rdx
@@ -1009,13 +1032,23 @@ DEF_FUNC sre_template_expand, TE_FRAME
     ret
 
 .te_oom:
+    SET_EXC exc_MemoryError_type, "out of memory"
+.te_fail:
+    ; The exception is pending; the pieces gathered so far and the separator
+    ; are this frame's.
     mov rdi, [rbp - TE_OUT]
     test rdi, rdi
-    jz .te_oom_raise
-    mov qword [rbp - TE_OUT], 0
+    jz .te_fail_sep
     call obj_decref
-.te_oom_raise:
-    RAISE exc_MemoryError_type, "out of memory"
+.te_fail_sep:
+    mov rdi, [rbp - TE_SEP]
+    test rdi, rdi
+    jz .te_fail_out
+    call obj_decref
+.te_fail_out:
+    xor eax, eax
+    leave
+    ret
 
 section .rodata
 te_nothing: db 0

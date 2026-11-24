@@ -6,6 +6,7 @@
 %include "object.inc"
 %include "sre.inc"
 
+extern set_exception
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
@@ -19,7 +20,6 @@ extern dict_set
 extern dict_get
 extern tuple_new
 extern none_singleton
-extern raise_exception
 extern exc_TypeError_type
 extern exc_IndexError_type
 extern str_type
@@ -286,7 +286,7 @@ DEF_FUNC sre_match_repr, MRP_FRAME
     ; what makes a bytes subject answer b'...' rather than a decoded str.
     mov rdi, [rbp - MRP_SELF]
     xor esi, esi
-    call sre_match_get_group_str
+    call sre_match_get_group_str    ; err: group 0 always exists
     test edx, edx
     jz .mrp_no_text
     cmp edx, TAG_PTR
@@ -393,7 +393,9 @@ END_FUNC match_data_base
 ;; ============================================================================
 ;; Helper: get substring for a group index
 ;; sre_match_get_group_str(SRE_MatchObject* self, i64 group_idx) -> (rax, edx)
-;; Returns string for the group, or (0, TAG_NONE) if unmatched.
+;; Fails: 0
+;; Returns string for the group, or None if unmatched.  The one failure is an
+;; index the pattern has no group for: IndexError, and (0, 0).
 ;; ============================================================================
 DEF_FUNC sre_match_get_group_str
     push rbx
@@ -518,13 +520,22 @@ DEF_FUNC sre_match_get_group_str
     ret
 
 .group_out_of_range:
-    RAISE exc_IndexError_type, "no such group"
+    SET_EXC exc_IndexError_type, "no such group"
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_match_get_group_str
 
 ;; ============================================================================
-;; sre_match_resolve_group_idx(rdi=self, rsi=payload, edx=tag) -> rsi=int_idx
+;; sre_match_resolve_group_idx(rdi=self, rsi=payload, edx=tag)
+;;   -> rsi = int_idx, rax = 0
+;; Fails: -1
 ;; Resolve a group argument: SmallInt passes through, string does dict lookup.
-;; On error (no such group), raises IndexError.
+;; No such group is IndexError.
 ;; ============================================================================
 DEF_FUNC sre_match_resolve_group_idx
     ; SmallInt → return as-is
@@ -552,16 +563,17 @@ DEF_FUNC sre_match_resolve_group_idx
     mov rsi, rax
     pop rdi                     ; restore self (discard)
 .rgi_done:
+    xor eax, eax
     leave
     ret
 
 .rgi_no_group_pop:
-    pop rdi
-.rgi_no_group_pop2:
-    RAISE exc_IndexError_type, "no such group"
-
+.rgi_no_group_pop2:             ; self is still pushed; leave drops it
 .rgi_type_error:
-    RAISE exc_IndexError_type, "no such group"
+    SET_EXC exc_IndexError_type, "no such group"
+    mov rax, -1
+    leave
+    ret
 END_FUNC sre_match_resolve_group_idx
 
 ;; ============================================================================
@@ -571,6 +583,8 @@ END_FUNC sre_match_resolve_group_idx
 ;; group(n) returns nth group.
 ;; group(a, b, ...) returns tuple.
 ;; ============================================================================
+MG_BASE  equ 32             ; rsp after the prologue: 8 + 3 pushes
+MG_TUPLE equ 40             ; the result tuple of the several-group form
 DEF_FUNC sre_match_group_method, 8            ; 3 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -607,16 +621,19 @@ DEF_FUNC sre_match_group_method, 8            ; 3 pushes, so rsp is 16-aligned
     V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
+    ERR_M1 .group_fail_tuple
     ; rsi = resolved int index
     mov rdi, rbx
     call sre_match_get_group_str
+    ERR_NULL .group_fail_tuple
     ; rax = payload, edx = tag
     pop r13
     pop rcx
     ; Set in tuple: tuple.ob_item[ecx] = (rax, edx)
     mov rdi, [rsp]             ; tuple (on stack from push before loop)
     ; INCREF if needed
-    INCREF_VAL rax, rdx
+    ; No INCREF: get_group_str hands over a reference of its own, and the
+    ; tuple slot takes it.  One taken on top leaked every group asked for.
     ; Write payload and tag
     mov rsi, [rdi + PyTupleObject.ob_item]       ; payloads
     V_PACK rax, rdx
@@ -637,7 +654,7 @@ DEF_FUNC sre_match_group_method, 8            ; 3 pushes, so rsp is 16-aligned
 .group_zero:
     mov rdi, rbx
     xor esi, esi               ; group 0
-    call sre_match_get_group_str
+    call sre_match_get_group_str    ; err: group 0 always exists
     pop r13
     pop r12
     pop rbx
@@ -650,14 +667,29 @@ DEF_FUNC sre_match_group_method, 8            ; 3 pushes, so rsp is 16-aligned
     V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
+    ERR_M1 .group_fail
     ; rsi = resolved int index
     mov rdi, rbx
-    call sre_match_get_group_str
+    call sre_match_get_group_str    ; err: its (0, 0) is this method's own
     pop r13
     pop r12
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.group_fail_tuple:
+    ; The tuple being filled is this frame's, pushed just below the saved
+    ; registers; the slots not reached yet are zero.
+    mov rdi, [rbp - MG_TUPLE]
+    lea rsp, [rbp - MG_BASE]
+    call obj_decref
+.group_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC sre_match_group_method
 
@@ -714,7 +746,7 @@ DEF_FUNC sre_match_groups_method, GS_FRAME
     push rcx
     mov rdi, rbx
     mov rsi, rcx
-    call sre_match_get_group_str
+    call sre_match_get_group_str    ; err: 1..groups, all in range
     ; If None and default was given, substitute default
     IS_NONE rax, rcx
     jne .groups_use_val
@@ -784,6 +816,7 @@ DEF_FUNC sre_match_start_method, 8            ; 1 pushes, so rsp is 16-aligned
     V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
+    ERR_M1 .start_fail
     ; rsi = resolved int index
     jmp .start_resolved
 .start_default:
@@ -806,7 +839,12 @@ DEF_FUNC sre_match_start_method, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .start_error:
-    RAISE exc_IndexError_type, "no such group"
+    SET_EXC exc_IndexError_type, "no such group"
+.start_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sre_match_start_method
 
 ;; ============================================================================
@@ -828,6 +866,7 @@ DEF_FUNC sre_match_end_method, 8            ; 1 pushes, so rsp is 16-aligned
     V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
+    ERR_M1 .end_fail
     ; rsi = resolved int index
     jmp .end_resolved
 .end_default:
@@ -849,7 +888,12 @@ DEF_FUNC sre_match_end_method, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .end_error:
-    RAISE exc_IndexError_type, "no such group"
+    SET_EXC exc_IndexError_type, "no such group"
+.end_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sre_match_end_method
 
 ;; ============================================================================
@@ -871,6 +915,7 @@ DEF_FUNC sre_match_span_method
     V_UNPACK rsi, rdx
     mov rdi, rbx
     call sre_match_resolve_group_idx
+    ERR_M1 .span_fail
     mov r12, rsi               ; resolved int index
 .span_default:
 
@@ -912,7 +957,13 @@ DEF_FUNC sre_match_span_method
     ret
 
 .span_error:
-    RAISE exc_IndexError_type, "no such group"
+    SET_EXC exc_IndexError_type, "no such group"
+.span_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_match_span_method
 
 ;; ============================================================================
@@ -990,7 +1041,7 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
 
     ; sre_match_get_group_str(self, group_idx)
     mov rdi, [rbp - GD_SELF]
-    call sre_match_get_group_str
+    call sre_match_get_group_str    ; err: groupindex names only real groups
     ; rax = val payload, edx = val tag
     ; If None, substitute default.
     ;
@@ -1091,12 +1142,13 @@ DEF_FUNC sre_match_expand_method, EX_FRAME
     mov rsi, [rax + SRE_MatchObject.pattern]
     extern sre_template_parse
     call sre_template_parse
+    ERR_NULL .ex_fail
     mov [rbp - EX_TMPL], rax
 
     mov rdi, rax
     mov rsi, [rbp - EX_SELF]
     extern sre_template_expand
-    call sre_template_expand
+    call sre_template_expand    ; err: its 0 is returned, once the template is released
     mov [rbp - EX_SELF], rax
     mov rdi, [rbp - EX_TMPL]
     call obj_decref
@@ -1107,9 +1159,13 @@ DEF_FUNC sre_match_expand_method, EX_FRAME
     ret
 
 .ex_type:
-    RAISE exc_TypeError_type, "expected str instance"
+    FAIL exc_TypeError_type, "expected str instance", .ex_fail
 .ex_args:
-    RAISE exc_TypeError_type, "expand() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "expand() takes exactly one argument"
+.ex_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sre_match_expand_method
 
 ;; ============================================================================
@@ -1168,7 +1224,7 @@ DEF_FUNC sre_match_subscript
 .ms_int_key:
     mov rdi, rbx               ; self
     mov rsi, r12               ; group index
-    call sre_match_get_group_str
+    call sre_match_get_group_str    ; err: its (0, 0) is this slot's own
 
     pop r12
     pop rbx
@@ -1177,10 +1233,16 @@ DEF_FUNC sre_match_subscript
     ret
 
 .ms_no_such_group:
-    RAISE exc_IndexError_type, "no such group"
+    FAIL exc_IndexError_type, "no such group", .ms_fail
 
 .ms_type_error:
-    RAISE exc_TypeError_type, "group index must be int or string"
+    SET_EXC exc_TypeError_type, "group index must be int or string"
+.ms_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_match_subscript
 
 ;; ============================================================================
