@@ -45,7 +45,7 @@ extern ap_malloc
 extern ap_realloc
 extern ap_free
 extern v_int_bias
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern type_check_is_class
 
@@ -339,6 +339,7 @@ END_FUNC subclass_unregister
 ;; against a subclass of the ABC rather than against the ABC itself?" -- has no
 ;; way to ask without it, so issubclass(X, A) answered False for an X
 ;; registered against a subclass of A.
+;; Fails: 0
 ;; ============================================================================
 TMS_LIST  equ 8
 TMS_SUBS  equ 16
@@ -396,7 +397,14 @@ DEF_FUNC type_method_subclasses, TMS_FRAME
     ret
 
 .tms_args:
-    RAISE exc_TypeError_type, "__subclasses__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__subclasses__() takes no arguments"
+    jmp .tms_fail
 .tms_type:
-    RAISE exc_TypeError_type, "__subclasses__() requires a type"
+    SET_EXC exc_TypeError_type, "__subclasses__() requires a type"
+.tms_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC type_method_subclasses
