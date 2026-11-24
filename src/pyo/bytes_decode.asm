@@ -55,7 +55,8 @@ extern raise_type_error_with_name
 section .text
 
 ;; ============================================================================
-;; bytes_check_errors_type(rdi = the errors= Value) -> returns, or raises
+;; bytes_check_errors_type(rdi = the errors= Value) -> rax = 0
+;; Fails: -1
 ;;
 ;; Absent is "strict"; anything present must be a str, None included --
 ;; which is what CPython requires here, unlike open()'s errors=.
@@ -82,16 +83,22 @@ DEF_FUNC bytes_check_errors_type
     call bd_append_typename
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bd_msgbuf]
-    call raise_exception
-    ud2
+    extern set_exception
+    call set_exception
+    mov rax, -1
+    leave
+    ret
 .bcet_ok:
+    xor eax, eax
     leave
     ret
 END_FUNC bytes_check_errors_type
 
 ;; ============================================================================
-;; bytes_raise_decode_error(rdi = the bytes, rsi = position, rdx = reason,
-;;   rcx = span, r8 = codec name) -> does not return; raises UnicodeDecodeError
+;; bytes_set_decode_error(rdi = the bytes, rsi = position, rdx = reason,
+;;   rcx = span, r8 = codec name) -> rax = 0, with the UnicodeDecodeError
+;;   pending.  It only ever fails, so it carries no Fails: line; a caller goes
+;;   to its own error exit.
 ;;
 ;; "'utf-8' codec can't decode byte 0xff in position 3: invalid start byte" --
 ;; CPython's wording, built here because str() of a UnicodeDecodeError does
@@ -105,7 +112,7 @@ BRD_CODEC equ 32
 BRD_REASON equ 40
 BRD_FRAME equ 56            ; + 1 push = 64, 16-aligned
 
-DEF_FUNC bytes_raise_decode_error, BRD_FRAME
+DEF_FUNC bytes_set_decode_error, BRD_FRAME
     push rbx
     mov [rbp - BRD_POS], rsi
     mov [rbp - BRD_SPAN], rcx
@@ -244,8 +251,12 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
 
     add rsp, 8
     pop rdi
-    extern raise_exception_obj
-    jmp raise_exception_obj     ; takes the reference; does not return
+    extern exc_install
+    call exc_install            ; takes the reference
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 
 ;; .brd_reason_text -- rbx = the reason id -> rsi = the text
 .brd_reason_text:
@@ -301,7 +312,7 @@ DEF_FUNC bytes_raise_decode_error, BRD_FRAME
     pop rdi
     DECREF_V rdi, rcx           ; exc_setattr took its own reference
     ret
-END_FUNC bytes_raise_decode_error
+END_FUNC bytes_set_decode_error
 
 ;; ============================================================================
 ;; bd_append_typename(rdi = dest, rsi = a Value) -> rax = the new NUL
@@ -583,6 +594,7 @@ END_FUNC bytes_utf8_check
 ;; ============================================================================
 ;; _bytes_decode_impl(rdi = args, rsi = nargs) -> rax = a str Value,
 ;;   or 0 with an exception set -- b.decode([encoding[, errors]])
+;; Fails: 0
 ;;
 ;; utf-8 is the bytes as they stand; ascii is that with a range check; latin-1
 ;; turns each byte into a code point, which is where the byte string and the
@@ -616,6 +628,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     call bytes_check_errors_type
     add rsp, 8
     pop rdi
+    ERR_M1 .bd_fail
 
     mov rbx, [rdi]
     mov [rbp - BD_SELF], rbx
@@ -700,8 +713,8 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov rdx, [rbp - BD_WHY]
     mov rcx, [rbp - BD_SPAN]
     xor r8d, r8d                ; the default codec name, 'utf-8'
-    call bytes_raise_decode_error
-    ud2
+    call bytes_set_decode_error
+    jmp .bd_fail
 
 .bd_utf8_fixup:
     ; ignore drops each offending byte, replace puts U+FFFD where it was, so
@@ -787,7 +800,14 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ret
 
 .bd_nomem:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    ; Every refusal arrives here before anything has been built.
+.bd_fail:
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 .bd_python:
     ; Everything this file cannot do itself: an encoding the registry has to
     ; find, and an error handler that is not one of the three built in here.
@@ -955,8 +975,8 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     call bd_append_typename
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bd_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .bd_fail
 .bd_empty:
     CSTRING rdi, ""
     xor esi, esi
@@ -970,7 +990,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ret
 
 .bd_too_many:
-    RAISE exc_TypeError_type, "decode() takes at most 2 arguments"
+    FAIL exc_TypeError_type, "decode() takes at most 2 arguments", .bd_fail
 
 .bd_not_decodable:
     ; "'ascii' codec can't decode byte 0xff in position 2: ordinal not in
@@ -981,8 +1001,8 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     mov edx, 3                  ; "ordinal not in range(128)"
     mov ecx, 1
     lea r8, [rel bd_codec_ascii]
-    call bytes_raise_decode_error
-    ud2
+    call bytes_set_decode_error
+    jmp .bd_fail
 END_FUNC _bytes_decode_impl
 
 section .rodata

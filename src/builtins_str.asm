@@ -259,7 +259,7 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     jmp .str_not_bytes
 
 .str_call_bytes:
-    call _bytes_decode_impl
+    call _bytes_decode_impl   ; err: the 0 is this function's own answer
     jmp .str_done
 .str_call_bytearray:
     call ba_shared_decode
@@ -282,7 +282,7 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     push rax
     sub rsp, 8
     lea rdi, [rbp - SB_ARGV]
-    call _bytes_decode_impl
+    call _bytes_decode_impl   ; err: the 0 is this function's own answer
     add rsp, 8
     pop rdi
     push rax
