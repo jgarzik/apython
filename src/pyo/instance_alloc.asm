@@ -268,7 +268,8 @@ DEF_FUNC str_sub_new, SSN_FRAME
 END_FUNC str_sub_new
 
 ;; ============================================================================
-;; tuple_sub_fill(rdi = instance, rsi = args, rdx = nargs)
+;; tuple_sub_fill(rdi = instance, rsi = args, rdx = nargs) -> rax = 0
+;; Fails: -1
 ;;
 ;; A tuple is immutable and has no __init__, so a subclass cannot be filled
 ;; after the fact the way list, dict and set are -- the contents have to be
@@ -296,6 +297,8 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     mov edx, 1
     pop rsi
     call tuple_type_call
+    test rax, rax
+    jz .tsf_fail                ; not iterable, or iterating it raised
     mov [rbp - TSF_TMP], rax
     mov rbx, rax
     mov r12, [rbx + PyTupleObject.ob_size]
@@ -330,11 +333,16 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     call obj_decref
 
 .tsf_done:
+    xor eax, eax
+.tsf_out:
     pop r13
     pop r12
     pop rbx
     leave
     ret
+.tsf_fail:
+    mov rax, -1
+    jmp .tsf_out
 END_FUNC tuple_sub_fill
 
 DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned

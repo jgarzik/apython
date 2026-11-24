@@ -1448,6 +1448,7 @@ DEF_FUNC type_call
     mov rsi, r12
     mov rdx, r13
     call tuple_sub_fill
+    ERR_M1_JUMP
     jmp .lookup_init
 
 .new_found:

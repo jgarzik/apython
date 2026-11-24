@@ -1586,6 +1586,8 @@ END_FUNC frozenset_dunder_hash
 
 ;; ============================================================================
 ;; set_sub_fill(rdi = the new instance, rsi = the args after cls, rdx = count)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; Fills a frozenset subclass from its constructor argument.  frozenset is
 ;; immutable, so -- exactly like tuple, which container_dunder_new already
@@ -1607,15 +1609,16 @@ DEF_FUNC set_sub_fill, SSF_FRAME
     lea rdi, [rbp - SSF_ARGS]
     mov esi, 2
     call set_method_update      ; returns None, which is ours to release
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .ssf_done
-    cmp edx, TAG_PTR
-    jne .ssf_done
+    ERR_NULL .ssf_fail
     mov rdi, rax
     call obj_decref
 
 .ssf_done:
+    xor eax, eax
+    leave
+    ret
+.ssf_fail:
+    mov rax, -1                 ; not iterable, or iterating it raised
     leave
     ret
 END_FUNC set_sub_fill

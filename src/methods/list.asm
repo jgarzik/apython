@@ -1104,6 +1104,7 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [r12 + 8]          ; the arguments after cls
     lea rdx, [r13 - 1]
     call tuple_sub_fill
+    ERR_M1 .cdn_fill_failed
     pop rax
     jmp .cdn_done
 
@@ -1125,6 +1126,7 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [r12 + 8]          ; the arguments after cls
     lea rdx, [r13 - 1]
     call set_sub_fill
+    ERR_M1 .cdn_fill_failed
 .cdn_not_frozen:
     pop rax
 
@@ -1139,6 +1141,10 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
 
 .cdn_error:
     SET_EXC exc_TypeError_type, "__new__() takes a class argument"
+    jmp .cdn_fail
+.cdn_fill_failed:
+    pop rdi                     ; the instance, which nothing else holds
+    call obj_decref
 .cdn_fail:
     xor eax, eax
     pop r13
