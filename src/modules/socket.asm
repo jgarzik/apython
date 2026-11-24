@@ -42,8 +42,8 @@ extern memoryview_type
 extern list_new
 extern list_append
 extern tuple_new
-extern raise_oserror
-extern raise_exception
+extern set_oserror
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OverflowError_type
@@ -77,16 +77,18 @@ extern sys_fcntl
 extern sys_uname
 
 ;; ============================================================================
-;; SOCK_CHECK reg -- the kernel returns -errno in [-4095, -1].  Same test as
-;; posixmod's POSIX_CHECK, with no filename to attach.
+;; SOCK_CHECK_RET reg, exit -- the kernel returns -errno in [-4095, -1].  The
+;; OSError is recorded, with no filename to attach, and control goes to the
+;; caller's error exit.
 ;; ============================================================================
-%macro SOCK_CHECK 1
+%macro SOCK_CHECK_RET 2         ; %1 = the result, %2 = the error exit
     cmp %1, -4095
     jb %%ok
     mov rdi, %1
     neg rdi
     xor esi, esi
-    call raise_oserror          ; does not return
+    call set_oserror
+    jmp %2
 %%ok:
 %endmacro
 
@@ -108,7 +110,8 @@ O_NONBLOCK equ 0o4000
 section .text
 
 ;; ============================================================================
-;; sk_int_arg(rdi = a Value) -> rax = int64, or raises TypeError
+;; sk_int_arg(rdi = a Value) -> rax = int64
+;; Fails: -1
 ;;
 ;; posix_int_arg by another name, and for the same reason: obj_as_index alone
 ;; reads a float's payload as a pointer, so a descriptor of 0.5 would be
@@ -124,7 +127,7 @@ DEF_FUNC_LOCAL sk_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rdi
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .sia_fail
     pop rdi
     push rax
     sub rsp, 8
@@ -137,16 +140,20 @@ DEF_FUNC_LOCAL sk_int_arg, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 .sia_range:
-    pop rax
-    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
+    FAIL exc_OverflowError_type, "Python int too large to convert to C int", .sia_fail
 .sia_bad:
-    pop rdi
-    RAISE exc_TypeError_type, "an integer is required"
+    SET_EXC exc_TypeError_type, "an integer is required"
+.sia_fail:
+    mov rax, -1                 ; leave drops the parked argument
+    leave
+    ret
 END_FUNC sk_int_arg
 
 ;; ============================================================================
 ;; sk_bytes_arg(rdi = a Value) -> rax = data, r10 = length
 ;; sk_wbuf_arg(rdi = a Value) -> the same, for something writable
+;; An empty buffer's storage may be NULL, so 0 alone is not the refusal.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC_LOCAL sk_bytes_arg
     call bytes_like_ptr_len
@@ -155,9 +162,12 @@ DEF_FUNC_LOCAL sk_bytes_arg
     leave
     ret
 .sba_bad:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    leave                       ; rax = 0
+    ret
 END_FUNC sk_bytes_arg
 
+;; Fails: 0?
 DEF_FUNC_LOCAL sk_wbuf_arg, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
@@ -183,7 +193,11 @@ DEF_FUNC_LOCAL sk_wbuf_arg, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 .swb_bad:
-    RAISE exc_TypeError_type, "a writable bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a writable bytes-like object is required"
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sk_wbuf_arg
 
 ;; ============================================================================
@@ -207,24 +221,37 @@ DEF_FUNC sock_socket_fn, 16
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .ss_fail
     mov r12, rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .ss_fail
     push rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .ss_fail1
     mov rdx, rax
     pop rsi
     mov rdi, r12
     call sys_socket
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .ss_fail
     mov rdi, rax
     pop r12
     pop rbx
     leave
     jmp sk_ret_int
 .ss_args:
-    RAISE exc_TypeError_type, "socket() takes exactly 3 arguments"
+    SET_EXC exc_TypeError_type, "socket() takes exactly 3 arguments"
+    leave                       ; nothing pushed yet; rax = 0
+    ret
+.ss_fail1:
+    pop rcx                     ; the type, parked across the conversion
+.ss_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sock_socket_fn
 
 ;; ============================================================================
@@ -235,14 +262,19 @@ DEF_FUNC sock_close_fn, 16
     jz .sc_args
     mov rdi, [rdi]
     call sk_int_arg
+    ERR_M1 .sc_fail
     mov rdi, rax
     call sys_close
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sc_fail
     LOAD_NONE rax
     leave
     ret
 .sc_args:
-    RAISE exc_TypeError_type, "close() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "close() takes exactly 1 argument"
+.sc_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sock_close_fn
 
 DEF_FUNC sock_dup_fn, 16
@@ -250,14 +282,19 @@ DEF_FUNC sock_dup_fn, 16
     jz .sd_args
     mov rdi, [rdi]
     call sk_int_arg
+    ERR_M1 .sd_fail
     mov rdi, rax
     call sys_dup
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sd_fail
     mov rdi, rax
     leave
     jmp sk_ret_int
 .sd_args:
-    RAISE exc_TypeError_type, "dup() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "dup() takes exactly 1 argument"
+.sd_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sock_dup_fn
 
 ;; ============================================================================
@@ -280,6 +317,9 @@ DEF_FUNC_LOCAL sock_addr_setup, SKA_FRAME
 END_FUNC sock_addr_setup
 
 ;; sock_bind_like(rdi = args, rsi = nargs, rdx = the syscall) -> rax = result
+;; The result is the kernel's, -errno included; a refused ARGUMENT is -1 with
+;; the exception pending.
+;; Fails: -1
 SBL_FD    equ 8
 SBL_FN    equ 16
 SBL_LEN   equ 24
@@ -291,9 +331,11 @@ DEF_FUNC_LOCAL sock_bind_like, SBL_FRAME
     mov [rbp - SBL_FN], rdx
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sbl_fail
     mov [rbp - SBL_FD], rax
     mov rdi, [rbx + 8]
     call sk_bytes_arg           ; rax = data, r10 = length
+    ERR_PENDING .sbl_fail
     cmp r10, SOCKADDR_MAX
     ja .sbl_toobig
     test r10, r10
@@ -318,9 +360,14 @@ DEF_FUNC_LOCAL sock_bind_like, SBL_FRAME
     leave
     ret
 .sbl_toobig:
-    RAISE exc_ValueError_type, "address too long"
+    FAIL exc_ValueError_type, "address too long", .sbl_fail
 .sbl_empty:
-    RAISE exc_ValueError_type, "empty address"
+    SET_EXC exc_ValueError_type, "empty address"
+.sbl_fail:
+    mov rax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC sock_bind_like
 
 DEF_FUNC sock_bind_fn, 16
@@ -328,12 +375,17 @@ DEF_FUNC sock_bind_fn, 16
     jl .sb_args
     lea rdx, [rel sys_bind]
     call sock_bind_like
-    SOCK_CHECK rax
+    ERR_M1 .sb_fail
+    SOCK_CHECK_RET rax, .sb_fail
     LOAD_NONE rax
     leave
     ret
 .sb_args:
-    RAISE exc_TypeError_type, "bind() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "bind() takes exactly 2 arguments"
+.sb_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sock_bind_fn
 
 DEF_FUNC sock_connect_fn, 16
@@ -341,12 +393,17 @@ DEF_FUNC sock_connect_fn, 16
     jl .sn_args
     lea rdx, [rel sys_connect]
     call sock_bind_like
-    SOCK_CHECK rax
+    ERR_M1 .sn_fail
+    SOCK_CHECK_RET rax, .sn_fail
     LOAD_NONE rax
     leave
     ret
 .sn_args:
-    RAISE exc_TypeError_type, "connect() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "connect() takes exactly 2 arguments"
+.sn_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sock_connect_fn
 
 DEF_FUNC sock_connect_ex_fn, 16
@@ -354,6 +411,7 @@ DEF_FUNC sock_connect_ex_fn, 16
     jl .sx_args
     lea rdx, [rel sys_connect]
     call sock_bind_like
+    ERR_M1 .sx_fail
     xor edi, edi
     cmp rax, -4095
     jb .sx_ok
@@ -363,7 +421,11 @@ DEF_FUNC sock_connect_ex_fn, 16
     leave
     jmp sk_ret_int
 .sx_args:
-    RAISE exc_TypeError_type, "connect_ex() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "connect_ex() takes exactly 2 arguments"
+.sx_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sock_connect_ex_fn
 
 ;; ============================================================================
@@ -380,19 +442,30 @@ DEF_FUNC sock_listen_fn, 8         ; lint: pushes=1 -- the `push rbx` below sits
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sl_fail
     push rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .sl_fail1
     mov rsi, rax
     pop rdi
     call sys_listen
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sl_fail
     LOAD_NONE rax
     pop rbx
     leave
     ret
 .sl_args:
-    RAISE exc_TypeError_type, "listen() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "listen() takes exactly 2 arguments"
+    leave                       ; nothing pushed yet; rax = 0
+    ret
+.sl_fail1:
+    pop rcx                     ; the descriptor, parked across the conversion
+.sl_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_listen_fn
 
 DEF_FUNC sock_shutdown_fn, 8         ; lint: pushes=1 -- the `push rbx` below sits after the
@@ -406,19 +479,30 @@ DEF_FUNC sock_shutdown_fn, 8         ; lint: pushes=1 -- the `push rbx` below si
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sh_fail
     push rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .sh_fail1
     mov rsi, rax
     pop rdi
     call sys_shutdown
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sh_fail
     LOAD_NONE rax
     pop rbx
     leave
     ret
 .sh_args:
-    RAISE exc_TypeError_type, "shutdown() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "shutdown() takes exactly 2 arguments"
+    leave                       ; nothing pushed yet; rax = 0
+    ret
+.sh_fail1:
+    pop rcx                     ; the descriptor, parked across the conversion
+.sh_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_shutdown_fn
 
 ;; ============================================================================
@@ -435,6 +519,7 @@ DEF_FUNC sock_accept_fn, SAC_FRAME
     jz .sa_args
     mov rdi, [rdi]
     call sk_int_arg
+    ERR_M1 .sa_fail
     mov rbx, rax
     mov dword [rbp - SAC_LEN], SOCKADDR_MAX
     ; SOCK_CLOEXEC: every descriptor Python opens is non-inheritable by
@@ -447,7 +532,7 @@ DEF_FUNC sock_accept_fn, SAC_FRAME
     sub rdx, SAC_LEN
     mov ecx, SOCK_CLOEXEC
     BLOCKING_CALL sys_accept4
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sa_fail
     mov [rbp - SAC_FD], rax
 
     mov edx, [rbp - SAC_LEN]
@@ -485,7 +570,7 @@ DEF_FUNC sock_accept_fn, SAC_FRAME
     leave
     ret
 .sa_args:
-    RAISE exc_TypeError_type, "accept() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "accept() takes exactly 1 argument", .sa_fail
 END_FUNC sock_accept_fn
 
 ;; ============================================================================
@@ -494,11 +579,14 @@ END_FUNC sock_accept_fn
 SGN_LEN   equ 8
 SGN_BUF   equ 16 + SOCKADDR_MAX
 SGN_FRAME equ ((SGN_BUF + 15) / 16) * 16 + 8       ; + 1 push = 16-aligned
+;; sock_name_like(rdi = args, rsi = nargs, rdx = the syscall) -> rax = bytes
+;; Fails: 0
 DEF_FUNC_LOCAL sock_name_like, SGN_FRAME
     push rbx
     mov rbx, rdx                    ; the syscall
     mov rdi, [rdi]
     call sk_int_arg
+    ERR_M1 .snl_fail
     mov dword [rbp - SGN_LEN], SOCKADDR_MAX
     mov rdi, rax
     mov rsi, rbp
@@ -506,7 +594,7 @@ DEF_FUNC_LOCAL sock_name_like, SGN_FRAME
     mov rdx, rbp
     sub rdx, SGN_LEN
     call rbx
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .snl_fail
     mov edx, [rbp - SGN_LEN]
     cmp rdx, SOCKADDR_MAX
     jbe .snl_len
@@ -519,28 +607,37 @@ DEF_FUNC_LOCAL sock_name_like, SGN_FRAME
     pop rbx
     leave
     ret
+.snl_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_name_like
 
 DEF_FUNC sock_getsockname_fn, 16
     test rsi, rsi
     jz .sgn_args
     lea rdx, [rel sys_getsockname]
-    call sock_name_like
+    call sock_name_like         ; err: its 0 and its exception are ours
     leave
     ret
 .sgn_args:
-    RAISE exc_TypeError_type, "getsockname() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "getsockname() takes exactly 1 argument"
+    leave
+    ret
 END_FUNC sock_getsockname_fn
 
 DEF_FUNC sock_getpeername_fn, 16
     test rsi, rsi
     jz .sgp_args
     lea rdx, [rel sys_getpeername]
-    call sock_name_like
+    call sock_name_like         ; err: its 0 and its exception are ours
     leave
     ret
 .sgp_args:
-    RAISE exc_TypeError_type, "getpeername() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "getpeername() takes exactly 1 argument"
+    leave
+    ret
 END_FUNC sock_getpeername_fn
 
 ;; ============================================================================
@@ -562,13 +659,16 @@ DEF_FUNC sock_send_fn, SSD_FRAME
     push r10
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .ssd_fail1
     mov [rbp - SSD_FD], rax
     mov rdi, [rbx + 8]
     call sk_bytes_arg
+    ERR_PENDING .ssd_fail1
     mov [rbp - SSD_DATA], rax
     mov [rbp - SSD_LEN], r10
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .ssd_fail1
     mov [rbp - SSD_FLAGS], rax
     pop r10
     xor r8d, r8d                    ; no destination
@@ -577,6 +677,7 @@ DEF_FUNC sock_send_fn, SSD_FRAME
     jl .ssd_go
     mov rdi, [rbx + 24]
     call sk_bytes_arg               ; rax = data, r10 = length
+    ERR_PENDING .ssd_fail
     cmp r10, SOCKADDR_MAX
     ja .ssd_toobig
     mov [rbp - SSD_ALEN], r10
@@ -594,15 +695,22 @@ DEF_FUNC sock_send_fn, SSD_FRAME
     mov rdx, [rbp - SSD_LEN]
     mov rcx, [rbp - SSD_FLAGS]
     BLOCKING_CALL sys_sendto
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .ssd_fail
     mov rdi, rax
     pop rbx
     leave
     jmp sk_ret_int
 .ssd_toobig:
-    RAISE exc_ValueError_type, "address too long"
+    FAIL exc_ValueError_type, "address too long", .ssd_fail
 .ssd_args:
-    RAISE exc_TypeError_type, "send() takes at least 3 arguments"
+    FAIL exc_TypeError_type, "send() takes at least 3 arguments", .ssd_fail
+.ssd_fail1:
+    pop rcx                     ; the argument count, parked across the conversions
+.ssd_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_send_fn
 
 ;; ============================================================================
@@ -617,6 +725,9 @@ SRC_ALEN  equ 40
 SRC_DATA  equ 48
 SRC_FROM  equ 56 + SOCKADDR_MAX
 SRC_FRAME equ ((SRC_FROM + 15) / 16) * 16 + 8      ; + 1 push = 16-aligned
+;; sock_recv_common(rdi = args, rsi = nargs, edx = 1 when the sender is wanted)
+;;   -> rax = the bytes received
+;; Fails: 0
 DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     ; rdi = args, rsi = nargs, edx = 1 when the sender is wanted
     push rbx
@@ -624,9 +735,11 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     mov [rbp - SRC_ALEN], rdx
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .src_fail
     mov [rbp - SRC_FD], rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .src_fail
     test rax, rax
     js .src_negative
     cmp rax, SOCK_MAX_RECV
@@ -634,6 +747,7 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     mov [rbp - SRC_N], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .src_fail
     mov [rbp - SRC_FLAGS], rax
 
     mov rdi, [rbp - SRC_N]
@@ -669,7 +783,7 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     call ap_free
     pop rax
     pop rax
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .src_fail
 .src_ok:
     mov rdi, [rbp - SRC_BUF]
     mov rsi, rax
@@ -686,13 +800,13 @@ DEF_FUNC_LOCAL sock_recv_common, SRC_FRAME
     leave
     ret
 .src_negative:
-    RAISE exc_ValueError_type, "negative buffersize in recv"
+    FAIL exc_ValueError_type, "negative buffersize in recv", .src_fail
 .src_toobig:
     ; ap_malloc is fatal on failure by design, so an absurd size has to be
     ; refused before it is asked for: `sock.recv(1 << 62)` killed the process
     ; with "Fatal: out of memory" where CPython raises MemoryError.
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .src_fail
 .src_fail:
     xor eax, eax
     pop rbx
@@ -704,11 +818,13 @@ DEF_FUNC sock_recv_fn, 16
     cmp rsi, 3
     jl .sr_args
     xor edx, edx
-    call sock_recv_common
+    call sock_recv_common       ; err: its 0 and its exception are ours
     leave
     ret
 .sr_args:
-    RAISE exc_TypeError_type, "recv() takes exactly 3 arguments"
+    SET_EXC exc_TypeError_type, "recv() takes exactly 3 arguments"
+    leave
+    ret
 END_FUNC sock_recv_fn
 
 ;; recvfrom needs the address the datagram came from, so it repeats the body
@@ -729,9 +845,11 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .srf_fail
     mov [rbp - SRF_FD], rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .srf_fail
     test rax, rax
     js .srf_negative
     cmp rax, SOCK_MAX_RECV
@@ -739,6 +857,7 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     mov [rbp - SRF_N], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .srf_fail
     mov [rbp - SRF_FLAGS], rax
 
     mov rdi, [rbp - SRF_N]
@@ -769,7 +888,7 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     call ap_free
     pop rax
     pop rax
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .srf_fail
 .srf_ok:
     mov rdi, [rbp - SRF_BUF]
     mov rsi, rax
@@ -811,16 +930,16 @@ DEF_FUNC sock_recvfrom_fn, SRF_FRAME
     leave
     ret
 .srf_negative:
-    RAISE exc_ValueError_type, "negative buffersize in recvfrom"
+    FAIL exc_ValueError_type, "negative buffersize in recvfrom", .srf_fail
 .srf_toobig:
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .srf_fail
 .srf_fail:
     xor eax, eax
     pop rbx
     leave
     ret
 .srf_args:
-    RAISE exc_TypeError_type, "recvfrom() takes exactly 3 arguments"
+    FAIL exc_TypeError_type, "recvfrom() takes exactly 3 arguments", .srf_fail
 END_FUNC sock_recvfrom_fn
 
 ;; ============================================================================
@@ -838,13 +957,16 @@ DEF_FUNC sock_recv_into_fn, 40
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sri_fail
     mov [rbp - SRI_FD], rax
     mov rdi, [rbx + 8]
     call sk_wbuf_arg            ; rax = data, r10 = length
+    ERR_PENDING .sri_fail
     mov [rbp - SRI_PTR], rax
     mov [rbp - SRI_CAP], r10
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .sri_fail
     mov [rbp - SRI_N], rax
     test rax, rax
     js .sri_negative
@@ -857,6 +979,7 @@ DEF_FUNC sock_recv_into_fn, 40
     ja .sri_toobig
     mov rdi, [rbx + 24]
     call sk_int_arg
+    ERR_M1 .sri_fail
     mov rcx, rax
     mov rdi, [rbp - SRI_FD]
     mov rsi, [rbp - SRI_PTR]
@@ -864,17 +987,22 @@ DEF_FUNC sock_recv_into_fn, 40
     xor r8d, r8d
     xor r9d, r9d
     BLOCKING_CALL sys_recvfrom
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sri_fail
     mov rdi, rax
     pop rbx
     leave
     jmp sk_ret_int
 .sri_negative:
-    RAISE exc_ValueError_type, "negative buffersize in recv_into"
+    FAIL exc_ValueError_type, "negative buffersize in recv_into", .sri_fail
 .sri_toobig:
-    RAISE exc_ValueError_type, "nbytes is greater than the length of the buffer"
+    FAIL exc_ValueError_type, "nbytes is greater than the length of the buffer", .sri_fail
 .sri_args:
-    RAISE exc_TypeError_type, "recv_into() takes exactly 4 arguments"
+    FAIL exc_TypeError_type, "recv_into() takes exactly 4 arguments", .sri_fail
+.sri_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_recv_into_fn
 
 ;; ============================================================================
@@ -895,15 +1023,19 @@ DEF_FUNC sock_setsockopt_fn, SSO_FRAME
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sso_fail
     mov [rbp - SSO_FD], rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .sso_fail
     mov [rbp - SSO_LEVEL], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .sso_fail
     mov [rbp - SSO_NAME], rax
     mov rdi, [rbx + 24]
     call sk_bytes_arg
+    ERR_PENDING .sso_fail
     cmp r10, 256
     ja .sso_toobig
     mov [rbp - SSO_LEN], r10
@@ -919,15 +1051,20 @@ DEF_FUNC sock_setsockopt_fn, SSO_FRAME
     sub rcx, SSO_BUF
     mov r8, [rbp - SSO_LEN]
     call sys_setsockopt
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sso_fail
     LOAD_NONE rax
     pop rbx
     leave
     ret
 .sso_toobig:
-    RAISE exc_ValueError_type, "option value too long"
+    FAIL exc_ValueError_type, "option value too long", .sso_fail
 .sso_args:
-    RAISE exc_TypeError_type, "setsockopt() takes exactly 4 arguments"
+    FAIL exc_TypeError_type, "setsockopt() takes exactly 4 arguments", .sso_fail
+.sso_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_setsockopt_fn
 
 SGO_FD    equ 8
@@ -943,15 +1080,19 @@ DEF_FUNC sock_getsockopt_fn, SGO_FRAME
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sgo_fail
     mov [rbp - SGO_FD], rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .sgo_fail
     mov [rbp - SGO_LEVEL], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .sgo_fail
     mov [rbp - SGO_NAME], rax
     mov rdi, [rbx + 24]
     call sk_int_arg
+    ERR_M1 .sgo_fail
     test rax, rax
     js .sgo_badlen
     cmp rax, 256
@@ -965,7 +1106,7 @@ DEF_FUNC sock_getsockopt_fn, SGO_FRAME
     mov r8, rbp
     sub r8, SGO_LEN
     call sys_getsockopt
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sgo_fail
     mov rdi, rbp
     sub rdi, SGO_BUF
     mov rsi, [rbp - SGO_LEN]
@@ -974,9 +1115,14 @@ DEF_FUNC sock_getsockopt_fn, SGO_FRAME
     leave
     ret
 .sgo_badlen:
-    RAISE exc_ValueError_type, "getsockopt buflen out of range"
+    FAIL exc_ValueError_type, "getsockopt buflen out of range", .sgo_fail
 .sgo_args:
-    RAISE exc_TypeError_type, "getsockopt() takes exactly 4 arguments"
+    FAIL exc_TypeError_type, "getsockopt() takes exactly 4 arguments", .sgo_fail
+.sgo_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_getsockopt_fn
 
 ;; ============================================================================
@@ -992,19 +1138,22 @@ DEF_FUNC sock_socketpair_fn, 24
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .ssp_fail
     push rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .ssp_fail1
     push rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .ssp_fail2
     mov rdx, rax
     pop rsi
     pop rdi
     mov rcx, rbp
     sub rcx, SSP_FDS
     call sys_socketpair
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .ssp_fail
 
     mov edi, 2
     call tuple_new
@@ -1035,7 +1184,12 @@ DEF_FUNC sock_socketpair_fn, 24
     leave
     ret
 .ssp_args:
-    RAISE exc_TypeError_type, "socketpair() takes exactly 3 arguments"
+    FAIL exc_TypeError_type, "socketpair() takes exactly 3 arguments", .ssp_fail
+.ssp_fail2:
+    pop rcx                     ; the type
+.ssp_fail1:
+    pop rcx                     ; the family
+    jmp .ssp_fail
 END_FUNC sock_socketpair_fn
 
 ;; ============================================================================
@@ -1050,15 +1204,17 @@ DEF_FUNC sock_set_blocking_fn, 32
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sbk_fail
     mov r12, rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .sbk_fail
     push rax
     mov rdi, r12
     mov esi, F_GETFL
     xor edx, edx
     call sys_fcntl
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sbk_fail1
     pop rcx                         ; the requested blocking flag
     test rcx, rcx
     jz .sbk_nonblock
@@ -1071,14 +1227,24 @@ DEF_FUNC sock_set_blocking_fn, 32
     mov rdi, r12
     mov esi, F_SETFL
     call sys_fcntl
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sbk_fail
     LOAD_NONE rax
     pop r12
     pop rbx
     leave
     ret
 .sbk_args:
-    RAISE exc_TypeError_type, "set_blocking() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "set_blocking() takes exactly 2 arguments"
+    leave                       ; nothing pushed yet; rax = 0
+    ret
+.sbk_fail1:
+    pop rcx                     ; the requested flag
+.sbk_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sock_set_blocking_fn
 
 DEF_FUNC sock_get_blocking_fn, 16
@@ -1086,11 +1252,12 @@ DEF_FUNC sock_get_blocking_fn, 16
     jz .gbk_args
     mov rdi, [rdi]
     call sk_int_arg
+    ERR_M1 .gbk_fail
     mov rdi, rax
     mov esi, F_GETFL
     xor edx, edx
     call sys_fcntl
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .gbk_fail
     test rax, O_NONBLOCK
     jnz .gbk_false
     lea rax, [rel bool_true]
@@ -1101,7 +1268,11 @@ DEF_FUNC sock_get_blocking_fn, 16
     leave
     ret
 .gbk_args:
-    RAISE exc_TypeError_type, "get_blocking() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "get_blocking() takes exactly 1 argument"
+.gbk_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sock_get_blocking_fn
 
 ;; ============================================================================
@@ -1113,12 +1284,16 @@ DEF_FUNC sock_gethostname_fn, SGH_FRAME
     mov rdi, rbp
     sub rdi, SGH_BUF
     call sys_uname
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sgh_fail
     ; struct utsname is five 65-byte fields; nodename is the second.
     mov rdi, rbp
     sub rdi, SGH_BUF
     add rdi, 65
     call str_from_cstr_heap
+    leave
+    ret
+.sgh_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC sock_gethostname_fn
@@ -1162,6 +1337,7 @@ DEF_FUNC sock_poll_fn, 56
 
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .spl_fail
     mov [rbp - SPL_TMO], rax
 
     ; One pollfd per pair, and never a zero-byte allocation.
@@ -1187,6 +1363,7 @@ DEF_FUNC sock_poll_fn, 56
     mov rdx, [rdx + PyListObject.ob_item]
     mov rdi, [rdx + rcx]            ; item 2i, the descriptor
     call sk_int_arg
+    ERR_M1 .spl_freefail
     mov rcx, [rbp - SPL_I]
     mov rdx, [rbp - SPL_FDS]
     mov [rdx + rcx*8 + PollFd.fd], eax
@@ -1196,6 +1373,7 @@ DEF_FUNC sock_poll_fn, 56
     mov rdx, [rdx + PyListObject.ob_item]
     mov rdi, [rdx + rcx + 8]        ; item 2i+1, the mask
     call sk_int_arg
+    ERR_M1 .spl_freefail
     mov rcx, [rbp - SPL_I]
     mov rdx, [rbp - SPL_FDS]
     mov [rdx + rcx*8 + PollFd.events], ax
@@ -1265,16 +1443,7 @@ DEF_FUNC sock_poll_fn, 56
     jmp .spl_wait
 
 .spl_handler_raised:
-    push rax
-    push rax
-    mov rdi, [rbp - SPL_FDS]
-    call ap_free
-    pop rax
-    pop rax
-    extern eval_exception_unwind
-    pop rbx
-    leave
-    jmp eval_exception_unwind
+    jmp .spl_freefail               ; its exception is pending
 
 .spl_failed:
     push rax
@@ -1283,7 +1452,7 @@ DEF_FUNC sock_poll_fn, 56
     call ap_free
     pop rax
     pop rax
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .spl_fail
 .spl_polled:
     mov rdi, [rbp - SPL_N]
     call list_new
@@ -1321,9 +1490,9 @@ DEF_FUNC sock_poll_fn, 56
     leave
     ret
 .spl_badlist:
-    RAISE exc_TypeError_type, "poll() takes a flat list of fd, events pairs"
+    FAIL exc_TypeError_type, "poll() takes a flat list of fd, events pairs", .spl_fail
 .spl_args:
-    RAISE exc_TypeError_type, "poll() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "poll() takes exactly 2 arguments", .spl_fail
 END_FUNC sock_poll_fn
 
 ;; ============================================================================
@@ -1341,16 +1510,21 @@ DEF_FUNC sock_epoll_create_fn, 16       ; + 0 pushes = 16, 16-aligned
     jz .sec_noflags
     mov rdi, [rdi]
     call sk_int_arg
+    ERR_M1 .sec_fail
     mov rdi, rax
     jmp .sec_go
 .sec_noflags:
     xor edi, edi
 .sec_go:
     call sys_epoll_create1
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sec_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
+    leave
+    ret
+.sec_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC sock_epoll_create_fn
@@ -1375,21 +1549,25 @@ DEF_FUNC sock_epoll_ctl_fn, 32
     mov rbx, rdi
     mov rdi, [rbx + 24]                 ; events
     call sk_int_arg
+    ERR_M1 .sctl_fail
     mov [rbp - SEC_EV], eax
     mov rdi, [rbx + 16]                 ; fd
     call sk_int_arg
+    ERR_M1 .sctl_fail
     mov [rbp - SEC_EV + 4], rax         ; data.u64 = the descriptor
     mov rdi, [rbx + 8]                  ; op
     call sk_int_arg
+    ERR_M1 .sctl_fail
     push rax
     mov rdi, [rbx]                      ; epfd
     call sk_int_arg
+    ERR_M1 .sctl_fail1
     pop rsi
     mov rdi, rax
     mov rdx, [rbp - SEC_EV + 4]         ; fd, again
     lea rcx, [rbp - SEC_EV]
     call sys_epoll_ctl
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sctl_fail
     pop rbx
     lea rax, [rel none_singleton]
     INCREF rax
@@ -1397,7 +1575,16 @@ DEF_FUNC sock_epoll_ctl_fn, 32
     leave
     ret
 .sctl_args:
-    RAISE exc_TypeError_type, "epoll_ctl() takes exactly 4 arguments"
+    SET_EXC exc_TypeError_type, "epoll_ctl() takes exactly 4 arguments"
+    leave                       ; nothing pushed yet; rax = 0
+    ret
+.sctl_fail1:
+    pop rcx                     ; the op, parked across the conversion
+.sctl_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC sock_epoll_ctl_fn
 
 ;; ============================================================================
@@ -1426,14 +1613,17 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     mov rbx, rdi
     mov rdi, [rbx]
     call sk_int_arg
+    ERR_M1 .sew_fail
     mov [rbp - SEW_EPFD], rax
     mov rdi, [rbx + 8]
     call sk_int_arg
+    ERR_M1 .sew_fail
     test rax, rax
     jle .sew_badmax
     mov [rbp - SEW_MAX], rax
     mov rdi, [rbx + 16]
     call sk_int_arg
+    ERR_M1 .sew_fail
     mov [rbp - SEW_TMO], rax
 
     ; Twelve bytes each; the allocation is rounded up so a partial trailing
@@ -1493,11 +1683,7 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     jmp .sew_wait
 
 .sew_handler_raised:
-    mov rdi, [rbp - SEW_EVS]
-    call ap_free
-    pop rbx
-    leave
-    jmp eval_exception_unwind
+    jmp .sew_freefail               ; its exception is pending
 
 .sew_failed:
     push rax
@@ -1506,7 +1692,7 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     call ap_free
     pop rax
     pop rax
-    SOCK_CHECK rax
+    SOCK_CHECK_RET rax, .sew_fail
 
 .sew_waited:
     mov [rbp - SEW_N], rax
@@ -1559,9 +1745,9 @@ DEF_FUNC sock_epoll_wait_fn, SEW_FRAME
     leave
     ret
 .sew_badmax:
-    RAISE exc_ValueError_type, "maxevents must be positive"
+    FAIL exc_ValueError_type, "maxevents must be positive", .sew_fail
 .sew_args:
-    RAISE exc_TypeError_type, "epoll_wait() takes exactly 3 arguments"
+    FAIL exc_TypeError_type, "epoll_wait() takes exactly 3 arguments", .sew_fail
 END_FUNC sock_epoll_wait_fn
 
 ;; ============================================================================
