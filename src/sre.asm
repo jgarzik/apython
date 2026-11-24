@@ -586,7 +586,7 @@ DEF_FUNC sre_concat, SCC_FRAME
     cmp rax, rcx
     jne .scc_str_type_error
     extern str_concat
-    call str_concat
+    call str_concat           ; err: both were just checked to be exact strs
     leave
     ret
 .scc_str_type_error:

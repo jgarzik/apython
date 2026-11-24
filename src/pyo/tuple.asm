@@ -385,6 +385,7 @@ DEF_FUNC tuple_getslice
     mov rdi, r12
     mov rsi, [rbx + PyTupleObject.ob_size]
     call slice_indices
+    ERR_M1_JUMP
     mov r13, rax               ; start
     mov r14, rdx               ; stop
     mov r15, rcx               ; step

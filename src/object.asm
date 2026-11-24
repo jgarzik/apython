@@ -1624,7 +1624,7 @@ rvr_body:
     mov rdi, [rbp - RVR_PREFIX]
     mov rsi, rax
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: obj_repr answered, and it answers a str
     mov [rbp - RVR_FULL], rax
 
     mov rdi, [rbp - RVR_PREFIX]
@@ -1642,7 +1642,7 @@ rvr_body:
     mov rdi, [rbp - RVR_FULL]
     mov rsi, rax
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     push rax
     mov rdi, [rbp - RVR_FULL]
     call obj_decref

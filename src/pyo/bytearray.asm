@@ -429,6 +429,7 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
     ; The LIVE length: a bound's __index__ can clear this very bytearray.
     lea rsi, [rcx + PyByteArrayObject.ob_size]
     call slice_indices_live     ; rax = start, rdx = stop, rcx = step
+    ERR_M1_JUMP
     mov [rbp - BSU_START], rax
     mov [rbp - BSU_STEP], rcx
     ; The element count, which slice_length computes for any step.
@@ -616,6 +617,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov rcx, [rbp - BAS_SELF]
     lea rsi, [rcx + PyByteArrayObject.ob_size]      ; the LIVE length
     call slice_indices_live
+    ERR_M1_JUMP
     mov [rbp - BAS_START], rax
     mov [rbp - BAS_STOP], rdx
     mov [rbp - BAS_STEP], rcx

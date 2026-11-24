@@ -851,14 +851,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp + 16]                    ; prefix str
     mov rsi, [rsp + 8]                     ; name str
     mov ecx, TAG_PTR                       ; right_tag (heap str)
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     push rax                               ; save partial
 
     ; Concat: partial + suffix
     mov rdi, rax                           ; partial
     mov rsi, [rsp + 8]                     ; suffix str
     mov ecx, TAG_PTR                       ; right_tag (heap str)
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     mov rbx, rax                           ; rbx = full message str
 
     ; DECREF intermediate strings (5 items on stack: partial, suffix, name, prefix, type_name_cstr)
@@ -1277,7 +1277,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp + 48]
     mov rsi, [rsp + 56]
     mov ecx, TAG_PTR            ; right_tag (heap str)
-    call str_concat
+    call str_concat           ; err: obj_repr answered, and it answers a str
     mov [rsp + 64], rax
 
     ; DECREF prefix_str and repr_str

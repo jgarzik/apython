@@ -877,6 +877,7 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     mov rdi, [rbp - RMS_START]      ; the slice
     mov rsi, rax                    ; the range's length
     call slice_indices              ; rax = start, rdx = stop, rcx = step
+    ERR_M1_JUMP
 
     ; substart = r.start + start * r.step,  substop = r.start + stop * r.step,
     ; substep  = r.step * step.

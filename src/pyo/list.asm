@@ -650,6 +650,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ; clamp has to see the length it left behind, not the one from before.
     lea rsi, [rbx + PyListObject.ob_size]
     call slice_indices_live
+    ERR_M1_JUMP
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax           ; r13 = start
     mov r14, rdx           ; r14 = stop
@@ -1493,6 +1494,7 @@ DEF_FUNC list_getslice
     mov rdi, r12               ; slice
     lea rsi, [rbx + PyListObject.ob_size]  ; the LIVE length; see above
     call slice_indices_live
+    ERR_M1_JUMP
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax               ; r13 = start
     mov r14, rdx               ; r14 = stop

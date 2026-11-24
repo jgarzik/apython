@@ -718,32 +718,42 @@ DEF_FUNC_LOCAL module_repr_from, MRF_FRAME
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
     call mrf_append
+    ERR_NULL .mrf_fail
     mov [rbp - MRF_ACC], rax
     lea rdi, [rel mod_repr_from_r]
     call str_from_cstr_heap
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
     call mrf_append
+    ERR_NULL .mrf_fail
     mov [rbp - MRF_ACC], rax
     mov rdi, [rbp - MRF_FILE]
     call obj_repr
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
     call mrf_append
+    ERR_NULL .mrf_fail
     mov [rbp - MRF_ACC], rax
     lea rdi, [rel mod_repr_close_r]
     call str_from_cstr_heap
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
-    call mrf_append
+    call mrf_append           ; err: its 0 is this function's own answer
     mov edx, TAG_PTR
+    leave
+    ret
+.mrf_fail:
+    RET_NULL                    ; a __repr__ raised; the pieces are released
     leave
     ret
 END_FUNC module_repr_from
 
 ;; ============================================================================
-;; mrf_append(rdi = a str, owned, rsi = a str, owned) -> rax = the two
+;; mrf_append(rdi = a str, owned, rsi = a str, owned, or 0) -> rax = the two
 ;;   concatenated; both references released
+;; Fails: 0
+;; when the second is 0 -- an obj_repr that raised, handed straight on -- with
+;; that exception still pending.
 ;; ============================================================================
 MRA_A     equ 8
 MRA_B     equ 16
@@ -751,9 +761,12 @@ MRA_FRAME equ 16
 DEF_FUNC_LOCAL mrf_append, MRA_FRAME
     mov [rbp - MRA_A], rdi
     mov [rbp - MRA_B], rsi
+    test rsi, rsi
+    jz .mra_fail
     mov ecx, TAG_PTR
     extern str_concat
     call str_concat
+    ERR_NULL .mra_fail
     push rax
     sub rsp, 8
     mov rdi, [rbp - MRA_A]
@@ -762,6 +775,17 @@ DEF_FUNC_LOCAL mrf_append, MRA_FRAME
     call obj_decref
     add rsp, 8
     pop rax
+    leave
+    ret
+.mra_fail:
+    mov rdi, [rbp - MRA_A]
+    call obj_decref
+    mov rdi, [rbp - MRA_B]
+    test rdi, rdi
+    jz .mra_fail_out
+    call obj_decref
+.mra_fail_out:
+    xor eax, eax
     leave
     ret
 END_FUNC mrf_append

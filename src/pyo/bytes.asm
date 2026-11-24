@@ -226,6 +226,7 @@ DEF_FUNC bytes_subscript
     mov rdi, r12               ; slice
     mov rsi, [rbx + PyBytesObject.ob_size]
     call slice_indices
+    ERR_M1_JUMP
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax               ; start
     mov r14, rdx               ; stop

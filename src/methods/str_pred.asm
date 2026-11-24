@@ -89,6 +89,7 @@ DEF_FUNC str_method_count, CNT_FRAME
     mov rdx, [rbp - CNT_NARGS]
     lea rcx, [rbp - CNT_WPTR]
     call str_search_window
+    ERR_M1 .count_fail
     test eax, eax
     jz .count_done                  ; nothing can match: zero
 
@@ -162,6 +163,7 @@ DEF_FUNC str_method_count, CNT_FRAME
     CSTRING rdi, `must be str, not \x01`
     extern set_type_error_with_name
     call set_type_error_with_name
+.count_fail:
     xor eax, eax
     pop r12
     pop rbx

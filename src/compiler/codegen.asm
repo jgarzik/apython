@@ -159,7 +159,7 @@ DEF_FUNC cg_set_qualname, SQ_FRAME
     push rax
     mov rdi, [rbp - SQ_ACC]
     extern str_concat
-    call str_concat
+    call str_concat           ; err: a scope's name is a str
     pop rcx
     pop rcx
     push rax
@@ -188,7 +188,7 @@ DEF_FUNC cg_set_qualname, SQ_FRAME
     push rax
     mov rdi, [rbp - SQ_ACC]
     mov rsi, rax
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     mov rcx, rax
     pop rdi
     push rcx
@@ -205,7 +205,7 @@ DEF_FUNC cg_set_qualname, SQ_FRAME
     mov rdi, [rbp - SQ_ACC]
     mov rdx, [rbp - SQ_UNIT]
     mov rsi, [rdx + CompUnit.name]
-    call str_concat
+    call str_concat           ; err: a scope's name is a str
     push rax
     mov rdi, [rbp - SQ_ACC]
     call obj_decref

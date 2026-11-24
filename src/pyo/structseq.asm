@@ -357,7 +357,7 @@ DEF_FUNC_LOCAL ssr_append_cstr
     mov rdi, rbx
     mov rsi, r12
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     push rax
     push rax
     mov rdi, rbx
@@ -378,7 +378,7 @@ DEF_FUNC_LOCAL ssr_append_obj
     mov rbx, rdi
     mov r12, rsi
     mov ecx, TAG_PTR
-    call str_concat             ; rdi is the accumulator already
+    call str_concat             ; rdi is the accumulator already -- err: obj_repr answered, and it answers a str
     push rax
     push rax
     mov rdi, rbx

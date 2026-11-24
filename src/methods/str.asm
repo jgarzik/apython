@@ -656,6 +656,7 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME3
     mov rdx, [rbp - AFF_NARGS]
     lea rcx, [rbp - AFF_WPTR]
     call str_search_window
+    ERR_M1 .sw_fail_pop
     test eax, eax
     jz .sw_false_pop
     mov r14, [rbp - AFF_WOFF]       ; window start, in bytes
@@ -703,6 +704,11 @@ DEF_FUNC_LOCAL str_startswith_one, AFF_FRAME3
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.sw_fail_pop:
+    pop r15
+    pop r14
+    jmp .sw_fail
 
 .sw_type_error:
     ; CPython names the type and says which of the two shapes was wrong: the
@@ -765,6 +771,7 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     mov rdx, [rbp - AFF_NARGS]
     lea rcx, [rbp - AFF_WPTR]
     call str_search_window
+    ERR_M1 .ew_fail_pop
     test eax, eax
     jz .ew_false_pop
     mov r14, [rbp - AFF_WPTR]       ; window base pointer
@@ -813,6 +820,10 @@ DEF_FUNC_LOCAL str_endswith_one, AFF_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+
+.ew_fail_pop:
+    pop r15
+    jmp .ew_fail
 
 .ew_type_error:
     ; CPython names the type and says which of the two shapes was wrong: the
@@ -884,6 +895,7 @@ DEF_FUNC str_find_impl, FND_FRAME
     mov rdx, [rbp - FND_NARGS]
     lea rcx, [rbp - FND_WPTR]
     call str_search_window
+    ERR_M1 .find_fail
     test eax, eax
     jz .find_not_found
 
@@ -935,6 +947,7 @@ DEF_FUNC str_find_impl, FND_FRAME
     mov rsi, [rsi + 8]
     CSTRING rdi, `must be str, not \x01`
     call set_type_error_with_name
+.find_fail:
     xor eax, eax
     leave
     ret

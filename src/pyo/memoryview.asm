@@ -1553,6 +1553,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rsi, rax
     mov rdi, [rbp - MS_KEY]            ; slice obj
     call slice_indices                 ; rax=start, rdx=stop, rcx=step
+    ERR_M1_JUMP
 
     ; The item count for a step of any sign: ceil((stop - start) / step),
     ; clamped at zero, which is what range() answers for the same three.
@@ -1909,6 +1910,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rsi, rax
     mov rdi, [rbp - MA_KEY]
     call slice_indices                 ; rax=start, rdx=stop, rcx=step
+    ERR_M1_JUMP
     ; The count for a step of any sign, as memoryview_subscript computes it.
     mov [rbp - MA_STEP], rcx
     mov [rbp - MA_START], rax

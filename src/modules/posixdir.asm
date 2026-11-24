@@ -183,7 +183,7 @@ DEF_FUNC direntry_repr, DER_FRAME
     push rax
     mov rdi, [rbp - DER_PART]
     mov rsi, rax
-    call str_concat
+    call str_concat           ; err: str_repr / bytes_repr answered a str
     mov [rbp - DER_PART], rax
     pop rdi
     push rax
@@ -199,7 +199,7 @@ DEF_FUNC direntry_repr, DER_FRAME
     push rax
     mov rdi, [rbp - DER_PART]
     mov rsi, rax
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     mov [rbp - DER_PART], rax
     pop rdi
     push rax
@@ -312,7 +312,7 @@ DEF_FUNC_LOCAL psd_join, PJ_FRAME
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne .pj_bytes
-    call str_concat
+    call str_concat           ; err: the 0 is this function's own answer
     leave
     ret
 .pj_bytes:

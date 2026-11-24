@@ -434,6 +434,7 @@ END_FUNC str_cp_offset
 ;;   [out +  8] = window length in bytes
 ;;   [out + 16] = the window's start as a byte offset into self
 ;;   -> eax = 1 when the window is usable, 0 when nothing can match in it
+;; Fails: -1
 ;;
 ;; The optional start/end arguments shared by find, rfind, index, rindex and
 ;; count, resolved once.  Every one of those methods used to ignore them
@@ -474,7 +475,7 @@ DEF_FUNC str_search_window, SSW_FRAME
     je .ssw_start_done              ; None means the default, as in CPython
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .ssw_fail
     mov rdi, [rbp - SSW_SELF]
     test rax, rax
     jns .ssw_start_set
@@ -493,7 +494,7 @@ DEF_FUNC str_search_window, SSW_FRAME
     je .ssw_bounds_done
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .ssw_fail
     mov rdi, [rbp - SSW_SELF]
     test rax, rax
     jns .ssw_end_set
@@ -537,6 +538,10 @@ DEF_FUNC str_search_window, SSW_FRAME
 
 .ssw_nothing:
     xor eax, eax
+    leave
+    ret
+.ssw_fail:
+    mov rax, -1                     ; a bound that is not an index
     leave
     ret
 END_FUNC str_search_window
@@ -1729,6 +1734,7 @@ END_FUNC str_hash_bytes
 ;; str_concat(PyObject *a, PyObject *b, ?, ecx=right_tag) -> (rax,edx) fat value
 ;; String concatenation via nb_add.
 ;; Binary op handler passes right_tag in ecx. Direct callers must set ecx=TAG_PTR.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_concat
     BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
@@ -1800,13 +1806,16 @@ DEF_FUNC str_concat
     VALUE_FOR_TYPE rdi, rsi
     mov rsi, rdi
     CSTRING rdi, `can only concatenate str (not "\x01") to str`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 END_FUNC str_concat
 
 ;; ============================================================================
 ;; str_repeat(PyObject *str_obj, PyObject *int_obj) -> rax = Value
 ;; String repetition via nb_multiply
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC str_repeat
     BINOP_REQUIRE_LEFT str_type, TYPE_FLAG_STR_SUBCLASS, 1
@@ -1916,9 +1925,9 @@ DEF_FUNC str_repeat
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.  list and bytes have said so
     ; since they were written; str sent both cases to the one label.
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .srep_decline
 .srep_overflow:
-    RAISE exc_OverflowError_type, "repeated string is too long"
+    FAIL exc_OverflowError_type, "repeated string is too long", .srep_decline
 END_FUNC str_repeat
 
 
@@ -2093,6 +2102,7 @@ END_FUNC str_len
 ;; ============================================================================
 ;; str_getitem(PyObject *self, int64_t index) -> rax = Value
 ;; sq_item: return single-char string at index
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
@@ -2140,12 +2150,19 @@ DEF_FUNC str_getitem, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .index_error:
-    RAISE exc_IndexError_type, "string index out of range"
+    SET_EXC exc_IndexError_type, "string index out of range"
+    RET_NULL
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_getitem
 
 ;; ============================================================================
 ;; str_subscript(PyObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
@@ -2171,12 +2188,12 @@ DEF_FUNC str_subscript
     mov rdi, rsi
     lea rsi, [rel ss_index_msg] ; ...and the refusal names the key's type
     call obj_as_index_seq
-    ERR_M1_JUMP
+    ERR_M1 .ss_fail
     mov rsi, rax
 
     ; Call str_getitem — already returns a Value
     mov rdi, rbx
-    call str_getitem
+    call str_getitem            ; err: its 0 is this slot's own answer
 
     pop rbx
     leave
@@ -2185,12 +2202,17 @@ DEF_FUNC str_subscript
 .ss_slice:
     mov rdi, rbx
     ; rsi = slice
-    call str_getslice
+    call str_getslice           ; err: its 0 is this slot's own answer
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
     ret
 
+.ss_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC str_subscript
 
 section .rodata
@@ -2200,6 +2222,7 @@ section .text
 ;; ============================================================================
 ;; str_contains(rdi=self, rsi=substr Value) -> int (0/1)
 ;; sq_contains: check if substr is in self using strstr
+;; Fails: -1
 ;; ============================================================================
 SC_ARG    equ 8             ; the operand as it arrived, for the refusal
 SC_FRAME  equ 16            ; + 0 pushes = 16, 16-aligned
@@ -2232,8 +2255,10 @@ DEF_FUNC str_contains, SC_FRAME
     mov rsi, [rbp - SC_ARG]
     CSTRING rdi, \
         `'in <string>' requires string as left operand, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 END_FUNC str_contains
 
 ;; ============================================================================
@@ -2250,6 +2275,7 @@ END_FUNC str_bool
 ;; ============================================================================
 ;; str_getslice(PyStrObject *str, PySliceObject *slice) -> PyStrObject*
 ;; Creates a new string from a slice of the original.
+;; Fails: 0
 ;; ============================================================================
 SGS_STR   equ 8
 SGS_START equ 16
@@ -2272,6 +2298,7 @@ DEF_FUNC str_getslice, SGS_FRAME
     mov rdi, rsi                ; the slice
     mov rsi, [rbx + PyStrObject.ob_length]
     call slice_indices
+    ERR_M1 .sgs_fail
     mov [rbp - SGS_START], rax
     mov [rbp - SGS_STEP], rcx
     mov r12, rdx                ; stop
@@ -2380,6 +2407,13 @@ DEF_FUNC str_getslice, SGS_FRAME
     pop r12
     pop rbx
     mov edx, TAG_PTR
+    leave
+    ret
+
+.sgs_fail:
+    RET_NULL
+    pop r12
+    pop rbx
     leave
     ret
 END_FUNC str_getslice

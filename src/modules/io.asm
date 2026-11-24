@@ -2268,24 +2268,28 @@ DEF_FUNC fileio_repr_fn, FRP_FRAME
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     lea rdi, [rel im_repr_mid]
     call str_from_cstr_heap
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     mov rdi, [rbp - FRP_SELF]
     call fileio_mode_str
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     lea rdi, [rel im_repr_end]
     call str_from_cstr_heap
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     mov rax, [rbp - FRP_PARTS]
     mov edx, TAG_PTR
@@ -2305,16 +2309,22 @@ DEF_FUNC fileio_repr_fn, FRP_FRAME
     ret
 END_FUNC fileio_repr_fn
 
-;; fileio_str_append(rdi = slot address holding a str, rsi = an owned str)
-;; concatenates in place and releases both inputs.
+;; fileio_str_append(rdi = slot address holding a str, rsi = an owned str, or 0)
+;;   -> rax = the concatenation, which the slot now holds; both inputs released
+;; Fails: 0
+;; when the second is 0 -- an obj_repr that raised, handed straight on -- with
+;; that exception still pending and the slot emptied.
 DEF_FUNC_LOCAL fileio_str_append
     push rbx
     push r12
     sub rsp, 16
     mov rbx, rdi
     mov r12, rsi
+    test rsi, rsi
+    jz .fsa_fail
     mov rdi, [rbx]
     call str_concat
+    ERR_NULL .fsa_fail
     mov [rsp], rax
     mov rdi, [rbx]
     call obj_decref
@@ -2322,6 +2332,21 @@ DEF_FUNC_LOCAL fileio_str_append
     call obj_decref
     mov rax, [rsp]
     mov [rbx], rax
+    add rsp, 16
+    pop r12
+    pop rbx
+    leave
+    ret
+.fsa_fail:
+    mov rdi, [rbx]
+    mov qword [rbx], 0
+    call obj_decref
+    test r12, r12
+    jz .fsa_fail_out
+    mov rdi, r12
+    call obj_decref
+.fsa_fail_out:
+    xor eax, eax
     add rsp, 16
     pop r12
     pop rbx

@@ -1156,7 +1156,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     mov rdi, [rbp - ISA_T2]
     mov rsi, rax
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     mov [rbp - ISA_T2], rax
     mov rdi, [rbp - ISA_T1]
     call obj_decref
@@ -1167,6 +1167,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     mov rsi, [rbp - ISA_ATTR]
     mov ecx, TAG_PTR
     call str_concat
+    ERR_NULL_JUMP
     mov [rbp - ISA_T1], rax
     mov rdi, [rbp - ISA_T2]
     call obj_decref
