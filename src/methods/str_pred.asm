@@ -9,7 +9,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-extern eval_exception_unwind
 extern obj_as_index
 %include "opcodes.inc"
 

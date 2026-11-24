@@ -15,7 +15,6 @@
 %include "opcodes.inc"
 
 ; External functions
-extern eval_exception_unwind
 extern frozenset_type
 extern int_is_integer
 extern complex_type

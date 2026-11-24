@@ -22,13 +22,13 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern eval_exception_unwind
 extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern none_singleton
 extern exc_TypeError_type
 extern set_exception
-extern eval_exception_unwind
 extern property_type
 extern property_construct
 

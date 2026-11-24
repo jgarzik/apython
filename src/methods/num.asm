@@ -10,7 +10,6 @@
 
 
 ; External functions
-extern eval_exception_unwind
 extern float_type
 extern ap_malloc
 extern ap_free

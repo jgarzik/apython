@@ -49,7 +49,6 @@ extern bytearray_ass_subscript
 extern bytearray_contains
 extern bytearray_tp_iter
 extern bytes_from_bytes_like
-extern raise_type_error_with_name
 extern list_type
 extern list_new
 extern list_append
