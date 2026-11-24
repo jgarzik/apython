@@ -1,0 +1,582 @@
+# Failure paths that leak or crash, found by
+# tests/raise_probe.sh.  The set may only shrink: a new
+# one fails the gate, and so does one that is fixed --
+# re-record with
+#   bash tests/raise_probe.sh --record
+# in the commit that fixes it.
+CRASH func | _abc._abc_subclasscheck(None, 1, 2, 3, 4, 5, 6, 7)
+CRASH func | _abc._get_dump **kw
+CRASH func | _abc._get_dump('s',)
+CRASH func | _abc._get_dump(-1,)
+CRASH func | _abc._get_dump(1.5,)
+CRASH func | _abc._get_dump([],)
+CRASH func | _abc._get_dump(b'b',)
+CRASH func | _abc._reset_caches **kw
+CRASH func | _abc._reset_caches('s',)
+CRASH func | _abc._reset_caches(-1,)
+CRASH func | _abc._reset_caches(1.5,)
+CRASH func | _abc._reset_caches([],)
+CRASH func | _abc._reset_caches(b'b',)
+CRASH func | _abc._reset_registry **kw
+CRASH func | _abc._reset_registry('s',)
+CRASH func | _abc._reset_registry(-1,)
+CRASH func | _abc._reset_registry(1.5,)
+CRASH func | _abc._reset_registry([],)
+CRASH func | _abc._reset_registry(b'b',)
+CRASH func | _sre.compile(None, 1, 2, 3, 4, 5, 6, 7)
+CRASH func | _weakref._remove_dead_weakref(None, 1, 2, 3, 4, 5, 6, 7)
+CRASH func | sys.set_int_max_str_digits(1.5,)
+CRASH func | sys.set_int_max_str_digits([],)
+CRASH meth | module.set_int_max_str_digits(1.5,)
+CRASH meth | module.set_int_max_str_digits([],)
+CRASH meth | property.deleter **kw
+CRASH meth | property.getter **kw
+CRASH meth | property.setter **kw
+cb | bytearray | c.center(E(60)) | index | nth=1
+cb | bytearray | c.count(E(7)) | index | nth=1
+cb | bytearray | c.count(E(7)) | index | nth=3
+cb | bytearray | c.expandtabs(E(4)) | index | nth=1
+cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=1
+cb | bytearray | c.find(E(7)) | index | nth=1
+cb | bytearray | c.find(E(7)) | index | nth=3
+cb | bytearray | c.hex(":", E(2)) | index | nth=1
+cb | bytearray | c.index(E(7)) | index | nth=1
+cb | bytearray | c.index(E(7)) | index | nth=3
+cb | bytearray | c.ljust(E(60)) | index | nth=1
+cb | bytearray | c.replace(b"\x01", b"z", E(2)) | index | nth=1
+cb | bytearray | c.split(None, E(2)) | index | nth=1
+cb | bytearray | c.startswith(other, E(1)) | index | nth=1
+cb | bytearray | c.zfill(E(60)) | index | nth=1
+cb | bytearray | c[2:5] = [E(1), E(2)] | index | nth=1
+cb | dict | c == other | eq | nth=1
+cb | dict | c == other | eq | nth=3
+cb | dict | c == other | hash | nth=1
+cb | dict | c == other | hash | nth=3
+cb | dict | c | other | eq | nth=1
+cb | dict | c | other | eq | nth=3
+cb | dict | c | other | hash | nth=1
+cb | dict | c | other | hash | nth=3
+cb | dict | c.__init__(other) | eq | nth=1
+cb | dict | c.__init__(other) | eq | nth=3
+cb | dict | c.__init__(other) | hash | nth=1
+cb | dict | c.__init__(other) | hash | nth=3
+cb | dict | c.items() == other.items() | eq | nth=1
+cb | dict | c.items() == other.items() | eq | nth=3
+cb | dict | c.items() == other.items() | hash | nth=1
+cb | dict | c.items() == other.items() | hash | nth=3
+cb | dict | c.keys() & other.keys() | eq | nth=1
+cb | dict | c.keys() & other.keys() | eq | nth=3
+cb | dict | c.keys() & other.keys() | hash | nth=1
+cb | dict | c.keys() & other.keys() | hash | nth=3
+cb | dict | c.keys() == other.keys() | eq | nth=1
+cb | dict | c.keys() == other.keys() | eq | nth=3
+cb | dict | c.keys() == other.keys() | hash | nth=1
+cb | dict | c.keys() == other.keys() | hash | nth=3
+cb | dict | c.popitem() | hash | nth=1
+cb | dict | c.update((e, 1) for e in gen(8)) | eq | nth=1
+cb | dict | c.update((e, 1) for e in gen(8)) | eq | nth=3
+cb | dict | c.update((e, 1) for e in gen(8)) | hash | nth=1
+cb | dict | c.update((e, 1) for e in gen(8)) | hash | nth=3
+cb | dict | c.update(other) | eq | nth=1
+cb | dict | c.update(other) | eq | nth=3
+cb | dict | c.update(other) | hash | nth=1
+cb | dict | c.update(other) | hash | nth=3
+cb | dict | dict.fromkeys(gen(8)) | hash | nth=1
+cb | dict | dict.fromkeys(gen(8)) | iter | nth=3
+cb | list | c[2:5] = gen(8) | iter | nth=1
+cb | list | c[2:5] = gen(8) | iter | nth=3
+cb | list | c[::2] = gen(6) | iter | nth=1
+cb | list | c[::2] = gen(6) | iter | nth=3
+cb | list | dict.fromkeys(c) | hash | nth=1
+cb | list | dict.fromkeys(c) | hash | nth=3
+cb | list | set(c) | hash | nth=3
+cb | set | c & other | eq | nth=1
+cb | set | c & other | eq | nth=3
+cb | set | c & other | hash | nth=1
+cb | set | c & other | hash | nth=3
+cb | set | c &= other | eq | nth=1
+cb | set | c &= other | eq | nth=3
+cb | set | c &= other | hash | nth=1
+cb | set | c &= other | hash | nth=3
+cb | set | c - other | eq | nth=1
+cb | set | c - other | eq | nth=3
+cb | set | c - other | hash | nth=1
+cb | set | c - other | hash | nth=3
+cb | set | c -= other | eq | nth=1
+cb | set | c -= other | eq | nth=3
+cb | set | c -= other | hash | nth=1
+cb | set | c -= other | hash | nth=3
+cb | set | c == other | hash | nth=1
+cb | set | c ^ other | eq | nth=1
+cb | set | c ^ other | eq | nth=3
+cb | set | c ^ other | hash | nth=1
+cb | set | c ^ other | hash | nth=3
+cb | set | c ^= other | eq | nth=1
+cb | set | c ^= other | eq | nth=3
+cb | set | c ^= other | hash | nth=1
+cb | set | c ^= other | hash | nth=3
+cb | set | c | other | eq | nth=1
+cb | set | c | other | eq | nth=3
+cb | set | c | other | hash | nth=1
+cb | set | c | other | hash | nth=3
+cb | set | c |= other | eq | nth=1
+cb | set | c |= other | eq | nth=3
+cb | set | c |= other | hash | nth=1
+cb | set | c |= other | hash | nth=3
+cb | set | c.__init__(gen(5)) | eq | nth=1
+cb | set | c.__init__(gen(5)) | hash | nth=1
+cb | set | c.__init__(gen(5)) | hash | nth=3
+cb | set | c.difference_update(gen(8)) | eq | nth=1
+cb | set | c.difference_update(gen(8)) | eq | nth=3
+cb | set | c.difference_update(gen(8)) | hash | nth=1
+cb | set | c.difference_update(gen(8)) | hash | nth=3
+cb | set | c.intersection_update(other) | eq | nth=1
+cb | set | c.intersection_update(other) | eq | nth=3
+cb | set | c.intersection_update(other) | hash | nth=1
+cb | set | c.intersection_update(other) | hash | nth=3
+cb | set | c.isdisjoint(other) | eq | nth=1
+cb | set | c.isdisjoint(other) | hash | nth=1
+cb | set | c.isdisjoint(other) | hash | nth=3
+cb | set | c.issuperset(other) | eq | nth=3
+cb | set | c.issuperset(other) | hash | nth=1
+cb | set | c.issuperset(other) | hash | nth=3
+cb | set | c.symmetric_difference_update(other) | eq | nth=1
+cb | set | c.symmetric_difference_update(other) | eq | nth=3
+cb | set | c.symmetric_difference_update(other) | hash | nth=1
+cb | set | c.symmetric_difference_update(other) | hash | nth=3
+cb | set | c.update(gen(8)) | eq | nth=3
+cb | set | c.update(gen(8)) | hash | nth=1
+cb | set | c.update(gen(8)) | hash | nth=3
+cb | set | frozenset(c) == frozenset(other) | hash | nth=1
+func | math.gcd('s',)
+func | math.gcd(1.5,)
+func | math.gcd(<class 'object'>,)
+func | math.gcd(None,)
+func | math.gcd([],)
+func | math.gcd(b'b',)
+func | time.strptime **kw
+func | time.strptime(-1,)
+func | time.strptime(1.5,)
+func | time.strptime(<class 'object'>,)
+func | time.strptime(None,)
+func | time.strptime([],)
+func | time.strptime(b'b',)
+meth | array.array.extend('s',)
+meth | array.array.fromlist('s',)
+meth | bytearray.__mod__('s',)
+meth | bytearray.__mod__(-1,)
+meth | bytearray.__mod__(1.5,)
+meth | bytearray.__mod__(<class 'object'>,)
+meth | bytearray.__mod__(None,)
+meth | bytearray.__mod__(b'b',)
+meth | bytearray.center('s',)
+meth | bytearray.center(1.5,)
+meth | bytearray.center(<class 'object'>,)
+meth | bytearray.center(None,)
+meth | bytearray.center([],)
+meth | bytearray.center(b'b',)
+meth | bytearray.count('s',)
+meth | bytearray.count(-1,)
+meth | bytearray.count(1.5,)
+meth | bytearray.count(<class 'object'>,)
+meth | bytearray.count(None,)
+meth | bytearray.count([],)
+meth | bytearray.decode **kw
+meth | bytearray.decode(-1,)
+meth | bytearray.decode(1.5,)
+meth | bytearray.decode(<class 'object'>,)
+meth | bytearray.decode(None,)
+meth | bytearray.decode([],)
+meth | bytearray.decode(b'b',)
+meth | bytearray.endswith('s',)
+meth | bytearray.endswith(-1,)
+meth | bytearray.endswith(1.5,)
+meth | bytearray.endswith(<class 'object'>,)
+meth | bytearray.endswith(None,)
+meth | bytearray.endswith([],)
+meth | bytearray.expandtabs('s',)
+meth | bytearray.expandtabs(1.5,)
+meth | bytearray.expandtabs(<class 'object'>,)
+meth | bytearray.expandtabs(None,)
+meth | bytearray.expandtabs([],)
+meth | bytearray.expandtabs(b'b',)
+meth | bytearray.find('s',)
+meth | bytearray.find(-1,)
+meth | bytearray.find(1.5,)
+meth | bytearray.find(<class 'object'>,)
+meth | bytearray.find(None,)
+meth | bytearray.find([],)
+meth | bytearray.hex **kw
+meth | bytearray.hex(-1,)
+meth | bytearray.hex(1.5,)
+meth | bytearray.hex(<class 'object'>,)
+meth | bytearray.hex(None,)
+meth | bytearray.hex([],)
+meth | bytearray.index('s',)
+meth | bytearray.index(-1,)
+meth | bytearray.index(1.5,)
+meth | bytearray.index(<class 'object'>,)
+meth | bytearray.index(None,)
+meth | bytearray.index([],)
+meth | bytearray.join('s',)
+meth | bytearray.join(-1,)
+meth | bytearray.join(1.5,)
+meth | bytearray.join(<class 'object'>,)
+meth | bytearray.join(None,)
+meth | bytearray.join(b'b',)
+meth | bytearray.ljust('s',)
+meth | bytearray.ljust(1.5,)
+meth | bytearray.ljust(<class 'object'>,)
+meth | bytearray.ljust(None,)
+meth | bytearray.ljust([],)
+meth | bytearray.ljust(b'b',)
+meth | bytearray.lstrip **kw
+meth | bytearray.lstrip('s',)
+meth | bytearray.lstrip(-1,)
+meth | bytearray.lstrip(1.5,)
+meth | bytearray.lstrip(<class 'object'>,)
+meth | bytearray.lstrip([],)
+meth | bytearray.partition('s',)
+meth | bytearray.partition(-1,)
+meth | bytearray.partition(1.5,)
+meth | bytearray.partition(<class 'object'>,)
+meth | bytearray.partition(None,)
+meth | bytearray.partition([],)
+meth | bytearray.removeprefix('s',)
+meth | bytearray.removeprefix(-1,)
+meth | bytearray.removeprefix(1.5,)
+meth | bytearray.removeprefix(<class 'object'>,)
+meth | bytearray.removeprefix(None,)
+meth | bytearray.removeprefix([],)
+meth | bytearray.removesuffix('s',)
+meth | bytearray.removesuffix(-1,)
+meth | bytearray.removesuffix(1.5,)
+meth | bytearray.removesuffix(<class 'object'>,)
+meth | bytearray.removesuffix(None,)
+meth | bytearray.removesuffix([],)
+meth | bytearray.rfind('s',)
+meth | bytearray.rfind(-1,)
+meth | bytearray.rfind(1.5,)
+meth | bytearray.rfind(<class 'object'>,)
+meth | bytearray.rfind(None,)
+meth | bytearray.rfind([],)
+meth | bytearray.rindex('s',)
+meth | bytearray.rindex(-1,)
+meth | bytearray.rindex(1.5,)
+meth | bytearray.rindex(<class 'object'>,)
+meth | bytearray.rindex(None,)
+meth | bytearray.rindex([],)
+meth | bytearray.rjust('s',)
+meth | bytearray.rjust(1.5,)
+meth | bytearray.rjust(<class 'object'>,)
+meth | bytearray.rjust(None,)
+meth | bytearray.rjust([],)
+meth | bytearray.rjust(b'b',)
+meth | bytearray.rpartition('s',)
+meth | bytearray.rpartition(-1,)
+meth | bytearray.rpartition(1.5,)
+meth | bytearray.rpartition(<class 'object'>,)
+meth | bytearray.rpartition(None,)
+meth | bytearray.rpartition([],)
+meth | bytearray.rsplit **kw
+meth | bytearray.rsplit('s',)
+meth | bytearray.rsplit(-1,)
+meth | bytearray.rsplit(1.5,)
+meth | bytearray.rsplit(<class 'object'>,)
+meth | bytearray.rsplit([],)
+meth | bytearray.rstrip **kw
+meth | bytearray.rstrip('s',)
+meth | bytearray.rstrip(-1,)
+meth | bytearray.rstrip(1.5,)
+meth | bytearray.rstrip(<class 'object'>,)
+meth | bytearray.rstrip([],)
+meth | bytearray.split **kw
+meth | bytearray.split('s',)
+meth | bytearray.split(-1,)
+meth | bytearray.split(1.5,)
+meth | bytearray.split(<class 'object'>,)
+meth | bytearray.split([],)
+meth | bytearray.startswith('s',)
+meth | bytearray.startswith(-1,)
+meth | bytearray.startswith(1.5,)
+meth | bytearray.startswith(<class 'object'>,)
+meth | bytearray.startswith(None,)
+meth | bytearray.startswith([],)
+meth | bytearray.strip **kw
+meth | bytearray.strip('s',)
+meth | bytearray.strip(-1,)
+meth | bytearray.strip(1.5,)
+meth | bytearray.strip(<class 'object'>,)
+meth | bytearray.strip([],)
+meth | bytearray.translate('s',)
+meth | bytearray.translate(-1,)
+meth | bytearray.translate(1.5,)
+meth | bytearray.translate(<class 'object'>,)
+meth | bytearray.translate([],)
+meth | bytearray.translate(b'b',)
+meth | bytearray.zfill('s',)
+meth | bytearray.zfill(1.5,)
+meth | bytearray.zfill(<class 'object'>,)
+meth | bytearray.zfill(None,)
+meth | bytearray.zfill([],)
+meth | bytearray.zfill(b'b',)
+meth | dict.__init__(-1,)
+meth | dict.__init__(1.5,)
+meth | dict.__init__(<class 'object'>,)
+meth | dict.__init__(None,)
+meth | dict.__ior__(-1,)
+meth | dict.__ior__(1.5,)
+meth | dict.__ior__(<class 'object'>,)
+meth | dict.__ior__(None,)
+meth | dict.update(-1,)
+meth | dict.update(1.5,)
+meth | dict.update(<class 'object'>,)
+meth | dict.update(None,)
+meth | frozenset.difference(None, 1, 2, 3, 4, 5, 6, 7)
+meth | frozenset.intersection(None, 1, 2, 3, 4, 5, 6, 7)
+meth | frozenset.union(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__delattr__ **kw
+meth | generator.__delattr__('s',)
+meth | generator.__delattr__()
+meth | generator.__delattr__(-1,)
+meth | generator.__delattr__(1.5,)
+meth | generator.__delattr__(<class 'object'>,)
+meth | generator.__delattr__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__delattr__(None,)
+meth | generator.__delattr__([],)
+meth | generator.__delattr__(b'b',)
+meth | generator.__dir__('s',)
+meth | generator.__dir__(-1,)
+meth | generator.__dir__(1.5,)
+meth | generator.__dir__(<class 'object'>,)
+meth | generator.__dir__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__dir__(None,)
+meth | generator.__dir__([],)
+meth | generator.__dir__(b'b',)
+meth | generator.__eq__ **kw
+meth | generator.__eq__()
+meth | generator.__eq__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__format__ **kw
+meth | generator.__format__('s',)
+meth | generator.__format__()
+meth | generator.__format__(-1,)
+meth | generator.__format__(1.5,)
+meth | generator.__format__(<class 'object'>,)
+meth | generator.__format__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__format__(None,)
+meth | generator.__format__([],)
+meth | generator.__format__(b'b',)
+meth | generator.__ge__ **kw
+meth | generator.__ge__()
+meth | generator.__ge__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__getattribute__ **kw
+meth | generator.__getattribute__()
+meth | generator.__getattribute__(-1,)
+meth | generator.__getattribute__(1.5,)
+meth | generator.__getattribute__(<class 'object'>,)
+meth | generator.__getattribute__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__getattribute__(None,)
+meth | generator.__getattribute__([],)
+meth | generator.__getattribute__(b'b',)
+meth | generator.__getstate__ **kw
+meth | generator.__getstate__('s',)
+meth | generator.__getstate__(-1,)
+meth | generator.__getstate__(1.5,)
+meth | generator.__getstate__(<class 'object'>,)
+meth | generator.__getstate__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__getstate__(None,)
+meth | generator.__getstate__([],)
+meth | generator.__getstate__(b'b',)
+meth | generator.__gt__ **kw
+meth | generator.__gt__()
+meth | generator.__gt__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__hash__('s',)
+meth | generator.__hash__(-1,)
+meth | generator.__hash__(1.5,)
+meth | generator.__hash__(<class 'object'>,)
+meth | generator.__hash__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__hash__(None,)
+meth | generator.__hash__([],)
+meth | generator.__hash__(b'b',)
+meth | generator.__init__ **kw
+meth | generator.__init__('s',)
+meth | generator.__init__(-1,)
+meth | generator.__init__(1.5,)
+meth | generator.__init__(<class 'object'>,)
+meth | generator.__init__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__init__(None,)
+meth | generator.__init__([],)
+meth | generator.__init__(b'b',)
+meth | generator.__iter__ **kw
+meth | generator.__iter__('s',)
+meth | generator.__iter__(-1,)
+meth | generator.__iter__(1.5,)
+meth | generator.__iter__(<class 'object'>,)
+meth | generator.__iter__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__iter__(None,)
+meth | generator.__iter__([],)
+meth | generator.__iter__(b'b',)
+meth | generator.__le__ **kw
+meth | generator.__le__()
+meth | generator.__le__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__lt__ **kw
+meth | generator.__lt__()
+meth | generator.__lt__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__ne__ **kw
+meth | generator.__ne__()
+meth | generator.__ne__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__next__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__reduce__ **kw
+meth | generator.__reduce__('s',)
+meth | generator.__reduce__()
+meth | generator.__reduce__(-1,)
+meth | generator.__reduce__(1.5,)
+meth | generator.__reduce__(<class 'object'>,)
+meth | generator.__reduce__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__reduce__(None,)
+meth | generator.__reduce__([],)
+meth | generator.__reduce__(b'b',)
+meth | generator.__reduce_ex__ **kw
+meth | generator.__reduce_ex__('s',)
+meth | generator.__reduce_ex__()
+meth | generator.__reduce_ex__(-1,)
+meth | generator.__reduce_ex__(1.5,)
+meth | generator.__reduce_ex__(<class 'object'>,)
+meth | generator.__reduce_ex__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__reduce_ex__(None,)
+meth | generator.__reduce_ex__([],)
+meth | generator.__reduce_ex__(b'b',)
+meth | generator.__repr__('s',)
+meth | generator.__repr__(-1,)
+meth | generator.__repr__(1.5,)
+meth | generator.__repr__(<class 'object'>,)
+meth | generator.__repr__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__repr__(None,)
+meth | generator.__repr__([],)
+meth | generator.__repr__(b'b',)
+meth | generator.__setattr__ **kw
+meth | generator.__setattr__('s',)
+meth | generator.__setattr__()
+meth | generator.__setattr__(-1,)
+meth | generator.__setattr__(1.5,)
+meth | generator.__setattr__(<class 'object'>,)
+meth | generator.__setattr__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__setattr__(None,)
+meth | generator.__setattr__([],)
+meth | generator.__setattr__(b'b',)
+meth | generator.__sizeof__('s',)
+meth | generator.__sizeof__(-1,)
+meth | generator.__sizeof__(1.5,)
+meth | generator.__sizeof__(<class 'object'>,)
+meth | generator.__sizeof__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__sizeof__(None,)
+meth | generator.__sizeof__([],)
+meth | generator.__sizeof__(b'b',)
+meth | generator.__str__('s',)
+meth | generator.__str__(-1,)
+meth | generator.__str__(1.5,)
+meth | generator.__str__(<class 'object'>,)
+meth | generator.__str__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | generator.__str__(None,)
+meth | generator.__str__([],)
+meth | generator.__str__(b'b',)
+meth | list.index(<class 'object'>,)
+meth | memoryview.hex **kw
+meth | memoryview.hex(-1,)
+meth | memoryview.hex(1.5,)
+meth | memoryview.hex(<class 'object'>,)
+meth | memoryview.hex(None,)
+meth | memoryview.hex([],)
+meth | module.__loader__ **kw
+meth | module.__loader__('s',)
+meth | module.__loader__(-1,)
+meth | module.__loader__(1.5,)
+meth | module.__loader__(<class 'object'>,)
+meth | module.__loader__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | module.__loader__(None,)
+meth | module.__loader__([],)
+meth | module.__loader__(b'b',)
+meth | set.__init__(-1,)
+meth | set.__init__(1.5,)
+meth | set.__init__(<class 'object'>,)
+meth | set.__init__(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.__init__(None,)
+meth | set.difference(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.difference_update(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.intersection(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.intersection_update(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.union(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.update(-1,)
+meth | set.update(1.5,)
+meth | set.update(<class 'object'>,)
+meth | set.update(None, 1, 2, 3, 4, 5, 6, 7)
+meth | set.update(None,)
+new | _io.BytesIO('s',)
+new | _io.BytesIO('s',) **kw
+new | _io.BytesIO() **kw
+new | _io.BytesIO(-1,)
+new | _io.BytesIO(-1,) **kw
+new | _io.BytesIO(1.5,)
+new | _io.BytesIO(1.5,) **kw
+new | _io.BytesIO(<class 'object'>,)
+new | _io.BytesIO(<class 'object'>,) **kw
+new | _io.BytesIO([],)
+new | _io.BytesIO([],) **kw
+new | _io.FileIO('s',)
+new | _io.FileIO('s',) **kw
+new | _io.FileIO()
+new | _io.FileIO(-1,)
+new | _io.FileIO(-1,) **kw
+new | _io.FileIO(None, 1, 2, 3, 4, 5, 6, 7)
+new | _io.FileIO(None, 1, 2, 3, 4, 5, 6, 7) **kw
+new | _io.FileIO(b'b',)
+new | _io.FileIO(b'b',) **kw
+new | _io.StringIO('s',) **kw
+new | _io.StringIO() **kw
+new | _io.StringIO(-1,) **kw
+new | _io.StringIO(1.5,) **kw
+new | _io.StringIO(<class 'object'>,) **kw
+new | _io.StringIO(None, 1, 2, 3, 4, 5, 6, 7)
+new | _io.StringIO(None, 1, 2, 3, 4, 5, 6, 7) **kw
+new | _io.StringIO(None,) **kw
+new | _io.StringIO([],) **kw
+new | _io.StringIO(b'b',) **kw
+new | dict('s',)
+new | dict('s',) **kw
+new | dict(-1,)
+new | dict(-1,) **kw
+new | dict(1.5,)
+new | dict(1.5,) **kw
+new | dict(<class 'object'>,)
+new | dict(<class 'object'>,) **kw
+new | dict(None,)
+new | dict(None,) **kw
+new | dict(b'b',)
+new | dict(b'b',) **kw
+new | list(-1,)
+new | list(1.5,)
+new | list(<class 'object'>,)
+new | list(None,)
+new | map('s',) **kw
+new | map(-1,) **kw
+new | map(1.5,) **kw
+new | map(<class 'object'>,) **kw
+new | map(None, 1, 2, 3, 4, 5, 6, 7)
+new | map(None, 1, 2, 3, 4, 5, 6, 7) **kw
+new | map(None,) **kw
+new | map([],) **kw
+new | map(b'b',) **kw
+new | tuple(-1,)
+new | tuple(1.5,)
+new | tuple(<class 'object'>,)
+new | tuple(None,)
+new | zip(-1,)
+new | zip(-1,) **kw
+new | zip(1.5,)
+new | zip(1.5,) **kw
+new | zip(<class 'object'>,)
+new | zip(<class 'object'>,) **kw
+new | zip(None, 1, 2, 3, 4, 5, 6, 7)
+new | zip(None, 1, 2, 3, 4, 5, 6, 7) **kw
+new | zip(None,)
+new | zip(None,) **kw

@@ -183,6 +183,7 @@ check: $(TARGET) lib-pyc
 	@bash tests/arity_probe.sh
 	@bash tests/typefuzz_probe.sh
 	@bash tests/reentry_probe.sh
+	@bash tests/raise_probe.sh
 	@bash tests/syntax_probe.sh
 
 # A malformed .pyc has to be refused rather than run.  Not a tests/test_*.py:
@@ -203,6 +204,12 @@ check-arity: $(TARGET)
 # same corpus under valgrind, which takes minutes.
 check-reentry: $(TARGET)
 	@bash tests/reentry_probe.sh
+
+# Every builtin made to FAIL, with the allocator's live-block count read
+# around each failure.  Ratchets against tests/raise_leak_floor.txt, in both
+# directions.
+check-raise: $(TARGET)
+	@bash tests/raise_probe.sh
 
 # A syntax error's message and its five location fields, against CPython's,
 # over tests/syntax_corpus.txt.  Ratchets against tests/syntax_floor.txt;
