@@ -595,7 +595,7 @@ DEF_FUNC float_type_call, FTC_FRAME
     mov [rbp - FTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
-    call builtin_float          ; rax = raw double bits, edx = TAG_FLOAT
+    call builtin_float          ; rax = raw double bits, edx = TAG_FLOAT; err: (0, 0) is tested below
     lea rcx, [rel float_type]
     cmp [rbp - FTC_TYPE], rcx
     je .ftc_out                 ; float() itself: the immediate is the answer

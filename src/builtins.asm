@@ -8,7 +8,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern eval_exception_unwind
 extern dict_new
 extern dict_set
 extern str_from_cstr
@@ -27,7 +26,7 @@ extern bool_type
 extern float_type
 extern ap_malloc
 extern ap_free
-extern raise_exception
+extern set_exception
 extern sys_write
 extern fileobj_write_fd
 extern range_new
@@ -203,6 +202,7 @@ END_FUNC builtin_func_new_checked
 
 ;; ============================================================================
 ;; builtin_func_call(PyObject *self, PyObject **args, int64_t nargs) -> PyObject*
+;; Fails: 0
 ;; Dispatch to the underlying C function: func_ptr(args, nargs)
 ;; Validates nargs against min_args/max_args if set.
 ;; ============================================================================
@@ -296,8 +296,8 @@ DEF_FUNC_BARE builtin_func_call
     ; rather than in each of them is what makes the next one impossible --
     ; every builtin method funnels through this function, which is why the
     ; receiver TYPE check above lives here too.
-    extern raise_missing_receiver
-    jmp raise_missing_receiver      ; rdi = the descriptor; does not return
+    extern set_missing_receiver
+    jmp set_missing_receiver        ; rdi = the descriptor; its 0 is ours
 
 .bfc_wrong_receiver:
     add rsp, 8
@@ -305,8 +305,8 @@ DEF_FUNC_BARE builtin_func_call
     pop rsi
     pop rdi
     mov rsi, [rsi]              ; the receiver
-    extern raise_descriptor_receiver
-    jmp raise_descriptor_receiver   ; rdi = the descriptor; does not return
+    extern set_descriptor_receiver
+    jmp set_descriptor_receiver     ; rdi = the descriptor; its 0 is ours
 
 .bfc_too_few:
     ; "list.append() takes exactly one argument (0 given)".  Both of these
@@ -325,8 +325,8 @@ DEF_FUNC_BARE builtin_func_call
     mov rsi, rdx
     mov rdx, rcx
     mov rcx, r9                 ; which way it was wrong
-    extern raise_builtin_arity
-    jmp raise_builtin_arity     ; rdi = the descriptor; does not return
+    extern set_builtin_arity
+    jmp set_builtin_arity       ; rdi = the descriptor; its 0 is ours
 END_FUNC builtin_func_call
 
 
@@ -723,12 +723,14 @@ DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
 .psw_not_object:
     CSTRING rdi, "write"
     call str_from_cstr_heap
+    mov rbx, rax
     mov rsi, rax
     mov rdi, [rbp - PSW_SINK]
     xor edx, edx                ; a get, not a set
-    extern raise_no_attribute
-    call raise_no_attribute
-    ; does not return
+    extern set_no_attribute
+    call set_no_attribute
+    mov rdi, rbx
+    call obj_decref             ; the name, which the jump used to leave behind
 
 .psw_raised:
     mov eax, 1
@@ -818,12 +820,13 @@ DEF_FUNC_LOCAL print_sink_flush, PSF_FRAME
     jne .psf_failed
     CSTRING rdi, "flush"
     call str_from_cstr_heap
+    mov rbx, rax
     mov rsi, rax
     mov rdi, [rbp - PSF_SINK]
     xor edx, edx                ; a get, not a set
-    extern raise_no_attribute
-    call raise_no_attribute
-    ; does not return
+    call set_no_attribute
+    mov rdi, rbx
+    call obj_decref             ; the name
 
 .psf_failed:
     mov eax, 1
@@ -846,6 +849,7 @@ END_FUNC print_sink_flush
 
 ;; ============================================================================
 ;; builtin_print(PyObject **args, int64_t nargs) -> PyObject*
+;; Fails: 0
 ;; Print each arg separated by spaces, followed by newline
 ;; Buffered: builds output in stack buffer, single fwrite() at end
 ;; ============================================================================
@@ -910,7 +914,7 @@ DEF_FUNC builtin_print, PR_FRAME
     lea rcx, [rbp - PR_KW_SEP]
     lea r8, [rel pr_kw_fn]
     call math_bind_kw_named
-    ERR_M1_JUMP
+    ERR_M1 .print_sink_failed
     mov r12, rax                ; r12 = n_pos
 
     ; sep and end: None or a str (a subclass too), checked before anything
@@ -919,10 +923,12 @@ DEF_FUNC builtin_print, PR_FRAME
     mov rdi, [rbp - PR_KW_SEP]
     CSTRING rsi, "sep"
     call print_str_or_none
+    ERR_PENDING .print_sink_failed
     mov [rbp - PR_SEP], rax
     mov rdi, [rbp - PR_KW_END]
     CSTRING rsi, "end"
     call print_str_or_none
+    ERR_PENDING .print_sink_failed
     mov [rbp - PR_END], rax
 
     ; It was accepted and ignored, which cost nothing while stdout was
@@ -1088,7 +1094,8 @@ align 16
     mov rdi, r14
     call obj_decref
 .print_sink_failed:
-    ; write() raised, or the sink has none.  Whatever was already handed over
+    ; write() raised, or the sink has none -- or a keyword was refused,
+    ; before there was a sink at all.  Whatever was already handed over
     ; stays handed over, as CPython's per-argument writes do, and the
     ; exception is the result.
     PRINT_DROP_SINK
@@ -1226,7 +1233,8 @@ END_FUNC builtin_print
 ;; ============================================================================
 ;; print_str_or_none(rdi = the keyword's Value or 0, rsi = its name, a C
 ;;                   string) -> rax = the str, or 0 for "not given or None"
-;; Anything else raises CPython's "sep must be None or a string, not int".
+;; Fails: 0?
+;; Anything else is CPython's "sep must be None or a string, not int".
 ;; ============================================================================
 PSN_ARG   equ 8
 PSN_NAME  equ 16
@@ -1260,7 +1268,9 @@ DEF_FUNC_LOCAL print_str_or_none, PSN_FRAME
     call rbt_typename
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - PSN_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
 END_FUNC print_str_or_none
 
 ; The keywords print() takes, for math_bind_kw_named
@@ -1277,6 +1287,7 @@ section .text
 
 ;; ============================================================================
 ;; builtin_len(PyObject **args, int64_t nargs) -> rax = Value
+;; Fails: 0
 ;; Returns len() of the first argument.  Reads ob_size for a variable-size
 ;; builtin, and falls back to the sequence and mapping length slots.
 ;; ============================================================================
@@ -1396,18 +1407,21 @@ DEF_FUNC builtin_len, LEN_FRAME
 .len_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "len() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .len_failed
 
 .len_type_error:
     mov rsi, rbx                ; args[0], live throughout
     CSTRING rdi, `object of type '\x01' has no len()`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .len_failed
 END_FUNC builtin_len
 
 ;; ============================================================================
 ;; range_arg_value(rdi = an argument Value) -> rax = an int Value, owned
+;; Fails: 0
 ;;
 ;; What a range bound is: an int, or anything with __index__, kept AS an
 ;; object.  The bounds used to go through obj_as_index_clamped, which is an
@@ -1448,17 +1462,18 @@ DEF_FUNC_LOCAL range_arg_value, RAV_FRAME
     mov rdi, [rbp - RAV_ARG]
     V_UNPACK rdi, rdx
     extern obj_as_index_object
-    call obj_as_index_object
-    ERR_NULL_JUMP
+    call obj_as_index_object    ; err: its 0 is this function's own
     leave
     ret
 END_FUNC range_arg_value
 
 ;; ============================================================================
 ;; builtin_range(PyObject **args, int64_t nargs) -> rax = Value
+;; Fails: 0
 ;; range(stop) or range(start, stop) or range(start, stop, step)
 ;; ============================================================================
-DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
+RNG_FRAME equ 8              ; + 3 pushes = 32, 16-aligned
+DEF_FUNC builtin_range, RNG_FRAME
     push rbx
     push r12
     push r13
@@ -1473,12 +1488,13 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     cmp r12, 3
     je .range_3
 
-    RAISE exc_TypeError_type, "range expected 1 to 3 arguments"
+    FAIL exc_TypeError_type, "range expected 1 to 3 arguments", .range_fail
 
 .range_1:
     ; range(stop): start=0, stop=args[0], step=1
     mov rdi, [rbx]             ; args[0]
-    call range_arg_value       ; an int Value, owned; raises otherwise
+    call range_arg_value       ; an int Value, owned
+    ERR_NULL .range_fail
     mov rsi, rax
     xor edi, edi
     V_PACK_I64 rdi, rdx        ; start = 0
@@ -1490,9 +1506,11 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     ; range(start, stop): step=1
     mov rdi, [rbx]             ; args[0]
     call range_arg_value
+    ERR_NULL .range_fail
     mov r13, rax               ; start
     mov rdi, [rbx + 8]         ; args[1]
     call range_arg_value
+    ERR_NULL .range_fail_start
     mov rsi, rax               ; stop
     mov rdi, r13               ; start
     mov rdx, V_INT(1)           ; step = 1
@@ -1503,12 +1521,17 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     ; range(start, stop, step)
     mov rdi, [rbx]             ; args[0]
     call range_arg_value
-    push rax                   ; start
+    ERR_NULL .range_fail
+    mov r13, rax               ; start, kept where the error exit finds it
+    push rax
     mov rdi, [rbx + 8]         ; args[1]
     call range_arg_value
-    push rax                   ; stop
+    ERR_NULL .range_fail_start
+    mov r12, rax               ; stop, likewise: nargs is no longer needed
+    push rax
     mov rdi, [rbx + 16]        ; args[2]
     call range_arg_value
+    ERR_NULL .range_fail_stop
     mov rdx, rax               ; step
     ; A zero step makes range_obj_sq_length divide by zero and makes
     ; range_iter_next advance by nothing, so len(range(0,5,0)) was SIGFPE
@@ -1523,7 +1546,21 @@ DEF_FUNC builtin_range, 8            ; 3 pushes, so rsp is 16-aligned
     jmp .range_done
 
 .range_zero_step:
-    RAISE exc_ValueError_type, "range() arg 3 must not be zero"
+    ; The step is the immediate 0 and owns nothing; the two bounds do.
+    SET_EXC exc_ValueError_type, "range() arg 3 must not be zero"
+.range_fail_stop:
+    DECREF_V r12, rax
+.range_fail_start:
+    DECREF_V r13, rax
+.range_fail:
+    ; The three-argument form arrives with its two pushes outstanding.
+    lea rsp, [rbp - RNG_FRAME - 24]
+    RET_NULL                    ; range's tp_new answers the pair
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .range_done:
     pop r13
@@ -1537,6 +1574,7 @@ END_FUNC builtin_range
 
 ;; ============================================================================
 ;; builtin_repr(PyObject **args, int64_t nargs) -> rax = Value
+;; Fails: 0
 ;; repr(obj)
 ;; ============================================================================
 DEF_FUNC builtin_repr
@@ -1554,12 +1592,14 @@ DEF_FUNC builtin_repr
 .repr_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "repr() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_repr
 
 ;; ============================================================================
 ;; builtin_bool(PyObject **args, int64_t nargs) -> PyObject*
+;; Fails: 0
 ;; bool()    -> False
 ;; bool(x)   -> True if x is truthy, False otherwise
 ;; ============================================================================
@@ -1593,12 +1633,15 @@ DEF_FUNC builtin_bool
 .bool_error:
     CSTRING rdi, "bool expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    xor edx, edx                ; bool's tp_new answers the (0, 0) pair
+    leave
+    ret
 END_FUNC builtin_bool
 
 ;; ============================================================================
 ;; builtin_float(PyObject **args, int64_t nargs) -> PyObject*
+;; Fails: 0
 ;; float()    -> 0.0
 ;; float(x)   -> convert x to float (int, float, or string)
 ;; ============================================================================
@@ -1750,8 +1793,10 @@ DEF_FUNC builtin_float, BF_FRAME
     call .float_append
     lea rdi, [rbp - BF_TMPL]
     mov rsi, [rbp - BF_RET]
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - BF_RET]     ; what __float__ answered was ours
+    DECREF_V rdi, rsi
+    jmp .float_dunder_raised
 
 ;; Writes "<the receiver's type name>." into BF_TMPL and answers the NUL it
 ;; left behind, so the caller appends the rest of the message there.  A type
@@ -1838,8 +1883,8 @@ DEF_FUNC builtin_float, BF_FRAME
     V_PACK rdi, rsi
     mov rsi, rdi
     CSTRING rdi, `float() argument must be a string or a real number, not '\x01'`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .float_dunder_raised
 
 .float_passthrough:
     mov rax, rdi
@@ -1967,8 +2012,9 @@ DEF_FUNC builtin_float, BF_FRAME
     ; does; float's message had lost it.
     mov rsi, [rbp - BF_OBJ]
     CSTRING rdi, "could not convert string to float: "
-    extern raise_value_error_with_repr
-    call raise_value_error_with_repr
+    extern set_value_error_with_repr
+    call set_value_error_with_repr
+    jmp .float_dunder_raised
 
 .float_no_args:
     ; float() -> 0.0
@@ -1980,8 +2026,8 @@ DEF_FUNC builtin_float, BF_FRAME
 .float_error:
     CSTRING rdi, "float expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .float_dunder_raised
 END_FUNC builtin_float
 
 

@@ -941,7 +941,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, rax
     xor esi, esi                   ; the receiver is decided further down
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     test eax, eax
     mov rax, [rbp - LA_ATTR]
     jnz .la_is_method_func
@@ -1958,7 +1958,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_ATTR], rax
     mov rdi, rax
     xor esi, esi                   ; super() has already chosen the receiver
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     mov ecx, eax
     mov rax, [rbp - LSA_ATTR]
     test ecx, ecx
@@ -1997,7 +1997,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, rax
     xor esi, esi                   ; super() has already chosen the receiver
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     mov rax, [rbp - LSA_ATTR]
     test eax, eax
     jz .lsa_attr_plain

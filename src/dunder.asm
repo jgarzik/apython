@@ -1300,11 +1300,12 @@ section .text
 ;; builtin_should_bind(rdi = the attribute, as a Value; rsi = the receiver
 ;;                     Value, or 0 not to check it)
 ;;   -> eax = 1 to bind it to the receiver, 0 to hand it over as it stands
+;; Fails: -1
 ;;
-;; With a receiver, does NOT return when the attribute is a descriptor whose
-;; owner the receiver is not an instance of: that is a TypeError at the
-;; ACCESS, which is where CPython raises it, and raise_descriptor_receiver
-;; already words it both ways.
+;; With a receiver, fails when the attribute is a descriptor whose owner the
+;; receiver is not an instance of: that is a TypeError at the ACCESS, which
+;; is where CPython raises it, and set_descriptor_receiver already words it
+;; both ways.  With rsi = 0 it cannot fail.
 ;;
 ;; rsi = 0 asks the first half only -- "is this a descriptor at all" -- and is
 ;; what the call sites that have not yet decided the receiver pass.
@@ -1386,7 +1387,9 @@ DEF_FUNC builtin_should_bind, BSB_FRAME
 .bsb_wrong:
     mov rdi, [rbp - BSB_FN]
     mov rsi, [rbp - BSB_RECV]
-    extern raise_descriptor_receiver
+    extern set_descriptor_receiver
+    call set_descriptor_receiver
+    mov rax, -1
     leave
-    jmp raise_descriptor_receiver   ; does not return
+    ret
 END_FUNC builtin_should_bind

@@ -788,6 +788,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rsi, rbx
     extern builtin_should_bind
     call builtin_should_bind
+    ERR_M1_JUMP
     test eax, eax
     jnz .bind_method
     jmp .found_type_raw

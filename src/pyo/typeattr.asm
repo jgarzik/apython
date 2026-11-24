@@ -1409,7 +1409,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov rdi, rax
     xor esi, esi                   ; the receiver here is a CLASS, by design
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     mov ecx, eax
     pop rdx
     pop rax

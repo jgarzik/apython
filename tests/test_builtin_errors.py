@@ -8,6 +8,8 @@
 #
 # Messages are not printed: the wording is tests/arity_probe.sh's business,
 # and half of it differs from CPython's on purpose.
+import gc
+import io
 import sys
 import types
 
@@ -20,14 +22,26 @@ def boom(*a, **k):
     raise Boom("boom")
 
 
-def check(name, fn):
+def attempt(fn):
     seen = "ok"
-    before = sys.getallocatedblocks()
     for _ in range(200):
         try:
             fn()
         except Exception as e:
             seen = type(e).__name__
+    return seen
+
+
+def check(name, fn):
+    # Unmeasured first: the early calls fill freelists and caches, which is
+    # growth that stops -- some of it only after several hundred calls.  A
+    # leak does not stop.
+    for _ in range(4):
+        attempt(fn)
+    gc.collect()
+    before = sys.getallocatedblocks()
+    seen = attempt(fn)
+    gc.collect()
     after = sys.getallocatedblocks()
     print(name, seen, after - before < 50)
 
@@ -75,6 +89,18 @@ class GetterRaises:
     def __getattr__(self, name):
         raise Boom()
 
+
+
+
+# A store that finds nothing to store into names neither .name nor .obj on
+# the AttributeError; a read names both.
+for label, fn in (("setattr", lambda: setattr(5, "x", 1)),
+                  ("delattr", lambda: delattr(5, "x")),
+                  ("getattr", lambda: getattr(5, "x"))):
+    try:
+        fn()
+    except AttributeError as e:
+        print(label, "AttributeError", e.name, e.obj)
 
 check("getattr getter raises", lambda: getattr(GetterRaises(), "p", 1))
 check("hasattr __getattr__ raises", lambda: hasattr(GetterRaises(), "q"))
@@ -178,3 +204,116 @@ class SuperUser:
 check("super attr, __class__ raises", lambda: SuperUser().attr())
 check("super method, __class__ raises", lambda: SuperUser().call())
 check("super object, __class__ raises", lambda: SuperUser().built())
+
+# --- len, range, repr, bool, float --------------------------------------------
+class LenRaises:
+    def __len__(self):
+        raise Boom()
+
+
+class LenStr:
+    def __len__(self):
+        return "x"
+
+
+class LenNegative:
+    def __len__(self):
+        return -1
+
+
+class StrRaises:
+    def __str__(self):
+        raise Boom()
+
+    def __repr__(self):
+        raise Boom()
+
+
+class IndexRaises:
+    def __index__(self):
+        raise Boom()
+
+
+class FloatRaises:
+    def __float__(self):
+        raise Boom()
+
+
+class FloatStr:
+    def __float__(self):
+        return "x" * 3
+
+
+class FloatBigInt:
+    def __float__(self):
+        return 10 ** 30
+
+
+class BoolRaises:
+    def __bool__(self):
+        raise Boom()
+
+
+check("len none", lambda: len())
+check("len two", lambda: len(1, 2))
+check("len int", lambda: len(5))
+check("len float", lambda: len(1.5))
+check("len __len__ raises", lambda: len(LenRaises()))
+check("len __len__ str", lambda: len(LenStr()))
+check("len __len__ negative", lambda: len(LenNegative()))
+check("range none", lambda: range())
+check("range four", lambda: range(1, 2, 3, 4))
+check("range str", lambda: range("a"))
+check("range big, str", lambda: range(10 ** 30, "a"))
+check("range big, big, str", lambda: range(10 ** 30, 10 ** 31, "a"))
+check("range big, str, big", lambda: range(10 ** 30, "a", 10 ** 31))
+check("range zero step", lambda: range(10 ** 30, 10 ** 31, 0))
+check("range __index__ raises", lambda: range(IndexRaises()))
+check("range big, big, __index__ raises",
+      lambda: range(10 ** 30, 10 ** 31, IndexRaises()))
+check("repr none", lambda: repr())
+check("repr __repr__ raises", lambda: repr(StrRaises()))
+check("bool two", lambda: bool(1, 2))
+check("bool keyword", lambda: bool(x=1))
+check("bool __bool__ raises", lambda: bool(BoolRaises()))
+check("float two", lambda: float(1, 2))
+check("float keyword", lambda: float(x=1))
+check("float None", lambda: float(None))
+check("float bad str", lambda: float("abc" * 10))
+check("float bad fullwidth", lambda: float("１x"))
+check("float bad bytes", lambda: float(b"zz"))
+check("float __float__ raises", lambda: float(FloatRaises()))
+check("float __float__ str", lambda: float(FloatStr()))
+check("float __float__ big int", lambda: float(FloatBigInt()))
+
+# --- print ------------------------------------------------------------------
+class WriteRaises:
+    def write(self, s):
+        raise Boom()
+
+
+class WriteOnly:
+    def write(self, s):
+        pass
+
+
+sink = io.StringIO()
+check("print bad keyword", lambda: print(1, bogus=2))
+check("print sep int", lambda: print(1, sep=2, file=sink))
+check("print end int", lambda: print(1, end=2, file=sink))
+check("print file int", lambda: print(1, file=5))
+check("print file float", lambda: print(1, file=1.5))
+check("print write raises", lambda: print(1, file=WriteRaises()))
+check("print __str__ raises", lambda: print(StrRaises(), file=sink))
+check("print no flush", lambda: print(1, file=WriteOnly(), flush=True))
+check("print flush __bool__ raises", lambda: print(1, file=sink, flush=BoolRaises()))
+check("displayhook two", lambda: sys.displayhook(1, 2))
+check("displayhook __repr__ raises", lambda: sys.displayhook(StrRaises()))
+
+# --- a method descriptor handed the wrong receiver, or the wrong count ------------
+check("list.append unbound, no arguments", lambda: list.append())
+check("list.append on a tuple", lambda: list.append((1, 2), 3))
+check("int.__neg__ on a float", lambda: int.__neg__(1.5))
+check("list.append none", lambda: [].append())
+check("list.append two", lambda: [].append(1, 2))
+check("str.join on an int", lambda: str.join(5, []))

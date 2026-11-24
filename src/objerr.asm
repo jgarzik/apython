@@ -215,9 +215,9 @@ DEF_FUNC raise_final_base
 END_FUNC raise_final_base
 
 ;; ============================================================================
-;; raise_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
-;;                           Value)
-;;   -> does not return: the message is raised as a TypeError
+;; set_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
+;;                         Value)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; CPython has two wordings here, and which one you get says what kind of
 ;; descriptor you reached:
@@ -230,8 +230,8 @@ RDR_DESC  equ 8
 RDR_RECV  equ 16
 RDR_BUF   equ 240
 RDR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
-global raise_descriptor_receiver
-DEF_FUNC raise_descriptor_receiver, RDR_FRAME
+global set_descriptor_receiver
+DEF_FUNC set_descriptor_receiver, RDR_FRAME
     mov [rbp - RDR_DESC], rdi
     mov [rbp - RDR_RECV], rsi
     lea rdi, [rbp - RDR_BUF]
@@ -279,7 +279,9 @@ DEF_FUNC raise_descriptor_receiver, RDR_FRAME
 .rdr_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RDR_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
 
 ;; The two names, appended at the cursor in rdi.
 .rdr_owner_name:
@@ -300,11 +302,20 @@ DEF_FUNC raise_descriptor_receiver, RDR_FRAME
 .rdr_recv_go:
     pop rdi
     jmp rbt_append_cstr
+END_FUNC set_descriptor_receiver
+
+;; raise_descriptor_receiver(the same arguments) -> does not return
+;; set_descriptor_receiver, then the unwind: for a handler, which alone may jump.
+global raise_descriptor_receiver
+DEF_FUNC raise_descriptor_receiver
+    call set_descriptor_receiver
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_descriptor_receiver
 
 ;; ============================================================================
-;; raise_missing_receiver(rdi = the PyBuiltinObject)
-;;   -> does not return: the message is raised as a TypeError
+;; set_missing_receiver(rdi = the PyBuiltinObject)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; A method descriptor or a slot wrapper reached UNBOUND and called with no
 ;; arguments at all.  There is no receiver to check, so raise_descriptor_
@@ -322,8 +333,8 @@ END_FUNC raise_descriptor_receiver
 RMR_DESC  equ 8
 RMR_BUF   equ 240
 RMR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
-global raise_missing_receiver
-DEF_FUNC raise_missing_receiver, RMR_FRAME
+global set_missing_receiver
+DEF_FUNC set_missing_receiver, RMR_FRAME
     mov [rbp - RMR_DESC], rdi
     lea rdi, [rbp - RMR_BUF]
     mov rcx, [rbp - RMR_DESC]
@@ -363,7 +374,9 @@ DEF_FUNC raise_missing_receiver, RMR_FRAME
 .rmr_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RMR_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
 
 .rmr_owner_name:
     mov rcx, [rbp - RMR_DESC]
@@ -375,6 +388,15 @@ DEF_FUNC raise_missing_receiver, RMR_FRAME
     mov rsi, [rcx + PyBuiltinObject.func_name]
     lea rsi, [rsi + PyStrObject.data]
     jmp rbt_append_cstr
+END_FUNC set_missing_receiver
+
+;; raise_missing_receiver(the same argument) -> does not return
+;; set_missing_receiver, then the unwind: for a handler, which alone may jump.
+global raise_missing_receiver
+DEF_FUNC raise_missing_receiver
+    call set_missing_receiver
+    leave
+    jmp eval_exception_unwind
 END_FUNC raise_missing_receiver
 
 ;; ============================================================================

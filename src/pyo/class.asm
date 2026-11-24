@@ -1623,7 +1623,7 @@ DEF_FUNC type_call
     mov rdi, rbx
     xor esi, esi                        ; the receiver check is type_call's own
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     test eax, eax
     jz .init_have_callable              ; not a descriptor: call it as written
     mov rdi, rbx

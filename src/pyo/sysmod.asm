@@ -2674,12 +2674,18 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     lea rdi, [rbp - SDH_REPR]
     mov esi, 1
     extern builtin_print
-    call builtin_print
-    mov rax, [rbp - SDH_KW]
-    mov [gs:ThreadState.kw_names_pending], rax
+    call builtin_print          ; err: tested below, once the frame is tidy
+    mov rcx, [rbp - SDH_KW]
+    mov [gs:ThreadState.kw_names_pending], rcx
 
+    push rax
+    push rax                    ; pad
     mov rdi, [rbp - SDH_REPR]
     call obj_decref
+    pop rax
+    pop rax
+    test rax, rax
+    jz .sdh_failed              ; the write raised
 
     ; builtins._ = value
     lea rdi, [rel sm_underscore]
