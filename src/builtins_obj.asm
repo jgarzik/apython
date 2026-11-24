@@ -23,11 +23,10 @@ extern obj_is_true
 extern obj_incref
 extern obj_decref
 extern type_is_subtype
-extern raise_exception
+extern set_exception
 extern dunder_name_obj
 extern obj_getattr_opt
 extern exc_new
-extern eval_exception_unwind
 extern none_singleton
 extern obj_dealloc
 
@@ -40,11 +39,11 @@ extern bytes_type_call
 extern rbt_append_cstr
 extern msg_append_i64
 extern value_type
-extern raise_type_error_counted
+extern set_type_error_counted
 extern _bytes_decode_impl
 extern ba_shared_decode
 extern ap_strcmp
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern bool_true
 extern bool_false
 
@@ -53,7 +52,6 @@ extern exc_ValueError_type
 extern exc_AttributeError_type
 extern exc_StopIteration_type
 extern gen_type
-extern raise_exception_obj
 extern list_new
 extern list_append
 extern list_contains
@@ -70,6 +68,7 @@ section .text
 ;; ============================================================================
 ;; 7. builtin_id(rdi = args, rsi = nargs) - id(x)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_id
 
@@ -93,7 +92,9 @@ DEF_FUNC builtin_id
     ret
 
 .id_error:
-    RAISE exc_TypeError_type, "id() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "id() takes exactly one argument"
+    leave
+    ret
 END_FUNC builtin_id
 
 ;; ============================================================================
@@ -109,6 +110,7 @@ END_FUNC builtin_id
 ;;
 ;; They must agree in any case, or a key hashes one way going in and another
 ;; coming out, so there is no version of this that should have its own copy.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_hash_fn
     cmp rsi, 1
@@ -123,12 +125,15 @@ DEF_FUNC builtin_hash_fn
     ret
 
 .hash_nargs_error:
-    RAISE exc_TypeError_type, "hash() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "hash() takes exactly one argument"
+    leave
+    ret
 END_FUNC builtin_hash_fn
 
 ;; ============================================================================
 ;; 9. builtin_callable(rdi = args, rsi = nargs) - callable(x)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_callable
 
@@ -167,13 +172,16 @@ DEF_FUNC builtin_callable
 .callable_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "callable() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_callable
 
 ;; ============================================================================
 ;; 10. builtin_iter_fn(rdi = args, rsi = nargs) - iter(x)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_iter_fn
 
@@ -214,7 +222,9 @@ DEF_FUNC builtin_iter_fn
     ret
 
 .iter_not_callable:
-    RAISE exc_TypeError_type, "iter(object, sentinel): object must be callable"
+    SET_EXC exc_TypeError_type, "iter(object, sentinel): object must be callable"
+    leave
+    ret
 .iter_error:
     ; CPython has two wordings, and they differ by which bound was broken.
     test rsi, rsi
@@ -225,7 +235,9 @@ DEF_FUNC builtin_iter_fn
     lea rdi, [rel iter_arity_msg]
 .iter_count:
     xor edx, edx
-    call raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_iter_fn
 
 section .rodata
@@ -236,6 +248,7 @@ section .text
 ;; ============================================================================
 ;; 11. builtin_next_fn(rdi = args, rsi = nargs) - next(x)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 NX_EXC   equ 8              ; current_exception before __next__ ran
 ; args[0] as it arrived, for the refusal: CPython names the type, and this
@@ -431,24 +444,26 @@ DEF_FUNC builtin_next_fn, NX_FRAME
 .next_type_error:
     mov rsi, [rbp - NX_ARG]
     CSTRING rdi, `'\x01' object is not an iterator`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .next_got_val_null
 
 .next_too_few:
     CSTRING rdi, "next expected at least 1 argument, got "
-    xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    jmp .next_count
 
 .next_error:
     CSTRING rdi, "next expected at most 2 arguments, got "
+.next_count:
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .next_got_val_null
 END_FUNC builtin_next_fn
 
 ;; ============================================================================
 ;; 12. builtin_any(rdi = args, rsi = nargs) - any(iterable)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 ANY_EXC   equ 8             ; current_exception before the iteration started
 ; args[0] as it arrived: the refusal said "argument is not iterable" and
@@ -472,7 +487,7 @@ DEF_FUNC builtin_any, ANY_FRAME
     mov rdi, [rdi]
     mov esi, TAG_PTR
     call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
-    ERR_PENDING_JUMP
+    ERR_PENDING .any_raised
     test rax, rax               ; counts as iterable too
     jz .any_type_error
     V_UNPACK rax, rdx           ; tp_call returns a Value
@@ -548,18 +563,20 @@ DEF_FUNC builtin_any, ANY_FRAME
 .any_type_error:
     mov rsi, [rbp - ANY_ARG]
     CSTRING rdi, `'\x01' object is not iterable`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .any_raised
 
 .any_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "any() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .any_raised
 END_FUNC builtin_any
 
 ;; ============================================================================
 ;; 13. builtin_all(rdi = args, rsi = nargs) - all(iterable)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 ALL_EXC   equ 8             ; current_exception before the iteration started
 ; args[0] as it arrived: the refusal said "argument is not iterable" and
@@ -583,7 +600,7 @@ DEF_FUNC builtin_all, ALL_FRAME
     mov rdi, [rdi]
     mov esi, TAG_PTR
     call get_iterator_opt       ; not tp_iter: the legacy __getitem__ protocol
-    ERR_PENDING_JUMP
+    ERR_PENDING .all_raised
     test rax, rax               ; counts as iterable too
     jz .all_type_error
     mov rbx, rax
@@ -658,13 +675,14 @@ DEF_FUNC builtin_all, ALL_FRAME
 .all_type_error:
     mov rsi, [rbp - ALL_ARG]
     CSTRING rdi, `'\x01' object is not iterable`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .all_raised
 
 .all_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "all() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .all_raised
 END_FUNC builtin_all
 
 ;; ============================================================================
@@ -715,6 +733,7 @@ section .text
 ;; accumulator.  NULL is not an error the loop noticed; it was added to,
 ;; DECREFed, and finally returned, and the failure surfaced wherever the
 ;; caller next touched it.
+;; Fails: 0
 
 SM_ACC   equ 8              ; the accumulator Value, owned
 SM_ITEM  equ 16             ; the item just pulled from the iterator, owned
@@ -727,7 +746,7 @@ SM_PHASE equ 64             ; 0 = not yet a float sum, 1 = in it, 2 = left it
 SM_FRAME equ 80             ; + 2 pushes = 96, 16-byte aligned
 
 extern value_type
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern obj_binary_op
 extern bytes_type
 extern bytearray_type
@@ -780,7 +799,7 @@ DEF_FUNC builtin_sum, SM_FRAME
     ja .sum_not_iterable        ; an immediate is never iterable
     mov esi, TAG_PTR
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .sum_fail_no_iter
     test rax, rax
     jz .sum_not_iterable
     mov rbx, rax                ; rbx = the iterator, owned
@@ -972,6 +991,7 @@ DEF_FUNC builtin_sum, SM_FRAME
 .sum_fail_no_iter:
     mov rdi, [rbp - SM_ACC]
     DECREF_V rdi, rdx
+.sum_ret0:
     xor eax, eax
     pop r12
     pop rbx
@@ -988,38 +1008,37 @@ DEF_FUNC builtin_sum, SM_FRAME
     DECREF_V rdi, rdx
     mov rsi, [rbp - SM_OBJ]
     CSTRING rdi, `'\x01' object is not iterable`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .sum_ret0
 
 .sum_no_str:
-    mov rdi, [rbp - SM_ACC]
-    DECREF_V rdi, rdx
-    RAISE exc_TypeError_type, "sum() can't sum strings [use ''.join(seq) instead]"
+    SET_EXC exc_TypeError_type, "sum() can't sum strings [use ''.join(seq) instead]"
+    jmp .sum_fail_no_iter
 
 .sum_no_bytes:
-    mov rdi, [rbp - SM_ACC]
-    DECREF_V rdi, rdx
-    RAISE exc_TypeError_type, "sum() can't sum bytes [use b''.join(seq) instead]"
+    SET_EXC exc_TypeError_type, "sum() can't sum bytes [use b''.join(seq) instead]"
+    jmp .sum_fail_no_iter
 
 .sum_no_bytearray:
-    mov rdi, [rbp - SM_ACC]
-    DECREF_V rdi, rdx
-    RAISE exc_TypeError_type, "sum() can't sum bytearray [use b''.join(seq) instead]"
+    SET_EXC exc_TypeError_type, "sum() can't sum bytearray [use b''.join(seq) instead]"
+    jmp .sum_fail_no_iter
 
 .sum_too_few:
-    CSTRING rdx, " given)"
     CSTRING rdi, "sum() takes at least 1 positional argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    jmp .sum_count
 
 .sum_error:
-    CSTRING rdx, " given)"
     CSTRING rdi, "sum() takes at most 2 arguments ("
-    jmp raise_type_error_counted
+.sum_count:
+    CSTRING rdx, " given)"
+    call set_type_error_counted
+    jmp .sum_ret0
 END_FUNC builtin_sum
 
 ;; ============================================================================
 ;; 15-16. builtin_min / builtin_max(rdi = args, rsi = nargs)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 ; Shared implementation: minmax_impl(args, nargs, cmp_op)
 ;   rdi = args (Value[]), rsi = nargs, edx = cmp_op (PY_LT for min, PY_GT for max)
@@ -1059,6 +1078,7 @@ END_FUNC builtin_min
 ;; ============================================================================
 ;; builtin_max(rdi = args, rsi = nargs) -> rax = Value
 ;; The other half of the pair above, selecting PY_GT instead.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE builtin_max
     mov edx, PY_GT                 ; PY_GT = 4
@@ -1102,6 +1122,7 @@ END_FUNC mm_key_of
 ;;   -> rax = Value
 ;; Both builtins, in one body: the op is the only thing that differs, and
 ;; key= and default= are keyword-only for either of them.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     push rbx
@@ -1266,6 +1287,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     DECREF_V rdi, rdx
     mov rdi, [rbp - MM_CANDKEY]
     DECREF_V rdi, rdx
+.mm_ret0:
     xor eax, eax
     pop r12
     pop rbx
@@ -1275,15 +1297,15 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_key_bad:
     mov rsi, [rbp - MM_KEY]
     CSTRING rdi, `'\x01' object is not callable`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mm_ret0
 
 .mm_default_with_args:
     cmp dword [rbp - MM_OP], PY_GT
     je .mm_default_max
-    RAISE exc_TypeError_type, "Cannot specify a default for min() with multiple positional arguments"
+    FAIL exc_TypeError_type, "Cannot specify a default for min() with multiple positional arguments", .mm_ret0
 .mm_default_max:
-    RAISE exc_TypeError_type, "Cannot specify a default for max() with multiple positional arguments"
+    FAIL exc_TypeError_type, "Cannot specify a default for max() with multiple positional arguments", .mm_ret0
 
     ; --- min/max(iterable) ---
 .mm_iter_path:
@@ -1293,7 +1315,7 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ja .mm_not_iterable         ; an immediate is never iterable
     mov esi, TAG_PTR
     call get_iterator_opt       ; see the note in builtin_sum
-    ERR_PENDING_JUMP
+    ERR_PENDING .mm_ret0        ; __iter__ raised; nothing is held yet
     test rax, rax
     jz .mm_not_iterable
     mov [rbp - MM_ITER], rax
@@ -1398,9 +1420,9 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     ; CPython names the builtin, and MM_OP is what tells them apart.
     cmp dword [rbp - MM_OP], PY_GT
     je .mm_iter_empty_max
-    RAISE exc_ValueError_type, "min() iterable argument is empty"
+    FAIL exc_ValueError_type, "min() iterable argument is empty", .mm_ret0
 .mm_iter_empty_max:
-    RAISE exc_ValueError_type, "max() iterable argument is empty"
+    FAIL exc_ValueError_type, "max() iterable argument is empty", .mm_ret0
 
 .mm_iter_no_next:
     mov rdi, [rbp - MM_ITER]
@@ -1408,7 +1430,8 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
 .mm_not_iterable:
     mov rsi, [rbx]
     CSTRING rdi, `'\x01' object is not iterable`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mm_ret0
 
 .mm_error:
     ; CPython names the one that was called, and says how many it got.
@@ -1416,13 +1439,13 @@ DEF_FUNC_LOCAL minmax_impl, MM_FRAME
     cmp dword [rbp - MM_OP], PY_GT
     je .mm_error_max
     CSTRING rdi, "min expected at least 1 argument, got "
-    xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    jmp .mm_count
 .mm_error_max:
     CSTRING rdi, "max expected at least 1 argument, got "
+.mm_count:
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .mm_ret0
 END_FUNC minmax_impl
 
 ;; ============================================================================
@@ -1434,6 +1457,7 @@ GA_EXC    equ 8              ; current_exception before the lookup
 ;; builtin_globals(rdi = args, rsi = nargs) - globals()
 ;;   -> rax = Value
 ;; Returns the globals dict of the current frame.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_globals
     test rsi, rsi
@@ -1451,8 +1475,9 @@ DEF_FUNC builtin_globals
 .globals_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "globals() takes no arguments ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_globals
 
 ;; ============================================================================
@@ -1462,6 +1487,7 @@ END_FUNC builtin_globals
 ;; In module scope, locals() == globals().
 ;; In class body, returns the class dict.
 ;; In function scope, returns globals as approximation.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_locals
     test rsi, rsi
@@ -1506,8 +1532,9 @@ DEF_FUNC builtin_locals
 .locals_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "locals() takes no arguments ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_locals
 
 ;; ============================================================================
@@ -1695,6 +1722,7 @@ END_FUNC dir_default
 ;; a __dir__ is finally asked.  Before this, dir() consulted only the MRO's
 ;; tp_dicts and object.__dir__ called dir() straight back, so the pair asked
 ;; the object nothing and answered a module with object's own dunders.
+;; Fails: 0
 ;; ============================================================================
 BD_OBJ    equ 8       ; the object, as a Value
 BD_SORT   equ 24      ; END of the two-Value args buffer for extend and sort
@@ -1814,7 +1842,7 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
     xor edi, edi
     xor esi, esi
     extern builtin_locals
-    call builtin_locals
+    call builtin_locals         ; err: .bd_failed, by the tag below
     V_UNPACK rax, rdx
     test edx, edx
     jz .bd_failed
@@ -1842,8 +1870,8 @@ DEF_FUNC builtin_dir, BD_FRAME  ; lint: pushes=1 -- see BD_FRAME above
 .bd_error:
     CSTRING rdi, "dir expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .bd_failed
 END_FUNC builtin_dir
 
 section .rodata
@@ -1862,6 +1890,7 @@ section .text
 ;;   -> rax = Value
 ;; 0 args: read line from stdin
 ;; 1 arg: print prompt, then read line
+;; Fails: 0
 ;; ============================================================================
 extern sys_write
 extern sys_read
@@ -1938,13 +1967,19 @@ DEF_FUNC builtin_input_fn, INP_FRAME
 
 .inp_eof:
     extern exc_EOFError_type
-    RAISE exc_EOFError_type, "EOF when reading a line"
+    SET_EXC exc_EOFError_type, "EOF when reading a line"
+    leave
+    ret
 
 .inp_error:
-    RAISE exc_TypeError_type, "input() takes at most 1 argument"
+    SET_EXC exc_TypeError_type, "input() takes at most 1 argument"
+    leave
+    ret
 
 .inp_type_error:
-    RAISE exc_TypeError_type, "input() prompt must be a string"
+    SET_EXC exc_TypeError_type, "input() prompt must be a string"
+    leave
+    ret
 END_FUNC builtin_input_fn
 
 ;; ============================================================================
@@ -1957,11 +1992,13 @@ extern sys_close
 extern file_type
 
 global builtin_open_fn
-OPN_FRAME equ 32            ; + 3 pushes = 56, not 16-aligned
+BO_SAVED  equ 24            ; builtin_open_fn's three saved registers
 
 ;; ============================================================================
 ;; open_reject_dir(rdi = fd, rsi = filename str)
-;;   -> returns, or raises IsADirectoryError
+;;   -> rax = 0
+;; Fails: -1
+;; The failure is IsADirectoryError.
 ;;
 ;; Linux lets open(2) succeed on a directory; it is read(2) that fails with
 ;; EISDIR, so open("/tmp") used to hand back a file object that failed later
@@ -1988,9 +2025,13 @@ DEF_FUNC_LOCAL open_reject_dir, ORD_FRAME
     call sys_close
     mov edi, 21                         ; EISDIR
     mov rsi, [rbp - ORD_NAME]
-    extern raise_oserror
-    call raise_oserror                  ; does not return
+    extern set_oserror
+    call set_oserror
+    mov rax, -1
+    leave
+    ret
 .ord_ok:
+    xor eax, eax
     leave
     ret
 END_FUNC open_reject_dir
@@ -2022,6 +2063,7 @@ section .text
 ;; Keyword arguments pass straight through.  A builtin is handed its keyword
 ;; values in the same array, with the names in kw_names_pending, and that is
 ;; exactly what the callee expects -- so this must NOT consume the global.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin_open_fn
     push rbx
@@ -2089,21 +2131,27 @@ DEF_FUNC builtin_open_fn
     ret
 
 .bo_import_failed:
-    add rsp, 8                  ; the parked keyword names
     cmp qword [gs:ThreadState.current_exception], 0
-    jne .bo_propagate
-    RAISE exc_ImportError_type, "open() requires the _io module"
-.bo_propagate:
-    leave
-    jmp eval_exception_unwind
+    jne .bo_fail
+    FAIL exc_ImportError_type, "open() requires the _io module", .bo_fail
 .bo_missing:
-    RAISE exc_ImportError_type, "_io.open is missing"
+    SET_EXC exc_ImportError_type, "_io.open is missing"
+.bo_fail:
+    ; The parked keyword names may still be on the stack.
+    lea rsp, [rbp - BO_SAVED]
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_open_fn
 
 ;; ============================================================================
 ;; builtin_ascii_fn(rdi = args, rsi = nargs) - ascii(obj)
 ;;   -> rax = Value
 ;; Like repr() but escapes non-ASCII characters to \xNN / \uNNNN / \UNNNNNNNN
+;; Fails: 0
 ;; ============================================================================
 global builtin_ascii_fn
 AA_REPR   equ 8
@@ -2267,8 +2315,8 @@ DEF_FUNC builtin_ascii_fn, AA_FRAME
 .aa_nargs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "ascii() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .aa_repr_failed
 section .rodata
 aa_hexdigits: db "0123456789abcdef"
 section .text
@@ -2456,6 +2504,7 @@ END_FUNC builtin_format_fn
 ;;   -> rax = Value
 ;; 0 args: returns frame locals dict (same as locals())
 ;; 1 arg: returns obj.__dict__
+;; Fails: 0
 ;; ============================================================================
 global builtin_vars_fn
 VR_OBJ   equ 8
@@ -2514,7 +2563,7 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     extern builtin_locals
     xor edi, edi
     xor esi, esi
-    call builtin_locals         ; already returns a Value
+    call builtin_locals         ; err: its 0 is this function's own
     leave
     ret
 
@@ -2563,13 +2612,16 @@ DEF_FUNC builtin_vars_fn, VR_FRAME
     ret
 
 .vars_no_dict:
-    RAISE exc_TypeError_type, "vars() argument must have __dict__ attribute"
+    SET_EXC exc_TypeError_type, "vars() argument must have __dict__ attribute"
+    leave
+    ret
 
 .vars_nargs_error:
     CSTRING rdi, "vars expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_vars_fn
 
 section .rodata
@@ -2580,6 +2632,7 @@ section .text
 ;; builtin_aiter_fn(rdi = args, rsi = nargs) - aiter(async_iterable)
 ;;   -> rax = Value
 ;; Calls tp_iter on the async iterable
+;; Fails: 0
 ;; ============================================================================
 AIT_ARG   equ 8             ; the argument, for the message
 AIT_NARGS equ 16
@@ -2625,21 +2678,24 @@ DEF_FUNC builtin_aiter_fn, AIT_FRAME
 .aiter_type_error:
     mov rsi, [rbp - AIT_ARG]
     CSTRING rdi, `'\x01' object is not an async iterable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 
 .aiter_nargs_error:
     mov rsi, [rbp - AIT_NARGS]
     CSTRING rdi, "aiter() takes exactly one argument ("
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_aiter_fn
 
 ;; ============================================================================
 ;; builtin_anext_fn(rdi = args, rsi = nargs) - anext(async_iterator[, default])
 ;;   -> rax = Value
 ;; Calls tp_iternext; on StopAsyncIteration returns default
+;; Fails: 0
 ;; ============================================================================
 global builtin_anext_fn
 AN_ITER    equ 8
@@ -2719,8 +2775,9 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
 .an_type_error:
     mov rsi, [rbp - AN_ITER]
     CSTRING rdi, `'\x01' object is not an async iterator`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 
 .an_nargs_error:
     ; CPython's two, with the count: it words the low bound and the high one
@@ -2729,13 +2786,14 @@ DEF_FUNC builtin_anext_fn, AN_FRAME
     cmp rsi, 1
     jge .an_too_many
     CSTRING rdi, "anext expected at least 1 argument, got "
-    xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    jmp .an_count
 .an_too_many:
     CSTRING rdi, "anext expected at most 2 arguments, got "
+.an_count:
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_anext_fn
 
 ;; ============================================================================
@@ -2751,6 +2809,7 @@ END_FUNC builtin_anext_fn
 ;;
 ;; globals and locals are still ignored: they only matter for a relative
 ;; import, and level > 0 is rejected below rather than silently mishandled.
+;; Fails: 0
 ;; ============================================================================
 extern sys_modules_dict
 extern dict_get
@@ -2908,7 +2967,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     jz .imp_level_ok
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .imp_fail
     test rax, rax
     jnz .imp_level_error
 .imp_level_ok:
@@ -3020,27 +3079,22 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 
 .imp_failed:
     ; NULL means the module body raised and the exception is still pending.
-    extern eval_exception_unwind
     cmp qword [gs:ThreadState.current_exception], 0
-    jne .imp_propagate
+    jne .imp_fail
     extern exc_ImportError_type
-    RAISE exc_ImportError_type, "import failed"
-.imp_propagate:
-    leave
-    jmp eval_exception_unwind
+    FAIL exc_ImportError_type, "import failed", .imp_fail
 
 .imp_kw_bad:
-    add rsp, 8
-    pop r9
-    pop rax
-    pop rcx
-    RAISE exc_TypeError_type, "__import__() got an unexpected keyword argument"
+    FAIL exc_TypeError_type, "__import__() got an unexpected keyword argument", .imp_fail
 .imp_level_error:
-    RAISE exc_NotImplementedError_type, "__import__(): relative import is not supported"
+    FAIL exc_NotImplementedError_type, "__import__(): relative import is not supported", .imp_fail
 .imp_nargs_error:
-    RAISE exc_TypeError_type, "__import__() requires at least 1 argument"
+    FAIL exc_TypeError_type, "__import__() requires at least 1 argument", .imp_fail
 .imp_name_error:
-    RAISE exc_TypeError_type, "module name must be a string"
+    SET_EXC exc_TypeError_type, "module name must be a string"
+.imp_fail:
+    RET_NULL                    ; .imp_done releases BIM_TEMP, and `leave` the rest
+    jmp .imp_done
 END_FUNC builtin_import_fn
 
 ;; ============================================================================

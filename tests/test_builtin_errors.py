@@ -708,3 +708,150 @@ check("time.asctime int", lambda: time.asctime(5))
 check("time.asctime short tuple", lambda: time.asctime((1, 2)))
 check("time.ctime str", lambda: time.ctime("a"))
 check("time.ctime __index__ raises", lambda: time.ctime(IndexRaises()))
+
+# --- id, hash, callable, iter, next, any, all, sum, min, max -----------------------
+class Unhashable:
+    __hash__ = None
+
+
+class HashRaises:
+    def __hash__(self):
+        raise Boom()
+
+
+class IterRaises:
+    def __iter__(self):
+        raise Boom()
+
+
+class NextRaises:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        raise Boom()
+
+
+class CompareRaises:
+    def __lt__(self, other):
+        raise Boom()
+
+    def __gt__(self, other):
+        raise Boom()
+
+
+class DirRaises:
+    def __dir__(self):
+        raise Boom()
+
+
+class DictRaises:
+    @property
+    def __dict__(self):
+        raise Boom()
+
+
+def falsy_then_raise():
+    yield 0
+    yield 0
+    raise Boom()
+
+
+check("id none", lambda: id())
+check("hash none", lambda: hash())
+check("hash list", lambda: hash([]))
+check("hash __hash__ None", lambda: hash(Unhashable()))
+check("hash __hash__ raises", lambda: hash(HashRaises()))
+check("callable none", lambda: callable())
+check("iter none", lambda: iter())
+check("iter three", lambda: iter(1, 2, 3))
+check("iter int", lambda: iter(5))
+check("iter sentinel, not callable", lambda: iter(5, 6))
+check("iter __iter__ raises", lambda: iter(IterRaises()))
+check("next none", lambda: next())
+check("next three", lambda: next(1, 2, 3))
+check("next int", lambda: next(5))
+check("next list", lambda: next([]))
+check("next list, default", lambda: next([], 1))
+check("next __next__ raises", lambda: next(NextRaises()))
+check("next __next__ raises, default", lambda: next(NextRaises(), 1))
+check("next exhausted", lambda: next(iter([])))
+check("any none", lambda: any())
+check("any int", lambda: any(5))
+check("any __iter__ raises", lambda: any(IterRaises()))
+check("any __next__ raises", lambda: any(NextRaises()))
+check("any generator raises", lambda: any(falsy_then_raise()))
+check("all none", lambda: all())
+check("all int", lambda: all(5))
+check("all __iter__ raises", lambda: all(IterRaises()))
+check("all __next__ raises", lambda: all(NextRaises()))
+check("sum none", lambda: sum())
+check("sum three", lambda: sum(1, 2, 3))
+check("sum int", lambda: sum(5))
+check("sum str start", lambda: sum([], "a"))
+check("sum bytes start", lambda: sum([], b"a"))
+check("sum bytearray start", lambda: sum([], bytearray()))
+check("sum strs", lambda: sum(["a", "b"]))
+check("sum int, big start", lambda: sum(5, 10 ** 30))
+check("sum __next__ raises", lambda: sum(NextRaises()))
+check("sum __next__ raises, big start", lambda: sum(NextRaises(), 10 ** 30))
+check("sum __iter__ raises", lambda: sum(IterRaises()))
+check("sum floats then str", lambda: sum([1.5, 2.5, "a"]))
+check("sum bigs then str", lambda: sum([10 ** 30, 10 ** 30, "a"]))
+check("min none", lambda: min())
+check("max none", lambda: max())
+check("min int", lambda: min(5))
+check("min empty", lambda: min([]))
+check("max empty", lambda: max([]))
+check("min key int", lambda: min([1, 2], key=5))
+check("min default with two", lambda: min(1, 2, default=3))
+check("max default with two", lambda: max(1, 2, default=3))
+check("min key raises", lambda: min([10 ** 30, 10 ** 31], key=boom))
+check("max key raises", lambda: max(10 ** 30, 10 ** 31, key=boom))
+check("min __lt__ raises", lambda: min([CompareRaises(), CompareRaises()]))
+check("max __gt__ raises", lambda: max(CompareRaises(), CompareRaises()))
+check("min int and str", lambda: min([1, "a"]))
+check("max big and str", lambda: max([10 ** 30, "a" * 20]))
+check("min __iter__ raises", lambda: min(IterRaises()))
+check("min __next__ raises", lambda: min(NextRaises()))
+
+# --- globals, locals, dir, ascii, vars, aiter, anext, __import__, open ----------
+check("globals one", lambda: globals(1))
+check("locals one", lambda: locals(1))
+check("dir two", lambda: dir(1, 2))
+check("dir __dir__ raises", lambda: dir(DirRaises()))
+check("ascii none", lambda: ascii())
+check("ascii __repr__ raises", lambda: ascii(StrRaises()))
+check("vars two", lambda: vars(1, 2))
+check("vars int", lambda: vars(5))
+check("vars __dict__ raises", lambda: vars(DictRaises()))
+check("aiter none", lambda: aiter())
+check("aiter int", lambda: aiter(5))
+check("aiter list", lambda: aiter([]))
+check("anext none", lambda: anext())
+check("anext three", lambda: anext(1, 2, 3))
+check("anext int", lambda: anext(5))
+check("__import__ none", lambda: __import__())
+check("__import__ int", lambda: __import__(5))
+check("__import__ None", lambda: __import__(None))
+check("__import__ no such module", lambda: __import__("no_such_module_zz"))
+check("__import__ bad keyword", lambda: __import__("sys", bogus=1))
+check("__import__ level str", lambda: __import__("sys", level="a"))
+check("open none", lambda: open())
+check("open bad mode", lambda: open("/dev/null", "zz"))
+check("open bad keyword", lambda: open("/dev/null", bogus=1))
+check("open no such file", lambda: open("/no/such/file/zz"))
+check("open a directory", lambda: open("/tmp"))
+
+
+# --- callbacks that raise, through helpers that now return the error ------------
+class AddRaises:
+    def __add__(self, other):
+        raise Boom()
+
+    def __radd__(self, other):
+        raise Boom()
+
+
+check("sum __add__ raises", lambda: sum([AddRaises(), AddRaises()]))
+check("pow __pow__ raises", lambda: pow(PowRaises(), 2))

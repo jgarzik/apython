@@ -1370,7 +1370,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rdi, rsp
     mov esi, 1
     extern builtin_ascii_fn
-    call builtin_ascii_fn
+    call builtin_ascii_fn       ; err: .sm_conv_failed, two lines down
     add rsp, 16
     test rax, rax
     jz .sm_conv_failed
