@@ -510,6 +510,7 @@ DEF_FUNC_BARE op_store_subscr
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
+    ERR_NULL_JUMP
     V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32               ; pop the args array
     ; rax = result (discard — __setitem__ returns None)
@@ -851,6 +852,7 @@ DEF_FUNC_BARE op_get_iter
 .have_iter:
     ; Call tp_iter(obj) -> iterator
     call rax
+    ERR_NULL_JUMP
 .have_iter_result:
     push rax                   ; save iterator on machine stack
 
@@ -1302,6 +1304,8 @@ DEF_FUNC_BARE op_contains_op
     push rcx                        ; the invert flag
     sub rsp, 8                      ; one push is odd; rsp must be 16-aligned
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     add rsp, 8
     pop rcx
     ; r15 is free by the register convention and callee-saved, so it carries
@@ -1357,6 +1361,8 @@ DEF_FUNC_BARE op_contains_op
     ; the saved words itself.
     sub rsp, 8
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     add rsp, 8
     push rax                   ; save result on machine stack
 
@@ -1463,6 +1469,7 @@ DEF_FUNC_BARE op_contains_op
     test rax, rax
     jz .contains_getitem_fallback
     call rax                     ; tp_iter(container) → iterator
+    ERR_PENDING_JUMP
     test rax, rax
     jz .contains_getitem_fallback
     mov rcx, [gs:ThreadState.current_exception]
@@ -1687,6 +1694,7 @@ DEF_FUNC_BARE op_contains_op
     V_PACK rdi, rcx             ; left  -> Value
     V_PACK rsi, r8              ; right -> Value
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     push rax
     push rdx
@@ -1900,6 +1908,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     test rax, rax
     jz .bslc_try_dunder
     call rax               ; rsi is a slice pointer, already a Value
+    ERR_NULL_JUMP
     V_UNPACK rax, rdx      ; mp_subscript returns a Value
 
 .bslc_have_result:
@@ -1991,6 +2000,8 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     test rax, rax
     jz .sslc_try_dunder
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
 
 .sslc_stored:
 

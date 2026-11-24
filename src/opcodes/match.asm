@@ -421,6 +421,7 @@ extern obj_decref
     jz .is_all_not_seq_ptr
     mov rdi, rbx
     call rax
+    ERR_M1_JUMP
     mov [rbp - IS_LIMIT], rax
     mov qword [rbp - IS_IDX], 0
     jmp .is_all_loop
@@ -490,6 +491,7 @@ extern obj_decref
     mov rdi, rbx                      ; the __all__ object
     mov rsi, [rbp - IS_IDX]
     call rax
+    ERR_NULL_JUMP
     V_UNPACK rax, rdx
     mov rsi, rax                      ; an owned one-character str; the locals
                                       ; dict takes its own reference, and the
@@ -733,6 +735,7 @@ extern obj_decref
     push rax                    ; twice: keep rsp 16-byte aligned
     mov rdi, rax                ; a pointer is its own Value
     call rcx                    ; nb_positive returns a Value, or NULL
+    ERR_PENDING_JUMP
     test rax, rax
     jz .ci1_pos_declined        ; a slot may decline; storing the NULL put a
     mov [r13 - 8], rax          ; raw 0 on the value stack for later to find
@@ -898,6 +901,7 @@ DEF_FUNC_BARE op_get_len
     ; is reached before the push and must not unwind it.
     sub rsp, 8
     call rax
+    ERR_M1_JUMP
     add rsp, 8
     jmp .gl_got_len
 
@@ -913,6 +917,7 @@ DEF_FUNC_BARE op_get_len
     jz .gl_error
     sub rsp, 8                  ; the same pad, for the same reason
     call rax
+    ERR_M1_JUMP
     add rsp, 8
 
 .gl_got_len:
@@ -1026,6 +1031,8 @@ DEF_FUNC op_setup_annotations
     mov rsi, r13
     mov rdx, r12
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
 .sa_map_free:
     mov rdi, r12
     call obj_decref
@@ -1592,6 +1599,9 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
+    GETATTR_HOOK_SKIP .mc_ga_pos
+    ERR_PENDING_JUMP
+.mc_ga_pos:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .mc_fail                     ; attr not found
@@ -1630,6 +1640,9 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
+    GETATTR_HOOK_SKIP .mc_ga_kw
+    ERR_PENDING_JUMP
+.mc_ga_kw:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .mc_fail                     ; attr not found

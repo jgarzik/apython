@@ -480,6 +480,23 @@
     ERR_M1 eval_exception_unwind
 %endmacro
 
+; After a tp_getattr answered: go to %1 unless it answered 0 with something
+; pending that is NOT a __getattr__ hook's own AttributeError.  That one is
+; the protocol saying "absent" (attr_error_pending says which it is), and the
+; miss path of each caller already knows what to do with it; anything else
+; pending is a failure, and the caller follows this with ERR_PENDING.
+;
+;   call rax                        ; tp_getattr
+;   GETATTR_HOOK_SKIP .have
+;   ERR_PENDING_JUMP
+; .have:
+%macro GETATTR_HOOK_SKIP 1
+    test rax, rax
+    jnz %1
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    jne %1
+%endmacro
+
 ; Build a builtin function and store it in a module dict under its own name.
 ; abcmod, weakrefmod and sre_module each carried a byte-identical private copy
 ; of this (ABC_ADD_FUNC, WR_ADD_FUNC, SRE_ADD_FUNC).  r12 holds the dict.

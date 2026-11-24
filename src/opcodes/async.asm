@@ -320,6 +320,7 @@ DEF_FUNC_BARE op_get_aiter
                                ; handler, so a call needs an even push list
     push rdi
     call rax                   ; tp_iter(obj) -> rax = async iterator (ptr)
+    ERR_PENDING_JUMP
 
     ; DECREF original object.  The result is parked in the original's own slot
     ; rather than pushed, so both calls sit at the same aligned depth.

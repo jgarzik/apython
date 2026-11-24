@@ -424,6 +424,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJVAL]
     mov rsi, [rbp - LA_NAME]
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_resolve_tag_dict     ; found nothing: the tp_dicts still might
@@ -543,6 +544,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov qword [rbp - LA_FROMINST], 1
 .la_getattr_go:
     call rax
+    GETATTR_HOOK_SKIP .la_ga_ok
+    ERR_PENDING_JUMP
+.la_ga_ok:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
@@ -2319,6 +2323,9 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     mov qword [rbp - GA_FROMINST], 1
 .ga_getattr_go:
     call rcx
+    GETATTR_HOOK_SKIP .ga_ga_ok
+    ERR_PENDING_JUMP
+.ga_ga_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .ga_type_dict

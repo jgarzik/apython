@@ -169,6 +169,8 @@ DEF_FUNC_BARE op_store_name
     push r9
     push r10
     call rax
+    movsxd rax, eax             ; the slot answers 0, or -1 with it raised
+    ERR_M1_JUMP
     pop r10
     pop r9
     DECREF_VAL r9, r10
@@ -505,10 +507,10 @@ DEF_FUNC_BARE op_delete_name
     push rsi
     xor edx, edx               ; a NULL value is a delete
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
-    ; A mapping that refuses has already raised, and slot_mp_ass_subscript
-    ; does not even return in that case; there is nothing to report here.
     jmp .dn_ok
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]

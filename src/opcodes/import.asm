@@ -233,6 +233,9 @@ DEF_FUNC op_import_from, IF2_FRAME
 
     ; Call tp_getattr(module, name_str)
     call rax
+    GETATTR_HOOK_SKIP .if_ga_ok
+    ERR_PENDING_JUMP
+.if_ga_ok:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jnz .if_got_attr

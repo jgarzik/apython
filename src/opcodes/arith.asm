@@ -976,6 +976,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     test edx, edx               ; NotImplemented, as above
     jz .binop_try_dunder
@@ -1020,6 +1021,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     test edx, edx               ; NotImplemented, as above
     jz .binop_try_dunder
@@ -1219,6 +1221,7 @@ DEF_FUNC_BARE op_binary_op
     push r9
     push r8
     call rax
+    ERR_PENDING_JUMP
     pop r8
     pop r9
     V_UNPACK rax, rdx           ; the nb_ slot returns a Value
@@ -1333,6 +1336,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_concat returns a Value
     ; A NULL Value is NotImplemented here too, exactly as it is for the nb_
     ; slots.  Untested, a declining sq_concat or sq_repeat pushed NULL onto
@@ -1353,6 +1357,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     test edx, edx               ; NotImplemented, as above
     jz .binop_try_dunder
@@ -1454,6 +1459,7 @@ DEF_FUNC_BARE op_binary_op
     push r9
     push r8
     call rax
+    ERR_PENDING_JUMP
     pop r8
     pop r9
     V_UNPACK rax, rdx
@@ -2580,6 +2586,7 @@ DEF_FUNC_BARE op_unary_negative
     mov rdx, r8                ; tag
     V_PACK rdi, rdx
     call rax                   ; rax = result Value
+    ERR_NULL_JUMP
 
     ; DECREF old operand (tag-aware)
     push rax                   ; save result Value
@@ -2636,6 +2643,7 @@ DEF_FUNC_BARE op_unary_invert
     V_PACK rdi, rdx
     xor esi, esi
     call rax                   ; rax = result Value
+    ERR_NULL_JUMP
     push rax
     push rax                   ; alignment
     mov rdi, [rsp + 16]

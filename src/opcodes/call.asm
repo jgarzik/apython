@@ -1017,6 +1017,9 @@ DEF_FUNC op_before_with
     mov rdi, rbx
     mov rsi, r12
     call rax
+    GETATTR_HOOK_SKIP .bw_exit_ga_ok
+    ERR_PENDING_JUMP
+.bw_exit_ga_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .bw_no_exit_decref_name
@@ -1059,6 +1062,9 @@ DEF_FUNC op_before_with
     mov rdi, rbx
     mov rsi, r12
     call rax
+    GETATTR_HOOK_SKIP .bw_enter_ga_ok
+    ERR_PENDING_JUMP
+.bw_enter_ga_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .bw_no_enter_decref_name

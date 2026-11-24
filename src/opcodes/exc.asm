@@ -691,6 +691,7 @@ DEF_FUNC_LOCAL raise_coerce_cause, RCC_FRAME
     xor esi, esi
     xor edx, edx
     call rax
+    ERR_NULL_JUMP
     jmp .rcc_out
 
 .rcc_instance:
