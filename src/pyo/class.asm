@@ -1329,7 +1329,8 @@ DEF_FUNC type_call
     mov rdi, rbx
     mov rsi, rax
     extern type_abstract_error
-    call type_abstract_error    ; does not return
+    call type_abstract_error    ; rax = 0, the TypeError pending
+    jmp eval_exception_unwind
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type

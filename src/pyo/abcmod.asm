@@ -51,7 +51,6 @@ extern type_is_subtype
 extern sub_list_for_type
 extern type_check_is_class
 extern value_type
-extern raise_exception
 extern ap_strcmp
 extern rbt_append_cstr
 extern exc_TypeError_type
@@ -505,6 +504,7 @@ END_FUNC abc_compute_abstracts
 
 ;; ============================================================================
 ;; _abc_init(cls) -> None
+;; Fails: 0
 ;; ============================================================================
 AI_CLS   equ 8
 AI_FRAME equ 16             ; + 0 pushes = 16
@@ -541,7 +541,9 @@ DEF_FUNC abc_init_func, AI_FRAME
     leave
     ret
 .bad:
-    RAISE exc_TypeError_type, "_abc_init() requires a class"
+    SET_EXC exc_TypeError_type, "_abc_init() requires a class"
+    leave
+    ret
 END_FUNC abc_init_func
 
 ;; ============================================================================
@@ -930,6 +932,7 @@ END_FUNC abc_subclasscheck_func
 
 ;; ============================================================================
 ;; type_abstract_error(rdi = the type, rsi = its __abstractmethods__ set)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; "Can't instantiate abstract class Shape without an implementation for
 ;;  abstract methods 'area', 'perimeter'" -- CPython's wording, with the
@@ -937,8 +940,6 @@ END_FUNC abc_subclasscheck_func
 ;; say only "Can't instantiate abstract class with abstract methods", which
 ;; names neither the class nor what is missing, and those are the two things
 ;; the reader needs.
-;;
-;; Does not return.
 ;; ============================================================================
 TAE_NAMES equ 12 * 8        ; the sorted keys, up to TAE_MAX of them
 TAE_COUNT equ TAE_NAMES + 8
@@ -1072,7 +1073,12 @@ DEF_FUNC type_abstract_error, TAE_FRAME
 .tae_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - TAE_BUF]
-    call raise_exception        ; does not return
+    call set_exception
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC type_abstract_error
 
 
@@ -1212,6 +1218,7 @@ END_FUNC abc_instancecheck_func
 
 ;; ============================================================================
 ;; _abc_register(cls, subclass) -> subclass
+;; Fails: 0
 ;; ============================================================================
 RG_CLS   equ 8
 RG_SUB   equ 16
@@ -1273,9 +1280,13 @@ DEF_FUNC abc_register_func, RG_FRAME
     leave
     ret
 .not_a_class:
-    RAISE exc_TypeError_type, "Can only register classes"
+    SET_EXC exc_TypeError_type, "Can only register classes"
+    leave
+    ret
 .cycle:
-    RAISE exc_RuntimeError_type, "Refusing to create an inheritance cycle"
+    SET_EXC exc_RuntimeError_type, "Refusing to create an inheritance cycle"
+    leave
+    ret
 .abc_not_a_class:
     SET_EXC exc_TypeError_type, \
         "issubclass() arg 2 must be a class, a tuple of classes, or a union"
