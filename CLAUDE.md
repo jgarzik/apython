@@ -242,6 +242,16 @@ read around each failure, ratcheted against `tests/raise_leak_floor.txt`.
 A destructor cannot fail: `tp_dealloc` and anything it calls swallows an
 error (CPython prints it as unraisable) rather than returning it.
 
+`ERR_PENDING` and `ERR_M1` ask "is an exception pending?", so **ordinary code
+runs with none**.  Anything that runs Python or calls through a slot while
+one is in flight -- a finalizer, a weakref callback, a trace hook, a report
+being printed -- takes it out first and puts it back after (`exc_fetch` /
+`exc_restore`, src/eval.asm), and nothing may hand back a value over an
+exception it left set.  `make EXC_STRICT=1` traps (`ud2`) at the first
+instruction that ends, or the first frame entered from C, with one still
+pending; run `tests/run_tests.sh` and `tests/raise_probe.sh` under it after
+touching anything that sets, clears or swallows an exception.
+
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
 ## Value Representation (NaN boxing)

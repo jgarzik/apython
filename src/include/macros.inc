@@ -138,6 +138,15 @@
 ; gs-relative store, measured on a Core Ultra 9 285K, issues at half the rate
 ; of a plain one and cost this loop 20% on the core benchmarks.
 %macro DISPATCH 0
+%ifdef EXC_STRICT
+    ; `make EXC_STRICT=1`: an instruction that ends with an exception still
+    ; pending is a bug -- it either lost an error or left a stale one for
+    ; ERR_PENDING / ERR_M1 to misread -- and this is where it stops.
+    cmp qword [gs:ThreadState.current_exception], 0
+    je %%exc_strict_ok
+    ud2
+%%exc_strict_ok:
+%endif
     mov [r12 + PyFrame.disp_ip], rbx  ; save bytecode IP for exception unwind
     mov [r12 + PyFrame.disp_sp], r13  ; save value stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode

@@ -30,6 +30,15 @@ ifdef NO_INT_FREELIST
 NASMFLAGS += -DNO_INT_FREELIST
 endif
 
+# EXC_STRICT=1 makes the interpreter trap (ud2) when an instruction ends, or
+# a frame is entered from C, with an exception still pending.  Ordinary code
+# runs with nothing pending -- ERR_PENDING and ERR_M1 depend on it -- and a
+# stale one is otherwise silent until something misreads it.  Run the suite
+# under it after touching anything that sets or clears an exception.
+ifdef EXC_STRICT
+NASMFLAGS += -DEXC_STRICT
+endif
+
 # NO_POOL=1 compiles the pool allocator out of src/alloc.asm, leaving the thin
 # libc wrappers ap_malloc/ap_free/ap_realloc used to be.  APYTHON_MALLOC=libc
 # does the same at run time, without a rebuild, and that is the one to reach

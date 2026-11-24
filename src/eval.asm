@@ -394,6 +394,14 @@ DEF_FUNC eval_frame
     jmp eval_exception_unwind
 
 .no_throw:
+%ifdef EXC_STRICT
+    ; A frame entered from C starts with nothing pending, or "0 AND an
+    ; exception pending" cannot be read as a failure anywhere beneath it.
+    cmp qword [r15 + ThreadState.current_exception], 0
+    je .exc_strict_ok
+    ud2
+.exc_strict_ok:
+%endif
     ; The 'call' event.  Here rather than earlier because the frame's globals
     ; and eval_base_rsp are in place by now, so a raise from the trace
     ; function unwinds through this frame and sys._getframe() inside the
