@@ -30,8 +30,9 @@ extern bool_false
 extern posix_int_arg
 extern posix_path_arg
 extern posix_embedded_nul
-extern posix_raise_missing
-extern raise_oserror
+extern posix_set_missing
+extern set_oserror
+extern obj_dealloc
 extern none_singleton
 extern list_new
 extern list_append
@@ -43,8 +44,7 @@ extern ap_strcmp
 extern environ
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_exception
-extern eval_exception_unwind
+extern set_exception
 
 global posix_fork
 global posix_execv
@@ -60,25 +60,27 @@ global pm_atfork_before
 global pm_atfork_parent
 global pm_atfork_child
 
-;; POSIX_CHECK result, filename -- turn a negative errno into an OSError.
-;; The same macro posixmod.asm uses; it is small and duplicating it is
-;; cheaper than a header that only these two files would include.
-%macro POSIX_CHECK 2            ; %1 = the result register, %2 = filename Value
+;; POSIX_CHECK_RET result, filename, exit -- a negative errno becomes a
+;; pending OSError and control goes to the caller's error exit.
+%macro POSIX_CHECK_RET 3        ; %1 = the result register, %2 = filename Value,
+                                ; %3 = the error exit
     cmp %1, -4095
     jb %%ok
     mov rdi, %1
     neg rdi
     mov rsi, %2
-    call raise_oserror          ; does not return
+    call set_oserror
+    jmp %3
 %%ok:
 %endmacro
 
 ;; PM_MISSING func, arg, pos -- the three-argument form of the arity error.
-%macro PM_MISSING 3
+%macro PM_MISSING 4             ; %4 = the caller's error exit
     CSTRING rdi, %1
     CSTRING rsi, %2
     mov edx, %3
-    call posix_raise_missing
+    call posix_set_missing      ; err: it always fails; %4 is where that goes
+    jmp %4
 %endmacro
 
 section .bss
@@ -134,7 +136,8 @@ DEF_FUNC posix_fork, 24                 ; + 1 push = 32, 16-aligned
     V_PACK rax, rdx
     ret
 .pfk_failed:
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pfk_fail
+.pfk_fail:
     xor eax, eax
     xor edx, edx
     pop rbx
@@ -144,12 +147,16 @@ END_FUNC posix_fork
 
 ;; ============================================================================
 ;; posix_run_fork_hooks(rdi = a list or 0, esi = 1 to walk it backwards)
-;;   -> nothing; a hook that raises leaves its exception pending, as
-;;      CPython's does
+;;   -> nothing.  A hook that raises is reported as unraisable and the
+;;      exception is dropped, as CPython's run_at_forkers does: fork() itself
+;;      still answers, and in the child there is nobody else to tell.  It used
+;;      to stay pending behind a fork() that returned a pid, and surfaced at
+;;      whatever asked next whether anything had failed.
 ;; ============================================================================
 PRH_LIST  equ 8
 PRH_I     equ 16
 PRH_REV   equ 24
+PRH_FN    equ 32            ; the hook being called, for the report
 PRH_FRAME equ 32            ; + 1 push = 40... one more word to land right
 DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     push rbx
@@ -182,9 +189,26 @@ DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .prh_next
+    mov [rbp - PRH_FN], rdi
     xor esi, esi
     xor edx, edx
     call rax
+    test rax, rax
+    jz .prh_raised
+    DECREF_V rax, rcx
+    jmp .prh_next
+.prh_raised:
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .prh_next
+    mov rsi, [rbp - PRH_FN]
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .prh_next
+    mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
 .prh_next:
     inc qword [rbp - PRH_I]
     jmp .prh_loop
@@ -275,13 +299,19 @@ DEF_FUNC posix_register_at_fork, PRF_FRAME
     V_PACK rax, rdx
     ret
 .prf_none:
-    RAISE exc_TypeError_type, "At least one argument is required."
+    FAIL exc_TypeError_type, "At least one argument is required.", .prf_fail
 .prf_positional:
-    RAISE exc_TypeError_type, \
-        "register_at_fork() takes no positional arguments"
+    FAIL exc_TypeError_type, \
+        "register_at_fork() takes no positional arguments", .prf_fail
 .prf_unexpected:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
         "register_at_fork() got an unexpected keyword argument"
+.prf_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC posix_register_at_fork
 
 
@@ -297,8 +327,13 @@ DEF_FUNC posix_exit_now
     jz .pen_zero
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pen_fail
     mov rdi, rax
     jmp .pen_go
+.pen_fail:                      ; a code that is not an int: nothing exits
+    xor eax, eax
+    leave
+    ret
 .pen_zero:
     xor edi, edi
 .pen_go:
@@ -322,15 +357,17 @@ DEF_FUNC posix_kill, 8         ; lint: pushes=1 -- the `push rbx` below sits aft
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pk_fail
     push rax
     push rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pk_fail2
     mov rsi, rax
     pop rdi
     pop rdi
     call sys_kill
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pk_fail
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
@@ -339,7 +376,15 @@ DEF_FUNC posix_kill, 8         ; lint: pushes=1 -- the `push rbx` below sits aft
     V_PACK rax, rdx
     ret
 .pk_argerr:
-    PM_MISSING "kill", "sig", 2
+    PM_MISSING "kill", "sig", 2, .pk_fail0
+.pk_fail2:
+    add rsp, 16                 ; the first argument, parked twice
+.pk_fail:
+    pop rbx
+.pk_fail0:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_kill
 
 
@@ -366,10 +411,12 @@ DEF_FUNC posix_close_range, 8         ; lint: pushes=1 -- the `push rbx` below s
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pcr_fail
     push rax
     push rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pcr_fail2
     mov rsi, rax
     pop rdi
     pop rdi
@@ -387,7 +434,15 @@ DEF_FUNC posix_close_range, 8         ; lint: pushes=1 -- the `push rbx` below s
     V_PACK rax, rdx
     ret
 .pcr_argerr:
-    PM_MISSING "closerange", "fd_high", 2
+    PM_MISSING "closerange", "fd_high", 2, .pcr_fail0
+.pcr_fail2:
+    add rsp, 16                 ; the first argument, parked twice
+.pcr_fail:
+    pop rbx
+.pcr_fail0:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_close_range
 
 ;; ============================================================================
@@ -395,10 +450,14 @@ END_FUNC posix_close_range
 ;; ============================================================================
 DEF_FUNC posix_setsid
     call sys_setsid
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pss_fail
     mov edx, TAG_SMALLINT
     leave
     V_PACK rax, rdx
+    ret
+.pss_fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC posix_setsid
 
@@ -421,6 +480,7 @@ END_FUNC posix_setsid
 PXV_PATH  equ 8
 PXV_ARGS  equ 16
 PXV_N     equ 24
+PXV_OWNED equ 32            ; what posix_path_arg asked us to release
 PXV_NARGS equ 40
 PXV_MAX   equ 256
 ; The vector grows UPWARD from its base, so its slot is the DEEPEST one --
@@ -434,6 +494,7 @@ PXV_ENV   equ PXV_VEC + (PXV_MAX + 1) * 8
 PXV_FRAME equ ((PXV_ENV + 15) / 16) * 16
 DEF_FUNC posix_execv, PXV_FRAME
     push rbx
+    mov qword [rbp - PXV_OWNED], 0
     cmp rsi, 2
     jl .pxv_argerr
     mov [rbp - PXV_NARGS], rsi
@@ -443,15 +504,14 @@ DEF_FUNC posix_execv, PXV_FRAME
     xor esi, esi
     mov edx, -1                         ; every kind posix_path_arg takes
     call posix_path_arg
-    test rax, rax
-    jz .pxv_fail
+    ERR_NULL .pxv_fail
     mov [rbp - PXV_PATH], rax
+    mov [rbp - PXV_OWNED], rdx
 
     mov rdi, [rbx + 8]
     lea rsi, [rbp - PXV_VEC]
     call pxv_string_vector
-    test rax, rax
-    jz .pxv_fail
+    ERR_NULL .pxv_fail
 
     ; The environment: the caller's when there is one, this process's when
     ; there is not.
@@ -461,32 +521,34 @@ DEF_FUNC posix_execv, PXV_FRAME
     mov rdi, [rbx + 16]
     lea rsi, [rbp - PXV_ENV]
     call pxv_env_vector
-    test rax, rax
-    jz .pxv_fail
+    ERR_NULL .pxv_fail
     lea rdx, [rbp - PXV_ENV]
 .pxv_have_env:
     mov rdi, [rbp - PXV_PATH]
     lea rsi, [rbp - PXV_VEC]
     call sys_execve
     ; Only ever reached on failure.
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pxv_fail
 .pxv_fail:
+    ; A PathLike's resolved path: nothing released it on any of these exits.
+    mov rdi, [rbp - PXV_OWNED]
+    test rdi, rdi
+    jz .pxv_fail_out
+    call obj_decref
+.pxv_fail_out:
     xor eax, eax
     xor edx, edx
     pop rbx
     leave
     ret
-.pxv_seqerr:
-    RAISE exc_TypeError_type, "execv() arg 2 must be a sequence of strings"
-.pxv_toomany:
-    RAISE exc_ValueError_type, "execv() arg 2 is too long"
 .pxv_argerr:
-    PM_MISSING "execv", "args", 2
+    PM_MISSING "execv", "args", 2, .pxv_fail
 END_FUNC posix_execv
 
 ;; ============================================================================
 ;; pxv_string_vector(rdi = a list or tuple of str, rsi = where to build it)
 ;;   -> rax = 1, or 0 with a TypeError or ValueError pending
+;; Fails: 0
 ;;
 ;; A NULL-terminated char*[] pointing INTO the strings, which is what execve
 ;; takes.  Nothing is copied: the strings outlive the call, because the call
@@ -553,16 +615,22 @@ DEF_FUNC_LOCAL pxv_string_vector, 40    ; + 1 push = 48, 16-aligned
     leave
     ret
 .psv_seqerr:
-    RAISE exc_TypeError_type, "execv() takes a sequence of strings"
+    FAIL exc_TypeError_type, "execv() takes a sequence of strings", .psv_fail
 .psv_toomany:
-    RAISE exc_ValueError_type, "execv() was given too many strings"
+    FAIL exc_ValueError_type, "execv() was given too many strings", .psv_fail
 .psv_nul:
-    RAISE exc_ValueError_type, "embedded null byte"
+    FAIL exc_ValueError_type, "embedded null byte", .psv_fail
+.psv_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC pxv_string_vector
 
 ;; ============================================================================
 ;; pxv_env_vector(rdi = a mapping or a sequence of "K=V" strings,
 ;;                rsi = where to build it) -> rax = 1, or 0 with an exception
+;; Fails: 0
 ;;
 ;; CPython's execve takes a MAPPING, and the strings it hands the kernel are
 ;; "key=value" pairs it builds itself.  _posixsubprocess already has that list
@@ -707,24 +775,31 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
 .pev_sequence:
     mov rdi, rbx
     mov rsi, [rbp - PEV_OUT]
-    call pxv_string_vector
+    call pxv_string_vector      ; err: its 0 and its exception are ours
     pop r12
     pop rbx
     leave
     ret
 
 .pev_bad:
-    RAISE exc_TypeError_type, \
-        "execve() arg 3 must be a mapping of str to str"
+    FAIL exc_TypeError_type, \
+        "execve() arg 3 must be a mapping of str to str", .pev_fail
 .pev_toomany:
 .pev_full:
-    RAISE exc_ValueError_type, "execve() environment is too large"
+    FAIL exc_ValueError_type, "execve() environment is too large", .pev_fail
 .pev_nul:
-    ; The two pushes are abandoned: RAISE does not return, and the unwinder
-    ; reloads rsp from eval_base_rsp.
-    RAISE exc_ValueError_type, "embedded null byte"
+    SET_EXC exc_ValueError_type, "embedded null byte"
+    jmp .pev_fail_pop2
 .pev_badname:
-    RAISE exc_ValueError_type, "illegal environment variable name"
+    SET_EXC exc_ValueError_type, "illegal environment variable name"
+.pev_fail_pop2:
+    add rsp, 16                 ; the key and the value, parked for the scan
+.pev_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ; Local: append a NUL-terminated string to the scratch buffer, advancing
 ; PEV_POS in this frame.  eax = 0 when it would not fit.
@@ -798,7 +873,8 @@ extern builtin_func_new
 extern str_from_cstr_heap
 extern dict_set
 
-;; posix_putenv(rdi = args, rsi = nargs) -> rax = Value (None), or 0 raising
+;; posix_putenv(rdi = args, rsi = nargs) -> rax = Value (None)
+;; Fails: 0
 PPE_NAME  equ 8             ; the C string
 PPE_VALUE equ 16
 PPE_ON    equ 24            ; the object holding the name's bytes
@@ -817,8 +893,7 @@ DEF_FUNC posix_putenv, PPE_FRAME
     CSTRING rsi, "putenv: name"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .ppe_fail
+    ERR_NULL .ppe_fail
     mov [rbp - PPE_NAME], rax
     mov [rbp - PPE_ON], rdx
 
@@ -826,8 +901,7 @@ DEF_FUNC posix_putenv, PPE_FRAME
     CSTRING rsi, "putenv: value"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .ppe_fail
+    ERR_NULL .ppe_fail
     mov [rbp - PPE_VALUE], rax
     mov [rbp - PPE_OV], rdx
 
@@ -863,12 +937,11 @@ DEF_FUNC posix_putenv, PPE_FRAME
     ; on once the name has been checked.
     mov edi, 22                     ; EINVAL
     xor esi, esi
-    call raise_oserror              ; does not return
+    call set_oserror
+    jmp .ppe_fail
 
 .ppe_badname:
-    PXE_PATH_DONE [rbp - PPE_OV]
-    PXE_PATH_DONE [rbp - PPE_ON]
-    RAISE exc_ValueError_type, "illegal environment variable name"
+    SET_EXC exc_ValueError_type, "illegal environment variable name"
 
 .ppe_fail:
     PXE_PATH_DONE [rbp - PPE_OV]
@@ -880,10 +953,11 @@ DEF_FUNC posix_putenv, PPE_FRAME
     ret
 
 .ppe_argerr:
-    RAISE exc_TypeError_type, "putenv expected 2 arguments"
+    FAIL exc_TypeError_type, "putenv expected 2 arguments", .ppe_fail
 END_FUNC posix_putenv
 
-;; posix_unsetenv(rdi = args, rsi = nargs) -> rax = Value (None), or 0 raising
+;; posix_unsetenv(rdi = args, rsi = nargs) -> rax = Value (None)
+;; Fails: 0
 PUE_NAME  equ 8
 PUE_ON    equ 16
 PUE_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -898,8 +972,7 @@ DEF_FUNC posix_unsetenv, PUE_FRAME
     CSTRING rsi, "unsetenv: name"
     mov edx, POSIX_PATH_KIND_PLAIN
     call posix_path_arg
-    test rax, rax
-    jz .pue_fail
+    ERR_NULL .pue_fail
     mov [rbp - PUE_NAME], rax
     mov [rbp - PUE_ON], rdx
 
@@ -921,7 +994,7 @@ DEF_FUNC posix_unsetenv, PUE_FRAME
     ret
 
 .pue_argerr:
-    RAISE exc_TypeError_type, "unsetenv expected 1 argument"
+    FAIL exc_TypeError_type, "unsetenv expected 1 argument", .pue_fail
 END_FUNC posix_unsetenv
 
 ;; ============================================================================
@@ -971,10 +1044,12 @@ DEF_FUNC posix_waitpid, PWP_FRAME   ; lint: pushes=1 -- see PWP_FRAME above
     mov rbx, rdi
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .pwp_fail
     push rax
     push rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .pwp_fail2
     mov rdx, rax                    ; options
     pop rdi
     pop rdi                         ; pid
@@ -982,7 +1057,7 @@ DEF_FUNC posix_waitpid, PWP_FRAME   ; lint: pushes=1 -- see PWP_FRAME above
     mov qword [rbp - PWP_STATUS], 0
     xor ecx, ecx                    ; no rusage
     BLOCKING_CALL sys_wait4
-    POSIX_CHECK rax, 0
+    POSIX_CHECK_RET rax, 0, .pwp_fail
     push rax
     push rax
     mov edi, 2
@@ -1016,7 +1091,12 @@ DEF_FUNC posix_waitpid, PWP_FRAME   ; lint: pushes=1 -- see PWP_FRAME above
     leave
     ret
 .pwp_argerr:
-    RAISE exc_TypeError_type, "waitpid() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "waitpid() takes exactly 2 arguments"
+    leave                           ; nothing pushed yet; rax = 0
+    ret
+.pwp_fail2:
+    add rsp, 16                     ; the pid, parked twice
+    jmp .pwp_fail
 END_FUNC posix_waitpid
 
 ;; The status readers.  Each takes the status word and answers an int or a
@@ -1027,9 +1107,14 @@ DEF_FUNC %1, 16
     jz %%argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 %%fail
     jmp %2
 %%argerr:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+%%fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1
 %endmacro
 
@@ -1123,6 +1208,7 @@ DEF_FUNC posix_waitstatus_to_exitcode, 16
     jz .pwe_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .pwe_fail
     mov ecx, eax
     and ecx, 0x7f
     test ecx, ecx
@@ -1144,9 +1230,17 @@ DEF_FUNC posix_waitstatus_to_exitcode, 16
     neg rax
     jmp pw_ret_int
 .pwe_bad:
-    RAISE exc_ValueError_type, "Invalid wait status"
+    SET_EXC exc_ValueError_type, "Invalid wait status"
+    leave
+    ret
 .pwe_argerr:
-    RAISE exc_TypeError_type, "waitstatus_to_exitcode() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "waitstatus_to_exitcode() takes exactly 1 argument"
+    leave
+    ret
+.pwe_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC posix_waitstatus_to_exitcode
 
 section .text
@@ -1186,9 +1280,11 @@ DEF_FUNC posix_prlimit, PRL_FRAME
 
     mov rdi, [rbx]
     call posix_int_arg
+    ERR_M1 .prl_failed_nomem
     mov [rbp - PRL_PID], rax
     mov rdi, [rbx + 8]
     call posix_int_arg
+    ERR_M1 .prl_failed_nomem
     mov [rbp - PRL_RES], rax
 
     xor edx, edx                        ; no `new` unless both limits are given
@@ -1200,9 +1296,11 @@ DEF_FUNC posix_prlimit, PRL_FRAME
     je .prl_call
     mov rdi, rax
     call posix_int_arg
+    ERR_M1 .prl_failed_nomem
     mov [rbp - PRL_NEW], rax
     mov rdi, [rbx + 24]
     call posix_int_arg
+    ERR_M1 .prl_failed_nomem
     mov [rbp - PRL_NEW + 8], rax
     lea rdx, [rbp - PRL_NEW]
 
@@ -1241,7 +1339,7 @@ DEF_FUNC posix_prlimit, PRL_FRAME
     neg eax
     mov edi, eax
     xor esi, esi
-    call raise_oserror
+    call set_oserror
 .prl_failed_nomem:
     xor eax, eax
     xor edx, edx
@@ -1250,9 +1348,7 @@ DEF_FUNC posix_prlimit, PRL_FRAME
     leave
     ret
 .prl_argerr:
-    pop r12
-    pop rbx
-    RAISE exc_TypeError_type, "prlimit() takes exactly 2 or 4 arguments"
+    FAIL exc_TypeError_type, "prlimit() takes exactly 2 or 4 arguments", .prl_failed_nomem
 END_FUNC posix_prlimit
 
 ;; ============================================================================
@@ -1275,6 +1371,7 @@ DEF_FUNC posix_getrusage, GRU_FRAME
     jz .gru_argerr
     mov rdi, [rdi]
     call posix_int_arg
+    ERR_M1 .gru_nomem
     mov rdi, rax
     lea rsi, [rbp - GRU_BUF]
     extern sys_getrusage
@@ -1333,7 +1430,7 @@ DEF_FUNC posix_getrusage, GRU_FRAME
     neg eax
     mov edi, eax
     xor esi, esi
-    call raise_oserror
+    call set_oserror
 .gru_nomem:
     xor eax, eax
     xor edx, edx
@@ -1342,7 +1439,5 @@ DEF_FUNC posix_getrusage, GRU_FRAME
     leave
     ret
 .gru_argerr:
-    pop r12
-    pop rbx
-    RAISE exc_TypeError_type, "getrusage() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "getrusage() takes exactly 1 argument", .gru_nomem
 END_FUNC posix_getrusage
