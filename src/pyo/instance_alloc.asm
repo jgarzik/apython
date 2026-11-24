@@ -94,7 +94,7 @@ DEF_FUNC int_sub_new, ISN_FRAME
     mov rdi, rsi
     mov rsi, rdx
     extern builtin_int_fn
-    call builtin_int_fn
+    call builtin_int_fn         ; err: .isn_fail, by the tag below
     test edx, edx
     jz .isn_fail
     mov [rbp - ISN_VAL], rax

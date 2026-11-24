@@ -12,6 +12,7 @@ import gc
 import io
 import sys
 import types
+import warnings
 
 
 class Boom(Exception):
@@ -317,3 +318,85 @@ check("int.__neg__ on a float", lambda: int.__neg__(1.5))
 check("list.append none", lambda: [].append())
 check("list.append two", lambda: [].append(1, 2))
 check("str.join on an int", lambda: str.join(5, []))
+
+# --- int() ------------------------------------------------------------------
+class IntRaises:
+    def __int__(self):
+        raise Boom()
+class IntStr:
+    def __int__(self):
+        return "x" * 3
+class IntFloat:
+    def __int__(self):
+        return 1.5
+class IndexStr:
+    def __index__(self):
+        return "x" * 3
+class TruncStr:
+    def __trunc__(self):
+        return "y" * 3
+class TruncFloat:
+    def __trunc__(self):
+        return 1.5
+class TruncRaises:
+    def __trunc__(self):
+        raise Boom()
+class TruncIndexStr:
+    def __trunc__(self):
+        return IndexStr()
+class SubInt(int):
+    def __int__(self):
+        return "z" * 3
+class SubIntSub(int):
+    def __int__(self):
+        return SubIntSub(5)
+class IntBool:
+    def __int__(self):
+        return True
+class GetRaises:
+    def __get__(self, o, t):
+        raise Boom()
+class IntDescr:
+    __int__ = GetRaises()
+class S(int):
+    pass
+warnings.simplefilter("ignore")
+check("int three", lambda: int(1, 2, 3))
+check("int None", lambda: int(None))
+check("int bad str", lambda: int("abc" * 10))
+check("int bad uni", lambda: int("１x"))
+check("int bad bytes", lambda: int(b"zz"))
+check("int bad bytearray", lambda: int(bytearray(b"zz")))
+check("int bad memoryview", lambda: int(memoryview(b"zz")))
+check("int nul", lambda: int("1\x002"))
+check("int raises", lambda: int(IntRaises()))
+check("int str", lambda: int(IntStr()))
+check("int float", lambda: int(IntFloat()))
+check("int index str", lambda: int(IndexStr()))
+check("int index raises", lambda: int(IndexRaises()))
+check("int trunc str", lambda: int(TruncStr()))
+check("int trunc float", lambda: int(TruncFloat()))
+check("int trunc raises", lambda: int(TruncRaises()))
+check("int trunc index str", lambda: int(TruncIndexStr()))
+check("int sub str", lambda: int(SubInt(3)))
+check("int descr", lambda: int(IntDescr()))
+check("int base float", lambda: int("1", 1.5))
+check("int base str", lambda: int("1", "a"))
+check("int base 1", lambda: int("1", 1))
+check("int base 37", lambda: int("1", 37))
+check("int base big", lambda: int("1", 10**30))
+check("int base index raises", lambda: int("1", IndexRaises()))
+check("int nonstr base", lambda: int(5, 10))
+check("int bad str base", lambda: int("zz" * 10, 16))
+check("int bad bytes base", lambda: int(b"zz", 16))
+check("int bad bytearray base", lambda: int(bytearray(b"zz"), 16))
+check("int kw", lambda: int("1", bogus=2))
+check("int base kw only", lambda: int(base=10))
+check("S bad", lambda: S("abc"))
+check("int inf", lambda: int(float("inf")))
+check("int nan", lambda: int(float("nan")))
+warnings.simplefilter("error")
+check("int trunc warn error", lambda: int(TruncFloat()))
+check("int sub warn error", lambda: int(SubIntSub(3)))
+check("int bool warn error", lambda: int(IntBool()))
+warnings.resetwarnings()
