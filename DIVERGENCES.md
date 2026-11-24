@@ -98,13 +98,8 @@ the reasoning rather than from scratch.
   never touching the allocator or the eval loop.  That is a real piece of
   work for a report that only matters when the interpreter has already
   failed, and having the module at all is what 113 of test_regrtest's tests
-  were waiting on.  `all_threads` is accepted and ignored, because there is
-  only ever one.
-
-- **`_thread` is a single-threaded stand-in.**  `lib/_thread.py` gives
-  `get_ident` a constant, makes locks uncontended, and raises from
-  `start_new_thread`.  Everything in the stdlib that only takes a lock works;
-  anything that expects a second thread does not.
+  were waiting on.  `all_threads` is accepted and ignored: the dump is of the
+  calling thread only.
 
 - **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
   locale handling does not exist, and neither does the `surrogateescape`
@@ -346,20 +341,33 @@ than against CPython, because CPython cannot serve as an oracle for them:
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
 
-## Threads are deferred
+## Threads run under a GIL, with these differences
 
-`lib/_thread.py` is a single-threaded stand-in: `get_ident` answers a
-constant, the locks are uncontended, and anything that would actually START a
-thread raises rather than pretending.  CPython's `threading.py` runs on it
-unchanged -- RLock, Event, Condition, Semaphore, local and current_thread all
-behave as one thread can observe them -- so a program that uses those
-primitives for their API rather than for concurrency works, and one that
-spawns is told plainly that it cannot.
+Threads are real: `_thread.start_new_thread` starts a pthread, one thread at a
+time runs Python under a global interpreter lock (`src/gil.asm`, a port of
+CPython's `ceval_gil.c`), and CPython's own `threading.py`, `queue.py` and
+`concurrent.futures` run on it unchanged.  What differs from CPython:
 
-That is the shape a deferred feature should have, and it is why this is here
-rather than in `bugs.md`: `Thread.start()` refusing is a decision, not an
-omission waiting to be filled in.  Real threads mean a GIL or fine-grained
-locking over every object this interpreter has, which is a project of its own.
+- **Signals are blocked in every thread but the main one.**  CPython leaves
+  them deliverable anywhere and only *runs handlers* on the main thread; here
+  the kernel delivers to the main thread to begin with.  A program sees the
+  same thing -- handlers run on the main thread -- unless it inspects another
+  thread's signal mask.
+- **A `readinto`-style call into a `bytearray` does not pin it.**  The GIL is
+  given up for the read, and CPython holds a buffer export for that time so
+  a resize from another thread raises `BufferError`; here the resize is not
+  refused.  Reading into a buffer one thread owns is unaffected.
+- **Not every blocking call gives up the GIL.**  The ones that do are sleep,
+  lock waits, `read`/`write`, the socket calls, `poll`/`epoll`, `connect`,
+  `waitpid`, `flock`, `pause`, `input()` and the four OpenSSL calls that do
+  socket I/O.  `open()` on a FIFO, `fsync`, compression of a large buffer and
+  a ctypes foreign call still hold it.
+- **`_thread._local`, `RLock` and the lock type are Python classes** over
+  `_threadcore`, where CPython's are C types.  Their behaviour is the
+  stdlib's; their `type()` is an ordinary class.
+- **A thread's frame region is smaller than the main thread's**, so very deep
+  recursion in a secondary thread falls back to the general frame pool
+  sooner.  It is slower there, not different.
 
 ## The CJK codecs are deferred
 

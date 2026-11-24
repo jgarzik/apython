@@ -8,7 +8,7 @@ the difference from CPython 3.12 is and, where it is known, why it is not a
 one-line fix.
 
 Divergences that are *deliberate* -- the `posix` subset, the absence of managed
-dicts, a single-threaded `_thread`, the three recorded-oracle tests, and the
+dicts, how threads differ under the GIL, the three recorded-oracle tests, and the
 rest -- are not bugs and are not here.  They live in `DIVERGENCES.md`, with the
 reasoning that chose them and what changing one would cost.
 
@@ -298,9 +298,10 @@ reasoning that chose them and what changing one would cost.
   `doctest`, `pdb`, `unittest` and `signal` with it.  So is `zlib`, as a shim
   over `-lz` on the precedent `-lgmp` set, and `gzip` with it -- and
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
-  compress.  So is `array`, which was the largest of these by reach.  What
-  is left is genuinely C: `_tracemalloc`, `_symtable`, `_ssl`,
-  `_sqlite3`, `_crypt`, `_ctypes`, `_curses` and `_tkinter`.  `fcntl`,
+  compress.  So is `array`, which was the largest of these by reach.  So are `_ssl` and `_ctypes`, over OpenSSL and libffi, and `_thread` over
+  real threads.  What is left is genuinely C: `_tracemalloc`, `_symtable`,
+  `_sqlite3`, `_crypt`, `_curses`, `_tkinter`, and `_multiprocessing` and
+  `_queue`, which `multiprocessing` and `queue.SimpleQueue`'s fast path want.  `fcntl`,
   `resource`, `syslog`, `pwd`, `grp`, `audioop` and `_lsprof` are there now
   and none of them needed much: two descriptor calls in `posixfd.asm`, two
   resource calls in `posixproc.asm`, and Python for the rest -- `syslog` over

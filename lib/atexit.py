@@ -1,13 +1,10 @@
 """atexit - callbacks to run at interpreter shutdown.
 
 CPython's is a C module because the interpreter calls into it from its own
-teardown.  Nothing here does that yet, so `register` records the callbacks
-and `_run_exitfuncs` runs them; what is missing is the automatic call at
-exit, not the bookkeeping.
-
-logging, and everything behind it, imports atexit at module level and only
-registers -- so the absence of the automatic call costs a flush at exit and
-not correctness.
+teardown.  Here `register` records the callbacks, `_run_exitfuncs` runs them,
+and the interpreter calls `_run_exitfuncs` on its way out
+(src/shutdown.asm), after threading._shutdown() and before finalization
+begins -- the order Py_FinalizeEx uses.
 """
 
 _registry = []

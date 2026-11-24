@@ -41,8 +41,11 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 `tests/stdlib_floor.txt` and fails when a module that used to import stops, or
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
-`make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh` and
-`tests/arity_probe.sh`.  A test listed in `tests/known_failures.txt` is
+`make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh`,
+`tests/arity_probe.sh`, `tests/typefuzz_probe.sh`, `tests/reentry_probe.sh`
+(every container operation with Python changing the container in the middle
+of it; nothing may crash, and `--valgrind` runs the same corpus under
+valgrind) and `tests/syntax_probe.sh`.  A test listed in `tests/known_failures.txt` is
 reported XFAIL, with the reason and the phase that fixes it written beside
 it, and FAILS the run if it starts passing -- so the entry leaves in the
 commit that earns it.  `make check-cpython` runs everything under
@@ -152,6 +155,53 @@ still the frame uses `PUBLISH_SP` (macros.inc).  A gs-relative access has about
 twice the load latency and half the store rate of a plain one on the machine
 this was measured on, so gs is for cold paths and for loading `ts_self` once.
 
+## Threads and the GIL
+
+Threads are pthreads, and one of them at a time runs the interpreter under a
+global lock: `src/gil.asm`, a port of CPython's `ceval_gil.c` on a pthread
+mutex and two condition variables.  `src/modules/thread.asm` is `_threadcore`
+-- thread start, the per-thread `ThreadState`, a lock that is a POSIX
+semaphore -- and `lib/_thread.py` is the surface over it.  `src/shutdown.asm`
+is what exit does first: `threading._shutdown()`, the `atexit` callbacks, then
+`gil_finalizing`, after which every thread but the main one is parked.
+
+Everything shared has no lock of its own and is safe only because its user
+holds the GIL.  The lock changes hands in exactly two places:
+
+- **An eval-breaker checkpoint**, `CHECK_EVAL_SIGNALS`: on `RESUME`, on a
+  backward jump, and on the return from a call.  `eval_breaker` is one word
+  with two bits, "a signal arrived" and "a thread wants the GIL", so the test
+  on the hot path is one load and one branch.  These points already ran
+  signal handlers, so the code around them already survives arbitrary Python.
+- **Around a blocking call**: `BLOCKING_CALL fn` for a raw syscall wrapper, or
+  `ALLOW_THREADS_BEGIN` / `ALLOW_THREADS_END` (`src/include/gil.inc`).
+  Between the two the thread **must not** touch an object, allocate, free,
+  change a refcount or raise.  Copy what the call needs into the frame first,
+  and read `errno` into the frame *before* `ALLOW_THREADS_END`.  A raw
+  `sys_*` wrapper returns `-errno` in rax, which is why those need nothing
+  more.  Until a second thread exists both forms cost a load and a branch.
+
+Do NOT give the GIL up around the raw `sys_*` calls import and startup make:
+they hold static path buffers (`isp_buf`, `iap_buf`, `pycw_path`) across the
+call, and are safe only because nothing else can run meanwhile.
+
+A new thread's first act is `tstate_install`: a clone inherits its creator's
+gs base.  It always runs a *Python* function at the bottom of its stack
+(`_thread._bootstrap`), because a raise with no interpreter frame beneath it
+is `fatal_error`.  Threads other than the main one are created with every
+signal blocked, so handlers run on the main thread; `signal_run_pending`
+returns at once anywhere else.
+
+`os.fork` goes through glibc's `fork`, and the child resets the GIL and
+becomes the main thread (`gil_fork`).
+
+Anything that calls back into Python -- `__eq__`, `__hash__`, `__repr__`,
+`__index__`, `__del__`, an iterator -- is a place another thread can be let
+in, as well as a place the same thread can re-enter.  Re-read sizes and hold
+references across such a call; `tests/reentry_probe.sh` is the gate, and
+`tests/test_thread_stress.py` runs eight threads at a ten-microsecond switch
+interval.
+
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
 ## Value Representation (NaN boxing)
@@ -230,8 +280,8 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   layout the two share
 - `lib/_imp.py` and `lib/_warnings.py` — the import system's own primitives
   and the warning machinery's C half, which CPython's `importlib._bootstrap`
-  is written against.  Neither needs to be assembly: one thread means the
-  import lock is a counter, there are no frozen or extension modules, and
+  is written against.  Neither needs to be assembly: the import lock is a
+  `_thread.RLock`, there are no frozen or extension modules, and
   `source_hash` is CPython's siphash13 in Python
 - `lib/_md5.py`, `lib/_sha1.py`, `lib/_sha2.py`, `lib/_sha3.py` and
   `lib/_blake2.py` — the digests in Python, which is what `hashlib` reaches
@@ -693,7 +743,7 @@ Build includes DWARF symbols (`-g -F dwarf`) and ELF function metadata (STT_FUNC
 - `info functions` — lists all functions with correct boundaries
 - `disassemble func_name` — disassembly with proper function bounds
 - `step`/`next`/`finish` — source-level stepping (maps to .asm lines)
-- `info registers` — inspect VM state (rbx=bytecode IP, r12=frame, r13=stack top, r14=consts, r15=names)
+- `info registers` — inspect VM state (rbx=bytecode IP, r12=frame, r13=stack top, r14=consts at frame entry)
 
 **GDB quick start:**
 ```
@@ -714,8 +764,8 @@ continue
 | `$rbx` | Current bytecode IP |
 | `$r12` | Current PyFrame* |
 | `$r13` | Value stack top |
-| `$r14` | co_consts data ptr |
-| `$r15` | co_names data ptr |
+| `$r14` | co_consts data ptr at frame entry; a handler may reuse it (`ThreadState.eval_co_consts` is the copy that is always right) |
+| `$r15` | scratch for handlers (co_names is `ThreadState.eval_co_names`) |
 
 **Function definition macros** (src/include/macros.inc):
 - `DEF_FUNC name` — global function with RBP frame (push rbp + mov rbp,rsp)
