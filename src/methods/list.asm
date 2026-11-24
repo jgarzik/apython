@@ -1166,6 +1166,10 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     mov rdi, rbx            ; args ptr (already has self + iterable)
     mov esi, 2                      ; nargs = 2
     call list_method_extend
+    ; An iterable that raised part-way is the answer; this used to hand back
+    ; None over it and leave the exception for whatever ran next.
+    test rax, rax
+    jz .ldi_failed
 
 .ldi_done:
     RET_NONE
@@ -1173,6 +1177,12 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.ldi_failed:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
     ret
 .ldi_no_keywords:
     RAISE exc_TypeError_type, "list() takes no keyword arguments"
