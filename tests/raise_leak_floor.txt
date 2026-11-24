@@ -8,7 +8,7 @@ cb | bytearray | c.center(E(60)) | index | nth=1
 cb | bytearray | c.count(E(7)) | index | nth=1
 cb | bytearray | c.count(E(7)) | index | nth=3
 cb | bytearray | c.expandtabs(E(4)) | index | nth=1
-cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=1
+cb | bytearray | c.extend([E(1), E(2), E(3)]) | index | nth=3
 cb | bytearray | c.find(E(7)) | index | nth=1
 cb | bytearray | c.find(E(7)) | index | nth=3
 cb | bytearray | c.hex(":", E(2)) | index | nth=1
@@ -28,7 +28,6 @@ cb | dict | c | other | eq | nth=1
 cb | dict | c | other | eq | nth=3
 cb | dict | c | other | hash | nth=1
 cb | dict | c | other | hash | nth=3
-cb | dict | c.__init__(other) | eq | nth=1
 cb | dict | c.__init__(other) | eq | nth=3
 cb | dict | c.__init__(other) | hash | nth=1
 cb | dict | c.__init__(other) | hash | nth=3
@@ -54,6 +53,7 @@ cb | dict | c.update(other) | eq | nth=3
 cb | dict | c.update(other) | hash | nth=1
 cb | dict | c.update(other) | hash | nth=3
 cb | dict | dict.fromkeys(gen(8)) | hash | nth=1
+cb | dict | dict.fromkeys(gen(8)) | hash | nth=3
 cb | dict | dict.fromkeys(gen(8)) | iter | nth=3
 cb | list | c[2:5] = gen(8) | iter | nth=1
 cb | list | c[2:5] = gen(8) | iter | nth=3
@@ -79,6 +79,7 @@ cb | set | c -= other | eq | nth=1
 cb | set | c -= other | eq | nth=3
 cb | set | c -= other | hash | nth=1
 cb | set | c -= other | hash | nth=3
+cb | set | c <= other | hash | nth=1
 cb | set | c == other | hash | nth=1
 cb | set | c ^ other | eq | nth=1
 cb | set | c ^ other | eq | nth=3
@@ -97,9 +98,9 @@ cb | set | c |= other | eq | nth=3
 cb | set | c |= other | hash | nth=1
 cb | set | c |= other | hash | nth=3
 cb | set | c.__init__(gen(5)) | eq | nth=1
+cb | set | c.__init__(gen(5)) | eq | nth=3
 cb | set | c.__init__(gen(5)) | hash | nth=1
 cb | set | c.__init__(gen(5)) | hash | nth=3
-cb | set | c.difference_update(gen(8)) | eq | nth=1
 cb | set | c.difference_update(gen(8)) | eq | nth=3
 cb | set | c.difference_update(gen(8)) | hash | nth=1
 cb | set | c.difference_update(gen(8)) | hash | nth=3
@@ -110,6 +111,8 @@ cb | set | c.intersection_update(other) | hash | nth=3
 cb | set | c.isdisjoint(other) | eq | nth=1
 cb | set | c.isdisjoint(other) | hash | nth=1
 cb | set | c.isdisjoint(other) | hash | nth=3
+cb | set | c.issubset(other) | hash | nth=1
+cb | set | c.issuperset(other) | eq | nth=1
 cb | set | c.issuperset(other) | eq | nth=3
 cb | set | c.issuperset(other) | hash | nth=1
 cb | set | c.issuperset(other) | hash | nth=3
@@ -458,18 +461,10 @@ meth | memoryview.hex(1.5,)
 meth | memoryview.hex(<class 'object'>,)
 meth | memoryview.hex(None,)
 meth | memoryview.hex([],)
-meth | module.__loader__ **kw
-meth | module.__loader__('s',)
-meth | module.__loader__(-1,)
-meth | module.__loader__(1.5,)
-meth | module.__loader__(<class 'object'>,)
-meth | module.__loader__(None, 1, 2, 3, 4, 5, 6, 7)
-meth | module.__loader__(None,)
-meth | module.__loader__([],)
-meth | module.__loader__(b'b',)
 meth | set.__init__(-1,)
 meth | set.__init__(1.5,)
 meth | set.__init__(<class 'object'>,)
+meth | set.__init__(None, 1, 2, 3, 4, 5, 6, 7)
 meth | set.__init__(None,)
 meth | set.difference(None, 1, 2, 3, 4, 5, 6, 7)
 meth | set.difference_update(None, 1, 2, 3, 4, 5, 6, 7)
@@ -481,29 +476,8 @@ meth | set.update(1.5,)
 meth | set.update(<class 'object'>,)
 meth | set.update(None, 1, 2, 3, 4, 5, 6, 7)
 meth | set.update(None,)
-new | _io.BytesIO('s',)
-new | _io.BytesIO('s',) **kw
-new | _io.BytesIO() **kw
-new | _io.BytesIO(-1,)
-new | _io.BytesIO(-1,) **kw
-new | _io.BytesIO(1.5,)
-new | _io.BytesIO(1.5,) **kw
-new | _io.BytesIO(<class 'object'>,)
-new | _io.BytesIO(<class 'object'>,) **kw
-new | _io.BytesIO([],)
-new | _io.BytesIO([],) **kw
-new | _io.FileIO('s',)
-new | _io.FileIO('s',) **kw
-new | _io.FileIO()
-new | _io.FileIO(-1,)
-new | _io.FileIO(-1,) **kw
-new | _io.FileIO(None, 1, 2, 3, 4, 5, 6, 7)
-new | _io.FileIO(None, 1, 2, 3, 4, 5, 6, 7) **kw
-new | _io.FileIO(b'b',)
-new | _io.FileIO(b'b',) **kw
 new | _io.StringIO('s',) **kw
 new | _io.StringIO() **kw
-new | _io.StringIO(-1,) **kw
 new | _io.StringIO(1.5,) **kw
 new | _io.StringIO(<class 'object'>,) **kw
 new | _io.StringIO(None, 1, 2, 3, 4, 5, 6, 7)

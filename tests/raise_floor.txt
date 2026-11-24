@@ -15,10 +15,9 @@ src/builtins_pow.asm                   7
 src/builtins_str.asm                   6
 src/builtins_type.asm                  8
 src/compiler/compile.asm               11
-src/dunder.asm                         10
 src/format.asm                         22
 src/import.asm                         8
-src/itertools.asm                      11
+src/itertools.asm                      8
 src/marshal.asm                        5
 src/marshalw.asm                       5
 src/methods/bytearray_methods.asm      8
@@ -36,8 +35,8 @@ src/methods/str_parts.asm              30
 src/methods/str_pred.asm               5
 src/methods/tuple.asm                  5
 src/modules/array.asm                  16
-src/modules/io.asm                     58
-src/modules/io_bytesio.asm             31
+src/modules/io.asm                     49
+src/modules/io_bytesio.asm             28
 src/modules/mmap.asm                   27
 src/modules/sre.asm                    8
 src/mro.asm                            1
@@ -49,7 +48,7 @@ src/pyo/asyncmod.asm                   20
 src/pyo/bytearray.asm                  29
 src/pyo/bytes.asm                      22
 src/pyo/bytes_decode.asm               5
-src/pyo/class.asm                      14
+src/pyo/class.asm                      11
 src/pyo/code.asm                       8
 src/pyo/complex.asm                    6
 src/pyo/descriptors.asm                28
@@ -94,6 +93,5 @@ src/pyo/typeattr.asm                   9
 src/pyo/weakrefmod.asm                 11
 src/repr.asm                           4
 src/runtime.asm                        1
-src/slots.asm                          14
 src/sre.asm                            6
 src/systrace.asm                       2
