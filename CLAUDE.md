@@ -231,6 +231,22 @@ words `err:` in a comment on the call line saying why none is needed.  A
 missed check is not a crash -- the caller carries on with a 0 it takes for an
 answer -- which is why it is a lint error and not a convention.
 
+Lint cannot see an INDIRECT call, so for a function installed in a type
+slot the slot's kind is the contract, and every `call reg` of that kind
+already checks for it:
+
+| Slot | A failure is |
+|---|---|
+| `tp_call` (so every builtin function and method), `tp_new` (with `edx = 0` too), `tp_repr`, `tp_str`, `tp_iter`, the unary number slots, `nb_index` / `nb_int` / `nb_float`, `mp_subscript`, `sq_item` | 0 |
+| `tp_getattr`, `tp_richcompare`, the binary number slots, `sq_concat` / `sq_repeat`, `tp_iternext` | 0 **and** an exception pending -- 0 alone is absent, NotImplemented or exhausted |
+| `tp_hash`, `sq_length`, `mp_length` | -1 in all of rax, and an exception pending |
+| `nb_bool`, `sq_contains`, `tp_setattr`, `mp_ass_subscript`, `sq_ass_item`, a getset setter | -1 and an exception pending (callers sign-extend eax) |
+| `tp_as_buffer`, `tp_dealloc`, `tp_traverse`, `tp_clear` | nothing: they cannot fail |
+
+`op_call` turns a 0 that arrives with nothing pending into SystemError, so a
+callee never returns 0 without setting one.  `type_call` releases the
+instance it was building when `__new__` or `__init__` answers 0.
+
 The conversion is in progress.  `python3 src/compiler/raisemap.py` is the map
 of what still jumps, `tests/raise_floor.txt` is the per-file ratchet, and the
 `ERR_*_JUMP` macros are the transitional form for a caller that cannot return
