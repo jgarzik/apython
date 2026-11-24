@@ -1472,7 +1472,7 @@ DEF_FUNC memoryview_method_hex_self, MVH_FRAME
     lea rdi, [rbp - MVH_ARGS]
     mov rsi, [rbp - MVH_NARGS]
     inc rsi                     ; plus the temporary bytes standing in for self
-    call bytes_method_hex
+    call bytes_method_hex       ; err: its 0 is this method's own, after the release
     push rax
     push rax
     mov rdi, [rbp - MVH_TMP]

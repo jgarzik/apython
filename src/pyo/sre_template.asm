@@ -994,6 +994,7 @@ DEF_FUNC sre_template_expand, TE_FRAME
 .te_join_bytes:
     extern bytes_method_join
     call bytes_method_join
+    ERR_NULL_JUMP
 .te_joined:
     add rsp, 16
     V_UNPACK rax, rdx
