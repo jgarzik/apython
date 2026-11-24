@@ -32,9 +32,8 @@ extern str_from_cstr
 extern str_from_cstr_heap
 extern obj_repr
 extern obj_decref
-extern raise_exception
+extern set_exception
 extern exc_new
-extern eval_exception_unwind
 extern int_promote_mpz
 
 extern int_type
@@ -54,6 +53,7 @@ extern ap_strcmp
 
 ;; ============================================================================
 ;; 1. builtin_abs(args, nargs) - abs(x)
+;; Fails: 0
 ;; ============================================================================
 
 ; --- moved to a sibling file by the split ---
@@ -203,18 +203,26 @@ DEF_FUNC builtin_abs
 .abs_type_error:
     mov rsi, rbx
     CSTRING rdi, `bad operand type for abs(): '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .abs_fail
 
 .abs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "abs() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+.abs_fail:
+    xor eax, eax
+    add rsp, 8
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_abs
 
 ;; ============================================================================
 ;; builtin_divmod(args, nargs) - divmod(a, b) -> (a // b, a % b)
+;; Fails: 0
 ;; ============================================================================
 DM_QTAG equ 8               ; the quotient's tag, across the remainder's call
 DM_FRAME equ 8              ; + 5 pushes = 48, 16-aligned.  DM_QTAG is a frame
@@ -229,6 +237,9 @@ DEF_FUNC builtin_divmod, DM_FRAME
     push r13
     push r14
     push r15
+    ; TAG_NULL until there is a quotient: .divmod_fail releases whatever
+    ; this names, and r15 is the caller's until then.
+    mov qword [rbp - DM_QTAG], 0
 
     cmp rsi, 2
     jne .divmod_error
@@ -260,7 +271,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
-    ERR_PENDING_JUMP
+    ERR_PENDING .divmod_fail    ; a 0 with something pending is not a decline
     test rax, rax
     jz .divmod_no_slot          ; declined: fall back to // and %
     pop r15
@@ -312,7 +323,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
-    ERR_PENDING_JUMP
+    ERR_PENDING .divmod_fail
     ; A slot may decline: this branch taught int_floordiv and int_mod to
     ; answer NULL for a non-int operand, and op_binary_op to fall back on the
     ; other operand's slot.  divmod() is the other direct caller and was not
@@ -335,7 +346,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
-    ERR_PENDING_JUMP
+    ERR_PENDING .divmod_fail
     test rax, rax
     jz .divmod_type_error
 .divmod_have_quot:
@@ -360,7 +371,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
-    ERR_PENDING_JUMP
+    ERR_PENDING .divmod_fail
     test rax, rax
     jnz .divmod_have_rem
     mov rdi, r12
@@ -378,7 +389,7 @@ DEF_FUNC builtin_divmod, DM_FRAME
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
-    ERR_PENDING_JUMP
+    ERR_PENDING .divmod_fail
     test rax, rax
     jz .divmod_pop_type_error
 .divmod_have_rem:
@@ -410,8 +421,8 @@ DEF_FUNC builtin_divmod, DM_FRAME
 .divmod_error:
     CSTRING rdi, "divmod expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .divmod_fail
 
 .divmod_pop_type_error:
 .divmod_type_error:
@@ -424,10 +435,25 @@ DEF_FUNC builtin_divmod, DM_FRAME
     mov ecx, r14d
     V_PACK rsi, rcx
     CSTRING rdx, "unsupported operand type(s) for divmod()"
-    call raise_binop_type_error
+    extern set_binop_type_error
+    call set_binop_type_error
+    jmp .divmod_fail
 .divmod_float_zero:
     extern exc_ZeroDivisionError_type
-    RAISE exc_ZeroDivisionError_type, "float divmod()"
+    SET_EXC exc_ZeroDivisionError_type, "float divmod()"
+.divmod_fail:
+    ; The quotient, when the remainder is what failed: it was left behind.
+    mov rdi, r15
+    mov rsi, [rbp - DM_QTAG]
+    DECREF_VAL rdi, rsi
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_divmod
 
 ;; ============================================================================
@@ -502,6 +528,8 @@ END_FUNC divmod_is_zero
 ; tp_call wrappers: shift (type, args, nargs) → (args, nargs)
 global int_type_call
 ITC_FRAME  equ 16            ; + 0 pushes = 16, 16-aligned
+;; int_type_call(rdi = type, rsi = args, rdx = nargs) -> the (rax, edx) pair
+;; Fails: 0
 DEF_FUNC int_type_call, ITC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     mov rdi, rsi
@@ -556,14 +584,20 @@ DEF_FUNC int_type_call, ITC_FRAME
 .itc_kw_no_pos:
     test r8, r8
     jne .itc_kw_reject
-    RAISE exc_TypeError_type, "int() missing string argument"
+    FAIL exc_TypeError_type, "int() missing string argument", .itc_fail
 .itc_kw_reject:
-    RAISE exc_TypeError_type, "'x' is an invalid keyword argument for int()"
+    SET_EXC exc_TypeError_type, "'x' is an invalid keyword argument for int()"
+.itc_fail:
+    RET_NULL                    ; a tp_new answers the pair
+    leave
+    ret
 .itc_no_kw:
     leave
     jmp builtin_int_fn
 END_FUNC int_type_call
 
+;; bool_type_call(rdi = type, rsi = args, rdx = nargs) -> the (rax, edx) pair
+;; Fails: 0
 DEF_FUNC_BARE bool_type_call
     ; Check for kwargs — bool() doesn't accept keyword arguments
     mov rax, [gs:ThreadState.kw_names_pending]
@@ -575,8 +609,11 @@ DEF_FUNC_BARE bool_type_call
 .bool_kwargs_error:
     mov qword [gs:ThreadState.kw_names_pending], 0
     extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "bool() takes no keyword arguments"
+    sub rsp, 8                  ; bare: realign for the call
+    SET_EXC exc_TypeError_type, "bool() takes no keyword arguments"
+    add rsp, 8
+    RET_NULL
+    ret
 END_FUNC bool_type_call
 
 ;; float_type_call(rdi = type, rsi = args, rdx = nargs) -> a fat pair
@@ -585,13 +622,14 @@ END_FUNC bool_type_call
 ;; plain float: the subclass name was lost and its __init__ never ran.  int
 ;; and str were right because their family flag routes type_call elsewhere;
 ;; float and complex had neither the flag nor a constructor that read rdi.
+;; Fails: 0
 FTC_TYPE  equ 8
 FTC_BITS  equ 16
 FTC_FRAME equ 16            ; + 0 pushes = 16
 extern builtin_sub_alloc
 
 DEF_FUNC float_type_call, FTC_FRAME
-    NO_KEYWORDS "float() takes no keyword arguments"
+    NO_KEYWORDS_RET "float() takes no keyword arguments", .ftc_fail
     mov [rbp - FTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
@@ -616,6 +654,10 @@ DEF_FUNC float_type_call, FTC_FRAME
 .ftc_out:
     leave
     ret
+.ftc_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC float_type_call
 
 ;; ============================================================================
@@ -624,6 +666,7 @@ END_FUNC float_type_call
 
 ;; ============================================================================
 ;; 4. builtin_ord(args, nargs) - ord(c)
+;; Fails: 0
 ;; ============================================================================
 ORD_ARG   equ 8             ; args[0] as it arrived, for both refusals
 ORD_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -747,8 +790,9 @@ DEF_FUNC builtin_ord, ORD_FRAME
 .ord_type_error:
     mov rsi, [rbp - ORD_ARG]
     CSTRING rdi, `ord() expected string of length 1, but \x01 found`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 
 .ord_len_error:
     ; CPython counts CODE POINTS for a str and bytes for the other two, and
@@ -771,18 +815,21 @@ DEF_FUNC builtin_ord, ORD_FRAME
 .ord_len_raise:
     CSTRING rdx, " found"
     CSTRING rdi, "ord() expected a character, but string of length "
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 
 .ord_nargs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "ord() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC builtin_ord
 
 ;; ============================================================================
 ;; 5. builtin_chr(args, nargs) - chr(n)
+;; Fails: 0
 ;; ============================================================================
 BC_BUF    equ 16            ; up to four UTF-8 bytes, then a NUL
 DEF_FUNC builtin_chr, 16
@@ -820,7 +867,7 @@ DEF_FUNC builtin_chr, 16
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
-    ERR_M1_JUMP
+    ERR_M1 .chr_fail
 
     cmp rax, 0x7fffffff
     jg .chr_too_wide
@@ -921,19 +968,23 @@ DEF_FUNC builtin_chr, 16
 
 .chr_too_wide:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
+    FAIL exc_OverflowError_type, "Python int too large to convert to C int", .chr_fail
 .chr_range_error:
-    RAISE exc_ValueError_type, "chr() arg not in range(0x110000)"
+    FAIL exc_ValueError_type, "chr() arg not in range(0x110000)", .chr_fail
 
 .chr_nargs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "chr() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+.chr_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC builtin_chr
 
 ;; ============================================================================
 ;; 6. builtin_hex(args, nargs) - hex(n)
+;; Fails: 0
 ;; ============================================================================
 HEXB_VAL   equ 8
 HEXB_STR   equ 16
@@ -1024,8 +1075,7 @@ DEF_FUNC builtin_hex, HEXB_FRAME
 .hex_nargs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "hex() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     pop r12
@@ -1054,6 +1104,7 @@ END_FUNC builtin_hex
 ;; the decimal representation the way CPython's double_round does rather than
 ;; the scaled binary value.  The int work is GMP's, so round(10**30, -5) is
 ;; an answer rather than "type cannot be rounded".
+;; Fails: 0
 ;; ============================================================================
 
 extern float_round_ndigits
@@ -1157,9 +1208,10 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     V_PACK rdi, rdx
     CSTRING rsi, "__round__"
     extern dunder_call_1
-    call dunder_call_1          ; err: 0, absent or raised, goes to .rnd_type_error
-    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
-    jz .rnd_type_error          ; no __round__, or it raised
+    call dunder_call_1
+    ERR_PENDING .rnd_fail       ; it raised: that is the error, not ours
+    test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent
+    jz .rnd_type_error          ; no __round__
     ; Already a Value.  The guard above was converted and this was not, so
     ; `class M(list): __round__ = list.__len__` answered 2^50 out.
     pop rbx
@@ -1262,7 +1314,8 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     CSTRING rdx, "__round__"
     mov ecx, TAG_SMALLINT
     extern dunder_call_2
-    call dunder_call_2          ; err: 0, absent or raised, goes to .rnd_type_error
+    call dunder_call_2
+    ERR_PENDING .rnd_fail
     V_UNPACK rax, rdx
     test edx, edx
     jz .rnd_type_error
@@ -1318,10 +1371,15 @@ DEF_FUNC builtin_round_fn, RND_FRAME
     ret
 
 .rnd_error:
-    RAISE exc_TypeError_type, "round() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, "round() takes 1 or 2 arguments", .rnd_fail
 
 .rnd_type_error:
-    RAISE exc_TypeError_type, "type cannot be rounded"
+    SET_EXC exc_TypeError_type, "type cannot be rounded"
+.rnd_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_round_fn
 
 ;; ============================================================================
@@ -1504,6 +1562,7 @@ END_FUNC int_round_to_power10
 ;; ============================================================================
 ;; builtin_bin(args, nargs) - bin(x)
 ;; Returns binary string representation: '0b...' or '-0b...'
+;; Fails: 0
 ;; ============================================================================
 global builtin_bin
 BINB_VAL   equ 8
@@ -1595,8 +1654,7 @@ DEF_FUNC builtin_bin, BINB_FRAME
 .bin_nargs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "bin() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     pop r12
@@ -1608,6 +1666,7 @@ END_FUNC builtin_bin
 ;; ============================================================================
 ;; builtin_oct(args, nargs) - oct(x)
 ;; Returns octal string representation: '0o...' or '-0o...'
+;; Fails: 0
 ;; ============================================================================
 global builtin_oct
 OCTB_VAL   equ 8
@@ -1699,8 +1758,7 @@ DEF_FUNC builtin_oct, OCTB_FRAME
 .oct_nargs_error:
     CSTRING rdx, " given)"
     CSTRING rdi, "oct() takes exactly one argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
 .idx_fail:                      ; not an index: the exception is pending
     xor eax, eax
     pop r12
@@ -1723,6 +1781,7 @@ section .text
 ;; The tp_new thunk.  Keywords are not accepted yet -- CPython takes real= and
 ;; imag= -- so a pending kw_names is rejected rather than ignored, and cleared
 ;; on the way out the way int_type_call and bool_type_call do.
+;; Fails: 0
 ;; ============================================================================
 CTC_TYPE  equ 8
 CTC_VAL   equ 16
@@ -1734,7 +1793,7 @@ DEF_FUNC complex_type_call, CTC_FRAME
     mov [rbp - CTC_TYPE], rdi
     mov rdi, rsi
     mov rsi, rdx
-    call builtin_complex        ; rax = a complex pointer, edx = TAG_PTR
+    call builtin_complex        ; rax = a complex pointer, edx = TAG_PTR; err: (0, 0) is tested below
     lea rcx, [rel complex_type]
     cmp [rbp - CTC_TYPE], rcx
     je .ctc_out                 ; complex() itself
@@ -1763,7 +1822,10 @@ DEF_FUNC complex_type_call, CTC_FRAME
     ret
 .ctc_kwargs:
     mov qword [gs:ThreadState.kw_names_pending], 0
-    RAISE exc_TypeError_type, "complex() takes no keyword arguments"
+    SET_EXC exc_TypeError_type, "complex() takes no keyword arguments"
+    RET_NULL
+    leave
+    ret
 END_FUNC complex_type_call
 
 ;; ============================================================================
@@ -1804,6 +1866,7 @@ BCX_FRAME equ 64              ; + 0 pushes = 64
 ;;
 ;; A __complex__ returning something other than a complex raises here rather
 ;; than answering 0: that is a different error, and CPython reports it as one.
+;; Fails: -1
 ;; ============================================================================
 BCC_OUT   equ 8
 BCC_SELF  equ 16
@@ -1814,9 +1877,6 @@ BCC_FRAME equ 32            ; + 0 pushes = 32
 extern dunder_call_1
 extern obj_dealloc
 extern complex_type
-extern raise_type_error_with_name
-extern raise_binop_type_error
-extern eval_exception_unwind
 
 DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
     mov [rbp - BCC_OUT], rsi
@@ -1885,7 +1945,10 @@ DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
 .bcc_bad_complex:
     mov rsi, [rbp - BCC_SELF]
     CSTRING rdi, `__complex__ returned non-complex (type \x01)`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - BCC_SELF]   ; what __complex__ answered was ours
+    DECREF_V rdi, rdx
+    jmp .bcc_raised
 
 .bcc_try_float:
     DUNDER_RAISED [rbp - BCC_EXC], .bcc_raised
@@ -1919,8 +1982,9 @@ DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
 
 .bcc_raised:
     ; A protocol method raised.  Report that, not "not a number".
+    mov rax, -1
     leave
-    jmp eval_exception_unwind
+    ret
 
 .bcc_no:
     xor eax, eax
@@ -1929,6 +1993,8 @@ DEF_FUNC_LOCAL bcx_coerce, BCC_FRAME
     ret
 END_FUNC bcx_coerce
 
+;; builtin_complex(rdi = args, rsi = nargs) -> the (rax, edx) pair; see above
+;; Fails: 0
 DEF_FUNC builtin_complex, BCX_FRAME
     mov [rbp - BCX_ARGS], rdi
     mov [rbp - BCX_NARGS], rsi
@@ -1970,6 +2036,7 @@ DEF_FUNC builtin_complex, BCX_FRAME
     lea rsi, [rbp - BCX_A]
     mov edx, 1                  ; __complex__ is offered to this one only
     call bcx_coerce
+    ERR_M1 .bcx_fail
     mov [rbp - BCX_RA], rax
     test eax, eax
     jz .bcx_bad_type
@@ -2005,6 +2072,7 @@ DEF_FUNC builtin_complex, BCX_FRAME
     lea rsi, [rbp - BCX_B]
     xor edx, edx                ; ...and never to the second
     call bcx_coerce
+    ERR_M1 .bcx_fail
     mov [rbp - BCX_RB], rax
     test eax, eax
     jz .bcx_bad_second
@@ -2054,26 +2122,31 @@ DEF_FUNC builtin_complex, BCX_FRAME
     mov rdi, [rbp - BCX_ARGS]
     mov rsi, [rdi]
     CSTRING rdi, `complex() first argument must be a string or a number, not '\x01'`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bcx_fail
 
 .bcx_bad_second:
     mov rdi, [rbp - BCX_ARGS]
     mov rsi, [rdi + 8]
     CSTRING rdi, `complex() second argument must be a number, not '\x01'`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bcx_fail
 
 .bcx_str_and_second:
-    RAISE exc_TypeError_type, "complex() can't take second arg if first is a string"
+    FAIL exc_TypeError_type, "complex() can't take second arg if first is a string", .bcx_fail
 
 .bcx_second_is_str:
-    RAISE exc_TypeError_type, "complex() second arg can't be a string"
+    FAIL exc_TypeError_type, "complex() second arg can't be a string", .bcx_fail
 
 .bcx_argcount:
     mov rsi, [rbp - BCX_NARGS]
     CSTRING rdx, " given)"
     CSTRING rdi, "complex() takes at most 2 arguments ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+.bcx_fail:
+    RET_NULL                    ; complex's tp_new reads the pair
+    leave
+    ret
 END_FUNC builtin_complex
 
 

@@ -1420,7 +1420,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov rdi, rsp
     mov esi, 1
     extern builtin_chr
-    call builtin_chr
+    call builtin_chr            ; err: the range was checked above; it cannot refuse
     add rsp, 16
     V_PACK rax, rdx
     mov [rbp-SM_VALUE], rax

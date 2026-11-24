@@ -335,7 +335,7 @@ DEF_FUNC array_item_value, AIV_FRAME
     lea rdi, [rbp - AIV_ARG]
     mov esi, 1
     extern builtin_chr
-    call builtin_chr
+    call builtin_chr            ; err: its 0 is this function's own
     leave
     ret
 END_FUNC array_item_value
@@ -2217,7 +2217,7 @@ DEF_FUNC array_getattr, AGA_FRAME
     lea rdi, [rbp - AGA_NAME]
     mov esi, 1
     extern builtin_chr
-    call builtin_chr
+    call builtin_chr            ; err: its 0 is this function's own
     leave
     ret
 

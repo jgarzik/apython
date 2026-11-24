@@ -554,3 +554,103 @@ check("int.__format__ spec int", lambda: (5).__format__(5))
 check("int.__format__ none", lambda: (5).__format__())
 check("% s __str__ raises", lambda: "%s" % StrRaises())
 check("% 5s __str__ raises", lambda: "%5s" % StrRaises())
+
+# --- abs, divmod, ord, chr, hex, bin, oct, round, complex -------------------------
+class AbsRaises:
+    def __abs__(self):
+        raise Boom()
+
+
+class DivmodRaises:
+    def __divmod__(self, other):
+        raise Boom()
+
+
+class FloordivOnly:
+    def __floordiv__(self, other):
+        return 10 ** 30
+
+
+class RoundRaises:
+    def __round__(self, ndigits=None):
+        raise Boom()
+
+
+class ComplexRaises:
+    def __complex__(self):
+        raise Boom()
+
+
+class ComplexStr:
+    def __complex__(self):
+        return "x" * 3
+
+
+class FloatSub(float):
+    pass
+
+
+class ComplexSub(complex):
+    pass
+
+
+check("abs none", lambda: abs())
+check("abs str", lambda: abs("a"))
+check("abs None", lambda: abs(None))
+check("abs __abs__ raises", lambda: abs(AbsRaises()))
+check("divmod one", lambda: divmod(1))
+check("divmod str", lambda: divmod("a", 1))
+check("divmod int, str", lambda: divmod(1, "a"))
+check("divmod by zero", lambda: divmod(1, 0))
+check("divmod big by zero", lambda: divmod(10 ** 30, 0))
+check("divmod float by zero", lambda: divmod(1.0, 0.0))
+check("divmod int by float zero", lambda: divmod(1, 0.0))
+check("divmod __divmod__ raises", lambda: divmod(DivmodRaises(), 1))
+check("divmod quotient, no remainder", lambda: divmod(FloordivOnly(), 1))
+check("ord none", lambda: ord())
+check("ord int", lambda: ord(5))
+check("ord two characters", lambda: ord("ab"))
+check("ord two bytes", lambda: ord(b"ab"))
+check("ord empty", lambda: ord(""))
+check("chr none", lambda: chr())
+check("chr str", lambda: chr("a"))
+check("chr negative", lambda: chr(-1))
+check("chr out of range", lambda: chr(0x110000))
+check("chr huge", lambda: chr(10 ** 30))
+check("chr __index__ raises", lambda: chr(IndexRaises()))
+check("hex none", lambda: hex())
+check("hex str", lambda: hex("a"))
+check("hex float", lambda: hex(1.5))
+check("hex __index__ raises", lambda: hex(IndexRaises()))
+check("bin none", lambda: bin())
+check("bin str", lambda: bin("a"))
+check("bin __index__ raises", lambda: bin(IndexRaises()))
+check("oct none", lambda: oct())
+check("oct str", lambda: oct("a"))
+check("oct __index__ raises", lambda: oct(IndexRaises()))
+check("round none", lambda: round())
+check("round three", lambda: round(1, 2, 3))
+check("round str", lambda: round("a"))
+check("round ndigits str", lambda: round(1.5, "a"))
+check("round ndigits float", lambda: round(1.5, 1.5))
+check("round __round__ raises", lambda: round(RoundRaises()))
+check("round __round__ raises, ndigits", lambda: round(RoundRaises(), 2))
+check("round nan", lambda: round(float("nan")))
+check("round inf", lambda: round(float("inf")))
+check("complex three", lambda: complex(1, 2, 3))
+check("complex bad keyword", lambda: complex(bogus=1))
+check("complex None", lambda: complex(None))
+check("complex second None", lambda: complex(1, None))
+check("complex str and second", lambda: complex("1", 2))
+check("complex second str", lambda: complex(1, "2"))
+check("complex bad str", lambda: complex("zz" * 10))
+check("complex __complex__ raises", lambda: complex(ComplexRaises()))
+check("complex __complex__ str", lambda: complex(ComplexStr()))
+check("complex __float__ raises", lambda: complex(FloatRaises()))
+check("complex second __float__ raises", lambda: complex(1, FloatRaises()))
+check("complex subclass None", lambda: ComplexSub(None))
+check("complex.__new__ subclass None", lambda: complex.__new__(ComplexSub, None))
+check("float.__new__ subclass None", lambda: float.__new__(FloatSub, None))
+check("float subclass keyword", lambda: FloatSub(x=1))
+check("float subclass bad str", lambda: FloatSub("zz"))
+check("bool.__new__ keyword", lambda: bool.__new__(bool, x=1))

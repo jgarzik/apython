@@ -157,7 +157,7 @@ DEF_FUNC scalar_dunder_new
     mov rdi, rbx
     mov rdx, rsi
     mov rsi, r12
-    call float_type_call
+    call float_type_call        ; err: its (0, 0) is this function's own
     pop r12
     pop rbx
     leave
@@ -169,7 +169,7 @@ DEF_FUNC scalar_dunder_new
     mov rdi, rbx
     mov rdx, rsi
     mov rsi, r12
-    call complex_type_call
+    call complex_type_call      ; err: its (0, 0) is this function's own
     pop r12
     pop rbx
     leave
