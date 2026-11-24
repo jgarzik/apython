@@ -134,6 +134,11 @@ class BadSink:
 
 GOOD = marshal.dumps((1, "two", 3.0, [4, b"five"]))
 
+class Index:
+    def __index__(self):
+        boom("index")
+
+
 HASH = Hash()
 HASHCALL = HashCall()
 
@@ -330,6 +335,26 @@ check("marshal.dump()", lambda: marshal.dump(), message=False)
 check("marshal.load(1)", lambda: marshal.load(1), message=False)
 check("marshal.load, read raises", lambda: marshal.load(BadSink()))
 check("marshal.load()", lambda: marshal.load(), message=False)
+
+# ---- compile(), exec() and eval() ---------------------------------------------
+check("compile(bad source)", lambda: compile("x = (", "<s>", "exec"), message=False)
+check("compile(1, ...)", lambda: compile(1, "<s>", "exec"), message=False)
+check("compile(src, 1, ...)", lambda: compile("x", 1, "exec"), message=False)
+check("compile(src, f, 1)", lambda: compile("x", "<s>", 1), message=False)
+check("compile(src, f, 'bogus')", lambda: compile("x", "<s>", "bogus"))
+check("compile(src, f, m, 'x')", lambda: compile("x", "<s>", "exec", "x"), message=False)
+check("compile(src, f, m, Index)", lambda: compile("x", "<s>", "exec", Index()))
+check("compile()", lambda: compile(), message=False)
+check("eval(bad source)", lambda: eval("1 +"), message=False)
+check("eval(1)", lambda: eval(1), message=False)
+check("eval(src, 1)", lambda: eval("1", 1), message=False)
+check("eval()", lambda: eval(), message=False)
+check("eval(raises)", lambda: eval("boom('eval')"))
+check("exec(bad source)", lambda: exec("def ("), message=False)
+check("exec(1)", lambda: exec(1), message=False)
+check("exec(src, 1)", lambda: exec("x = 1", 1), message=False)
+check("exec()", lambda: exec(), message=False)
+check("exec(raises)", lambda: exec("boom('exec')"))
 
 # ---- sys.call_tracing ---------------------------------------------------------
 check("sys.call_tracing(f)", lambda: sys.call_tracing(len), message=False)
