@@ -24,6 +24,7 @@
 
 ASM_INIT
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -1836,7 +1837,7 @@ DEF_FUNC socket_module_create, SMC_FRAME
     mov rdi, [rbp - SMC_DICT]
     mov rsi, [rbp - SMC_NAME]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     ; DECREF_V, not obj_decref: under INT_STRESS=1 every one of these is a
     ; heap int and V_PACK handed back an owned reference.
     mov rax, [rbp - SMC_ENT]

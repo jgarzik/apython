@@ -542,7 +542,8 @@
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    extern dict_set_str
+    call dict_set_str           ; a module's own dict, before it is published
     pop rdi
     call obj_decref
     pop rdi

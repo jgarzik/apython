@@ -26,6 +26,7 @@
 %include "src/include/macros.inc"
 %include "src/include/value.inc"
 
+extern dict_set_str
 extern posix_int_arg
 extern set_oserror
 extern posix_set_missing
@@ -1082,7 +1083,7 @@ DEF_FUNC posixid_register, PIR_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - PIR_ENT]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - PIR_ENT]
     call obj_decref
     mov rdi, [rbp - PIR_KEY]
@@ -1105,7 +1106,7 @@ DEF_FUNC posixid_register, PIR_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - PIR_ENT]
-    call dict_set
+    call dict_set_str
     mov rax, [rbp - PIR_ENT]
     DECREF_V rax, rcx
     mov rdi, [rbp - PIR_KEY]

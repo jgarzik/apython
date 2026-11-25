@@ -28,6 +28,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -630,7 +631,7 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     mov rsi, rbx
     mov rdx, rax
     push rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -651,7 +652,7 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rax
     call obj_decref

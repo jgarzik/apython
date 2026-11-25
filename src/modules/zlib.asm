@@ -22,6 +22,7 @@
 
 ASM_INIT
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -1196,7 +1197,7 @@ DEF_FUNC zlib_module_create, ZM_FRAME
     mov rdi, r12
     mov rsi, rbx
     mov rdx, r13
-    call dict_set
+    call dict_set_str
     mov rdi, rbx
     call obj_decref
     mov rdi, r13

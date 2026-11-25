@@ -28,6 +28,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern obj_decref
@@ -2309,7 +2310,7 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel array_type]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - AMC_KEY]
     call obj_decref
 
@@ -2327,7 +2328,7 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, r12
     mov rsi, [rbp - AMC_KEY]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - AMC_KEY]
     call obj_decref
     mov rdi, [rbp - AMC_FN]

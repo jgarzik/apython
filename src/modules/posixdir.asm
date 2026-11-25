@@ -44,6 +44,7 @@ POSIX_PATH_KIND_PLAIN equ 0
 
 section .text
 
+extern dict_set_str
 extern ap_malloc
 extern ap_free
 extern builtin_func_new
@@ -1089,7 +1090,7 @@ DEF_FUNC posixdir_register, PDR_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - PDR_ENT]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - PDR_ENT]
     call obj_decref
     mov rdi, [rbp - PDR_KEY]

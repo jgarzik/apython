@@ -59,6 +59,7 @@
 
 ASM_INIT
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -1372,7 +1373,7 @@ DEF_FUNC ssl_module_create, SM_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, r13
-    call dict_set
+    call dict_set_str
     add rsp, 8
     pop rdi
     call obj_decref

@@ -21,6 +21,7 @@
 %include "object.inc"
 %include "value.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -189,7 +190,7 @@ DEF_FUNC ucd32_module_create, UMC_FRAME
     mov rdx, rax
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rax
     call obj_decref

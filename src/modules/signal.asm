@@ -25,6 +25,7 @@
 
 ASM_INIT
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -952,7 +953,7 @@ DEF_FUNC_LOCAL sm_add_int_named, SAN_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - SAN_ENT]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - SAN_NAME]
     call obj_decref
     mov rax, [rbp - SAN_ENT]

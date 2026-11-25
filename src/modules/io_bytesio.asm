@@ -16,6 +16,7 @@
 ASM_INIT
 
 ; --- from io.asm, the half this came out of ---
+extern dict_set_str
 extern io_bases1
 extern io_set_number
 extern io_append_i64
@@ -1174,7 +1175,7 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     mov rdi, rbx
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi

@@ -19,6 +19,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern obj_decref
@@ -584,7 +585,7 @@ DEF_FUNC_LOCAL gm_stat_put
     mov rdx, r12
     V_PACK_I64 rdx, rcx
     extern dict_set
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop r12
@@ -776,7 +777,7 @@ DEF_FUNC_LOCAL gm_add, GMA_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - GMA_FUNC]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - GMA_KEY]
     call obj_decref
     mov rdi, [rbp - GMA_FUNC]
@@ -937,7 +938,7 @@ DEF_FUNC_LOCAL gm_add_empty_list, GME_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - GME_LIST]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - GME_KEY]
     call obj_decref
     mov rdi, [rbp - GME_LIST]
@@ -969,7 +970,7 @@ DEF_FUNC_LOCAL gm_add_int, GMI_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - GMI_VAL]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - GMI_KEY]
     call obj_decref
     mov rdi, [rbp - GMI_VAL]

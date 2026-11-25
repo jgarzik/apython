@@ -25,6 +25,8 @@
 ASM_INIT
 
 ; --- from io_bytesio.asm, the half split out of this one ---
+extern dict_set_ret
+extern dict_set_str
 extern bytesio_check
 extern io_make_bytesio
 extern im_n_BytesIO
@@ -126,7 +128,7 @@ DEF_FUNC_LOCAL io_new_type, INT_FRAME
     mov rdi, [rbp - INT_NS]
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -139,7 +141,7 @@ DEF_FUNC_LOCAL io_new_type, INT_FRAME
     mov rdi, [rbp - INT_NS]
     mov rsi, rax
     mov rdx, [rbp - INT_NAME]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -782,6 +784,8 @@ END_FUNC fileio_set_not_writable
 
 ;; ============================================================================
 ;; fileio_set_attr(rdi = self, rsi = name cstr, rdx = value object, borrowed)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; name / mode / closed are ordinary entries in the instance dict, created on
 ;; demand -- instance_new zero-fills, so the dict is NULL until something
@@ -815,9 +819,11 @@ DEF_FUNC_LOCAL fileio_set_attr, FSA_FRAME
     mov rdi, [rdi + PyFileIOObject.inst_dict]
     mov rsi, [rbp - FSA_KEY]
     mov rdx, [rbp - FSA_VAL]
-    call dict_set
+    call dict_set_ret           ; err: returned to the caller, once the name is released
+    mov [rbp - FSA_VAL], rax
     mov rdi, [rbp - FSA_KEY]
     call obj_decref
+    mov rax, [rbp - FSA_VAL]
     leave
     ret
 END_FUNC fileio_set_attr
@@ -1231,6 +1237,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     lea rsi, [rel im_a_name]
     mov rdx, [rbp - FI_FILE]
     call fileio_set_attr
+    ERR_M1 .fi_path_refused     ; a second __init__, over a __dict__ that refuses
 
     ; mode and closed are properties, so neither is an instance attribute:
     ; CPython's FileIO keeps only `name` in its instance dict, and code that
@@ -2561,7 +2568,7 @@ DEF_FUNC io_add_method, IAM_FRAME
     mov rdi, [rbp - IAM_NS]
     mov rsi, rax
     mov rdx, [rbp - IAM_FN]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - IAM_FN]
     call obj_decref
     mov rdi, [rbp - IAM_KEY]
@@ -2757,7 +2764,7 @@ DEF_FUNC io_add_property, IAP_FRAME
     mov rdi, [rbp - IAP_NS]
     mov rsi, rax
     mov rdx, [rbp - IAP_PROP]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - IAP_PROP]
     call obj_decref
     mov rdi, [rbp - IAP_KEY]
@@ -2815,7 +2822,7 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     mov rdi, rbx
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi

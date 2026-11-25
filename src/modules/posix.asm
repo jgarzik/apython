@@ -27,6 +27,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern dict_set_str
 extern posix_path_arg
 %include "posixpath.inc"
 
@@ -2825,7 +2826,7 @@ DEF_FUNC posix_environ_new, 40
     mov rdi, [rbp - PEN_DICT]
     mov rsi, [rbp - PEN_KEY]
     mov rdx, [rbp - PEN_VAL]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - PEN_VAL]
     call obj_decref             ; dict_set took its own
 .pen_drop_key:
