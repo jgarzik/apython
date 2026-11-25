@@ -116,7 +116,7 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
 
     mov rdi, [rbp - TSN_NS]
     mov rsi, rcx
-    call dict_get
+    call dict_get_jumping
     V_UNPACK rax, rdx
     test edx, edx
     jz .next                            ; deleted while we walked
@@ -359,8 +359,8 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     mov rdi, [rbp - TAH_DICT]
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    extern dict_set
-    call dict_set
+    extern dict_set_jumping
+    call dict_set_jumping
     add rsp, 8
     pop rdi
     call obj_decref
@@ -410,8 +410,8 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
 
     mov rdi, [rbp - TWI_DICT]
     mov rsi, rax
-    extern dict_get
-    call dict_get
+    extern dict_get_jumping
+    call dict_get_jumping
     test rax, rax
     jz .twi_release
 
@@ -443,8 +443,8 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
     mov rdi, [rbp - TWI_DICT]
     mov rsi, [rbp - TWI_KEY]
     mov rdx, rax
-    extern dict_set
-    call dict_set
+    extern dict_set_jumping
+    call dict_set_jumping
     add rsp, 8
     pop rdi
     extern obj_decref
@@ -468,8 +468,8 @@ DEF_FUNC_LOCAL tah_dict_get, 16
     sub rsp, 8
     mov rdi, rbx
     mov rsi, rax
-    extern dict_get
-    call dict_get
+    extern dict_get_jumping
+    call dict_get_jumping
     add rsp, 8
     pop rdi
     push rax
@@ -550,7 +550,7 @@ DEF_FUNC type_slots_conflict, TSC_FRAME
     mov [rbp - TSC_NAME], rax                   ; owned from here
     mov rdi, [rbp - TSC_DICT]
     mov rsi, rax
-    call dict_get                               ; a Value; 0 is the miss
+    call dict_get_jumping                               ; a Value; 0 is the miss
     test rax, rax
     jz .tsc_release
 

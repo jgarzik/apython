@@ -36,7 +36,7 @@ extern obj_incref
 extern set_exception
 extern str_from_cstr_heap
 extern dict_type
-extern dict_set
+extern dict_set_jumping
 extern str_type
 extern tuple_new
 extern tuple_type
@@ -787,7 +787,7 @@ BCL_RSP   equ 8 + 40 + 64
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - BCL_ORIG]
-    call dict_set               ; takes its own reference
+    call dict_set_jumping               ; takes its own reference
     pop rdi
     call obj_decref
 .bc_orig_release:

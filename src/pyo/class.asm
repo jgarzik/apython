@@ -16,8 +16,8 @@ extern set_exception
 extern none_singleton
 extern obj_incref
 extern dict_new
-extern dict_get
-extern dict_set
+extern dict_get_jumping
+extern dict_set_jumping
 extern str_from_cstr
 extern str_from_cstr_heap
 extern type_getattr
@@ -1382,7 +1382,7 @@ DEF_FUNC type_call
     TC_NAME rcx, tc_abstract_name_obj, tc_abstract_name
     pop rdi
     mov rsi, rcx
-    call dict_get
+    call dict_get_jumping
     test rax, rax
     jz .tc_not_abstract
     V_TEST_PTR rax, rcx

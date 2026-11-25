@@ -19,8 +19,8 @@ extern dict_type
 extern dict_new
 extern dunder_call_3
 extern dunder_lookup
-extern dict_get
-extern dict_set
+extern dict_get_jumping
+extern dict_set_jumping
 extern str_from_cstr_heap
 extern obj_getattr_opt
 extern obj_call_n
@@ -118,7 +118,7 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov [rbp - BFC_KEY], rax
     mov rdi, [rbp - BFC_DICT]
     mov rsi, rax
-    call dict_get                       ; a Value; 0 is the miss
+    call dict_get_jumping                       ; a Value; 0 is the miss
     test rax, rax
     jz .bfc_drop_key
 
@@ -270,7 +270,7 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     mov [rbp - BTQ_KEY], rax
     mov rdi, [r12 + PyTypeObject.tp_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     test rax, rax
     jz .btq_release_key
 
@@ -328,7 +328,7 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
     jz .bcq_done
     mov [rbp - BCQ_KEY], rax
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     push rax
     sub rsp, 8
     mov rdi, [rbp - BCQ_KEY]
@@ -703,7 +703,7 @@ TFP_RSP   equ 40 + 88
     mov rbx, rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     V_UNPACK rax, rdx
     mov r12, rax
     mov [rbp - TFP_SLOTV], rdx
@@ -927,7 +927,7 @@ TFP_RSP   equ 40 + 88
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     mov rbx, rax                ; the current __new__, as a Value
     V_TEST_PTR rbx, rax
     ja .tfp_new_done
@@ -954,7 +954,7 @@ TFP_RSP   equ 40 + 88
     mov rdi, r15
     mov rsi, [rsp]              ; the "__new__" key
     mov rdx, rbx
-    call dict_set
+    call dict_set_jumping
     mov rdi, rbx
     call obj_decref             ; the dict holds it now
 .tfp_new_done:
@@ -969,7 +969,7 @@ TFP_RSP   equ 40 + 88
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .bc_have_module
     mov rcx, [gs:ThreadState.eval_saved_r12]
@@ -984,7 +984,7 @@ TFP_RSP   equ 40 + 88
     mov rdi, [gs:ThreadState.eval_saved_r12]
     mov rdi, [rdi + PyFrame.globals]
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     V_UNPACK rax, rdx
     pop rdi
     push rax
@@ -997,7 +997,7 @@ TFP_RSP   equ 40 + 88
     mov rdi, r15
     mov rsi, [rsp]                  ; the "__module__" key
     mov rdx, rax
-    call dict_set
+    call dict_set_jumping
     or qword [rbp - TFP_FILLED], TFP_FILLED_MODULE
 .bc_have_module:
     pop rdi
@@ -1020,13 +1020,13 @@ TFP_RSP   equ 40 + 88
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     test rax, rax               ; a Value; 0 is the miss
     jnz .bc_have_doc
     mov rdi, r15
     mov rsi, [rsp]
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_jumping
     or qword [rbp - TFP_FILLED], TFP_FILLED_DOC
 .bc_have_doc:
     pop rdi
@@ -1040,7 +1040,7 @@ TFP_RSP   equ 40 + 88
     push rax                        ; save __slots__ str
     mov rdi, r15                    ; class_dict
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                         ; __slots__ str
     push rdx                        ; save dict_get tag
@@ -1297,7 +1297,7 @@ TFP_RSP   equ 40 + 88
     mov rsi, [rsp]                 ; name (key)
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
-    call dict_set
+    call dict_set_jumping
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
     pop rdi
@@ -1330,7 +1330,7 @@ TFP_RSP   equ 40 + 88
 
     mov rdi, r15            ; class_dict
     mov rsi, rax            ; "__init__" str
-    call dict_get
+    call dict_get_jumping
     V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rbx, rax            ; rbx = __init__ func or NULL
 
@@ -2136,7 +2136,7 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rbx, [rbx + PyTypeObject.tp_dict]
     mov rdi, rbx
     mov rsi, rax
-    call dict_get
+    call dict_get_jumping
     test rax, rax               ; a Value; 0 is the miss
     jnz .bal_drop_name          ; the class already has the name
 
@@ -2154,7 +2154,7 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rdi, rbx
     mov rsi, [rbp - BAL_NAME]
     mov rdx, rax
-    call dict_set
+    call dict_set_jumping
     mov rdi, [rbp - BAL_DESC]
     call obj_decref             ; dict_set took its own
 .bal_drop_name:
