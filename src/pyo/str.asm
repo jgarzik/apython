@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_ret
 extern eval_exception_unwind
 extern none_singleton
 
@@ -712,7 +713,7 @@ DEF_FUNC codec_via_python, CVP_FRAME
     push rax
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: tested at .cvp_missing, which keeps what is pending
     mov rbx, rax
     pop rdi
     call obj_decref
@@ -729,7 +730,7 @@ DEF_FUNC codec_via_python, CVP_FRAME
     push rax
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: tested at .cvp_missing, which keeps what is pending
     mov rbx, rax
     pop rdi
     call obj_decref
@@ -746,7 +747,7 @@ DEF_FUNC codec_via_python, CVP_FRAME
     push rax
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: tested at .cvp_missing, which keeps what is pending
     mov rbx, rax
     pop rdi
     call obj_decref

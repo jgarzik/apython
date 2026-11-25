@@ -221,3 +221,39 @@ def kwdefaults_colliding():
 
 
 check("call, colliding __kwdefaults__", kwdefaults_colliding)
+
+# --- the rest of the objects that keep a dict --------------------------------
+for what, mk in keys_for("a"):
+    check("dict([(%s, 1)])" % what, lambda: dict([(mk(), 1)]))
+check("dict(mapping, a=1), colliding", lambda: dict(colliding("a"), a=1))
+
+import re
+import types
+
+
+def groupdict_unhashable():
+    m = re.match(r"(?P<a>x)", "x")
+    return m[[]]
+
+
+check("match[[]]", groupdict_unhashable)
+check("match.group(BadHash())", lambda: re.match(r"(?P<a>x)", "x").group(BadHash()))
+
+
+def namespace_with(name):
+    ns = types.SimpleNamespace()
+    ns.__dict__[BadEq(name)] = 1
+    return ns
+
+
+check("namespace.q", lambda: namespace_with("q").q)
+check("namespace.q = 1", lambda: setattr(namespace_with("q"), "q", 1))
+
+
+def frame_locals_colliding():
+    f = sys._getframe()
+    f.f_locals[BadEq("f")] = 1
+    return f.f_locals
+
+
+check("frame.f_locals, colliding", frame_locals_colliding)

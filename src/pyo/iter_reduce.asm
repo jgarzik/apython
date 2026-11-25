@@ -34,6 +34,7 @@
 %include "object.inc"
 %include "value.inc"
 
+extern dict_get_ret
 extern int_from_i64
 extern tuple_new
 extern list_new
@@ -89,7 +90,7 @@ DEF_FUNC ir_iter_builtin, IIB_FRAME
     mov [rbp - IIB_NAME], rax
     mov rdi, [rbp - IIB_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: a 0 goes to .iib_none either way, with whatever is pending
     mov [rbp - IIB_DICT], rax   ; the answer, borrowed from builtins
     mov rdi, [rbp - IIB_NAME]
     call obj_decref             ; the name
@@ -487,7 +488,7 @@ DEF_FUNC ir_getattr_builtin, IGB_FRAME
     mov [rbp - IGB_NAME], rax
     mov rdi, [rbp - IGB_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: a 0 goes to .igb_none either way, with whatever is pending
     mov [rbp - IGB_DICT], rax
     mov rdi, [rbp - IGB_NAME]
     call obj_decref

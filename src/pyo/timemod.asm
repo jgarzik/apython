@@ -5,6 +5,9 @@
 %include "object.inc"
 %include "gil.inc"
 
+extern dict_get_ret
+extern dict_set_ret
+extern dict_set_str
 extern ap_malloc
 extern obj_decref
 extern obj_incref
@@ -42,7 +45,8 @@ extern obj_dealloc
 extern tuple_new
 
 ;; ============================================================================
-;; tm_add_int(rdi = the value, rsi = its name as a C string) -> void
+;; tm_add_int(rdi = the value, rsi = its name as a C string)
+;;   -> rax = 0, or -1 with the exception pending when the dict refused it
 ;; One int in the module dict, with the dict in r12 as everything here has it.
 ;; ============================================================================
 TAI_VAL   equ 8
@@ -62,11 +66,13 @@ DEF_FUNC_LOCAL tm_add_int, TAI_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - TAI_OBJ]
-    call dict_set
+    call dict_set_ret       ; err: returned to the caller, once the name and the int are released
+    mov [rbp - TAI_VAL], rax    ; dict_set's answer, across the releases
     pop rdi
     call obj_decref
     mov rdi, [rbp - TAI_OBJ]
     DECREF_V rdi, rsi
+    mov rax, [rbp - TAI_VAL]
     leave
     ret
 END_FUNC tm_add_int
@@ -905,7 +911,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, [rbp - TSP_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: a 0 goes to .tsp_no_impl, which keeps what is pending
     mov [rbp - TSP_MOD], rax
     mov rdi, [rbp - TSP_TMP]
     call obj_decref
@@ -987,7 +993,8 @@ tm_strptime_impl: resq 1
 section .text
 
 ;; ============================================================================
-;; tm_publish_tz() -> nothing; r12 = the module dict
+;; tm_publish_tz() -> rax = 0; r12 = the module dict
+;; Fails: -1
 ;;
 ;; tzset(3) and the four names it fills: tzname, timezone, altzone, daylight.
 ;; Called at import and again by time.tzset(), which is the only reason the
@@ -995,6 +1002,7 @@ section .text
 ;; tzset() has to see the new zone in these four, and nothing else in this
 ;; file needs the dict after import.
 ;; ============================================================================
+PTZ_RC    equ 8
 DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     call tzset
     lea rax, [rel tzname]
@@ -1019,11 +1027,14 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_ret       ; err: tested once the name and the tuple are released
+    mov [rbp - PTZ_RC], rax     ; dict_set's answer, across the releases
     pop rdi
     call obj_decref
     pop rdi
     call obj_decref
+    cmp qword [rbp - PTZ_RC], 0
+    jne .ptz_fail
 
     ; The offset west of UTC in seconds, as CPython reports it: `timezone` is
     ; standard time, `altzone` is the same less an hour when the zone has DST,
@@ -1032,6 +1043,7 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     mov rdi, [rax]
     lea rsi, [rel tm_timezone]
     call tm_add_int
+    ERR_M1 .ptz_fail
     lea rax, [rel timezone]
     mov rdi, [rax]
     lea rcx, [rel daylight]
@@ -1042,11 +1054,18 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
 .ptz_no_dst:
     lea rsi, [rel tm_altzone]
     call tm_add_int
+    ERR_M1 .ptz_fail
     lea rax, [rel daylight]
     movsxd rdi, dword [rax]
     lea rsi, [rel tm_daylight]
     call tm_add_int
+    ERR_M1 .ptz_fail
 
+    xor eax, eax
+    leave
+    ret
+.ptz_fail:                      ; time's dict is Python's by the time tzset() runs
+    mov rax, -1
     leave
     ret
 END_FUNC tm_publish_tz
@@ -1065,6 +1084,7 @@ DEF_FUNC time_tzset_func, 16          ; + 0 pushes = 16, 16-aligned
     test r12, r12
     jz .tzs_none
     call tm_publish_tz
+    ERR_M1 .tzs_fail
 .tzs_none:
     pop r12
     pop r12
@@ -1075,6 +1095,12 @@ DEF_FUNC time_tzset_func, 16          ; + 0 pushes = 16, 16-aligned
     ret
 .tzs_args:
     SET_EXC exc_TypeError_type, "tzset() takes no arguments"
+    leave
+    ret
+.tzs_fail:
+    pop r12
+    pop r12
+    xor eax, eax
     leave
     ret
 END_FUNC time_tzset_func
@@ -1108,7 +1134,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1140,7 +1166,7 @@ DEF_FUNC time_module_create
     ; function rather than a no-op: a program that changes $TZ and calls it
     ; has to see the new zone here.
     mov [rel tm_module_dict], r12
-    call tm_publish_tz
+    call tm_publish_tz          ; err: the module's own dict, before anything can reach it
 
     lea rdi, [rel struct_time_type]
     call structseq_init_type
@@ -1153,7 +1179,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1221,7 +1247,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1237,7 +1263,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1254,7 +1280,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1271,7 +1297,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi

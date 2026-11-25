@@ -12,6 +12,7 @@
 %include "object.inc"
 %include "eventloop.inc"
 
+extern dict_set_str
 extern ap_strcmp
 extern obj_is_true
 extern task_type
@@ -1150,7 +1151,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1167,7 +1168,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1184,7 +1185,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1201,7 +1202,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1218,7 +1219,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1235,7 +1236,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1253,7 +1254,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1270,7 +1271,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel exc_CancelledError_type]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1280,7 +1281,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel exc_TimeoutError_type]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1291,7 +1292,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel task_type]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 

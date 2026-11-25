@@ -29,6 +29,9 @@
 %include "threadstate.inc"
 
 ASM_INIT
+extern dict_get_ret
+extern dict_set_ret
+extern dict_set_str
 extern ap_malloc
 extern obj_decref
 extern obj_dealloc
@@ -347,7 +350,7 @@ DEF_FUNC frameobj_detach, 8            ; 1 push, so rsp is 16-aligned
     ; and reads it back after the frame is gone, which is exactly this
     ; moment.
     mov rdi, rbx
-    call frameobj_refresh_locals
+    call frameobj_refresh_locals    ; err: a frame being detached has nobody to tell; what is pending stays
 
 .fdt_drop:
     mov qword [rbx + PyFrameObject.f_frame], 0
@@ -365,6 +368,7 @@ END_FUNC frameobj_detach
 ;; ============================================================================
 ;; frameobj_refresh_locals(rdi = a PyFrameObject*) -> rax = the dict, borrowed,
 ;;   or 0
+;; Fails: 0?
 ;;
 ;; A frame using a locals DICT already has the real thing in f_locals and
 ;; needs nothing.  A frame using fast locals does not have a dict at all, so
@@ -410,10 +414,16 @@ DEF_FUNC frameobj_refresh_locals, FRL_FRAME
     cmp rdi, [rbx + PyFrameObject.f_globals]
     je .frl_adopt
     mov rsi, [rbp - FRL_FRESH]
-    call frameobj_merge_dict
+    call frameobj_merge_dict    ; err: tested once the fresh dict is released
+    mov rbx, rax
     mov rdi, [rbp - FRL_FRESH]
     call obj_decref
-    jmp .frl_asis
+    test rbx, rbx
+    jz .frl_asis
+    xor eax, eax                ; f_locals could not be brought up to date
+    pop rbx
+    leave
+    ret
 
 .frl_adopt:
     mov rdi, [rbx + PyFrameObject.f_locals]
@@ -459,11 +469,17 @@ DEF_FUNC_LOCAL frameobj_merge_dict, 48
     jz .fmd_next                ; empty or a tombstone
     mov rdx, [rcx + DictEntry.value]
     mov rdi, [rbp - FMD_DST]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .fmd_fail
 .fmd_next:
     inc qword [rbp - FMD_I]
     jmp .fmd_loop
 .fmd_done:
+    xor eax, eax
+    leave
+    ret
+.fmd_fail:                      ; the destination held a key that would not compare
+    mov rax, -1
     leave
     ret
 END_FUNC frameobj_merge_dict
@@ -858,7 +874,7 @@ DEF_FUNC sys_current_frames_func, SCF_FRAME
     mov rsi, [rbp - SCF_KEY]
     mov rdx, [rbp - SCF_VIEW]
     extern dict_set
-    call dict_set               ; takes its own references
+    call dict_set_str               ; takes its own references
     mov rax, [rbp - SCF_KEY]
     DECREF_V rax, rcx
     mov rdi, [rbp - SCF_VIEW]
@@ -925,7 +941,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     sub rsp, 8
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get_ret       ; err: tested at .sgm_miss, once the key is released
     add rsp, 8
     pop rcx
     push rax
@@ -935,7 +951,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     add rsp, 8
     pop rax
     test rax, rax
-    jz .sgm_none
+    jz .sgm_miss
     INCREF_V rax, rdx
     pop rbx
     leave
@@ -950,6 +966,13 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     ret
 .sgm_fail:                      ; the depth was refused, and that is pending
     add rsp, 8                  ; the rcx pushed around obj_as_index
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.sgm_miss:                      ; no __name__, or the globals could not be searched
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .sgm_none
     xor eax, eax
     pop rbx
     leave
@@ -1082,6 +1105,7 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
 .fog_locals:
     mov rdi, [rbp - FOG_SELF]
     call frameobj_refresh_locals
+    ERR_PENDING .fog_locals_raised
     test rax, rax
     jz .fog_locals_none
     INCREF rax
@@ -1095,6 +1119,10 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
+    ret
+.fog_locals_raised:
+    xor eax, eax
+    leave
     ret
 
 .fog_lineno:

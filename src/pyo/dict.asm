@@ -415,7 +415,7 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     mov esi, 2
     call dict_method_update             ; kw_names_pending is already cleared
     add rsp, 24
-    ERR_NULL .dtc_error                 ; update left its exception pending
+    ERR_NULL .dtc_update_failed         ; update left its exception pending
     mov rdi, rax
     DECREF_V rdi, rsi                   ; the None it returns
     jmp .dtc_add_kwargs
@@ -489,7 +489,8 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
 
     ; dict_set(dict, key Value, value Value)
     mov rdi, r15
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .dtc_kw_raised
 
     pop rdx
     pop rax
@@ -539,6 +540,12 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     pop rbx
     leave
     ret
+.dtc_kw_raised:                 ; a keyword collided with a key that would not compare
+    add rsp, 32                 ; the four loop registers
+.dtc_update_failed:
+    mov rdi, r15                ; the dict that was being built
+    call obj_decref
+    jmp .dtc_error
 END_FUNC dict_type_call
 
 

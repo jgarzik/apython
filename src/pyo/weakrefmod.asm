@@ -19,6 +19,10 @@
 %include "value.inc"
 %include "opcodes.inc"
 
+extern dict_get_mro
+extern dict_get_ret
+extern dict_get_str
+extern dict_set_str
 extern ap_malloc
 extern ap_free
 extern gc_alloc
@@ -98,7 +102,7 @@ DEF_FUNC_LOCAL weakref_chain, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rax
     mov rsi, rbx
     add rsi, [rel v_int_bias]   ; a user address always fits an int immediate
-    call dict_get
+    call dict_get_str
     pop rbx
     leave
     ret
@@ -464,7 +468,7 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rdi, rax
     mov rsi, [rbp - WM_OBJ]
     add rsi, [rel v_int_bias]
-    call dict_get
+    call dict_get_str
     test rax, rax
     jnz .have_chain
     xor edi, edi
@@ -485,7 +489,7 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rsi, [rbp - WM_OBJ]
     add rsi, [rel v_int_bias]
     mov rdx, [rsp]
-    call dict_set
+    call dict_set_str
     pop rax
     push rax
     mov rdi, rax
@@ -1133,7 +1137,7 @@ DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     test rdi, rdi
     jz .none
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jz .none
     INCREF_V rax, rcx
@@ -1393,9 +1397,10 @@ DEF_FUNC wr_remove_dead_func, WRD_FRAME
     mov rsi, [rbx + 8]
     push rdi
     push rsi
-    call dict_get
+    call dict_get_ret       ; err: tested once the two arguments are popped
     pop rsi
     pop rdi
+    ERR_PENDING .wrd_fail
     test rax, rax
     jz .none_pop
     V_TEST_PTR rax, rcx

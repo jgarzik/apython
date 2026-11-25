@@ -32,6 +32,8 @@ struc SubList
 endstruc
 %include "value.inc"
 
+extern dict_get_mro
+extern dict_set_ret
 extern eval_exception_unwind
 extern dict_new
 extern dict_get
@@ -81,7 +83,7 @@ DEF_FUNC_LOCAL abc_state_get, AG_FRAME
     test rdi, rdi
     jz .absent
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     mov rdi, rbx
     mov rbx, rax
     call obj_decref
@@ -99,7 +101,8 @@ DEF_FUNC_LOCAL abc_state_get, AG_FRAME
 END_FUNC abc_state_get
 
 ;; ============================================================================
-;; abc_state_set(rdi = cls, rsi = name cstr, rdx = value Value)
+;; abc_state_set(rdi = cls, rsi = name cstr, rdx = value Value) -> rax = 0
+;; Fails: -1
 ;; Stores into the class's own tp_dict, creating it if the type has none.
 ;; ============================================================================
 AS_CLS   equ 8
@@ -123,9 +126,11 @@ DEF_FUNC_LOCAL abc_state_set, AS_FRAME
 .have_dict:
     mov rsi, rbx
     mov rdx, [rbp - AS_VAL]
-    call dict_set
+    call dict_set_ret       ; err: returned to the caller, once the name is released
     mov rdi, rbx
+    mov rbx, rax                ; dict_set's answer, across the release
     call obj_decref
+    mov rax, rbx
     pop rbx
     leave
     ret
@@ -133,6 +138,7 @@ END_FUNC abc_state_set
 
 ;; ============================================================================
 ;; abc_fresh_set(rdi = cls, rsi = name cstr) -> rax = the new set (borrowed)
+;; Fails: 0
 ;; ============================================================================
 AF_CLS   equ 8
 AF_NAME  equ 16
@@ -146,10 +152,15 @@ DEF_FUNC_LOCAL abc_fresh_set, AF_FRAME
     mov rdi, [rbp - AF_CLS]
     mov rsi, [rbp - AF_NAME]
     mov rdx, rbx
-    call abc_state_set          ; the dict takes its own reference
+    call abc_state_set          ; err: tested once our reference is released -- the dict takes its own
+    mov [rbp - AF_NAME], rax
     mov rdi, rbx
     call obj_decref
     mov rax, rbx
+    cmp qword [rbp - AF_NAME], 0
+    je .af_done
+    xor eax, eax                ; the class's dict refused it, and the set is gone
+.af_done:
     pop rbx
     leave
     ret
@@ -506,6 +517,7 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     CSTRING rsi, "__abstractmethods__"
     mov rdx, rax
     call abc_state_set
+    ERR_M1 .ca_fail
     mov rdi, [rbp - CA_SET]
     call obj_decref
     xor eax, eax
@@ -540,17 +552,21 @@ DEF_FUNC abc_init_func, AI_FRAME
     mov rdi, [rbp - AI_CLS]
     CSTRING rsi, "_abc_registry"
     call abc_fresh_set
+    ERR_NULL .ai_fail
     mov rdi, [rbp - AI_CLS]
     CSTRING rsi, "_abc_cache"
     call abc_fresh_set
+    ERR_NULL .ai_fail
     mov rdi, [rbp - AI_CLS]
     CSTRING rsi, "_abc_negative_cache"
     call abc_fresh_set
+    ERR_NULL .ai_fail
     mov rdi, [rbp - AI_CLS]
     CSTRING rsi, "_abc_negative_cache_version"
     mov rdx, [rel abc_invalidation_counter]
     V_PACK_I64 rdx, rcx
     call abc_state_set
+    ERR_M1 .ai_fail
 
     mov rdi, [rbp - AI_CLS]
     call abc_compute_abstracts
@@ -654,12 +670,14 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache"
     call abc_fresh_set
+    ERR_NULL .error
     mov [rbp - SC_NEG], rax
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache_version"
     mov rdx, [rel abc_invalidation_counter]
     V_PACK_I64 rdx, rcx
     call abc_state_set
+    ERR_M1 .error
     jmp .hook
 
 .neg_current:
@@ -1401,6 +1419,7 @@ DEF_FUNC abc_reset_registry_func
     mov rdi, rax
     CSTRING rsi, "_abc_registry"
     call abc_fresh_set
+    ERR_NULL .fail
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     leave
@@ -1426,9 +1445,11 @@ DEF_FUNC abc_reset_caches_func, RC_FRAME
     mov rdi, rax
     CSTRING rsi, "_abc_cache"
     call abc_fresh_set
+    ERR_NULL .fail
     mov rdi, [rbp - RC_CLS]
     CSTRING rsi, "_abc_negative_cache"
     call abc_fresh_set
+    ERR_NULL .fail
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
     leave

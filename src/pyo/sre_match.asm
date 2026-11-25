@@ -6,6 +6,8 @@
 %include "object.inc"
 %include "sre.inc"
 
+extern dict_get_ret
+extern dict_set_ret
 extern set_exception
 extern ap_malloc
 extern ap_free
@@ -554,11 +556,11 @@ DEF_FUNC sre_match_resolve_group_idx
 
     ; dict_get(groupindex, key, key_tag)
     ; rsi = key (already set), edx = TAG_PTR
-    call dict_get
+    call dict_get_ret       ; err: tested at .rgi_miss
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
     test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jz .rgi_no_group_pop2
+    jz .rgi_miss
     ; group_idx = val payload (SmallInt)
     mov rsi, rax
     pop rdi                     ; restore self (discard)
@@ -571,6 +573,14 @@ DEF_FUNC sre_match_resolve_group_idx
 .rgi_no_group_pop2:             ; self is still pushed; leave drops it
 .rgi_type_error:
     SET_EXC exc_IndexError_type, "no such group"
+    mov rax, -1
+    leave
+    ret
+.rgi_miss:
+    ; No such name -- or the key could not be hashed or compared, and that
+    ; error is the answer: m[[]] is a TypeError, as CPython's is.
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .rgi_no_group_pop2
     mov rax, -1
     leave
     ret
@@ -1071,7 +1081,8 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     V_PACK rdx, rcx
     mov r8, r14                ; key tag
     V_PACK rsi, r8
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .gd_set_raised
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -1090,6 +1101,19 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.gd_set_raised:
+    pop rdx
+    pop rax
+    DECREF_VAL rax, rdx         ; the group's value
+    mov rdi, [rbp - GD_RESULT]
+    call obj_decref
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC sre_match_groupdict_method
 
@@ -1212,11 +1236,11 @@ DEF_FUNC sre_match_subscript
 
     ; dict_get(groupindex, key, key_tag)
     mov rsi, r12               ; key
-    call dict_get
+    call dict_get_ret       ; err: tested at .ms_group_miss
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
     test edx, edx               ; the tag, not the payload: a hit may be int 0
-    jz .ms_no_such_group
+    jz .ms_group_miss
 
     ; group_idx = val payload (SmallInt)
     mov r12, rax               ; group index
@@ -1243,6 +1267,10 @@ DEF_FUNC sre_match_subscript
     pop rbx
     leave
     ret
+.ms_group_miss:
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .ms_no_such_group
+    jmp .ms_fail
 END_FUNC sre_match_subscript
 
 ;; ============================================================================

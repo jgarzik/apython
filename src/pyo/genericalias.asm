@@ -17,6 +17,7 @@
 %include "opcodes.inc"
 
 ; --- what descriptors.asm keeps ---
+extern dict_get_mro
 extern ga_name_str
 extern generic_alias_as_number
 extern union_type
@@ -570,7 +571,7 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     mov r15, rax
     mov rsi, rax
     mov rdi, r14
-    call dict_get
+    call dict_get_mro
     xchg r15, rax               ; the name was built for this one lookup and
     mov rdi, rax                ; was never released: two strings per class
     call obj_decref             ; named, on every repr of an alias
@@ -637,7 +638,7 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     mov r15, rax
     mov rsi, rax
     mov rdi, r14
-    call dict_get
+    call dict_get_mro
     xchg r15, rax               ; the name was built for this one lookup and
     mov rdi, rax                ; was never released: two strings per class
     call obj_decref             ; named, on every repr of an alias
@@ -1822,7 +1823,7 @@ DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     jz .gen_no_module
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jz .gen_no_module
     V_TEST_PTR rax, rcx

@@ -34,6 +34,8 @@
 
 ASM_INIT
 
+extern dict_get_str
+extern dict_set_str
 extern dict_new
 extern dict_get
 extern dict_set
@@ -94,7 +96,7 @@ DEF_FUNC sub_list_for_type, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rax
     mov rsi, rbx
     add rsi, [rel v_int_bias]   ; a user address always fits an int immediate
-    call dict_get
+    call dict_get_str
     test rax, rax
     jz .none
     sub rax, [rel v_int_bias]   ; the SubList address, stored the same way
@@ -151,7 +153,7 @@ DEF_FUNC_LOCAL sub_list_add, SLA_FRAME
     add rsi, [rel v_int_bias]
     mov rdx, [rbp - SLA_LIST]
     add rdx, [rel v_int_bias]
-    call dict_set
+    call dict_set_str
     call sub_table_refresh
     mov rax, [rbp - SLA_LIST]
 

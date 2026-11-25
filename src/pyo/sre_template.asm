@@ -24,6 +24,8 @@
 %include "object.inc"
 %include "sre.inc"
 
+extern dict_get_quiet
+extern dict_get_ret
 extern set_exception
 extern ap_malloc
 extern ap_free
@@ -181,7 +183,7 @@ DEF_FUNC_LOCAL tp_set_error, TPE_FRAME
     push rax
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_quiet
     mov rbx, rax
     pop rdi
     call obj_decref
@@ -664,7 +666,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov rdi, [rbp - TP_SCRATCH]
     push rsi
     sub rsp, 8
-    call dict_get
+    call dict_get_ret       ; err: tested at .tp_name_miss, once the name is released
     add rsp, 8
     pop rdi
     push rax
@@ -673,7 +675,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     add rsp, 8
     pop rax
     test rax, rax
-    jz .tp_unknown_name
+    jz .tp_name_miss
     V_UNPACK rax, rdx
     mov rdi, rax
     call obj_as_index           ; the index may be a heap int
@@ -891,6 +893,10 @@ DEF_FUNC sre_template_parse, TP_FRAME
 .tp_raised:
     call .tp_release
     jmp .tp_fail
+.tp_name_miss:                  ; no such group, or groupindex could not be searched
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .tp_unknown_name
+    jmp .tp_raised
 END_FUNC sre_template_parse
 
 

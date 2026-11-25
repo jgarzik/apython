@@ -4,6 +4,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_str
+extern dict_set_ret
+extern dict_set_str
 extern ap_malloc
 extern ap_strlen
 extern obj_decref
@@ -322,7 +325,7 @@ DEF_FUNC_LOCAL sm_add_str, SAS_FRAME
     mov rdi, [rbp - SAS_DICT]
     mov rsi, [rbp - SAS_KEY]
     mov rdx, rax
-    call dict_set                       ; takes its own reference to both
+    call dict_set_str                       ; takes its own reference to both
     mov rdi, rbx
     call obj_decref
     mov rdi, [rbp - SAS_KEY]
@@ -354,7 +357,7 @@ DEF_FUNC_LOCAL sm_add_owned, SAO_FRAME
     mov rdi, [rbp - SAO_DICT]
     mov rsi, rax
     mov rdx, [rbp - SAO_VAL]
-    call dict_set                       ; takes its own reference to both
+    call dict_set_str                       ; takes its own reference to both
     mov rdi, [rbp - SAO_VAL]
     call obj_decref
     mov rdi, [rbp - SAO_KEY]
@@ -393,7 +396,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, r14
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -425,7 +428,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12            ; DECREF sys.path (dict_set INCREF'd)
@@ -473,7 +476,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, r13
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r13            ; DECREF sys.argv (dict_set INCREF'd)
@@ -534,7 +537,7 @@ DEF_FUNC sys_module_init, 40
     mov rdx, [rsp + 8]        ; value payload
     mov ecx, [rsp + 16]       ; value tag (from int_from_i64)
     V_PACK rdx, rcx           ; dict_set takes Values
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref            ; DECREF key string
     pop rdi                    ; value payload (SmallInt, no DECREF)
@@ -550,7 +553,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -566,7 +569,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -630,7 +633,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -689,7 +692,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -711,7 +714,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     ; the same object under its __ name, as CPython does
@@ -722,7 +725,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 16]         ; the file object, still on the stack below
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref
@@ -741,7 +744,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     ; the same object under its __ name, as CPython does
@@ -752,7 +755,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 16]         ; the file object, still on the stack below
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref
@@ -770,7 +773,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -787,7 +790,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -803,7 +806,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -848,7 +851,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get
+    call dict_get_str
     V_UNPACK rax, rdx
     pop rdi
     push rax
@@ -870,7 +873,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - SMI_TMP]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, [rbp - SMI_TMP]
@@ -886,7 +889,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - SMI_TMP]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, [rbp - SMI_TMP]
@@ -954,7 +957,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - SMI_TMP]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, [rbp - SMI_TMP]
@@ -970,7 +973,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1020,7 +1023,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1060,7 +1063,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1084,7 +1087,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1126,7 +1129,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1166,7 +1169,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1183,7 +1186,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1204,7 +1207,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1224,7 +1227,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1353,7 +1356,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1370,7 +1373,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1387,7 +1390,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1479,7 +1482,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r14                ; sys.modules dict
     mov rsi, rax
     mov rdx, [rel sys_module_obj]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -2762,10 +2765,13 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     mov rdi, [rel builtins_dict_global]
     mov rsi, rax
     mov rdx, [rbp - SDH_VAL]
-    call dict_set
+    call dict_set_ret       ; err: tested once the name is released
+    mov [rbp - SDH_VAL], rax    ; dict_set's answer, across the release
     pop rdi
     pop rdi
     call obj_decref
+    cmp qword [rbp - SDH_VAL], 0
+    jne .sdh_failed             ; builtins is an ordinary dict, and refused `_`
 
 .sdh_none:
     RET_NONE
