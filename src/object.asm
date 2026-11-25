@@ -5,6 +5,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -17,7 +18,6 @@ extern bool_false
 extern bool_true
 extern int_repr
 extern int_type
-extern eval_exception_unwind
 extern int_promote_mpz
 extern int_to_i64
 extern float_type
@@ -268,7 +268,7 @@ DEF_FUNC obj_repr
 .smallint:
     ; rdi = raw int value — int_repr checks edx for TAG_SMALLINT
     RET_TAG_SMALLINT
-    call int_repr
+    call int_repr             ; err: a small int has no digit limit to exceed
     leave
     ret
 
@@ -570,7 +570,7 @@ DEF_FUNC obj_str
     ; SmallInt: delegate to int_repr
     mov rdi, rbx
     RET_TAG_SMALLINT
-    call int_repr
+    call int_repr             ; err: a small int has no digit limit to exceed
     pop r12
     pop rbx
     leave
@@ -621,8 +621,8 @@ DEF_FUNC obj_str
     ret
 END_FUNC obj_str
 ;; ============================================================================
-;; obj_as_slice_index(rdi = payload, edx = tag) -> rax = the i64, or does not
-;; return
+;; obj_as_slice_index(rdi = payload, edx = tag) -> rax = the i64
+;; Fails: -1
 ;;
 ;; obj_as_index with CPython's other wording.  The start and stop of
 ;; list.index and tuple.index are slice bounds, and CPython blames them as
@@ -650,15 +650,22 @@ DEF_FUNC obj_as_slice_index, OAI_FRAME
     leave
     jmp obj_as_index_clamped
 .oasi_bad:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
         "slice indices must be integers or have an __index__ method"
+    mov rax, -1
+    leave
+    ret
 END_FUNC obj_as_slice_index
 
 
 ;; ============================================================================
 ;; obj_as_index(rdi = payload, edx = tag) -> rax = int64
+;; Fails: -1
 ;;
-;; Convert a Value to a C index, or raise TypeError.  Callers used to hand
+;; Convert a Value to a C index, or refuse it with a TypeError.  Every int64
+;; is an answer, so a refusal is -1 AND an exception pending: ERR_M1, straight
+;; after the call.  The four entry points below share the body and the rule.
+;; Callers used to hand
 ;; whatever they were given straight to int_to_i64, which reads
 ;; PyIntObject.compact unconditionally: a float's payload is raw IEEE bits, so
 ;; range(1.5) dereferenced 0x3ff8000000000000, and None's fields decoded as a
@@ -682,6 +689,7 @@ OAI_MODE  equ 8             ; 0 = refuse what will not fit, 1 = clamp to it,
 ; subscript says "list indices must be integers or slices, not float" and
 ; names the container as well as the key.
 OAI_MSG   equ 16
+OAI_GOT   equ 24            ; what a bad __index__ answered, held to be named
 OAI_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC obj_as_index, OAI_FRAME
     mov qword [rbp - OAI_MODE], 0
@@ -722,6 +730,7 @@ oai_body:
     test rax, rax
     jz .oai_error
     call rax                    ; nb_index returns a Value
+    ERR_PENDING .oai_fail       ; it raised: that exception stands
     V_UNPACK rax, rdx
     ; __index__ must itself return an int; one level only, so a class whose
     ; __index__ returns another such class is an error rather than a loop.
@@ -768,13 +777,15 @@ oai_body:
     cmp qword [rbp - OAI_MODE], 2
     je .oai_too_wide_seq
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+    FAIL exc_OverflowError_type, \
+        "Python int too large to convert to C ssize_t", .oai_fail
 .oai_too_wide_seq:
     ; CPython passes the exception TYPE to PyNumber_AsSsize_t, and every
     ; sequence subscript passes IndexError: `[1][2**70]` is an IndexError
     ; there, not an OverflowError, and the sentence is a different one.
     extern exc_IndexError_type
-    RAISE exc_IndexError_type, "cannot fit 'int' into an index-sized integer"
+    FAIL exc_IndexError_type, \
+        "cannot fit 'int' into an index-sized integer", .oai_fail
 .oai_clamp:
     ; A slice bound past either end is that end, which is what CPython's
     ; _PyEval_SliceIndex does.  The sign is the mpz's: a heap int this wide
@@ -798,8 +809,12 @@ oai_body:
     ; missing.
     mov rsi, rax
     V_PACK rsi, rdx
+    mov [rbp - OAI_GOT], rsi
     lea rdi, [rel oai_bad_index_msg]
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - OAI_GOT]
+    DECREF_V rdi, rcx           ; named; nb_index handed it over owned
+    jmp .oai_fail
 
 .oai_error:
     ; Name the type.  This is the single funnel for every __index__ context --
@@ -810,13 +825,19 @@ oai_body:
     V_PACK rsi, rdx
     mov rdi, [rbp - OAI_MSG]
     test rdi, rdi
-    jnz raise_type_error_with_name
+    jnz .oai_refuse
     lea rdi, [rel oai_not_an_index]
-    jmp raise_type_error_with_name
+.oai_refuse:
+    call set_type_error_with_name
+.oai_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC obj_as_index
 
 ;; ============================================================================
 ;; obj_as_index_object(rdi = payload, edx = tag) -> rax = an int Value, owned
+;; Fails: 0
 ;;
 ;; The same refusal as obj_as_index, answering the OBJECT rather than an
 ;; int64.  For a caller whose CPython counterpart keeps the object: range's
@@ -879,13 +900,16 @@ DEF_FUNC obj_as_index_object, OAO_FRAME
     ; obj_as_index's own wording, which names the type.
     mov rsi, [rbp - OAO_ARG]
     lea rdi, [rel oai_not_an_index]
-    jmp raise_type_error_with_name
+    call set_type_error_with_name       ; rax = 0
+    leave
+    ret
 END_FUNC obj_as_index_object
 
 ;; ============================================================================
 ;; obj_as_index_seq(rdi = payload, edx = tag, rsi = the refusal's template,
 ;;                  whose \x01 stands for the key's type, or 0)
 ;;   -> rax = int64
+;; Fails: -1
 ;; The same, refusing a too-wide int as a sequence subscript does: an
 ;; IndexError naming the index, not an OverflowError naming a C type.
 ;; ============================================================================
@@ -897,6 +921,7 @@ END_FUNC obj_as_index_seq
 
 ;; ============================================================================
 ;; obj_as_index_clamped(rdi = payload, edx = tag) -> rax = int64
+;; Fails: -1
 ;; The same, clamping instead of refusing.  See obj_as_index above.
 ;; ============================================================================
 global obj_as_index_clamped
@@ -910,6 +935,7 @@ END_FUNC obj_as_index_clamped
 ;; obj_as_index_clamped_msg(rdi = payload, edx = tag, rsi = the refusal's
 ;;                          template, whose \x01 stands for the type, or 0)
 ;;   -> rax = int64
+;; Fails: -1
 ;; The same again, with the caller's wording.  A slice bound has its own:
 ;; CPython says "slice indices must be integers or None or have an __index__
 ;; method" and names no type at all.
@@ -992,10 +1018,10 @@ DEF_FUNC_BARE value_type
     ret
 END_FUNC value_type
 
-; raise_type_error_with_name(rdi = template C string with a single %s marker
-;                            written as \x01, rsi = Value whose type to name)
-; Composes the message into a static buffer and raises TypeError.  Does not
-; return.
+; set_type_error_with_name(rdi = template C string with a single %s marker
+;                          written as \x01, rsi = Value whose type to name)
+; Composes the message into a static buffer and records a TypeError; the
+; docblock is above the function, below the buffers.
 ; Wide enough for the longest message that goes through it, which is now a
 ; deprecation rather than an error: CPython's "__index__ returned non-int
 ; (type bool).  The ability to return an instance of a strict subclass of int
@@ -1031,7 +1057,9 @@ section .bss
 rbt_buf: resb 320   ; two 80-char type names plus the prefix and separators
 
 section .text
-DEF_FUNC raise_type_error_with_name
+;; set_type_error_with_name(rdi = the template, rsi = the Value to name)
+;;   -> rax = 0, always, with the TypeError pending
+DEF_FUNC set_type_error_with_name
     push rbx
     push r12
     mov rbx, rdi
@@ -1039,15 +1067,16 @@ DEF_FUNC raise_type_error_with_name
     call value_type
     mov r12, rax                    ; type, or 0
     jmp rtn_compose
-END_FUNC raise_type_error_with_name
+END_FUNC set_type_error_with_name
 
 ;; ============================================================================
-;; raise_type_error_with_typename(rdi = the same template, rsi = a type object)
+;; set_type_error_with_typename(rdi = the same template, rsi = a type object)
+;;   -> rax = 0, always, with the TypeError pending
 ;; For a caller that has released the object it is complaining about and kept
 ;; only its type -- the object is gone by then, and reading ob_type off freed
 ;; memory is exactly the bug this message is reporting.
 ;; ============================================================================
-DEF_FUNC raise_type_error_with_typename
+DEF_FUNC set_type_error_with_typename
     push rbx
     push r12
     mov rbx, rdi
@@ -1059,10 +1088,13 @@ rtn_compose:
     lea rdi, [rel exc_TypeError_type]
     mov rsi, rax
     extern exc_TypeError_type
-    extern raise_exception
-    call raise_exception
-    ud2
-END_FUNC raise_type_error_with_typename
+    extern set_exception
+    call set_exception
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC set_type_error_with_typename
 
 ;; ============================================================================
 ;; type_name_message(rdi = a template whose \x01 stands for a type name and
@@ -1137,7 +1169,10 @@ END_FUNC type_name_message
 ;; dunder_require_self(rdi = self Value, rsi = the type whose method this is,
 ;; rdx = a second acceptable type, or 0,
 ;; rcx = the descriptor's own name, or 0)
-;; -> rax = the self Value, unchanged; does not return if the type is wrong
+;; -> rax = the self Value, unchanged
+;; Fails: 0
+;;   -- the TypeError is pending and self was not what the method is for.
+;;   self is never 0: it is args[0] of a call that had at least one argument.
 ;;
 ;; A dunder reached BY NAME is handed whatever the caller passed, and the slot
 ;; behind it decodes self without asking: int.__neg__(2.5) gives int's
@@ -1231,13 +1266,38 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel rbt_buf]
-    call raise_exception
-    ud2
+    call set_exception          ; rax = 0
+    leave
+    ret
 END_FUNC dunder_require_self
 
 ;; ============================================================================
-;; raise_binop_type_error(rdi = left Value, rsi = right Value,
-;; rdx = prefix C string) -> never returns
+;; require_self_refused / require_self_refused_bare -- JUMPED to, never called
+;;
+;; Where dunder_require_self's 0 goes.  Every by-name dunder asks it first,
+;; before it holds anything, so they all leave the same way: the frame taken
+;; down (or, for a body with no frame, nothing at all) and the (0, 0) pair
+;; handed back with the TypeError pending.  One shared exit keeps the check
+;; at each of some sixty sites to a test and a branch.
+;; ============================================================================
+global require_self_refused
+DEF_FUNC_BARE require_self_refused
+    xor eax, eax
+    xor edx, edx
+    leave                       ; the frame of whoever jumped here
+    ret
+END_FUNC require_self_refused
+
+global require_self_refused_bare
+DEF_FUNC_BARE require_self_refused_bare
+    xor eax, eax
+    xor edx, edx
+    ret
+END_FUNC require_self_refused_bare
+
+;; ============================================================================
+;; set_binop_type_error(rdi = left Value, rsi = right Value,
+;; rdx = prefix C string) -> rax = 0, always, with the TypeError pending
 ;; "<prefix>: 'int' and 'complex'", which is how CPython words every binary
 ;; operator's TypeError.  With two operands the bare prefix does not say which
 ;; one was wrong.
@@ -1247,10 +1307,10 @@ RBT_RIGHT equ 16
 RBT_OPEN  equ 24
 RBT_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
-DEF_FUNC_BARE raise_binop_type_error
+DEF_FUNC_BARE set_binop_type_error
     lea rcx, [rel rbt_open]     ; the default opener, ": '"
-    jmp raise_binop_type_error_ex
-END_FUNC raise_binop_type_error
+    jmp set_binop_type_error_ex
+END_FUNC set_binop_type_error
 
 ;; ============================================================================
 ;; compose_binop_type_error(rdi = left Value, rsi = right Value,
@@ -1258,7 +1318,7 @@ END_FUNC raise_binop_type_error
 ;;                          type name, or 0 for the usual ": '")
 ;;   -> rax = the composed C string, in the shared rbt_buf
 ;;
-;; The composition raise_binop_type_error_ex does, without the raise.  A
+;; The composition set_binop_type_error_ex records, without the exception.  A
 ;; caller that still has two references to release cannot unwind from where
 ;; it notices, so it sets the exception instead -- and was reporting the bare
 ;; "unsupported operand type(s)", with neither the operator nor the types.
@@ -1301,44 +1361,21 @@ DEF_FUNC compose_binop_type_error, RBT_FRAME
 END_FUNC compose_binop_type_error
 
 ;; ============================================================================
-;; raise_binop_type_error_ex(rdi = left Value, rsi = right Value,
+;; set_binop_type_error_ex(rdi = left Value, rsi = right Value,
 ;; rdx = prefix C string, rcx = opener C string)
-;; -> never returns
+;; -> rax = 0, always, with the TypeError pending
 ;; The opener is what sits between the prefix and the first type name.  A
 ;; binary operator wants ": '", and COMPARE_OP wants " of '", because CPython
 ;; words that one "'<' not supported between instances of 'int' and 'str'".
 ;; ============================================================================
-DEF_FUNC raise_binop_type_error_ex, RBT_FRAME
-    push rbx
-    mov [rbp - RBT_LEFT], rdi
-    mov [rbp - RBT_RIGHT], rsi
-    mov rbx, rdx
-    mov [rbp - RBT_OPEN], rcx
-
-    lea rdi, [rel rbt_buf]
-    mov rsi, rbx
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - RBT_OPEN]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - RBT_LEFT]
-    call rbt_typename
-    mov rdi, rax
-    lea rsi, [rel rbt_and]
-    call rbt_append_cstr
-    mov rdi, rax
-    mov rsi, [rbp - RBT_RIGHT]
-    call rbt_typename
-    mov rdi, rax
-    lea rsi, [rel rbt_close]
-    call rbt_append_cstr
-
+DEF_FUNC set_binop_type_error_ex
+    call compose_binop_type_error       ; the same four arguments
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rbt_buf]
-    call raise_exception
-    ud2
-END_FUNC raise_binop_type_error_ex
+    mov rsi, rax
+    call set_exception
+    leave
+    ret
+END_FUNC set_binop_type_error_ex
 
 ; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
 ; NUL is 212, which overran a 192-byte buffer and wrote into the globals
@@ -1541,8 +1578,8 @@ DEF_FUNC msg_append_escaped_cp, MAE_FRAME
 END_FUNC msg_append_escaped_cp
 
 ;; ============================================================================
-;; raise_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
-;; -> never returns
+;; set_value_error_with_repr(rdi = prefix C string, rsi = the object Value)
+;; -> rax = 0, always, with an exception pending
 ;;
 ;; ValueError("<prefix><repr(obj)>"), which CPython writes as "%s: %R".  int's
 ;; own copy of this is inline and stays there, because its prefix carries the
@@ -1560,9 +1597,9 @@ extern str_from_cstr_heap
 extern str_concat
 extern exc_new
 extern exc_ValueError_type
-extern raise_exception_obj
+extern exc_install
 
-DEF_FUNC raise_value_error_with_repr, RVR_FRAME
+DEF_FUNC set_value_error_with_repr, RVR_FRAME
     xor edx, edx
 rvr_body:
     mov [rbp - RVR_SUFFIX], rdx
@@ -1578,15 +1615,14 @@ rvr_body:
     ; with one about a message we could not build.
     mov rdi, [rbp - RVR_PREFIX]
     call obj_decref
-    leave
-    jmp eval_exception_unwind
+    jmp .rvr_out
 
 .rvr_have_repr:
     mov [rbp - RVR_REPR], rax
     mov rdi, [rbp - RVR_PREFIX]
     mov rsi, rax
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: obj_repr answered, and it answers a str
     mov [rbp - RVR_FULL], rax
 
     mov rdi, [rbp - RVR_PREFIX]
@@ -1604,7 +1640,7 @@ rvr_body:
     mov rdi, [rbp - RVR_FULL]
     mov rsi, rax
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     push rax
     mov rdi, [rbp - RVR_FULL]
     call obj_decref
@@ -1623,20 +1659,22 @@ rvr_body:
     call obj_decref                 ; exc_new took its own reference
 
     mov rdi, [rbp - RVR_PREFIX]
+    call exc_install                ; chains; takes the reference
+.rvr_out:
+    xor eax, eax
     leave
-    jmp raise_exception_obj         ; chains and unwinds; takes the reference
-END_FUNC raise_value_error_with_repr
+    ret
+END_FUNC set_value_error_with_repr
 
 ;; ============================================================================
-;; raise_value_error_with_repr2(rdi = prefix, rsi = the object Value,
-;;                              rdx = the text after the repr)
-;;   -> does not return
+;; set_value_error_with_repr2(rdi = prefix, rsi = the object Value,
+;;                            rdx = the text after the repr)
+;;   -> rax = 0, always, with an exception pending
 ;; The same, with the repr in the middle: "None is not in list".
 ;; ============================================================================
-global raise_value_error_with_repr2
-DEF_FUNC raise_value_error_with_repr2, RVR_FRAME
+DEF_FUNC set_value_error_with_repr2, RVR_FRAME
     jmp rvr_body
-END_FUNC raise_value_error_with_repr2
+END_FUNC set_value_error_with_repr2
 
 section .bss
 ; Set by instance_getattr when __getattr__ raised an AttributeError and it
@@ -1648,7 +1686,8 @@ rtn_buf: resb RTN_BUFSZ
 section .text
 
 ;; ============================================================================
-;; seq_repeat_not_index(rsi = the count that was not one) -- does not return
+;; set_seq_repeat_not_index(rsi = the count that was not one)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; What __mul__, __rmul__ and __imul__ say when called by name and handed
 ;; something that is not an index.  The OPERATOR words the same refusal
@@ -1657,10 +1696,10 @@ section .text
 ;; code: the operator through sequence_repeat, the dunder through the
 ;; wrapper's own PyNumber_AsSsize_t.
 ;; ============================================================================
-DEF_FUNC seq_repeat_not_index
+DEF_FUNC_BARE set_seq_repeat_not_index
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    jmp raise_type_error_with_name
-END_FUNC seq_repeat_not_index
+    jmp set_type_error_with_name
+END_FUNC set_seq_repeat_not_index
 
 ;; ============================================================================
 ;; binop_is_count(rdi = a Value) -> eax = 1 when it could be a repetition count
@@ -1707,6 +1746,7 @@ END_FUNC binop_is_count
 
 ;; ============================================================================
 ;; seq_repeat_count(rsi = the count, a Value) -> rax = the count as an i64
+;; Fails: -1
 ;;
 ;; Every sequence's sq_repeat and sq_inplace_repeat comes through here, which
 ;; is CPython's sequence_repeat: PyNumber_Check decides whether the argument
@@ -1719,8 +1759,6 @@ END_FUNC binop_is_count
 ;; fit 'int' into an index-sized integer".  The in-place pair did not even do
 ;; that -- they took the count through obj_as_index, which truncates, so
 ;; `b *= 2**64` emptied the bytearray instead of refusing.
-;;
-;; Does not return on failure.
 ;; ============================================================================
 SRC_ARG   equ 8             ; the count as the caller passed it, for the message
 SRC_HELD  equ 16            ; an __index__ result, owned across the conversion
@@ -1754,6 +1792,7 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
     jz .src_bad
     mov rdi, rsi
     call rcx                    ; nb_index answers a Value
+    ERR_PENDING .src_fail
     test rax, rax
     jz .src_bad
     mov [rbp - SRC_HELD], rax
@@ -1785,8 +1824,7 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
     leave
     ret
 
-;; Give back the __index__ result, if there was one.  Every exit needs it and
-;; three of the four are raises, which do not come back here.
+;; Give back the __index__ result, if there was one.  Every exit needs it.
 .src_release:
     mov rdi, [rbp - SRC_HELD]
     test rdi, rdi
@@ -1798,16 +1836,20 @@ DEF_FUNC seq_repeat_count, SRC_FRAME
 
 .src_bad_index:
     call .src_release
-    RAISE exc_TypeError_type, "__index__ returned non-int"
+    FAIL exc_TypeError_type, "__index__ returned non-int", .src_fail
 .src_overflow:
     call .src_release
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "cannot fit 'int' into an index-sized integer"
+    FAIL exc_OverflowError_type, "cannot fit 'int' into an index-sized integer", .src_fail
 .src_bad:
     call .src_release
     mov rsi, [rbp - SRC_ARG]
     CSTRING rdi, `can't multiply sequence by non-int of type '\x01'`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.src_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC seq_repeat_count
 
 
@@ -2111,7 +2153,7 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
 .orb_have_result:
     mov [rbp - ORB_RES], rax    ; the result Value, owned
     mov rdi, rax
-    call obj_is_true
+    call obj_is_true            ; err: its -1, with the exception, is this function's too
     mov [rbp - ORB_OP], rax     ; the op is finished with; reuse the slot
     mov rdi, [rbp - ORB_RES]
     DECREF_V rdi, rdx
@@ -2127,7 +2169,7 @@ DEF_FUNC obj_richcompare_bool, ORB_FRAME
     jmp .orb_done
 
 .orb_error:
-    mov eax, -1
+    mov rax, -1                 ; all 64 bits, as obj_is_true's is
 
 .orb_done:
     mov [rbp - ORB_RES], rax
@@ -2320,7 +2362,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     jz .obo_rdunder
     mov rsi, [rbp - OBO_RIGHT]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: OBO_ANSWERED tells a miss from a raise
     test rax, rax
     OBO_ANSWERED
 
@@ -2338,7 +2380,7 @@ DEF_FUNC obj_binary_op, OBO_FRAME
     jz .obo_unsupported
     mov rsi, [rbp - OBO_LEFT]   ; reflected: the right operand is self
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: OBO_ANSWERED tells a miss from a raise
     test rax, rax
     OBO_ANSWERED
 
@@ -2479,15 +2521,14 @@ orb_swap_table:
 section .text
 
 ;; ============================================================================
-;; hash_not_implemented(rdi = the object) -> never returns
-;; Used as tp_hash for unhashable types (dict, list, set, bytearray), and
+;; set_hash_not_implemented(rdi = the object)
+;;   -> rax = 0, always, with the TypeError pending
+;; hash_not_implemented, below, is the form used as tp_hash for unhashable types (dict, list, set, bytearray), and
 ;; installed on a class that defines __eq__ without __hash__ or sets
 ;; __hash__ = None.  Raises TypeError("unhashable type: 'list'") -- it used to
 ;; name nothing, which is the one thing the message is for.
 ;; ============================================================================
-global hash_not_implemented
-DEF_FUNC hash_not_implemented
-    extern raise_exception
+DEF_FUNC set_hash_not_implemented
     extern exc_TypeError_type
     push rdi
     sub rsp, 8
@@ -2503,8 +2544,20 @@ DEF_FUNC hash_not_implemented
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel rbt_buf]
-    call raise_exception
-    ud2
+    call set_exception
+    leave
+    ret
+END_FUNC set_hash_not_implemented
+
+;; hash_not_implemented(rdi = the object) -> rax = -1, always, with the TypeError pending
+;; The tp_hash of an unhashable type: the slot's own error value, so obj_hash
+;; hands it up like any other __hash__ that raised.
+;; Fails: -1
+DEF_FUNC hash_not_implemented
+    call set_hash_not_implemented
+    mov rax, -1
+    leave
+    ret
 END_FUNC hash_not_implemented
 
 ;; ============================================================================
@@ -2526,6 +2579,9 @@ END_FUNC object_hash
 ;; ============================================================================
 ;; obj_hash(rdi=value) -> int64
 ;; Decodes the Value, then dispatches: int immediate → int_hash_i64, pointer → tp_hash.
+;; A hash is any int64, -1 included; -1 with an exception pending is a
+;; __hash__ that raised, or an unhashable type.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC obj_hash
     V_UNPACK rdi, rsi
@@ -2546,13 +2602,13 @@ DEF_FUNC obj_hash
     test rax, rax
     jz .default_hash
 
-    ; tail-call tp_hash(rdi=obj, edx=tag)
+    ; tp_hash(rdi=obj, edx=tag)
     ; tp_hash implementations (int_hash) forward edx to int_unwrap, so the
     ; tag MUST be supplied here -- leaving edx undefined makes int_unwrap
     ; take a random branch and int_hash return the object address.
     mov edx, esi
     leave
-    jmp rax
+    jmp rax                     ; the slot's contract is this function's own
 
 .smallint_hash:
     ; Shared with int_hash / builtin_hash: sign(v) * (|v| mod 2^61-1).
@@ -2589,8 +2645,11 @@ DEF_FUNC obj_hash
 END_FUNC obj_hash
 
 ;; ============================================================================
-;; obj_is_true(rdi=value) -> int (0 or 1)
+;; obj_is_true(rdi=value) -> rax = 0 or 1, or -1 with the exception pending
 ;; Decodes the Value, then dispatches: int immediate → value != 0, pointer → type-based.
+;; A __bool__ or __len__ that raised, or answered with something that is not
+;; a truth value, is the -1: all 64 bits of rax, so ERR_M1 reads it.
+;; Fails: -1
 ;; ============================================================================
 OIT_PAD equ 8               ; rbp and one callee-saved push leave the body
                             ; eight bytes out of 16-alignment, and __bool__,
@@ -2645,6 +2704,7 @@ DEF_FUNC_BARE obj_is_true
     ; `not x` and `if x:` were right, because they go elsewhere.
     mov edx, TAG_PTR
     call rax
+    movsxd rax, eax             ; -1 with an exception pending goes up as it is
     add rsp, OIT_PAD
     pop rbx
     pop rbp
@@ -2661,6 +2721,7 @@ DEF_FUNC_BARE obj_is_true
     jz .check_map_len
     mov rdi, rbx
     call rax
+    ERR_M1 .fail
     test rax, rax
     jnz .true
     jmp .false
@@ -2676,6 +2737,7 @@ DEF_FUNC_BARE obj_is_true
     jz .check_dunder_bool
     mov rdi, rbx
     call rax
+    ERR_M1 .fail
     test rax, rax
     jnz .true
     jmp .false
@@ -2707,8 +2769,9 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_bool]
     call dunder_call_1
+    ERR_PENDING .fail
     V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx              ; TAG_NULL = call failed
+    test edx, edx              ; TAG_NULL = there is no __bool__
     jz .check_dunder_len
 
     ; __bool__ returned a result — must be bool
@@ -2740,9 +2803,8 @@ DEF_FUNC_BARE obj_is_true
     ret
 
 .dunder_bool_none_error:
-    extern raise_exception
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "cannot interpret 'NoneType' object as an integer"
+    FAIL exc_TypeError_type, "cannot interpret 'NoneType' object as an integer", .fail
 
 .dunder_bool_type_error:
     ; __bool__ didn't return bool — DECREF result and raise TypeError
@@ -2750,7 +2812,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rax
     mov esi, edx
     DECREF_VAL rdi, rsi
-    RAISE exc_TypeError_type, "__bool__ should return bool, returned non-bool"
+    FAIL exc_TypeError_type, "__bool__ should return bool, returned non-bool", .fail
 
 .check_dunder_len:
     ; Try __len__ dunder
@@ -2758,6 +2820,7 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rbx
     lea rsi, [rel dunder_len]
     call dunder_call_1
+    ERR_PENDING .fail
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx              ; TAG_NULL = not found
     jz .true                ; no __len__ → truthy by default
@@ -2784,12 +2847,12 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, rax
     mov rsi, rdx
     V_PACK rdi, rsi
-    call obj_is_true
-    mov ecx, eax
+    call obj_is_true            ; err: the -1 is handed up as it came
+    mov rbx, rax                ; the receiver is done with; DECREF clobbers rcx
     pop rdi                    ; payload
     pop rsi                    ; tag
     DECREF_VAL rdi, rsi
-    mov eax, ecx
+    mov rax, rbx
     add rsp, OIT_PAD
     pop rbx
     pop rbp
@@ -2797,7 +2860,14 @@ DEF_FUNC_BARE obj_is_true
 
 .len_negative_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "__len__() should return >= 0"
+    FAIL exc_ValueError_type, "__len__() should return >= 0", .fail
+
+.fail:
+    mov rax, -1
+    add rsp, OIT_PAD
+    pop rbx
+    pop rbp
+    ret
 
 .false:
     xor eax, eax
@@ -2888,7 +2958,7 @@ DEF_FUNC type_repr, TR_FRAME
     call str_from_cstr
     mov rsi, rax
     mov rdi, [rbp - TR_LEN]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jz .tr_name
@@ -2949,7 +3019,7 @@ DEF_FUNC type_repr, TR_FRAME
     call str_from_cstr
     mov rsi, rax
     mov rdi, [rbp - TR_LEN]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jz .tr_name_from_tp

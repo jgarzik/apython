@@ -18,14 +18,15 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
 extern object_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern str_from_cstr_heap
 extern type_call
 extern dict_get
-extern raise_type_error_with_typename
-extern raise_type_error_with_name
+extern set_type_error_with_typename
+extern set_type_error_with_name
 extern dunder_lookup_owner
 extern rbt_append_cstr
 extern new_dunder_cstr
@@ -94,7 +95,7 @@ DEF_FUNC int_sub_new, ISN_FRAME
     mov rdi, rsi
     mov rsi, rdx
     extern builtin_int_fn
-    call builtin_int_fn
+    call builtin_int_fn         ; err: .isn_fail, by the tag below
     test edx, edx
     jz .isn_fail
     mov [rbp - ISN_VAL], rax
@@ -176,7 +177,7 @@ DEF_FUNC str_sub_new, SSN_FRAME
     mov rdi, rsi
     mov rsi, rdx
     extern builtin_str_fn
-    call builtin_str_fn
+    call builtin_str_fn         ; err: .ssn_failed, by the tag below
     V_UNPACK rax, rdx
     test edx, edx
     jz .ssn_failed
@@ -268,7 +269,8 @@ DEF_FUNC str_sub_new, SSN_FRAME
 END_FUNC str_sub_new
 
 ;; ============================================================================
-;; tuple_sub_fill(rdi = instance, rsi = args, rdx = nargs)
+;; tuple_sub_fill(rdi = instance, rsi = args, rdx = nargs) -> rax = 0
+;; Fails: -1
 ;;
 ;; A tuple is immutable and has no __init__, so a subclass cannot be filled
 ;; after the fact the way list, dict and set are -- the contents have to be
@@ -296,6 +298,7 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     mov edx, 1
     pop rsi
     call tuple_type_call
+    ERR_NULL .tsf_fail                ; not iterable, or iterating it raised
     mov [rbp - TSF_TMP], rax
     mov rbx, rax
     mov r12, [rbx + PyTupleObject.ob_size]
@@ -330,11 +333,16 @@ DEF_FUNC tuple_sub_fill, TSF_FRAME
     call obj_decref
 
 .tsf_done:
+    xor eax, eax
+.tsf_out:
     pop r13
     pop r12
     pop rbx
     leave
     ret
+.tsf_fail:
+    mov rax, -1
+    jmp .tsf_out
 END_FUNC tuple_sub_fill
 
 DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned
@@ -621,6 +629,7 @@ END_FUNC builtin_sub_dealloc
 ;; ============================================================================
 ;; object_type_call(args, nargs) -> PyObject*
 ;; object() returns a bare instance of object_type
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE object_type_call
     ; Create a bare instance with object_type (gc_alloc since HAVE_GC)
@@ -658,7 +667,10 @@ DEF_FUNC_BARE object_type_call
     ret
 
 .otc_no_args:
-    RAISE exc_TypeError_type, "object() takes no arguments"
+    SET_EXC exc_TypeError_type, "object() takes no arguments"
+    RET_NULL
+    pop rbp
+    ret
 END_FUNC object_type_call
 
 ;; ============================================================================
@@ -720,7 +732,7 @@ DEF_FUNC type_defines_dunder, TDD_FRAME
     test rdi, rdi
     jz .tdd_next
     mov rsi, [rbp - TDD_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx               ; the tag: a hit may be a false-looking payload
     jnz .tdd_yes
@@ -832,6 +844,7 @@ END_FUNC object_new_is_safe
 ;; object_new_fn(args, nargs) -> instance
 ;; Implements object.__new__(cls) — creates a bare instance of cls.
 ;; args[0] = cls (the type to instantiate)
+;; Fails: 0
 ;; ============================================================================
 ONF_TYPE  equ 8
 ONF_BASE  equ 16
@@ -892,13 +905,17 @@ DEF_FUNC object_new_fn, ONF_FRAME
     ret
 
 .onf_no_type:
-    RAISE exc_TypeError_type, "object.__new__(): not enough arguments"
+    SET_EXC exc_TypeError_type, "object.__new__(): not enough arguments"
+    leave
+    ret
 
 .onf_not_a_type:
     ; CPython names what it got: "X is not a type object (int)".
     mov rsi, rdi
     CSTRING rdi, `object.__new__(X): X is not a type object (\x01)`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 
 .onf_unsafe:
     ; "object.__new__(C) is not safe, use B.__new__()" -- C is the type asked
@@ -926,16 +943,21 @@ DEF_FUNC object_new_fn, ONF_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel onf_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    leave
+    ret
 
 .onf_own_new:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
           "object.__new__() takes exactly one argument (the type to instantiate)"
+    leave
+    ret
 .onf_no_args:
     mov rsi, [rbp - ONF_TYPE]
     CSTRING rdi, `\x01() takes no arguments`
-    jmp raise_type_error_with_typename
+    call set_type_error_with_typename
+    leave
+    ret
 END_FUNC object_new_fn
 
 section .rodata

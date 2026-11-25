@@ -5,17 +5,19 @@
 %include "object.inc"
 %include "gil.inc"
 
+extern dict_get
+extern dict_set
+extern dict_set_str
 extern ap_malloc
 extern obj_decref
 extern obj_incref
 extern str_from_cstr_heap
 extern float_from_f64
 extern dict_new
-extern dict_set
 extern module_new
 extern builtin_func_new
 extern none_singleton
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OverflowError_type
@@ -42,7 +44,8 @@ extern obj_dealloc
 extern tuple_new
 
 ;; ============================================================================
-;; tm_add_int(rdi = the value, rsi = its name as a C string) -> void
+;; tm_add_int(rdi = the value, rsi = its name as a C string)
+;;   -> rax = 0, or -1 with the exception pending when the dict refused it
 ;; One int in the module dict, with the dict in r12 as everything here has it.
 ;; ============================================================================
 TAI_VAL   equ 8
@@ -62,11 +65,13 @@ DEF_FUNC_LOCAL tm_add_int, TAI_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - TAI_OBJ]
-    call dict_set
+    call dict_set       ; err: returned to the caller, once the name and the int are released
+    mov [rbp - TAI_VAL], rax    ; dict_set's answer, across the releases
     pop rdi
     call obj_decref
     mov rdi, [rbp - TAI_OBJ]
     DECREF_V rdi, rsi
+    mov rax, [rbp - TAI_VAL]
     leave
     ret
 END_FUNC tm_add_int
@@ -118,6 +123,7 @@ extern daylight
     mov rdi, [rax + %1*8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .trs_fail            ; time_read_struct's exit: its only user
     add rax, %3
     mov [rbx + %2], eax
 %endmacro
@@ -141,6 +147,7 @@ SYS_clock_getres         equ 229
 ;; ============================================================================
 ;; time_process_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Returns process CPU time as a float (seconds)
+;; Fails: 0
 ;; ============================================================================
 ; A struct timespec, filled by clock_gettime: tv_sec then tv_nsec.
 TS_SEC    equ 16
@@ -170,12 +177,15 @@ DEF_FUNC time_process_time_func, 16
     ret
 
 .pt_error:
-    RAISE exc_TypeError_type, "process_time() takes no arguments"
+    SET_EXC exc_TypeError_type, "process_time() takes no arguments"
+    leave
+    ret
 END_FUNC time_process_time_func
 
 ;; ============================================================================
 ;; time_monotonic_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Returns monotonic clock as a float (seconds)
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC time_monotonic_func, 16
     test rsi, rsi
@@ -198,7 +208,9 @@ DEF_FUNC time_monotonic_func, 16
     ret
 
 .mono_error:
-    RAISE exc_TypeError_type, "monotonic() takes no arguments"
+    SET_EXC exc_TypeError_type, "monotonic() takes no arguments"
+    leave
+    ret
 END_FUNC time_monotonic_func
 
 ;; ============================================================================
@@ -208,6 +220,7 @@ END_FUNC time_monotonic_func
 ;; source monotonic() reads; CPython keeps them separate because on other
 ;; platforms they are not, and because timeit and every benchmark in the
 ;; stdlib ask for this name rather than that one.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC time_perf_counter_func, 16
     test rsi, rsi
@@ -230,7 +243,9 @@ DEF_FUNC time_perf_counter_func, 16
     ret
 
 .perf_error:
-    RAISE exc_TypeError_type, "perf_counter() takes no arguments"
+    SET_EXC exc_TypeError_type, "perf_counter() takes no arguments"
+    leave
+    ret
 END_FUNC time_perf_counter_func
 
 ;; ============================================================================
@@ -266,7 +281,9 @@ DEF_FUNC %1, 16
     ret
 
 %%bad:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+    leave
+    ret
 END_FUNC %1
 %endmacro
 
@@ -288,6 +305,7 @@ DEF_CLOCK_NS time_process_time_ns_func, CLOCK_PROCESS_CPUTIME_ID, "process_time_
 ;;
 ;; None of the five existing readers checks it.  That is safe for them and
 ;; would not be for these, which is the whole distinction.
+;; Fails: 0
 ;; ============================================================================
 TCG_TS    equ 16            ; struct timespec: tv_sec, tv_nsec
 TCG_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -298,6 +316,7 @@ DEF_FUNC time_clock_gettime_func, TCG_FRAME
     jz .tcg_args
     mov rdi, [rdi]
     call tm_clock_id_arg
+    ERR_M1 .tcg_fail
     mov rdi, rax
     lea rsi, [rbp - TCG_TS]
     mov eax, SYS_clock_gettime
@@ -319,15 +338,22 @@ DEF_FUNC time_clock_gettime_func, TCG_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    extern raise_oserror
-    call raise_oserror
+    extern set_oserror
+    call set_oserror
+    jmp .tcg_fail
 .tcg_args:
-    RAISE exc_TypeError_type, "clock_gettime() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "clock_gettime() takes exactly 1 argument"
+.tcg_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC time_clock_gettime_func
 
 ;; ============================================================================
 ;; time_clock_gettime_ns_func(rdi = the arguments, rsi = how many)
 ;;   -> rax = an int Value: the same reading in nanoseconds
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC time_clock_gettime_ns_func, TCG_FRAME
     push rbx
@@ -335,6 +361,7 @@ DEF_FUNC time_clock_gettime_ns_func, TCG_FRAME
     jz .tcgn_args
     mov rdi, [rdi]
     call tm_clock_id_arg
+    ERR_M1 .tcgn_fail
     mov rdi, rax
     lea rsi, [rbp - TCG_TS]
     mov eax, SYS_clock_gettime
@@ -355,14 +382,21 @@ DEF_FUNC time_clock_gettime_ns_func, TCG_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .tcgn_fail
 .tcgn_args:
-    RAISE exc_TypeError_type, "clock_gettime_ns() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "clock_gettime_ns() takes exactly 1 argument"
+.tcgn_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC time_clock_gettime_ns_func
 
 ;; ============================================================================
 ;; time_clock_getres_func(rdi = the arguments, rsi = how many)
 ;;   -> rax = a float Value: the clock's resolution in seconds
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC time_clock_getres_func, TCG_FRAME
     push rbx
@@ -370,6 +404,7 @@ DEF_FUNC time_clock_getres_func, TCG_FRAME
     jz .tcr_args
     mov rdi, [rdi]
     call tm_clock_id_arg
+    ERR_M1 .tcr_fail
     mov rdi, rax
     lea rsi, [rbp - TCG_TS]
     mov eax, SYS_clock_getres
@@ -391,13 +426,20 @@ DEF_FUNC time_clock_getres_func, TCG_FRAME
     mov rdi, rax
     neg rdi
     xor esi, esi
-    call raise_oserror
+    call set_oserror
+    jmp .tcr_fail
 .tcr_args:
-    RAISE exc_TypeError_type, "clock_getres() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "clock_getres() takes exactly 1 argument"
+.tcr_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC time_clock_getres_func
 
 ;; ============================================================================
 ;; tm_clock_id_arg(rdi = a Value) -> rax = the clock id
+;; Fails: -1
 ;;
 ;; An int, and nothing else.  CPython's clinic takes a clockid_t, which means
 ;; __index__ is honoured; obj_as_index is that.
@@ -409,7 +451,7 @@ DEF_FUNC_LOCAL tm_clock_id_arg, 16
     ; clock_gettime("x") an EINVAL from the syscall instead of the TypeError
     ; it owes.
     V_UNPACK rdi, rdx
-    call obj_as_index
+    call obj_as_index           ; err: its -1 is this function's own
     leave
     ret
 END_FUNC tm_clock_id_arg
@@ -427,6 +469,7 @@ DEF_CLOCK_NS time_thread_time_ns_func, CLOCK_THREAD_CPUTIME_ID, "thread_time_ns(
 
 ;; ============================================================================
 ;; time_thread_time_func(rdi, rsi) -> rax = a float Value: the same in seconds
+;; Fails: 0
 ;; ============================================================================
 TT_TS    equ 16
 TT_FRAME equ 24             ; + 1 push = 32, 16-aligned
@@ -450,7 +493,10 @@ DEF_FUNC time_thread_time_func, TT_FRAME
     leave
     ret
 .tt_args:
-    RAISE exc_TypeError_type, "thread_time() takes no arguments"
+    SET_EXC exc_TypeError_type, "thread_time() takes no arguments"
+    pop rbx
+    leave
+    ret
 END_FUNC time_thread_time_func
 
 ;; ============================================================================
@@ -474,6 +520,7 @@ END_FUNC time_thread_time_func
 ;; thread_time is in the table although time.thread_time() is not in this
 ;; module.  get_clock_info describes the platform's clocks, and refusing a
 ;; name CPython knows would be the worse answer of the two.
+;; Fails: 0
 ;; ============================================================================
 TCI_ARGS  equ 8             ; the name argument, as handed to us
 TCI_TMP   equ 16            ; whichever owned field value is in flight
@@ -483,8 +530,8 @@ extern namespace_new
 extern namespace_set
 extern bool_true
 extern bool_false
-extern raise_type_error_counted
-extern raise_type_error_with_name
+extern set_type_error_counted
+extern set_type_error_with_name
 extern none_singleton
 extern ap_strcmp
 extern ap_strlen
@@ -606,7 +653,8 @@ DEF_FUNC time_get_clock_info_func, TCI_FRAME
 .gci_arity:
     CSTRING rdi, "get_clock_info() takes exactly 1 argument ("
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+    jmp .gci_fail
 
 .gci_not_str:
     ; CPython's _PyArg_BadArgument spells None as "None" rather than as its
@@ -617,21 +665,23 @@ DEF_FUNC time_get_clock_info_func, TCI_FRAME
     cmp rsi, rax
     je .gci_not_str_none
     CSTRING rdi, `get_clock_info() argument 1 must be str, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .gci_fail
 .gci_not_str_none:
-    RAISE exc_TypeError_type, "get_clock_info() argument 1 must be str, not None"
+    FAIL exc_TypeError_type, "get_clock_info() argument 1 must be str, not None", .gci_fail
 
 .gci_embedded_nul:
-    RAISE exc_ValueError_type, "embedded null character"
+    FAIL exc_ValueError_type, "embedded null character", .gci_fail
 
 .gci_unknown:
-    RAISE exc_ValueError_type, "unknown clock"
+    FAIL exc_ValueError_type, "unknown clock", .gci_fail
 END_FUNC time_get_clock_info_func
 
 ;; ============================================================================
 ;; time_time_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Seconds since the epoch, as a float.  The wall clock, where monotonic is
 ;; the one that cannot go backwards.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC time_time_func, 16
     test rsi, rsi
@@ -654,12 +704,15 @@ DEF_FUNC time_time_func, 16
     ret
 
 .time_error:
-    RAISE exc_TypeError_type, "time() takes no arguments"
+    SET_EXC exc_TypeError_type, "time() takes no arguments"
+    leave
+    ret
 END_FUNC time_time_func
 
 ;; ============================================================================
 ;; time_sleep_func(PyObject **args, int64_t nargs) -> None
 ;; nanosleep, with the argument in seconds as an int or a float.
+;; Fails: 0
 ;; ============================================================================
 TSL_SEC   equ 16
 TSL_NSEC  equ 8
@@ -763,16 +816,19 @@ DEF_FUNC time_sleep_func, TSL_FRAME
 .sleep_handler_raised:
     ; The handler raised, and that is the answer: a NULL Value with the
     ; exception recorded, which is what signal_run_pending leaves behind.
+    ; Every refusal of the argument leaves this way too -- all of them are
+    ; decided before the GIL is given up, and none is raised inside the
+    ; window.
     xor eax, eax
     xor edx, edx
     leave
     ret
 
 .sleep_type_error:
-    RAISE exc_TypeError_type, "sleep() argument must be a number"
+    FAIL exc_TypeError_type, "sleep() argument must be a number", .sleep_handler_raised
 .sleep_nan:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "Invalid value NaN (not a number)"
+    FAIL exc_ValueError_type, "Invalid value NaN (not a number)", .sleep_handler_raised
 .sleep_overflow:
     ; CPython reaches the same overflow by two roads and says so differently:
     ; an int is rejected converting to _PyTime_t, a float converting back out
@@ -781,15 +837,15 @@ DEF_FUNC time_sleep_func, TSL_FRAME
     mov rax, [rbp - TSL_ARG]
     V_IS_FLOAT rax, rcx
     jbe .sleep_overflow_float
-    RAISE exc_OverflowError_type, \
-          "timestamp too large to convert to C _PyTime_t"
+    FAIL exc_OverflowError_type, \
+          "timestamp too large to convert to C _PyTime_t", .sleep_handler_raised
 .sleep_overflow_float:
-    RAISE exc_OverflowError_type, \
-          "timestamp out of range for platform time_t"
+    FAIL exc_OverflowError_type, \
+          "timestamp out of range for platform time_t", .sleep_handler_raised
 .sleep_value_error:
-    RAISE exc_ValueError_type, "sleep length must be non-negative"
+    FAIL exc_ValueError_type, "sleep length must be non-negative", .sleep_handler_raised
 .sleep_error:
-    RAISE exc_TypeError_type, "sleep() takes exactly one argument"
+    FAIL exc_TypeError_type, "sleep() takes exactly one argument", .sleep_handler_raised
 END_FUNC time_sleep_func
 
 ;; ============================================================================
@@ -810,6 +866,7 @@ END_FUNC time_sleep_func
 ;; LARGER number: args[0] is at [rbp - TSP_ARGS] and args[1] eight bytes
 ;; above it.  Writing TSP_ARGS as 8 put args[1] at [rbp], which is the saved
 ;; rbp.
+;; Fails: 0
 TSP_ARGS  equ 24            ; the two Values handed to _strptime_time
 TSP_NARGS equ 32            ; how many -- rsi does not survive the import
 TSP_TMP   equ 40
@@ -817,7 +874,6 @@ TSP_MOD   equ 48            ; the module, and then the function, while looked up
 TSP_KW    equ 56            ; the parked kw_names_pending
 TSP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 extern import_module
-extern dict_get
 extern obj_incref
 extern obj_call_n
 DEF_FUNC time_strptime_func, TSP_FRAME
@@ -840,7 +896,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - TSP_MOD], rax
     mov rdi, [rbp - TSP_TMP]
     call obj_decref
@@ -853,7 +909,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, [rbp - TSP_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get       ; err: a 0 goes to .tsp_no_impl, which keeps what is pending
     mov [rbp - TSP_MOD], rax
     mov rdi, [rbp - TSP_TMP]
     call obj_decref
@@ -895,7 +951,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, [rel tm_strptime_impl]
     lea rsi, [rbp - TSP_ARGS]
     mov edx, 2
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     mov [rbp - TSP_MOD], rax            ; the answer, across the release
     mov rdi, [rbp - TSP_TMP]
     test rdi, rdi
@@ -910,7 +966,11 @@ DEF_FUNC time_strptime_func, TSP_FRAME
 .tsp_no_impl:
     mov rax, [rbp - TSP_KW]
     mov [gs:ThreadState.kw_names_pending], rax
-    RAISE exc_TypeError_type, "strptime() needs the _strptime module"
+    ; An import that RAISED keeps its own exception; only a module that came
+    ; back without the function is ours to describe.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .tsp_fail
+    SET_EXC exc_TypeError_type, "strptime() needs the _strptime module"
 .tsp_fail:
     xor eax, eax
     xor edx, edx
@@ -918,7 +978,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     leave
     ret
 .tsp_args:
-    RAISE exc_TypeError_type, "strptime() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, "strptime() takes 1 or 2 arguments", .tsp_fail
 END_FUNC time_strptime_func
 
 section .rodata
@@ -931,7 +991,8 @@ tm_strptime_impl: resq 1
 section .text
 
 ;; ============================================================================
-;; tm_publish_tz() -> nothing; r12 = the module dict
+;; tm_publish_tz() -> rax = 0; r12 = the module dict
+;; Fails: -1
 ;;
 ;; tzset(3) and the four names it fills: tzname, timezone, altzone, daylight.
 ;; Called at import and again by time.tzset(), which is the only reason the
@@ -939,6 +1000,7 @@ section .text
 ;; tzset() has to see the new zone in these four, and nothing else in this
 ;; file needs the dict after import.
 ;; ============================================================================
+PTZ_RC    equ 8
 DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     call tzset
     lea rax, [rel tzname]
@@ -963,11 +1025,14 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set       ; err: tested once the name and the tuple are released
+    mov [rbp - PTZ_RC], rax     ; dict_set's answer, across the releases
     pop rdi
     call obj_decref
     pop rdi
     call obj_decref
+    cmp qword [rbp - PTZ_RC], 0
+    jne .ptz_fail
 
     ; The offset west of UTC in seconds, as CPython reports it: `timezone` is
     ; standard time, `altzone` is the same less an hour when the zone has DST,
@@ -976,6 +1041,7 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     mov rdi, [rax]
     lea rsi, [rel tm_timezone]
     call tm_add_int
+    ERR_M1 .ptz_fail
     lea rax, [rel timezone]
     mov rdi, [rax]
     lea rcx, [rel daylight]
@@ -986,11 +1052,18 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
 .ptz_no_dst:
     lea rsi, [rel tm_altzone]
     call tm_add_int
+    ERR_M1 .ptz_fail
     lea rax, [rel daylight]
     movsxd rdi, dword [rax]
     lea rsi, [rel tm_daylight]
     call tm_add_int
+    ERR_M1 .ptz_fail
 
+    xor eax, eax
+    leave
+    ret
+.ptz_fail:                      ; time's dict is Python's by the time tzset() runs
+    mov rax, -1
     leave
     ret
 END_FUNC tm_publish_tz
@@ -998,6 +1071,7 @@ END_FUNC tm_publish_tz
 ;; ============================================================================
 ;; time_tzset_func(rdi = the arguments, rsi = how many) -> rax = None
 ;; Re-reads $TZ and republishes the four names it sets.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC time_tzset_func, 16          ; + 0 pushes = 16, 16-aligned
     test rsi, rsi
@@ -1008,6 +1082,7 @@ DEF_FUNC time_tzset_func, 16          ; + 0 pushes = 16, 16-aligned
     test r12, r12
     jz .tzs_none
     call tm_publish_tz
+    ERR_M1 .tzs_fail
 .tzs_none:
     pop r12
     pop r12
@@ -1017,7 +1092,15 @@ DEF_FUNC time_tzset_func, 16          ; + 0 pushes = 16, 16-aligned
     leave
     ret
 .tzs_args:
-    RAISE exc_TypeError_type, "tzset() takes no arguments"
+    SET_EXC exc_TypeError_type, "tzset() takes no arguments"
+    leave
+    ret
+.tzs_fail:
+    pop r12
+    pop r12
+    xor eax, eax
+    leave
+    ret
 END_FUNC time_tzset_func
 
 section .bss
@@ -1049,7 +1132,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1081,7 +1164,7 @@ DEF_FUNC time_module_create
     ; function rather than a no-op: a program that changes $TZ and calls it
     ; has to see the new zone here.
     mov [rel tm_module_dict], r12
-    call tm_publish_tz
+    call tm_publish_tz          ; err: the module's own dict, before anything can reach it
 
     lea rdi, [rel struct_time_type]
     call structseq_init_type
@@ -1094,7 +1177,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1162,7 +1245,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1178,7 +1261,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1195,7 +1278,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1212,7 +1295,7 @@ DEF_FUNC time_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1505,6 +1588,7 @@ END_FUNC time_fill_struct
 ;; ============================================================================
 ;; time_read_struct(rdi = a 9-or-more sequence, rsi = a struct tm to fill)
 ;;   -> eax = 1, or 0 with the exception pending
+;; Fails: 0
 ;; The inverse of the above, for mktime and strftime.
 ;; ============================================================================
 TRS_SEQ   equ 8
@@ -1559,6 +1643,7 @@ DEF_FUNC_LOCAL time_read_struct, TRS_FRAME
     mov rdi, [rax + 6*8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .trs_fail
     inc rax
     cdq
     mov ecx, 7
@@ -1570,14 +1655,18 @@ DEF_FUNC_LOCAL time_read_struct, TRS_FRAME
     leave
     ret
 .trs_short:
-    pop rbx
     ; CPython names the caller: "strftime(): illegal time tuple argument".
     ; time_read_struct is shared, so the name comes in as an argument.
     mov rdi, [rbp - TRS_NAME]
-    call time_raise_bad_tuple
+    call time_set_bad_tuple
+    jmp .trs_fail
 .trs_bad:
+    SET_EXC exc_TypeError_type, "Tuple or struct_time argument required"
+.trs_fail:
+    xor eax, eax
     pop rbx
-    RAISE exc_TypeError_type, "Tuple or struct_time argument required"
+    leave
+    ret
 END_FUNC time_read_struct
 
 ;; ============================================================================
@@ -1589,6 +1678,7 @@ TLT_FRAME equ 80            ; + 0 pushes = 80
 %macro DEF_TIME_CONVERT 2   ; %1 = the exposed name, %2 = the libc call
 DEF_FUNC time_%1_func, TLT_FRAME
     call time_seconds_arg
+    ERR_M1 %%fail
     mov [rbp - TLT_SECS], rax
     lea rdi, [rbp - TLT_SECS]
     lea rsi, [rbp - TLT_TM]
@@ -1605,7 +1695,11 @@ DEF_FUNC time_%1_func, TLT_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 %%failed:
-    RAISE exc_OverflowError_type, "timestamp out of range for platform time_t"
+    SET_EXC exc_OverflowError_type, "timestamp out of range for platform time_t"
+%%fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC time_%1_func
 %endmacro
 DEF_TIME_CONVERT localtime, localtime_r
@@ -1613,6 +1707,8 @@ DEF_TIME_CONVERT gmtime,    gmtime_r
 
 ;; time_seconds_arg -- the optional first argument, truncated to whole
 ;; seconds, defaulting to now.  rdi = args, rsi = nargs on entry.
+;; Fails: -1
+;; With no argument it reads the clock and cannot fail.
 TSA_FRAME equ 32            ; + 0 pushes = 32
 DEF_FUNC_LOCAL time_seconds_arg, TSA_FRAME
     test rsi, rsi
@@ -1630,7 +1726,7 @@ DEF_FUNC_LOCAL time_seconds_arg, TSA_FRAME
     ret
 .tsa_int:
     V_UNPACK rdi, rdx
-    call obj_as_index
+    call obj_as_index           ; err: its -1 is this function's own
     leave
     ret
 .tsa_now:
@@ -1646,6 +1742,7 @@ END_FUNC time_seconds_arg
 
 ;; ============================================================================
 ;; time.mktime(t) -> the seconds since the epoch, as a float
+;; Fails: 0
 ;; ============================================================================
 TMK_TM    equ 64
 TMK_FRAME equ 80            ; + 0 pushes = 80
@@ -1656,8 +1753,7 @@ DEF_FUNC time_mktime_func, TMK_FRAME
     lea rsi, [rbp - TMK_TM]
     CSTRING rdx, "mktime"
     call time_read_struct
-    test eax, eax
-    jz .tmk_failed
+    ERR_NULL .tmk_failed
     ; mktime interprets tm_isdst < 0 as "work it out", which is what CPython
     ; passes through.
     lea rdi, [rbp - TMK_TM]
@@ -1671,17 +1767,18 @@ DEF_FUNC time_mktime_func, TMK_FRAME
     V_PACK rax, rdx
     ret
 .tmk_range:
-    RAISE exc_OverflowError_type, "mktime argument out of range"
+    FAIL exc_OverflowError_type, "mktime argument out of range", .tmk_failed
+.tmk_args:
+    SET_EXC exc_TypeError_type, "mktime() takes exactly one argument"
 .tmk_failed:
     xor eax, eax
     leave
     ret
-.tmk_args:
-    RAISE exc_TypeError_type, "mktime() takes exactly one argument"
 END_FUNC time_mktime_func
 
 ;; ============================================================================
 ;; time.strftime(format[, t]) -> str
+;; Fails: 0
 ;; ============================================================================
 TSF_TM    equ 64
 TSF_BUF   equ 72
@@ -1711,13 +1808,12 @@ DEF_FUNC time_strftime_func, TSF_FRAME
     lea rsi, [rbp - TSF_TM]
     CSTRING rdx, "strftime"
     call time_read_struct
-    test eax, eax
-    jz .tsf_failed
+    ERR_NULL .tsf_failed
     jmp .tsf_have_tm
 .tsf_now:
     ; No time given: localtime(now), as CPython does.
     xor esi, esi
-    call time_seconds_arg
+    call time_seconds_arg       ; err: no argument, so it reads the clock
     mov [rbp - TSF_BUF], rax
     lea rdi, [rbp - TSF_BUF]
     lea rsi, [rbp - TSF_TM]
@@ -1757,20 +1853,21 @@ DEF_FUNC time_strftime_func, TSF_FRAME
     pop rdi                     ; args -- the two pushes are gone now
     mov rsi, [rdi]              ; args[0], the format
     CSTRING rdi, `strftime() argument 1 must be str, not \x01`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .tsf_failed
+.tsf_args:
+    SET_EXC exc_TypeError_type, "strftime() takes at least 1 argument"
 .tsf_failed:
     xor eax, eax
     leave
     ret
-.tsf_args:
-    RAISE exc_TypeError_type, "strftime() takes at least 1 argument"
 END_FUNC time_strftime_func
 
 ;; ============================================================================
 ;; time.asctime([t]) and time.ctime([secs])
 ;;
 ;; Both are strftime with CPython's fixed format; ctime converts first.
+;; Fails: 0
 ;; ============================================================================
 TAC_TM    equ 64
 TAC_SECS  equ 72
@@ -1786,12 +1883,11 @@ DEF_FUNC time_asctime_func, TAC_FRAME
     lea rsi, [rbp - TAC_TM]
     CSTRING rdx, "asctime"
     call time_read_struct
-    test eax, eax
-    jz .tac_failed
+    ERR_NULL .tac_failed
     jmp .tac_format
 .tac_now:
     xor esi, esi
-    call time_seconds_arg
+    call time_seconds_arg       ; err: no argument, so it reads the clock
     mov [rbp - TAC_SECS], rax
     lea rdi, [rbp - TAC_SECS]
     lea rsi, [rbp - TAC_TM]
@@ -1830,8 +1926,11 @@ DEF_FUNC time_asctime_func, TAC_FRAME
     ret
 END_FUNC time_asctime_func
 
+;; time_ctime_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC time_ctime_func, TAC_FRAME
     call time_seconds_arg
+    ERR_M1 .tct_failed
     mov [rbp - TAC_SECS], rax
     lea rdi, [rbp - TAC_SECS]
     lea rsi, [rbp - TAC_TM]
@@ -1877,11 +1976,12 @@ tm_asctime_fmt: db "%a %b %e %H:%M:%S %Y", 0
 
 section .text
 
-;; time_raise_bad_tuple(rdi = the caller's name) -- does not return
+;; time_set_bad_tuple(rdi = the caller's name)
+;;   -> rax = 0, always, with the TypeError pending
 TRB_NAME  equ 8
 TRB_BUF   equ 176
 TRB_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL time_raise_bad_tuple, TRB_FRAME
+DEF_FUNC_LOCAL time_set_bad_tuple, TRB_FRAME
     mov [rbp - TRB_NAME], rdi
     lea rdi, [rbp - TRB_BUF]
     mov rsi, [rbp - TRB_NAME]
@@ -1892,5 +1992,7 @@ DEF_FUNC_LOCAL time_raise_bad_tuple, TRB_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - TRB_BUF]
-    call raise_exception
-END_FUNC time_raise_bad_tuple
+    call set_exception
+    leave
+    ret
+END_FUNC time_set_bad_tuple

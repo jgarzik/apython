@@ -6,7 +6,7 @@
 
 extern exc_TypeError_type
 extern exc_IndexError_type
-extern raise_exception
+extern set_exception
 extern none_singleton
 extern ap_free
 extern ap_malloc
@@ -741,6 +741,7 @@ END_FUNC code_getattr
 ;;
 ;; A list rather than a generator: the caller indexes into it with
 ;; islice, and a list is the shortest thing that supports that.
+;; Fails: 0
 ;; ============================================================================
 CPO_CODE  equ 8
 CPO_LIST  equ 16
@@ -845,7 +846,7 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     mov rdi, [rbp - CPO_LIST]
     mov rsi, rax
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     add rsp, 8
     pop rdi
     extern obj_decref
@@ -867,7 +868,7 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     leave
     ret
 .cpo_args:
-    RAISE exc_TypeError_type, "co_positions() takes no arguments"
+    FAIL exc_TypeError_type, "co_positions() takes no arguments", .cpo_failed
 END_FUNC code_method_co_positions
 
 section .rodata
@@ -1044,6 +1045,7 @@ END_FUNC _get_co_replace_builtin
 ;; kinds string, so replacing one of the three means rebuilding both, and a
 ;; caller that changes them without changing the bytecode has broken the
 ;; object anyway.  DIVERGENCES.md records it.
+;; Fails: 0
 ;; ============================================================================
 CR_ARGS   equ 8
 CR_NARGS  equ 16
@@ -1207,6 +1209,7 @@ DEF_FUNC code_method_replace, CR_FRAME
     mov rdi, rbx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .cr_fail_spec
     lea r12, [rbp - CR_SPEC]
     mov r9, [rbp - CR_OFF]
     mov [r12 + r9], eax
@@ -1260,20 +1263,26 @@ DEF_FUNC code_method_replace, CR_FRAME
     call ap_strcmp
     test eax, eax
     jz .cr_refused
-    lea rdi, [rbp - CR_SPEC]
-    call code_spec_clear
-    RAISE exc_TypeError_type, "replace() got an unexpected keyword argument"
+    FAIL exc_TypeError_type, "replace() got an unexpected keyword argument", .cr_fail_spec
 .cr_refused:
-    lea rdi, [rbp - CR_SPEC]
-    call code_spec_clear
-    RAISE exc_TypeError_type, \
-        "replace() cannot change co_varnames, co_freevars or co_cellvars"
+    FAIL exc_TypeError_type, \
+        "replace() cannot change co_varnames, co_freevars or co_cellvars", .cr_fail_spec
 .cr_bad_type:
+    SET_EXC exc_TypeError_type, "replace() got the wrong type for a field"
+.cr_fail_spec:
+    ; The spec holds a reference on every field copied out of the source.
     lea rdi, [rbp - CR_SPEC]
     call code_spec_clear
-    RAISE exc_TypeError_type, "replace() got the wrong type for a field"
+    jmp .cr_fail
 .cr_positional:
-    RAISE exc_TypeError_type, "replace() takes no positional arguments"
+    SET_EXC exc_TypeError_type, "replace() takes no positional arguments"
+.cr_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC code_method_replace
 
 ;; ============================================================================
@@ -1287,6 +1296,7 @@ END_FUNC code_method_replace
 ;; Built from code_addr2line rather than from the line table directly: the
 ;; walk is the same one every other reader here uses, and a second decoder
 ;; would be a second thing to get wrong.
+;; Fails: 0
 ;; ============================================================================
 COL_CODE  equ 8
 COL_LIST  equ 16
@@ -1372,7 +1382,7 @@ DEF_FUNC code_method_co_lines, COL_FRAME
     leave
     ret
 .col_args:
-    RAISE exc_TypeError_type, "co_lines() takes no arguments"
+    FAIL exc_TypeError_type, "co_lines() takes no arguments", .col_failed
 
 ;; One (start, end, line) triple, from COL_START to COL_I.  A local, because
 ;; it reads the caller's frame.  It sits after every dotted label that names
@@ -1405,7 +1415,7 @@ col_emit:
     mov rdi, [rbp - COL_LIST]
     mov rsi, [rbp - COL_TUP]
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - COL_TUP]
     extern obj_decref
     call obj_decref
@@ -1446,8 +1456,7 @@ DEF_FUNC_LOCAL code_build_lnotab, CBL_FRAME
     lea rdi, [rbp - CBL_ARGS]
     mov esi, 1
     call code_method_co_lines
-    test rax, rax
-    jz .cbl_fail
+    ERR_NULL .cbl_fail
     mov [rbp - CBL_LIST], rax
 
     mov edi, 64
@@ -1617,6 +1626,7 @@ END_FUNC _get_co_lines_builtin
 ;; test_dis both read this rather than reassembling the three tuples.
 ;;
 ;; Out of range is an IndexError, which is what PyTuple_GetItem raises there.
+;; Fails: 0
 ;; ============================================================================
 global code_method_varname_from_oparg
 DEF_FUNC code_method_varname_from_oparg, 8   ; 1 push, so rsp is 16-aligned
@@ -1628,6 +1638,7 @@ DEF_FUNC code_method_varname_from_oparg, 8   ; 1 push, so rsp is 16-aligned
     V_UNPACK rdi, rdx                   ; obj_as_index takes the pair
     extern obj_as_index
     call obj_as_index                   ; names the type for a non-integer
+    ERR_M1 .vfo_fail
     mov rbx, [rbx + PyCodeObject.co_localsplusnames]
     test rbx, rbx
     jz .vfo_range
@@ -1642,11 +1653,14 @@ DEF_FUNC code_method_varname_from_oparg, 8   ; 1 push, so rsp is 16-aligned
     leave
     ret
 .vfo_range:
-    pop rbx
-    RAISE exc_IndexError_type, "tuple index out of range"
+    FAIL exc_IndexError_type, "tuple index out of range", .vfo_fail
 .vfo_argerr:
+    SET_EXC exc_TypeError_type, "_varname_from_oparg() takes exactly 1 argument"
+.vfo_fail:
+    xor eax, eax
     pop rbx
-    RAISE exc_TypeError_type, "_varname_from_oparg() takes exactly 1 argument"
+    leave
+    ret
 END_FUNC code_method_varname_from_oparg
 
 ;; ============================================================================

@@ -13,7 +13,7 @@
 ; refusal it wants is worded differently, which is what POSIX_PATH_KIND_IO is.
 ;
 ; The message builders it calls -- posix_typename_of, posix_copy_bounded,
-; posix_raise_typename -- and the buffer they write into stay in posix.asm,
+; posix_set_typename -- and the buffer they write into stay in posix.asm,
 ; where a dozen other refusals share them.
 
 %include "macros.inc"
@@ -24,13 +24,11 @@ extern ap_strlen
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern obj_decref
-extern raise_exception
 extern set_exception
 extern str_type
 extern bytes_type
 extern posix_copy_bounded
 extern posix_typename_of
-extern posix_raise_typename
 extern pm_msgbuf
 extern pm_msg_fspath
 extern pm_msg_path
@@ -109,6 +107,10 @@ END_FUNC posix_embedded_nul
 ;; name or a path out of what it finds has to build it of the argument's own
 ;; kind.  Callers that only pass the string to a syscall ignore it.
 ;;
+;; Every refusal -- a bad type, an embedded NUL, a __fspath__ that raised or
+;; answered something that is not a path -- is 0 with the exception pending.
+;; Fails: 0
+;;
 ;; CPython names the function and the argument in its refusal -- "stat: path
 ;; should be string, bytes, os.PathLike or integer, not float" -- and lists
 ;; the kinds THAT function takes.  This said only "path should be string,
@@ -144,7 +146,7 @@ DEF_FUNC posix_path_arg, PPA_FRAME
     jne .ppa_bad                ; already followed one
     CSTRING rsi, "__fspath__"
     DUNDER_EXC_SAVE [rbp - PPA_EXC]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .ppa_got_fspath`
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jnz .ppa_got_fspath
     ; NULL means either "no __fspath__" or "__fspath__ raised", and reporting

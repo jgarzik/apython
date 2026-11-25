@@ -24,7 +24,7 @@ extern ap_strcmp
 extern str_type
 extern type_type
 extern none_singleton
-extern raise_exception
+extern set_exception
 extern exc_AttributeError_type
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -158,15 +158,16 @@ DEF_FUNC traceback_setattr, TBS_FRAME
     ret
 
 .tbs_loop:
-    RAISE exc_ValueError_type, "traceback loop detected"
+    FAIL exc_ValueError_type, "traceback loop detected", .tbs_fail
 .tbs_bad:
     ; Name what was actually assigned.  The message was a fixed 'NoneType',
     ; which is the one value this arm cannot be reached with -- None is the
     ; legal way to clear tb_next, handled above.
     mov rsi, rdx
     CSTRING rdi, `expected traceback object, got '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .tbs_fail
 .tbs_no_attr:
     ; CPython is not uniform here and this follows it exactly: tb_lineno has a
     ; setter that refuses, tb_frame and tb_lasti are plain members, and a name
@@ -191,14 +192,18 @@ DEF_FUNC traceback_setattr, TBS_FRAME
     jz .tbs_readonly
     mov rdi, [rbp - TBS_SELF]
     mov rsi, [rbp - TBS_NAME]
-    mov edx, 1
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    extern set_no_attribute_store
+    call set_no_attribute_store
+    jmp .tbs_fail
 .tbs_not_writable:
-    RAISE exc_AttributeError_type, \
-        "attribute 'tb_lineno' of 'traceback' objects is not writable"
+    FAIL exc_AttributeError_type, \
+        "attribute 'tb_lineno' of 'traceback' objects is not writable", .tbs_fail
 .tbs_readonly:
-    RAISE exc_AttributeError_type, "readonly attribute"
+    SET_EXC exc_AttributeError_type, "readonly attribute"
+.tbs_fail:
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
+    leave
+    ret
 END_FUNC traceback_setattr
 
 ;; ============================================================================

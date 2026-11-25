@@ -40,7 +40,6 @@ extern obj_incref
 extern obj_decref
 extern none_singleton
 extern obj_dealloc
-extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
 extern exc_ValueError_type
@@ -153,6 +152,7 @@ END_FUNC bytes_len
 ;; ============================================================================
 ;; bytes_getitem(PyBytesObject *self, int64_t index) -> rax = Value (SmallInt 0-255)
 ;; sq_item: return byte at index as integer
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE bytes_getitem
     ; Handle negative index
@@ -173,13 +173,16 @@ DEF_FUNC_BARE bytes_getitem
     ret
 
 .index_error:
-    push rdi
-    RAISE exc_IndexError_type, "index out of range"
+    sub rsp, 8                  ; no frame here; the call wants rsp aligned
+    SET_EXC exc_IndexError_type, "index out of range"
+    add rsp, 8
+    ret                         ; rax = 0, with it pending
 END_FUNC bytes_getitem
 
 ;; ============================================================================
 ;; bytes_subscript(PyBytesObject *self, PyObject *key) -> rax = Value
 ;; mp_subscript: handles both int and slice keys
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
@@ -206,11 +209,23 @@ DEF_FUNC bytes_subscript
     mov rdi, r12
     lea rsi, [rel bs_index_msg]
     call obj_as_index_seq
+    ERR_M1 .bs_fail
     ; Call bytes_getitem
     mov rdi, rbx
     mov rsi, rax
-    call bytes_getitem          ; already returns a Value
+    call bytes_getitem          ; already returns a Value -- err: its 0 is this slot's own
 
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.bs_slice_fail:
+    pop r15
+    pop r14
+    pop r13
+.bs_fail:
+    RET_NULL
     pop r12
     pop rbx
     leave
@@ -225,6 +240,7 @@ DEF_FUNC bytes_subscript
     mov rdi, r12               ; slice
     mov rsi, [rbx + PyBytesObject.ob_size]
     call slice_indices
+    ERR_M1 .bs_slice_fail
     ; rax = start, rdx = stop, rcx = step
     mov r13, rax               ; start
     mov r14, rdx               ; stop
@@ -337,6 +353,7 @@ section .text
 ;; ============================================================================
 ;; bytes_contains(PyBytesObject *self, PyObject *value) -> int (0/1)
 ;; sq_contains: check if byte value is in bytes
+;; Fails: -1
 ;; ============================================================================
 BCN_ARG   equ 8             ; the operand as it arrived, for the refusal
 BCN_FRAME equ 48            ; + 4 pushes = 80, 16-aligned
@@ -453,11 +470,20 @@ DEF_FUNC bytes_contains, BCN_FRAME
 .bc_type_error:
     mov rsi, [rbp - BCN_ARG]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bc_fail
 
 .bc_range_error:
-    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+    SET_EXC exc_ValueError_type, "byte must be in range(0, 256)"
+.bc_fail:
+    mov rax, -1                 ; as sq_contains says it
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_contains
 
 ;; ============================================================================
@@ -473,7 +499,7 @@ DEF_FUNC bytes_repr
     mov rsi, [rdi + PyBytesObject.ob_size]
     lea rdi, [rdi + PyBytesObject.data]
     xor edx, edx               ; 0 = b'...'
-    call bytes_repr_impl
+    call bytes_repr_impl      ; err: the 0 is this function's own answer
     leave
     ret
 END_FUNC bytes_repr
@@ -485,7 +511,7 @@ DEF_FUNC bytearray_repr, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, rax
     mov rsi, [rbx + PyByteArrayObject.ob_size]
     mov edx, 1                 ; 1 = bytearray(b'...')
-    call bytes_repr_impl
+    call bytes_repr_impl      ; err: the 0 is this function's own answer
     pop rbx
     leave
     ret
@@ -500,6 +526,7 @@ END_FUNC bytearray_repr
 ;; Four output bytes per input byte is the worst any byte can do (\xHH), and
 ;; the wrapper is at most `bytearray(b'` plus `')` plus the NUL, so 4n + 32
 ;; cannot be exceeded.
+;; Fails: 0
 BRI_FRAME equ 8             ; + 5 pushes = 48, 16-aligned
 DEF_FUNC_LOCAL bytes_repr_impl, BRI_FRAME
     push rbx
@@ -705,7 +732,15 @@ DEF_FUNC_LOCAL bytes_repr_impl, BRI_FRAME
     ret
 .br_oom:
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    RET_NULL
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_repr_impl
 
 
@@ -1135,6 +1170,7 @@ END_FUNC bytes_latin1_to_str
 ;; back as a single mangled byte.  CPython rejects a str for %s outright
 ;; ("%b requires a bytes-like object..."); it accepts one for %r and %a, which
 ;; is why only the wide ones are refused here rather than all of them.
+;; Fails: -1
 DEF_FUNC bytes_mod_reject_wide
     V_TEST_PTR rdi, rax
     ja .bmw_ok
@@ -1157,6 +1193,7 @@ DEF_FUNC bytes_mod_reject_wide
     cmp rax, [rdi + PyStrObject.ob_length]
     jne .bmw_wide               ; more bytes than code points: not ASCII
 .bmw_ok:
+    xor eax, eax
     leave
     ret
 .bmw_wide:
@@ -1164,7 +1201,10 @@ DEF_FUNC bytes_mod_reject_wide
     ; type, which for a subclass is the subclass.
     mov rsi, rdi
     CSTRING rdi, `%b requires a bytes-like object, or an object that implements __bytes__, not '\x01'`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 END_FUNC bytes_mod_reject_wide
 
 global bytes_mod_is_byteslike
@@ -1222,6 +1262,7 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
 
     ; A single argument.
     call bytes_mod_reject_wide
+    ERR_M1 .bmp_fail
     mov rdi, [rbp - BMP_ARGS]
     call bytes_mod_as_str
     test rax, rax
@@ -1231,6 +1272,10 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     leave
     ret
 .bmp_out:
+    leave
+    ret
+.bmp_fail:                      ; nothing is owned yet; `leave` drops the saves
+    xor eax, eax
     leave
     ret
 
@@ -1252,6 +1297,7 @@ DEF_FUNC_LOCAL bytes_mod_prepare_args, BMP_FRAME
     push rdx
     sub rsp, 8
     call bytes_mod_reject_wide
+    ERR_M1 .bmp_fail
     mov rax, [rsp + 8 + 16]
     mov rcx, [rsp + 8 + 8]
     mov rdx, [rsp + 8]
@@ -1409,6 +1455,7 @@ END_FUNC bytes_mod_release_args
 ;; bytes_mod(PyBytesObject *fmt, PyObject *args) -> PyBytesObject*
 ;; nb_remainder: implements b"fmt" % args
 ;; Strategy: convert bytes fmt to str, call str_mod, convert result to bytes
+;; Fails: 0?
 ;; ============================================================================
 BM_FMT   equ 8
 BM_ARGS  equ 16
@@ -1470,7 +1517,7 @@ DEF_FUNC bytes_mod, BM_FRAME
     mov edx, 1                 ; and this one is a BYTES format
     mov ecx, 1                 ; report by RETURNING: see below
     extern str_mod_impl
-    call str_mod_impl
+    call str_mod_impl         ; err: tested below, once the format copy is released
     mov r12, rax               ; r12 = result str Value (a str is a pointer)
 
     ; DECREF temp fmt str.  This is the whole reason str_mod_impl is asked to
@@ -1554,15 +1601,8 @@ DEF_FUNC bytes_mod, BM_FRAME
     ; slot declines" -- a number slot has no other way to say NULL -- and the
     ; interpreter would report "unsupported operand type(s) for %" over the
     ; top of the real message.
-    mov rdi, [gs:ThreadState.current_exception]
-    test rdi, rdi
-    jz .bm_failed_no_exc
-    mov qword [gs:ThreadState.current_exception], 0
-    pop r12
-    pop rbx
-    leave
-    extern raise_exception_obj
-    jmp raise_exception_obj     ; takes the reference, does not return
+    ; It goes on its way as a 0 with the exception still pending, which a
+    ; number slot's caller now tells from "declined".
 .bm_failed_no_exc:
     xor eax, eax
     pop r12
@@ -1610,7 +1650,7 @@ DEF_FUNC bytearray_mod, BMOD_FRAME
 
     mov rdi, rax
     mov rsi, [rbp - BMOD_ARGS]
-    call bytes_mod
+    call bytes_mod              ; err: its 0, declined or raised, is handed on below
     mov rbx, rax
 
     mov rdi, [rbp - BMOD_TMP]
@@ -1696,6 +1736,7 @@ section .text
 ;; bytes_concat(left Value, right Value) -> Value
 ;; bytes had neither sq_concat nor nb_add, so `x + y` on two bytes variables
 ;; raised TypeError; only the constant-folded form worked.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_concat
     BINOP_REQUIRE_LEFT bytes_type, TYPE_FLAG_BYTES_SUBCLASS, 1
@@ -1778,16 +1819,21 @@ DEF_FUNC bytes_concat
     ret
 
 .bc_type_error:
-    ; raise_type_error_with_name does not return, so the pushes above are
-    ; abandoned with the rest of the C stack; nothing to restore.
     mov rsi, r12
     CSTRING rdi, `can't concat \x01 to bytes`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_concat
 
 ;; ============================================================================
 ;; bytes_repeat(bytes Value, count Value) -> Value
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC bytes_repeat
     BINOP_REQUIRE_LEFT bytes_type, TYPE_FLAG_BYTES_SUBCLASS, 1
@@ -1812,6 +1858,7 @@ DEF_FUNC bytes_repeat
     jz .brep_decline
     extern seq_repeat_count
     call seq_repeat_count    ; __index__ counts, and one too big to be an
+    ERR_M1 .brep_decline
     mov r12, rax             ; index is refused rather than truncated
     test r12, r12
     jg .brep_positive
@@ -1871,15 +1918,12 @@ DEF_FUNC bytes_repeat
 .brep_toobig:
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .brep_decline
 .brep_overflow:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "repeated bytes are too long"
+    FAIL exc_OverflowError_type, "repeated bytes are too long", .brep_decline
 END_FUNC bytes_repeat
 
-;; ============================================================================
-;; bytes_type_call(type, args, nargs) -> PyBytesObject*
-;; Constructor: bytes(bytes_obj) — copies data, uses passed-in type for subclass
 ;; ============================================================================
 global bytes_type_call
 
@@ -1899,7 +1943,9 @@ global bytes_type_call
 ;; ============================================================================
 ;; bls_item_byte(rdi = item Value) -> eax = the byte 0..255,
 ;;                                    -1 not an integer,
-;;                                    -2 an integer outside range(0, 256)
+;;                                    -2 an integer outside range(0, 256),
+;;                                    -3 its __index__ raised: that exception
+;;                                       is pending and is the one to report
 ;;
 ;; One item of the iterable handed to bytes() or bytearray().  It used to test
 ;; V_IS_INT and nothing else, so only an int *immediate* was accepted: every
@@ -1952,6 +1998,7 @@ DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
     je .bib_not_int
     mov edx, TAG_PTR
     call obj_as_index
+    ERR_M1 .bib_raised
 
 .bib_check:
     test rax, rax
@@ -1970,10 +2017,18 @@ DEF_FUNC_LOCAL bls_item_byte, BIB_FRAME
     mov eax, -2
     leave
     ret
+
+.bib_raised:
+    mov eax, -3
+    leave
+    ret
 END_FUNC bls_item_byte
 
 ;; ============================================================================
-;; (continued) bytes_load_source
+;; (continued) byteslike_source
+;; Fails: 0?
+;; (0, 0) alone is "empty"; with an exception pending it is a refusal, and the
+;; temporary list and the buffer have already gone back.
 ;; ============================================================================
 BLS_ARGS  equ 8
 BLS_RANGEMSG equ 16
@@ -2124,9 +2179,8 @@ DEF_FUNC byteslike_source, BLS_FRAME
     call type_name_message
     mov rsi, rax
     lea rdi, [rel exc_OverflowError_type]
-    extern raise_exception
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .bls_fail
 
 .bls_not_index:
     extern str_type
@@ -2164,7 +2218,7 @@ extern str_set_length
     push rax
     sub rsp, 8
     mov rdi, rax
-    call memoryview_as_bytes
+    call memoryview_as_bytes  ; err: tested below, once the view is released
     add rsp, 8
     pop rdi
     push rax
@@ -2173,7 +2227,7 @@ extern str_set_length
     add rsp, 8
     pop rax
     test rax, rax
-    jz .bls_empty
+    jz .bls_fail                ; __buffer__ answered a released view
     mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
     mov rbx, [rax + PyBytesObject.ob_size]
     lea r12, [rax + PyBytesObject.data]
@@ -2271,8 +2325,7 @@ extern str_set_length
     ; both: it lays the items out end to end, which is what bytes() means.
     extern memoryview_as_bytes
     call memoryview_as_bytes
-    test rax, rax
-    jz .bls_empty
+    ERR_NULL .bls_fail          ; a released view
     mov [rbp - BLS_LIST], rax   ; released below, with the list's arm
     mov rbx, [rax + PyBytesObject.ob_size]
     lea r12, [rax + PyBytesObject.data]
@@ -2322,6 +2375,7 @@ extern str_set_length
     extern get_iterator_opt
     mov rsi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING .bls_fail
     test rax, rax
     jz .bls_bad_type
     V_UNPACK rax, rdx
@@ -2332,7 +2386,7 @@ extern str_set_length
     lea rdi, [rel list_type]
     mov rsi, [rbp - BLS_ARGS]
     mov edx, 1
-    call list_type_call
+    call list_type_call       ; err: .bls_bad_type, below, looks for what is pending
     V_UNPACK rax, rdx
     test rax, rax
     jz .bls_bad_type
@@ -2364,7 +2418,10 @@ extern str_set_length
     jmp .bls_iter_loop
 
 .bls_iter_reject:
-    ; -1 = not an integer at all, -2 = an integer outside range(0, 256).
+    ; -1 = not an integer at all, -2 = an integer outside range(0, 256),
+    ; -3 = its __index__ raised, and that is already the pending exception.
+    cmp edx, -3
+    je .bls_fail
     mov rdi, [rax + rcx*8]      ; the offending item, for the message
     cmp edx, -2
     je .bls_iter_range
@@ -2383,8 +2440,8 @@ extern str_set_length
     mov rdi, [rbp - BLS_LIST]
     call obj_decref
     jmp .bls_empty
-    ; raise_exception abandons this frame, so the list and the buffer have to
-    ; go first or a loop that keeps catching the error keeps leaking them.
+    ; The list and the buffer, whichever are live: every refusal gives them
+    ; back before it returns.
 .bls_release:
     mov rdi, [rbp - BLS_LIST]
     test rdi, rdi
@@ -2405,16 +2462,18 @@ extern str_set_length
     ; that will not fit in a byte is a ValueError.
     mov [rbp - BLS_BADITEM], rdi
     call .bls_release
-    extern raise_type_error_with_name
+    extern set_type_error_with_name
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
     mov rsi, [rbp - BLS_BADITEM]
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bls_fail
 .bls_iter_range:
     call .bls_release
     lea rdi, [rel exc_ValueError_type]
     ; bytes() and bytearray() word this differently; the caller says which.
     mov rsi, [rbp - BLS_RANGEMSG]
-    call raise_exception
+    call set_exception
+    jmp .bls_fail
 
     ; bytes(s, encoding[, errors]) / bytearray(s, encoding[, errors]).  The
     ; arguments are str.encode's, in str.encode's order, so that is what runs
@@ -2455,6 +2514,7 @@ extern str_set_length
     mov rsi, [rbp - BLS_NARGS]
     extern str_method_encode
     call str_method_encode
+    ERR_NULL .bls_bad_type      ; which propagates what is pending
     V_UNPACK rax, rdx
     test rax, rax
     jz .bls_bad_type
@@ -2482,28 +2542,29 @@ extern str_set_length
 
 .bls_count_overflow:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, \
-          "cannot fit 'int' into an index-sized integer"
+    FAIL exc_OverflowError_type, \
+          "cannot fit 'int' into an index-sized integer", .bls_fail
 .bls_negative:
-    RAISE exc_ValueError_type, "negative count"
+    FAIL exc_ValueError_type, "negative count", .bls_fail
 .bls_enc_no_str:
-    RAISE exc_TypeError_type, "encoding without a string argument"
+    FAIL exc_TypeError_type, "encoding without a string argument", .bls_fail
 .bls_enc_bad_encoding:
     mov rdi, [rbp - BLS_ARGS]
     mov rsi, [rdi + 8]
     mov rdi, [rbp - BLS_ENCMSG]
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bls_fail
 .bls_need_encoding:
-    RAISE exc_TypeError_type, "string argument without an encoding"
+    FAIL exc_TypeError_type, "string argument without an encoding", .bls_fail
 .bls_too_many:
     ; Which constructor this is comes from the range message the caller set:
     ; both go through byteslike_source, and CPython names each.
     mov rsi, [rbp - BLS_NARGS]
     CSTRING rdx, " given)"
     mov rdi, [rbp - BLS_ARITY]
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .bls_fail
 .bls_bad_type:
     ; Reached both when the argument is the wrong TYPE and when materialising
     ; it RAISED -- list_type_call answers 0 for either.  Substituting "cannot
@@ -2515,20 +2576,27 @@ extern str_set_length
     mov rdi, [rbp - BLS_ARGS]
     mov rsi, [rdi]
     mov rdi, [rbp - BLS_CONVMSG]
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
 
 .bls_propagate:
-    ; A (0, 0) return means "empty", so there is no value to report failure
-    ; with: the exception already pending is carried out the way every other
-    ; error in this function leaves, non-locally.
+.bls_fail:
+    ; The one error exit: (0, 0) with the exception pending, which is what
+    ; tells it from "empty".
+    call .bls_release
+    xor eax, eax
+    xor edx, edx
     pop r12
     pop rbx
     leave
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
+    ret
 END_FUNC byteslike_source
 
+;; ============================================================================
+;; bytes_type_call(type, args, nargs) -> (rax, edx) = a PyBytesObject*, TAG_PTR
+;; Fails: 0
+;; Constructor: bytes(...), with the passed-in type for a subclass.  A refusal
+;; is (0, 0), as every tp_new answers one.
+;; ============================================================================
 BTC_TYPE  equ 8
 BTC_BUF   equ 16
 BTC_LEN   equ 24
@@ -2558,7 +2626,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rdi, rax
     CSTRING rsi, "__bytes__"
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .btc_dunder_absent
     test rax, rax
     jz .btc_dunder_absent               ; absent, not callable, or it raised
     V_TEST_PTR rax, rcx
@@ -2606,12 +2674,16 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     call obj_decref                     ; the dunder's answer was ours
     jmp .btc_have_buf
 .btc_dunder_bad:
+    mov [rbp - BTC_BUF], rax            ; the answer: ours, and named below
     mov rdi, rax
     ; "__bytes__ returned non-bytes (type int)" -- the type is the point.
     CSTRING rsi, "__bytes__ returned non-bytes (type "
     CSTRING rdx, ")"
-    extern raise_typed_message
-    call raise_typed_message
+    extern set_typed_message
+    call set_typed_message
+    mov rdi, [rbp - BTC_BUF]
+    DECREF_V rdi, rax
+    jmp .btc_propagate
 .btc_dunder_absent:
     cmp qword [gs:ThreadState.current_exception], 0
     jne .btc_propagate                  ; it raised: that is the answer
@@ -2625,6 +2697,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     lea r8, [rel bytes_arity_msg]
     lea r9, [rel bytes_conv_msg]
     call byteslike_source
+    ERR_PENDING .btc_propagate
     mov [rbp - BTC_BUF], rax
     mov [rbp - BTC_LEN], rdx
 
@@ -2686,11 +2759,10 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     leave
     ret
 .btc_propagate:
-    PUBLISH_SP
+    RET_NULL                    ; the exception is pending
     pop rbx
     leave
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
+    ret
 END_FUNC bytes_type_call
 
 ;; ============================================================================

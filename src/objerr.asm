@@ -1,14 +1,18 @@
 ; objerr.asm - the arity and receiver error messages.
 ;
 ; Split out of object.asm, which reached the 100k cap that src/compiler/lint.py
-; enforces.  The seam is the one object.asm already had: these six build a
-; message into a stack buffer and hand it to raise_exception, and none of them
-; returns.  They share nothing with the object protocol above them but the two
-; append helpers, and every one of them exists for the same reason -- CPython
-; reports the count and the receiver it actually got, and this tree used to
-; report the rule and leave the caller to guess what it had passed.
+; enforces.  The seam is the one object.asm already had: each of these builds
+; a message into a stack buffer and records the exception.  They share nothing
+; with the object protocol above them but the two append helpers, and every
+; one of them exists for the same reason -- CPython reports the count and the
+; receiver it actually got, and this tree used to report the rule and leave
+; the caller to guess what it had passed.
 ;
-; The remaining raise_* helpers stay in object.asm: they are interleaved with
+; Every one RETURNS: set_<name> composes the message, records the exception
+; and answers 0.  The handful an opcode handler raises with have a jumping
+; twin, raise_<name>, in src/opcodes/raise.asm -- nothing here jumps.
+;
+; The remaining set_* helpers stay in object.asm: they are interleaved with
 ; value_type, dunder_require_self and the msg_append_* primitives they are
 ; built on, and cutting between them would mean moving those too.
 
@@ -24,8 +28,8 @@ extern rbt_typename
 extern value_type
 extern ap_strcmp
 
-; --- raising ---
-extern raise_exception
+; --- recording ---
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 
@@ -33,9 +37,10 @@ section .text
 
 
 ;; ============================================================================
-;; raise_type_error_counted(rdi = the text before the number, rsi = the count,
+;; set_type_error_counted(rdi = the text before the number, rsi = the count,
 ;;                          rdx = the text after it, or 0)
-;;   -> does not return: the composed message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a TypeError
 ;;
 ;; "str() takes at most 3 arguments (4 given)".  CPython reports the count in
 ;; every arity message and this tree reported it in almost none, so a caller
@@ -45,8 +50,8 @@ RTC_N     equ 8
 RTC_TAIL  equ 16
 RTC_BUF   equ 192
 RTC_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-global raise_type_error_counted
-DEF_FUNC raise_type_error_counted, RTC_FRAME
+global set_type_error_counted
+DEF_FUNC set_type_error_counted, RTC_FRAME
     mov [rbp - RTC_N], rsi
     mov [rbp - RTC_TAIL], rdx
     mov rsi, rdi
@@ -63,20 +68,23 @@ DEF_FUNC raise_type_error_counted, RTC_FRAME
 .rtc_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RTC_BUF]
-    call raise_exception
-END_FUNC raise_type_error_counted
+    call set_exception
+    leave
+    ret
+END_FUNC set_type_error_counted
 
 ;; ============================================================================
-;; raise_value_error_counted(rdi = the text before the number, rsi = the
+;; set_value_error_counted(rdi = the text before the number, rsi = the
 ;;                           count, rdx = the text after it, or 0)
-;;   -> does not return: the composed message is raised as a ValueError
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a ValueError
 ;;
-;; The same composition as raise_type_error_counted, for the messages that
+;; The same composition as set_type_error_counted, for the messages that
 ;; are ValueErrors: "Item 0 of second argument (exceptions) is not an
 ;; exception".
 ;; ============================================================================
-global raise_value_error_counted
-DEF_FUNC raise_value_error_counted, RTC_FRAME
+global set_value_error_counted
+DEF_FUNC set_value_error_counted, RTC_FRAME
     mov [rbp - RTC_N], rsi
     mov [rbp - RTC_TAIL], rdx
     mov rsi, rdi
@@ -94,14 +102,17 @@ DEF_FUNC raise_value_error_counted, RTC_FRAME
     extern exc_ValueError_type
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rbp - RTC_BUF]
-    call raise_exception
-END_FUNC raise_value_error_counted
+    call set_exception
+    leave
+    ret
+END_FUNC set_value_error_counted
 
 
 ;; ============================================================================
-;; raise_typed_message(rdi = a Value, rsi = the text before the type name,
+;; set_typed_message(rdi = a Value, rsi = the text before the type name,
 ;;                     rdx = the text after it, or 0)
-;;   -> does not return: a TypeError naming the argument's type
+;;   -> rax = 0, always, with the exception pending:
+;;      a TypeError naming the argument's type
 ;;
 ;; The shape CPython uses for a refusal that is about WHAT it was handed:
 ;; "argument of type 'ValueError' is not iterable", "__bytes__ returned
@@ -113,8 +124,8 @@ RTM_VAL    equ 8
 RTM_SUFFIX equ 16
 RTM_BUF    equ 224
 RTM_FRAME  equ 224          ; + 0 pushes = 224, 16-aligned
-global raise_typed_message
-DEF_FUNC raise_typed_message, RTM_FRAME
+global set_typed_message
+DEF_FUNC set_typed_message, RTM_FRAME
     mov [rbp - RTM_VAL], rdi
     mov [rbp - RTM_SUFFIX], rdx
     lea rdi, [rbp - RTM_BUF]
@@ -131,21 +142,23 @@ DEF_FUNC raise_typed_message, RTM_FRAME
 .rtm_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RTM_BUF]
-    call raise_exception
-    ud2
-END_FUNC raise_typed_message
+    call set_exception
+    leave
+    ret
+END_FUNC set_typed_message
 
 ;; ============================================================================
-;; raise_final_base(rdi = the type's name, as a C string)
-;;   -> does not return: the message is raised as a TypeError
+;; set_final_base(rdi = the type's name, as a C string)
+;;   -> rax = 0, always, with the exception pending:
+;;      the message, as a TypeError
 ;;
 ;; "type 'bool' is not an acceptable base type", for a type CPython gives no
 ;; Py_TPFLAGS_BASETYPE.
 ;; ============================================================================
 RFB_BUF   equ 176
 RFB_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-global raise_final_base
-DEF_FUNC raise_final_base, RFB_FRAME
+global set_final_base
+DEF_FUNC set_final_base, RFB_FRAME
     mov rdx, rdi
     lea rdi, [rbp - RFB_BUF]
     CSTRING rsi, "type '"
@@ -158,13 +171,15 @@ DEF_FUNC raise_final_base, RFB_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RFB_BUF]
-    call raise_exception
-END_FUNC raise_final_base
+    call set_exception
+    leave
+    ret
+END_FUNC set_final_base
 
 ;; ============================================================================
-;; raise_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
-;;                           Value)
-;;   -> does not return: the message is raised as a TypeError
+;; set_descriptor_receiver(rdi = the PyBuiltinObject, rsi = the receiver
+;;                         Value)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; CPython has two wordings here, and which one you get says what kind of
 ;; descriptor you reached:
@@ -177,8 +192,8 @@ RDR_DESC  equ 8
 RDR_RECV  equ 16
 RDR_BUF   equ 240
 RDR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
-global raise_descriptor_receiver
-DEF_FUNC raise_descriptor_receiver, RDR_FRAME
+global set_descriptor_receiver
+DEF_FUNC set_descriptor_receiver, RDR_FRAME
     mov [rbp - RDR_DESC], rdi
     mov [rbp - RDR_RECV], rsi
     lea rdi, [rbp - RDR_BUF]
@@ -226,7 +241,9 @@ DEF_FUNC raise_descriptor_receiver, RDR_FRAME
 .rdr_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RDR_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
 
 ;; The two names, appended at the cursor in rdi.
 .rdr_owner_name:
@@ -247,11 +264,11 @@ DEF_FUNC raise_descriptor_receiver, RDR_FRAME
 .rdr_recv_go:
     pop rdi
     jmp rbt_append_cstr
-END_FUNC raise_descriptor_receiver
+END_FUNC set_descriptor_receiver
 
 ;; ============================================================================
-;; raise_missing_receiver(rdi = the PyBuiltinObject)
-;;   -> does not return: the message is raised as a TypeError
+;; set_missing_receiver(rdi = the PyBuiltinObject)
+;;   -> rax = 0, always, with the TypeError pending
 ;;
 ;; A method descriptor or a slot wrapper reached UNBOUND and called with no
 ;; arguments at all.  There is no receiver to check, so raise_descriptor_
@@ -269,8 +286,8 @@ END_FUNC raise_descriptor_receiver
 RMR_DESC  equ 8
 RMR_BUF   equ 240
 RMR_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
-global raise_missing_receiver
-DEF_FUNC raise_missing_receiver, RMR_FRAME
+global set_missing_receiver
+DEF_FUNC set_missing_receiver, RMR_FRAME
     mov [rbp - RMR_DESC], rdi
     lea rdi, [rbp - RMR_BUF]
     mov rcx, [rbp - RMR_DESC]
@@ -310,7 +327,9 @@ DEF_FUNC raise_missing_receiver, RMR_FRAME
 .rmr_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RMR_BUF]
-    call raise_exception
+    call set_exception
+    leave
+    ret
 
 .rmr_owner_name:
     mov rcx, [rbp - RMR_DESC]
@@ -322,12 +341,13 @@ DEF_FUNC raise_missing_receiver, RMR_FRAME
     mov rsi, [rcx + PyBuiltinObject.func_name]
     lea rsi, [rsi + PyStrObject.data]
     jmp rbt_append_cstr
-END_FUNC raise_missing_receiver
+END_FUNC set_missing_receiver
 
 ;; ============================================================================
-;; raise_wrapper_arity(rdi = the number of arguments wanted, not counting
+;; set_wrapper_arity(rdi = the number of arguments wanted, not counting
 ;;                     self; rsi = the number given, likewise)
-;;   -> does not return: the message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the message, as a TypeError
 ;;
 ;; "expected 0 arguments, got 1" -- CPython's wording for a slot wrapper.
 ;; Every one of these said "expected exactly one argument", which is neither
@@ -337,8 +357,8 @@ RWA_WANT  equ 8
 RWA_GOT   equ 16
 RWA_BUF   equ 192
 RWA_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-global raise_wrapper_arity
-DEF_FUNC raise_wrapper_arity, RWA_FRAME
+global set_wrapper_arity
+DEF_FUNC set_wrapper_arity, RWA_FRAME
     mov [rbp - RWA_WANT], rdi
     mov [rbp - RWA_GOT], rsi
     lea rdi, [rbp - RWA_BUF]
@@ -372,14 +392,17 @@ DEF_FUNC raise_wrapper_arity, RWA_FRAME
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RWA_BUF]
-    call raise_exception
-END_FUNC raise_wrapper_arity
+    call set_exception
+    leave
+    ret
+END_FUNC set_wrapper_arity
 
 ;; ============================================================================
-;; raise_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
+;; set_builtin_arity(rdi = the PyBuiltinObject, rsi = the count given,
 ;;                     rdx = the count wanted, ecx = 0 too few / 1 too many)
 ;;   -- neither count includes self
-;;   -> does not return: the message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the message, as a TypeError
 ;;
 ;; CPython's shapes, which differ by whether the method takes a fixed number:
 ;;   list.append() takes exactly one argument (2 given)
@@ -398,8 +421,8 @@ RBA_WANT  equ 24
 RBA_OVER  equ 32            ; 1 = too many, 0 = too few
 RBA_BUF   equ 240
 RBA_FRAME equ 240           ; + 0 pushes = 240, 16-aligned
-global raise_builtin_arity
-DEF_FUNC raise_builtin_arity, RBA_FRAME
+global set_builtin_arity
+DEF_FUNC set_builtin_arity, RBA_FRAME
     mov [rbp - RBA_DESC], rdi
     mov [rbp - RBA_GOT], rsi
     mov [rbp - RBA_WANT], rdx
@@ -435,7 +458,8 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
 .rba_wrapper:
     mov rdi, [rbp - RBA_WANT]
     mov rsi, [rbp - RBA_GOT]
-    jmp raise_wrapper_arity
+    leave
+    jmp set_wrapper_arity
 
 .rba_method:
     lea rdi, [rbp - RBA_BUF]
@@ -506,14 +530,16 @@ DEF_FUNC raise_builtin_arity, RBA_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RBA_BUF]
-    call raise_exception
-END_FUNC raise_builtin_arity
+    call set_exception
+    leave
+    ret
+END_FUNC set_builtin_arity
 
 ;; ============================================================================
-;; raise_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
-;;                     argument as a Value, edx = 0 no argument / 1 not a type
-;;                     / 2 not a subtype)
-;;   -> does not return: the composed message is raised as a TypeError
+;; set_new_bad_class(rdi = the type whose __new__ this is, rsi = the class
+;;                   argument as a Value, edx = 0 no argument / 1 not a type
+;;                   / 2 not a subtype / 3 not safe)
+;;   -> rax = 0, always, with the composed TypeError pending
 ;;
 ;; The three ways `T.__new__(cls, ...)` can be called wrongly, worded as
 ;; CPython words them:
@@ -531,8 +557,8 @@ RNB_ARG   equ 16
 RNB_WHY   equ 24
 RNB_BUF   equ 400
 RNB_FRAME equ 400           ; + 0 pushes = 400, 16-aligned
-global raise_new_bad_class
-DEF_FUNC raise_new_bad_class, RNB_FRAME
+global set_new_bad_class
+DEF_FUNC set_new_bad_class, RNB_FRAME
     mov [rbp - RNB_OWNER], rdi
     mov [rbp - RNB_ARG], rsi
     mov [rbp - RNB_WHY], rdx
@@ -600,7 +626,10 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
 .rnb_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RNB_BUF]
-    call raise_exception
+    call set_exception
+    xor eax, eax
+    leave
+    ret
 
 ;; The two names, appended at the cursor in rdi.  The argument is a class here
 ;; -- reason 2 is the only caller -- so its own tp_name is what to print, not
@@ -613,7 +642,7 @@ DEF_FUNC raise_new_bad_class, RNB_FRAME
     mov rcx, [rbp - RNB_ARG]
     mov rsi, [rcx + PyTypeObject.tp_name]
     jmp rbt_append_cstr
-END_FUNC raise_new_bad_class
+END_FUNC set_new_bad_class
 
 ;; ============================================================================
 ;; obj_getattr_str_opt(rdi = an object, rsi = an attribute name as a C string)
@@ -669,9 +698,10 @@ DEF_FUNC_LOCAL obj_getattr_str_opt, RAC_FRAME
 END_FUNC obj_getattr_str_opt
 
 ;; ============================================================================
-;; raise_callable_arg(rdi = the callable, rsi = a C string to append,
+;; set_callable_arg(rdi = the callable, rsi = a C string to append,
 ;;                    rdx = the text between them, rcx = a suffix or 0)
-;;   -> does not return: the composed message is raised as a TypeError
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a TypeError
 ;;
 ;; "__main__.f() argument after ** must be a mapping, not int", and
 ;; "__main__.f() got multiple values for keyword argument 'a'".  CPython names
@@ -691,8 +721,8 @@ RCA_HELD  equ 40
 RCA_SUF   equ 48            ; a trailing quote, or 0
 RCA_BUF   equ 456
 RCA_FRAME equ 464           ; + 0 pushes = 464, 16-aligned
-global raise_callable_arg
-DEF_FUNC raise_callable_arg, RCA_FRAME
+global set_callable_arg
+DEF_FUNC set_callable_arg, RCA_FRAME
     mov [rbp - RCA_FUNC], rdi
     mov [rbp - RCA_ARG], rsi
     mov [rbp - RCA_MID], rdx
@@ -771,12 +801,15 @@ DEF_FUNC raise_callable_arg, RCA_FRAME
 .rca_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RCA_BUF]
-    call raise_exception
-END_FUNC raise_callable_arg
+    call set_exception
+    leave
+    ret
+END_FUNC set_callable_arg
 
 ;; ============================================================================
-;; raise_missing_arguments(rdi = the PyFuncObject, rsi = its half-filled frame)
-;;   -> does not return: the composed message is raised as a TypeError
+;; set_missing_arguments(rdi = the PyFuncObject, rsi = its half-filled frame)
+;;   -> rax = 0, always, with the exception pending:
+;;      the composed message, as a TypeError.  The frame is freed.
 ;;
 ;;   f() missing 1 required positional argument: 'b'
 ;;   f() missing 2 required positional arguments: 'a' and 'b'
@@ -824,8 +857,8 @@ RMA_FRAME   equ RMA_BUF        ; + 4 pushes = 640, 16-aligned
 
 extern frame_free
 
-global raise_missing_arguments
-DEF_FUNC raise_missing_arguments, RMA_FRAME
+global set_missing_arguments
+DEF_FUNC set_missing_arguments, RMA_FRAME
     push rbx
     push r12
     push r13
@@ -967,7 +1000,15 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
     call frame_free
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RMA_BUF]
-    call raise_exception
+    call set_exception
+.rma_ret:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .rma_nothing_missing:
     ; Unreachable from func_call, which only comes here having found an empty
@@ -977,7 +1018,8 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
     call frame_free
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "function missing required argument"
-    call raise_exception
+    call set_exception
+    jmp .rma_ret
 
 ;; rdi = frame, esi = first slot, edx = one past the last
 ;;   -> eax = how many of those slots are empty
@@ -996,16 +1038,14 @@ DEF_FUNC raise_missing_arguments, RMA_FRAME
     jmp .rma_count_loop
 .rma_count_done:
     ret
-END_FUNC raise_missing_arguments
+END_FUNC set_missing_arguments
 
 ;; ============================================================================
 ;; The AttributeError every failed attribute access ends in.  It moved here
 ;; from object.asm, which crossed the 100k cap when the two attributes CPython
 ;; hangs on the exception were added -- and this is objerr.asm's subject
-;; exactly: a message built into a buffer and handed to a raise that does not
-;; return.
+;; exactly: a message built into a buffer and recorded.
 ;; ============================================================================
-extern eval_exception_unwind
 extern value_type
 extern module_type
 extern str_type
@@ -1013,15 +1053,18 @@ extern exc_AttributeError_type
 extern exc_isinstance
 extern exc_from_cstr
 extern exc_setattr
-extern raise_exception_obj
 extern str_intern_cstr
 extern dict_get
 extern obj_decref
 extern none_singleton
 ;; ============================================================================
-;; raise_no_attribute(rdi = the object as a Value, rsi = the attribute name,
+;; set_attribute_error(rdi = the object as a Value, rsi = the attribute name,
 ;;                     edx = 1 for a store or a delete, 0 for a read)
-;;   -> does not return: the AttributeError CPython raises
+;;   -> rax = 0, always, with the AttributeError CPython raises pending
+;;
+;; What LOAD_ATTR ends in when nothing answered.  If a __getattr__ hook has
+;; already raised an AttributeError of its own (attr_error_pending), that one
+;; is kept and only completed; otherwise a fresh one is composed.
 ;;
 ;; The message names both nouns -- a module and a class name THEMSELVES rather
 ;; than their type, because "'module' object has no attribute 'zzz'" tells a
@@ -1032,30 +1075,27 @@ extern none_singleton
 RNA_OBJ   equ 8
 RNA_NAME  equ 16
 RNA_ISSET equ 24            ; 1 for a store or a delete, 0 for a read
-RNA_NORET equ 32            ; 1 from set_no_attribute: install, then RETURN
-; The message is built in the frame rather than in object.asm's shared rtn_buf:
-; that buffer stayed behind, and a raiser that never returns has no reason to
-; want a static one.
+; The message is built in the frame rather than in object.asm's shared
+; rtn_buf, which stayed behind.
 RNA_BUFSZ equ 512
 RNA_BUF   equ 32 + RNA_BUFSZ
 RNA_FRAME equ RNA_BUF       ; + 2 pushes, 16-aligned
 
-; .rna_set_attr's own frame, which is its own rbp and not raise_no_attribute's.
+; .rna_set_attr's own frame, which is its own rbp and not set_attribute_error's.
 RSA_VAL   equ 8
 RSA_NAME  equ 16
 RSA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 extern str_type
-DEF_FUNC raise_no_attribute, RNA_FRAME
+global set_attribute_error
+DEF_FUNC set_attribute_error, RNA_FRAME
     push rbx
     push r12
     ; A __getattr__ that raised AttributeError already said what it wanted
     ; said.  Replacing it here with a generic message threw that away, so
-    ; instance_getattr hands it over with this flag rather than unwinding --
-    ; which would skip getattr()'s and hasattr()'s own frames.
+    ; instance_getattr hands it over with this flag.
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov [rbp - RNA_ISSET], rdx
-    mov qword [rbp - RNA_NORET], 0
     cmp qword [gs:ThreadState.attr_error_pending], 0
     je .rna_fresh
     mov qword [gs:ThreadState.attr_error_pending], 0
@@ -1073,7 +1113,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     extern exc_AttributeError_type
     lea rsi, [rel exc_AttributeError_type]
     extern exc_isinstance
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .rna_pending_raise
     mov rdi, [rbx + PyExceptionObject.exc_dict]
@@ -1089,6 +1129,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov rsi, r12
     extern dict_get
     call dict_get
+    ERR_DICT_GET .rna_name_raised   ; from the register: an exception IS pending here
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned
     mov rdi, r12
@@ -1112,11 +1153,17 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call .rna_set_attr
 
 .rna_pending_raise:
-    pop r12
-    pop rbx
-    leave
-    PUBLISH_SP
-    jmp eval_exception_unwind
+    ; The hook's own AttributeError goes out.  This used to republish the
+    ; handler's stack pointer and jump, which told the unwinder that
+    ; LOAD_ATTR had released the receiver it had only popped: one object
+    ; leaked per `o.x` whose __getattr__ said no.
+    jmp .rna_return
+.rna_name_raised:
+    ; The pending AttributeError's own dict could not be searched, and what
+    ; that raised has taken its place: it is what goes out.
+    mov rdi, r12
+    call obj_decref
+    jmp .rna_pending_raise
 .rna_fresh:
     push rdi
     call value_type
@@ -1307,22 +1354,14 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call .rna_set_attr
 
 .rna_installed:
-    cmp qword [rbp - RNA_NORET], 0
-    jne .rna_return
-    ; The tail raise_exception has: it does not republish PyFrame.disp_sp
-    ; either, because every caller here is inside a helper the opcode called
-    ; rather than an opcode that has popped operands of its own.
-    leave
-    jmp eval_exception_unwind
+    jmp .rna_return
 
 .rna_bare:
     ; A store, a delete, or an exc_from_cstr that could not allocate.
-    cmp qword [rbp - RNA_NORET], 0
-    jne .rna_return
     lea rdi, [rel exc_AttributeError_type]
     mov rsi, rbx
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .rna_return
 
 ;; A local helper, not a DEF_FUNC: rbx is the exception and rdi/rsi are the
 ;; name and the value.  A NULL value is None, which is what CPython stores
@@ -1345,7 +1384,7 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov rsi, rax
     mov ecx, TAG_PTR                    ; rdx is already a Value
     extern exc_setattr
-    call exc_setattr
+    call exc_setattr        ; err: no field name, so no refusal
     mov rdi, [rbp - RSA_NAME]
     call obj_decref                     ; str_intern_cstr's; dict_set took one
 .rsa_done:
@@ -1353,24 +1392,23 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     ret
 
 .rna_return:
-    ; set_no_attribute's exit: the exception is installed and pending, and
-    ; the caller hands back NULL itself.
+    ; The one exit: the exception is installed and pending.
     lea rsp, [rbp - RNA_FRAME - 16]
+    xor eax, eax
     pop r12
     pop rbx
     leave
     ret
-END_FUNC raise_no_attribute
+END_FUNC set_attribute_error
 
 ;; ============================================================================
 ;; set_no_attribute(rdi = the object as a Value, rsi = the attribute name)
-;;   -> returns, with that same AttributeError installed in current_exception
+;;   -> rax = 0, always, with that same AttributeError pending
 ;;
-;; raise_no_attribute's read form, for a lookup that has to say "absent" to a
-;; caller that may swallow it.  A __slots__ slot never assigned is one:
-;; unwinding from inside instance_getattr skipped hasattr()'s and getattr()'s
-;; own native frames, so `hasattr(o, "slot")` RAISED instead of answering
-;; False.  The prologue is raise_no_attribute's, so its body can be shared.
+;; set_attribute_error's read form with nothing consulted first: always a
+;; fresh AttributeError, whatever a hook left pending.  A __slots__ slot never
+;; assigned is one caller.  The prologue is set_attribute_error's, so its body
+;; can be shared.
 ;; ============================================================================
 DEF_FUNC set_no_attribute, RNA_FRAME
     push rbx
@@ -1378,19 +1416,76 @@ DEF_FUNC set_no_attribute, RNA_FRAME
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov qword [rbp - RNA_ISSET], 0
-    mov qword [rbp - RNA_NORET], 1
     xor edx, edx
-    jmp raise_no_attribute.rna_fresh
+    jmp set_attribute_error.rna_fresh
 END_FUNC set_no_attribute
 
+;; set_no_attribute_store(rdi = the object as a Value, rsi = the name)
+;;   -> rax = 0, always, with the AttributeError pending
+;;
+;; The store-or-delete form: the same sentence, and neither `.name` nor
+;; `.obj` filled in, which is CPython's split.  setattr(5, "x", 1) and
+;; delattr(5, "x") are its callers.
+global set_no_attribute_store
+DEF_FUNC set_no_attribute_store, RNA_FRAME
+    push rbx
+    push r12
+    mov [rbp - RNA_NAME], rsi
+    mov [rbp - RNA_OBJ], rdi
+    mov qword [rbp - RNA_ISSET], 1
+    jmp set_attribute_error.rna_fresh
+END_FUNC set_no_attribute_store
+
 ;; ============================================================================
-;; raise_unexpected_keyword(rdi = the function, rsi = its frame,
+;; method_one_arg_check(rsi = nargs, self included, rdx = the no-keywords
+;;                      sentence, rcx = the arity sentence up to its count)
+;;   -> rax = 1 when the call is self and exactly one positional argument
+;; Fails: 0
+;;
+;; CPython's METH_O, for a method written here as (args, nargs): "property.
+;; getter() takes no keyword arguments", "property.getter() takes exactly one
+;; argument (2 given)".  kw_names_pending is consumed either way.  A method
+;; that only counted its arguments took a keyword's VALUE for the argument
+;; and left the name pending for whatever it called next.
+;; ============================================================================
+MOA_N     equ 8
+MOA_ARITY equ 16
+MOA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global method_one_arg_check
+DEF_FUNC method_one_arg_check, MOA_FRAME
+    mov [rbp - MOA_N], rsi
+    mov [rbp - MOA_ARITY], rcx
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je .moa_no_kw
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, rdx
+    call set_exception          ; rax = 0
+    leave
+    ret
+.moa_no_kw:
+    mov eax, 1
+    cmp qword [rbp - MOA_N], 2
+    je .moa_out
+    mov rdi, [rbp - MOA_ARITY]
+    mov rsi, [rbp - MOA_N]
+    dec rsi                     ; self does not count
+    CSTRING rdx, " given)"
+    call set_type_error_counted ; rax = 0
+.moa_out:
+    leave
+    ret
+END_FUNC method_one_arg_check
+
+;; ============================================================================
+;; set_unexpected_keyword(rdi = the function, rsi = its frame,
 ;;                          rdx = the keyword's name, a str)
-;;   -> does not return: "h() got an unexpected keyword argument 'nosuch'"
+;;   -> rax = 0, always, with the exception pending:
+;;      "h() got an unexpected keyword argument 'nosuch'"
 ;;
 ;; CPython names the function by its __qualname__ and quotes the keyword; the
 ;; bare "got an unexpected keyword argument" said neither.  The frame is freed
-;; here, as raise_missing_arguments frees it: the caller was part-way through
+;; here, as set_missing_arguments frees it: the caller was part-way through
 ;; filling it and never gets control back.
 ;; ============================================================================
 RUK_FUNC    equ 8
@@ -1403,8 +1498,8 @@ RUK_BUFLEN  equ 256
 RUK_BUF     equ RUK_SLOTS + RUK_BUFLEN
 RUK_FRAME   equ RUK_BUF                 ; 288, 16-aligned with no pushes
 
-global raise_unexpected_keyword
-DEF_FUNC raise_unexpected_keyword, RUK_FRAME
+global set_unexpected_keyword
+DEF_FUNC set_unexpected_keyword, RUK_FRAME
     mov [rbp - RUK_FUNC], rdi
     mov [rbp - RUK_FRAME_P], rsi
     mov [rbp - RUK_NAME], rdx
@@ -1441,5 +1536,7 @@ DEF_FUNC raise_unexpected_keyword, RUK_FRAME
     call frame_free
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - RUK_BUF]
-    call raise_exception
-END_FUNC raise_unexpected_keyword
+    call set_exception
+    leave
+    ret
+END_FUNC set_unexpected_keyword

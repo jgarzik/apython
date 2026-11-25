@@ -21,6 +21,7 @@
 %include "object.inc"
 %include "value.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -30,7 +31,7 @@ extern str_type
 extern str_cp_at
 extern builtin_func_new
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern int_from_i64
 extern udp_run_lookup
 extern ucd32_normalize
@@ -107,9 +108,10 @@ DEF_FUNC ucd32_%1
     leave
     ret
 .type:
-    RAISE exc_TypeError_type, %3
 .arity:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3      ; rax = 0, the failed call's answer
+    leave
+    ret
 END_FUNC ucd32_%1
 %endmacro
 
@@ -138,9 +140,10 @@ DEF_FUNC ucd32_%1
     leave
     ret
 .type:
-    RAISE exc_TypeError_type, %3
 .arity:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3      ; rax = 0, the failed call's answer
+    leave
+    ret
 END_FUNC ucd32_%1
 %endmacro
 
@@ -189,7 +192,7 @@ DEF_FUNC ucd32_module_create, UMC_FRAME
     mov rdx, rax
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rax
     call obj_decref

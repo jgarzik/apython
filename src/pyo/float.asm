@@ -9,6 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern set_exception
 extern int_promote_mpz
 extern str_from_cstr
 extern bool_true
@@ -16,7 +17,6 @@ extern bool_false
 extern none_singleton
 extern int_from_i64
 extern int_type
-extern raise_exception
 extern exc_ZeroDivisionError_type
 extern exc_OverflowError_type
 extern exc_ValueError_type
@@ -885,7 +885,9 @@ FB_FRAME  equ 48            ; + 0 pushes = 48
     mov rax, [rax + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
     jnz %%ok
-    RAISE exc_OverflowError_type, "int too large to convert to float"
+    SET_EXC exc_OverflowError_type, "int too large to convert to float"
+    leave                       ; every user has FB_FRAME and no pushes yet
+    ret                         ; rax = 0, with it pending
 %%ok:
 %endmacro
 
@@ -948,7 +950,9 @@ DEF_FUNC float_truediv, FB_FRAME
     ret
 
 .div_zero:
-    RAISE exc_ZeroDivisionError_type, "float division by zero"
+    SET_EXC exc_ZeroDivisionError_type, "float division by zero"
+    leave
+    ret
 END_FUNC float_truediv
 
 DEF_FUNC float_floordiv, FB_FRAME
@@ -974,7 +978,9 @@ DEF_FUNC float_floordiv, FB_FRAME
     ret
 
 .floordiv_zero:
-    RAISE exc_ZeroDivisionError_type, "float floor division by zero"
+    SET_EXC exc_ZeroDivisionError_type, "float floor division by zero"
+    leave
+    ret
 END_FUNC float_floordiv
 
 DEF_FUNC float_mod, FB_FRAME
@@ -1005,7 +1011,9 @@ DEF_FUNC float_mod, FB_FRAME
     ret
 
 .mod_zero:
-    RAISE exc_ZeroDivisionError_type, "float modulo"
+    SET_EXC exc_ZeroDivisionError_type, "float modulo"
+    leave
+    ret
 END_FUNC float_mod
 
 ;; ============================================================================
@@ -1090,6 +1098,7 @@ END_FUNC float_pos
 ;;
 ;; libm's pow is the one that is specified for all of them (C99 Annex F), so
 ;; the guards below are only the cases CPython settles before calling it.
+;; Fails: 0?
 ;; ============================================================================
 FP_LEFT   equ 8             ; iv
 FP_RIGHT  equ 16            ; iw
@@ -1281,12 +1290,16 @@ DEF_FUNC float_pow, FB_FRAME
     jmp .fpow_out
 
 .fpow_zero_div:
-    RAISE exc_ZeroDivisionError_type, "0.0 cannot be raised to a negative power"
+    SET_EXC exc_ZeroDivisionError_type, "0.0 cannot be raised to a negative power"
+    leave
+    ret
 
 .fpow_overflow:
     ; CPython builds this one from errno, so its args are the pair
     ; (34, 'Numerical result out of range') and str() renders the tuple.
-    RAISE exc_OverflowError_type, "(34, 'Numerical result out of range')"
+    SET_EXC exc_OverflowError_type, "(34, 'Numerical result out of range')"
+    leave
+    ret
 END_FUNC float_pow
 
 ;; ============================================================================
@@ -1345,6 +1358,7 @@ section .text
 ;; digit, so the answer is zero or a single power of ten.
 ;;
 ;; Frame: aligned for libc's SSE, as float_repr's is.
+;; Fails: -1
 ;; ============================================================================
 FRN_X     equ 8               ; the original double
 FRN_ND    equ 16              ; ndigits
@@ -1565,11 +1579,15 @@ DEF_FUNC float_round_ndigits, FRN_FRAME
     andpd xmm2, [rel frn_absmask]
     ucomisd xmm2, xmm1
     je .frn_overflow
+    xor eax, eax
     leave
     ret
 
 .frn_overflow:
-    RAISE exc_OverflowError_type, "rounded value too large to represent"
+    SET_EXC exc_OverflowError_type, "rounded value too large to represent"
+    mov rax, -1
+    leave
+    ret
 
 .frn_underflow:
     ; k <= 0.  Everything rounds to a signed zero except the one case where
@@ -1636,11 +1654,13 @@ DEF_FUNC float_round_ndigits, FRN_FRAME
     andnpd xmm2, xmm0
     orpd xmm2, xmm1
     movapd xmm0, xmm2
+    xor eax, eax
     leave
     ret
 
 .frn_identity:
     movsd xmm0, [rbp - FRN_X]
+    xor eax, eax
     leave
     ret
 END_FUNC float_round_ndigits
@@ -1708,6 +1728,7 @@ END_FUNC float_parse_exp10
 ;; instance whose double sits inline at the base's offset.  It used to take
 ;; raw double bits, which every caller had to know and which made it the one
 ;; slot a generic thunk could not call.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC float_int
     V_TEST_PTR rdi, rax
@@ -1774,10 +1795,14 @@ DEF_FUNC float_int
     ret
 
 .not_a_number:
-    RAISE exc_ValueError_type, "cannot convert float NaN to integer"
+    SET_EXC exc_ValueError_type, "cannot convert float NaN to integer"
+    leave
+    ret
 .is_infinite:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "cannot convert float infinity to integer"
+    SET_EXC exc_OverflowError_type, "cannot convert float infinity to integer"
+    leave
+    ret
 END_FUNC float_int
 
 ;; ============================================================================

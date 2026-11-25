@@ -27,8 +27,7 @@ extern obj_dealloc
 extern obj_incref
 extern none_singleton
 extern exc_TypeError_type
-extern raise_exception
-extern eval_exception_unwind
+extern set_exception
 extern property_type
 extern property_construct
 
@@ -75,8 +74,7 @@ DEF_FUNC prop_new_of, PNO_FRAME
     xor esi, esi
     xor edx, edx
     call property_construct
-    test rax, rax
-    jz .pno_out
+    ERR_NULL .pno_out
     mov rbx, rax
     mov [rbp - PNO_ARGS], rax               ; args[0] = self
 
@@ -84,8 +82,7 @@ DEF_FUNC prop_new_of, PNO_FRAME
     mov rsi, [rbp - PNO_N]
     inc rsi                                 ; self as well
     call property_method_init
-    test rax, rax
-    jz .pno_failed
+    ERR_NULL .pno_failed
     mov rax, rbx
 .pno_out:
     pop rbx
@@ -102,6 +99,7 @@ END_FUNC prop_new_of
 
 ;; ============================================================================
 ;; staticmethod_method_init(rdi = args, rsi = nargs) -> a Value, always None
+;; Fails: 0
 ;;
 ;; staticmethod.__init__(self, callable).  The wrapped callable is a VALUE,
 ;; not a pointer: `staticmethod(0)` is an ordinary call.
@@ -124,11 +122,16 @@ DEF_FUNC staticmethod_method_init
     V_PACK rax, rdx
     ret
 .smi_bad:
-    RAISE exc_TypeError_type, "staticmethod expected 1 argument"
+    SET_EXC exc_TypeError_type, "staticmethod expected 1 argument"
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC staticmethod_method_init
 
 ;; ============================================================================
 ;; classmethod_method_init(rdi = args, rsi = nargs) -> a Value, always None
+;; Fails: 0
 ;;
 ;; classmethod.__init__(self, callable), and the same VALUE caveat.
 ;; ============================================================================
@@ -150,7 +153,11 @@ DEF_FUNC classmethod_method_init
     V_PACK rax, rdx
     ret
 .cmi_bad:
-    RAISE exc_TypeError_type, "classmethod expected 1 argument"
+    SET_EXC exc_TypeError_type, "classmethod expected 1 argument"
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC classmethod_method_init
 
 ;; Move one field out of the freshly parsed property and into self, releasing
@@ -166,6 +173,7 @@ END_FUNC classmethod_method_init
 
 ;; ============================================================================
 ;; property_method_init(rdi = args, rsi = nargs) -> a Value, always None
+;; Fails: 0
 ;;
 ;; property.__init__(self, fget, fset, fdel, doc), with all four
 ;; positional-or-keyword, which is a hundred lines of parsing in
@@ -193,6 +201,7 @@ DEF_FUNC property_method_init, PMI_FRAME
     lea rsi, [rdi + 8]
     lea rdi, [rel property_type]
     call property_construct                 ; -> rax = a parsed property
+    ERR_NULL .pmi_fail                      ; refused the arguments
     mov r12, rax
 
     PMI_MOVE prop_get
@@ -224,6 +233,8 @@ DEF_FUNC property_method_init, PMI_FRAME
     mov rdi, rbx
     mov rdx, r13                            ; the doc, a Value
     call rax
+    movsxd rax, eax
+    ERR_M1 .pmi_store_failed
 .pmi_done:
 
     mov rdi, r12                            ; the throwaway, now emptied
@@ -235,8 +246,19 @@ DEF_FUNC property_method_init, PMI_FRAME
     leave
     V_PACK rax, rdx
     ret
+.pmi_store_failed:                          ; a subclass's __setattr__ raised
+    mov rdi, r12                            ; the throwaway goes all the same
+    call obj_decref
+    jmp .pmi_fail
 .pmi_bad:
-    RAISE exc_TypeError_type, "property.__init__() needs an instance"
+    SET_EXC exc_TypeError_type, "property.__init__() needs an instance"
+.pmi_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 section .rodata
 pmi_doc_name: db "__doc__", 0

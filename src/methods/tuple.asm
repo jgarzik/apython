@@ -18,7 +18,6 @@ extern bool_false
 
 extern bool_true
 
-extern eval_exception_unwind
 
 extern exc_ValueError_type
 
@@ -28,14 +27,14 @@ extern int_to_i64
 
 extern obj_richcompare_bool
 
-extern raise_exception
+extern set_exception
 
 extern tuple_concat
 
 extern tuple_contains
 
 extern tuple_repeat
-extern seq_repeat_not_index
+extern set_seq_repeat_not_index
 
 extern tuple_subscript
 
@@ -55,6 +54,7 @@ DEF_FUNC tuple_dunder_contains
     mov rsi, [rdi + 8]      ; the item Value
     mov rdi, rax
     call tuple_contains
+    ERR_M1 .tdc_fail
     test eax, eax
     jz .tdc_false
     lea rax, [rel bool_true]
@@ -66,6 +66,10 @@ DEF_FUNC tuple_dunder_contains
     INCREF rax
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.tdc_fail:
+    xor eax, eax                ; an element's __eq__ raised
+    leave
     ret
 END_FUNC tuple_dunder_contains
 
@@ -100,9 +104,13 @@ DEF_FUNC_BARE tuple_dunder_mul
     mov rdi, rax
     push rsi                    ; one push: rsp is 16-aligned at the call
     call tuple_repeat
+    ERR_PENDING .tdm_fail
     pop rsi
     test rax, rax
-    jz seq_repeat_not_index
+    jz set_seq_repeat_not_index ; a tail call: its 0 is this dunder's own
+    ret
+.tdm_fail:
+    pop rsi                     ; the count raised, or was too large: rax is 0
     ret
 END_FUNC tuple_dunder_mul
 
@@ -115,14 +123,19 @@ DEF_FUNC_BARE tuple_dunder_rmul
     mov rdi, rax
     push rsi
     call tuple_repeat
+    ERR_PENDING .tdr_fail
     pop rsi
     test rax, rax
-    jz seq_repeat_not_index
+    jz set_seq_repeat_not_index ; a tail call: its 0 is this dunder's own
+    ret
+.tdr_fail:
+    pop rsi
     ret
 END_FUNC tuple_dunder_rmul
 
 ;; ============================================================================
 ;; tuple_method_index(args, nargs) -> SmallInt index
+;; Fails: 0
 ;; args[0]=self (tuple), args[1]=value, optional args[2]=start, args[3]=stop
 ;; ============================================================================
 TMI_ARGS  equ 8
@@ -149,6 +162,7 @@ DEF_FUNC tuple_method_index, 16
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
     call obj_as_slice_index
+    ERR_M1 .tindex_error_pop
     pop rcx
     mov rcx, rax
     ; Handle negative start
@@ -168,6 +182,7 @@ DEF_FUNC tuple_method_index, 16
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
     call obj_as_slice_index
+    ERR_M1 .tindex_error_pop
     pop rcx
     ; Handle negative stop
     test rax, rax
@@ -219,16 +234,24 @@ DEF_FUNC tuple_method_index, 16
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.tindex_error:
-    leave
-    jmp eval_exception_unwind
-
 .tindex_not_found:
-    RAISE exc_ValueError_type, "tuple.index(x): x not in tuple"
+    SET_EXC exc_ValueError_type, "tuple.index(x): x not in tuple"
+    jmp .tindex_error
+.tindex_error_pop:
+    add rsp, 8                  ; the start, parked across the conversion
+.tindex_error:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC tuple_method_index
 
 ;; ============================================================================
 ;; tuple_method_count(args, nargs) -> SmallInt
+;; Fails: 0
 ;; args[0]=self (tuple), args[1]=value
 ;; ============================================================================
 TCT_IDX   equ 8
@@ -279,8 +302,12 @@ DEF_FUNC tuple_method_count, TCT_FRAME
     ret
 
 .tcount_error:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC tuple_method_count
 
 ;; ============================================================================

@@ -9,6 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set
 extern ap_malloc
 extern ap_free
 extern obj_dealloc
@@ -573,7 +574,6 @@ FTL_N       equ 40
 FTL_FRAME   equ 56        ; + 1 push = 64
 global frame_fast_to_locals
 extern dict_new
-extern dict_set
 extern cell_type
 DEF_FUNC frame_fast_to_locals, FTL_FRAME
     push rbx
@@ -632,6 +632,7 @@ DEF_FUNC frame_fast_to_locals, FTL_FRAME
     jz .ftl_next
     mov rdi, [rbp - FTL_DICT]
     call dict_set
+    ERR_M1 .ftl_fail            ; f_locals held a key that would not compare
 .ftl_next:
     inc qword [rbp - FTL_I]
     jmp .ftl_loop

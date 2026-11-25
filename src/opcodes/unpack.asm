@@ -149,7 +149,7 @@ DEF_FUNC_BARE op_unpack_sequence
     extern tuple_type_call
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call            ; raises for a non-iterable
+    call tuple_type_call            ; raises for a non-iterable -- err: the 0 is tested just below
     add rsp, 32
     pop rcx                         ; expected count
     test rax, rax
@@ -579,7 +579,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rbp - UEX_RESTL]
     ; edx = item tag from .ue_getitem (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append           ; list_append does INCREF
+    call list_append           ; list_append does INCREF -- err: a list built here is not being sorted
     inc qword [rbp - UEX_I]
     dec qword [rbp - UEX_N]
     jmp .ue_rest_loop
@@ -625,6 +625,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rbp - UEX_IPAY]
     mov esi, TAG_PTR
     call get_iterator_opt       ; see the note in .extend_generic
+    ERR_PENDING_JUMP
     test rax, rax
     jz .ue_type_error
     mov [rbp - UEX_ITER], rax
@@ -654,7 +655,7 @@ DEF_FUNC op_unpack_ex
     mov rdi, [rbp - UEX_TMPL]
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - UEX_I]
     mov rsi, [rbp - UEX_N]
     DECREF_VAL rdi, rsi

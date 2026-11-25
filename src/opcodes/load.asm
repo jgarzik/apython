@@ -16,13 +16,14 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_index
+extern dict_get_mro
+extern dict_get
 extern exc_TypeError_type
 
 section .text
 
 extern eval_dispatch
-extern dict_get
-extern dict_get_index
 extern instance_setattr
 extern raise_exception
 extern obj_incref
@@ -139,6 +140,7 @@ DEF_FUNC_BARE op_load_global
     mov rsi, [rsp]             ; rsi = name
     mov edx, TAG_PTR
     call dict_get_index
+    ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .try_builtins
 
@@ -171,6 +173,7 @@ DEF_FUNC_BARE op_load_global
     push rsi                   ; save name for error message
     mov edx, TAG_PTR
     call dict_get_index
+    ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .not_found
 
@@ -254,6 +257,7 @@ DEF_FUNC_BARE op_load_name
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
     jmp .try_globals
@@ -261,16 +265,28 @@ DEF_FUNC_BARE op_load_name
 .locals_mapping:
     mov rsi, [rsp]             ; rsi = name
     extern mapping_getitem_opt
-    call mapping_getitem_opt
+    call mapping_getitem_opt    ; err: 0, absent or raised, falls through `jnz .found_owned`
     test rax, rax
     jnz .found_owned
     ; A miss RAISES for a mapping of its own, where a dict answers NULL.
     ; CPython clears a KeyError and lets anything else through; clearing
     ; whatever it was keeps the mapping's exception out of a name lookup that
     ; then succeeds in globals or in builtins.
+    ;
+    ; Only a KeyError, now: a builtin __getitem__ RETURNS its refusal, so the
+    ; TypeError a str or a list namespace answers a name with arrives here
+    ; too, and clearing it left the class body running in something that is
+    ; not a mapping at all.
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .try_globals
+    extern exc_isinstance
+    extern exc_KeyError_type
+    lea rsi, [rel exc_KeyError_type]
+    call exc_isinstance     ; err: a static type is never refused
+    test eax, eax
+    jz .locals_mapping_raised
+    mov rdi, [gs:ThreadState.current_exception]
     mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 
@@ -279,6 +295,7 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
@@ -287,6 +304,7 @@ DEF_FUNC_BARE op_load_name
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
@@ -301,6 +319,10 @@ DEF_FUNC_BARE op_load_name
     add rsp, 16                ; discard saved name and the pad
     VPUSH rax
     DISPATCH
+
+.locals_mapping_raised:
+    add rsp, 16                ; the name and the pad
+    jmp eval_exception_unwind
 
 .found:
     add rsp, 16                ; discard saved name and the pad
@@ -424,6 +446,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_OBJVAL]
     mov rsi, [rbp - LA_NAME]
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_resolve_tag_dict     ; found nothing: the tp_dicts still might
@@ -452,7 +475,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_tag_next
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .la_tag_found
@@ -507,6 +530,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; getattr(c, 'm') must still answer a bound method.
     mov ecx, 1
     call instance_getattr_where
+    GETATTR_HOOK_SKIP .la_getattr_done_v
+    ERR_PENDING_JUMP
     jmp .la_getattr_done_v
 .la_call_type_getattr:
     mov qword [rbp - LA_FROMMETA], 0
@@ -543,6 +568,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov qword [rbp - LA_FROMINST], 1
 .la_getattr_go:
     call rax
+    GETATTR_HOOK_SKIP .la_ga_ok
+    ERR_PENDING_JUMP
+.la_ga_ok:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .la_try_dict             ; tp_getattr returned NULL — fallback to tp_dict
@@ -703,7 +731,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, [rbp - LA_ATTR]   ; descriptor (attr)
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR             ; both are always heap pointers
-    call dunder_call_3
+    call dunder_call_3          ; err: .la_propagate, once both are released
     V_UNPACK rax, rdx           ; returns a Value
 
     ; rax = result from __get__, rdx = result tag
@@ -745,6 +773,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_OBJVAL]
     extern getset_descr_get
     call getset_descr_get       ; -> a Value
+    ERR_NULL_JUMP
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned
     mov rdi, [rbp - LA_ATTR]
@@ -866,6 +895,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov edx, TAG_PTR
     extern dict_get_index
     call dict_get_index
+    ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .la_simple_push             ; gone already: do not cache a miss
     cmp rax, 0xFFFF
@@ -937,7 +967,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rdi, rax
     xor esi, esi                   ; the receiver is decided further down
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     test eax, eax
     mov rax, [rbp - LA_ATTR]
     jnz .la_is_method_func
@@ -1236,7 +1266,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Call property_descr_get(property, obj)
     mov rdi, [rbp - LA_ATTR]   ; property descriptor
     mov rsi, [rbp - LA_OBJ]    ; obj
-    call property_descr_get
+    call property_descr_get    ; err: edx = 0 is offered to __getattr__ below
     ; A getter that raised an AttributeError has not failed -- it has said the
     ; attribute is absent, which is what __getattr__ is the hook for.  Asked
     ; here, before the object below is released, and before the tag says NULL.
@@ -1654,6 +1684,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     je .lsa_unbound                 ; super(C, None) is CPython's UNBOUND super
     extern obj_declared_class
     call obj_declared_class
+    ERR_PENDING .lsa_declared_raised
     test rax, rax
     jz .lsa_bad_self
     push rax
@@ -1732,7 +1763,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     push rax                       ; save current type
     push rax                       ; twice: rsp stays 16-byte aligned
     mov rsi, [rbp - LSA_NAME]      ; name
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
     pop rcx                        ; restore current type
@@ -1875,6 +1906,20 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     PUBLISH_SP
     RAISE exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
 
+.lsa_declared_raised:
+    ; A __class__ that raised.  The three operands are already off the stack
+    ; and global_super is already released, so unwinding from DISPATCH's
+    ; stack top -- which is what a jump out of obj_declared_class did --
+    ; released all three again: three `super(C, proxy).x` with such a proxy
+    ; freed super_type.  Release the two still held and say where the stack is.
+    mov rdi, [rbp - LSA_SELF]
+    DECREF_V rdi, rsi
+    mov rdi, [rbp - LSA_CLASS]
+    call obj_decref
+    PUBLISH_SP
+    leave
+    jmp eval_exception_unwind
+
 .lsa_not_found:
     ; DECREF class and self
     mov rdi, [rbp - LSA_CLASS]
@@ -1939,7 +1984,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_ATTR], rax
     mov rdi, rax
     xor esi, esi                   ; super() has already chosen the receiver
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     mov ecx, eax
     mov rax, [rbp - LSA_ATTR]
     test ecx, ecx
@@ -1978,7 +2023,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov rdi, rax
     xor esi, esi                   ; super() has already chosen the receiver
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     mov rax, [rbp - LSA_ATTR]
     test eax, eax
     jz .lsa_attr_plain
@@ -2020,7 +2065,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     mov [rbp - LSA_ATTR], rax
     mov rdi, rax
     mov rsi, [rbp - LSA_SELF]
-    call property_descr_get        ; -> (rax, rdx), owned
+    call property_descr_get        ; -> (rax, rdx), owned  ; err: edx = 0 goes to .lsa_propagate
     SAVE_FAT_RESULT
     mov rdi, [rbp - LSA_ATTR]
     call obj_decref
@@ -2215,7 +2260,7 @@ GA_OWNMRO   equ 88          ; the attribute came from the CLASS's own MRO
 GA_FROMMETA equ 96          ; type_getattr_meta's out-parameter
 GA_FROMINST equ 104         ; instance_getattr_where's: instance storage
 GA_FRAME    equ 120         ; + 1 push = 128
-DEF_FUNC obj_getattr_opt, GA_FRAME
+DEF_FUNC obj_getattr_raw, GA_FRAME
     push rbx
     mov [rbp - GA_OBJ], rdi
     mov [rbp - GA_NAME], rsi
@@ -2274,6 +2319,9 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     lea rdx, [rbp - GA_FROMINST]
     xor ecx, ecx                ; getattr() wants the bound method itself
     call instance_getattr_where
+    GETATTR_HOOK_SKIP .ga_where_answered
+    ERR_PENDING_JUMP
+.ga_where_answered:
     test rax, rax
     jnz .ga_where_found
     ; As op_load_attr: an AttributeError installed on the way is the answer.
@@ -2319,6 +2367,9 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov qword [rbp - GA_FROMINST], 1
 .ga_getattr_go:
     call rcx
+    GETATTR_HOOK_SKIP .ga_ga_ok
+    ERR_PENDING_JUMP
+.ga_ga_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .ga_type_dict
@@ -2349,7 +2400,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     jz .ga_mro_next
     mov rdi, rax
     mov rsi, [rbp - GA_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jnz .ga_from_type
@@ -2429,7 +2480,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
 .ga_user_call:
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR
-    call dunder_call_3
+    call dunder_call_3          ; err: 0 goes to the caller as it stands
     mov [rbp - GA_SAVE], rax
     mov rdi, [rbp - GA_ATTR]
     call obj_decref
@@ -2446,6 +2497,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
     call getset_descr_get
+    ERR_NULL_JUMP
     mov [rbp - GA_SAVE], rax
     mov rdi, [rbp - GA_ATTR]
     call obj_decref
@@ -2512,7 +2564,7 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
 .ga_property_run:
     mov rdi, [rbp - GA_ATTR]
     mov rsi, [rbp - GA_OBJ]
-    call property_descr_get
+    call property_descr_get     ; err: edx = 0 is offered to __getattr__ below
     ; As in op_load_attr: an AttributeError out of the getter is the attribute
     ; saying it is absent, and a class with __getattr__ gets its chance at the
     ; name.  getattr(o, n, default) reaches the property through here.
@@ -2574,7 +2626,65 @@ DEF_FUNC obj_getattr_opt, GA_FRAME
     pop rbx
     leave
     ret
+END_FUNC obj_getattr_raw
+
+;; ============================================================================
+;; obj_getattr_opt(rdi = obj, a Value, rsi = name) -> rax = the attribute,
+;;   a Value and a new reference, or 0 with NOTHING pending when there is none
+;;
+;; CPython's PyObject_GetOptionalAttr: "no such attribute" is an answer, and
+;; a __getattr__ hook gives it by raising AttributeError.  obj_getattr_raw
+;; leaves that exception pending, with attr_error_pending saying what it is,
+;; for the three callers that re-raise it under the hook's own wording --
+;; getattr(), and print() reaching for write and flush.  Every other caller
+;; asked a question whose answer may be no, carried on, and left the
+;; exception behind for whatever looked at current_exception next:
+;; `isinstance(m, C)` for a module with a PEP 562 hook ended the program with
+;; a traceback for an AttributeError nothing had raised at it.
+;;
+;; The same exception can be pending behind an attribute that was FOUND.  A
+;; module's tp_getattr asks its PEP 562 hook before the type's own attributes
+;; are consulted, so for `__class__` the hook raises, the walk goes on to find
+;; it on the type, and the answer arrives with the hook's AttributeError still
+;; in the global -- which is what isinstance() asks of every object it is
+;; handed.  So it is swallowed on both answers; rax is carried across in the
+;; frame.
+;; ============================================================================
+GAO_VAL   equ 8
+GAO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC obj_getattr_opt, GAO_FRAME
+    call obj_getattr_raw
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .gao_out
+    mov [rbp - GAO_VAL], rax
+    call attr_miss_swallow
+    mov rax, [rbp - GAO_VAL]
+.gao_out:
+    leave
+    ret
 END_FUNC obj_getattr_opt
+
+;; ============================================================================
+;; attr_miss_swallow() -> nothing
+;;
+;; After a lookup that answered 0 -- or that found the attribute somewhere
+;; the hook was asked before: if what is pending is the AttributeError a
+;; __getattr__ hook raised to say "absent" (attr_error_pending), release it.
+;; Anything else pending is a real failure and is left alone.
+;; ============================================================================
+DEF_FUNC attr_miss_swallow
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .ams_done
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .ams_done
+    mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+.ams_done:
+    leave
+    ret
+END_FUNC attr_miss_swallow
 
 ;; ============================================================================
 ;; The pure stack shuffles.  Nothing below reads a name or touches a dict.

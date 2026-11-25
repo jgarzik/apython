@@ -23,7 +23,6 @@ extern bc_prepare_name
 extern ap_strcmp
 extern builtins_dict_global
 extern dict_new
-extern eval_exception_unwind
 extern eval_frame
 extern exc_TypeError_type
 extern exc_metatype
@@ -34,7 +33,7 @@ extern obj_dealloc
 extern obj_decref
 extern obj_getattr_opt
 extern obj_incref
-extern raise_exception
+extern set_exception
 extern str_from_cstr_heap
 extern dict_type
 extern dict_set
@@ -174,12 +173,15 @@ DEF_FUNC_LOCAL bc_split_kwargs, BSK_FRAME
 END_FUNC bc_split_kwargs
 
 ;; ============================================================================
-;; bc_prepare_namespace(meta, name, bases, fallback) -> rax = mapping, or 0
+;; bc_prepare_namespace(meta, name, bases, fallback, kwnames, kwvalues)
+;;   -> rax = the mapping, owned, with the fallback released; or 0 to keep
+;;      the fallback
+;; Fails: -1
 ;;
 ;; The namespace a class body executes in.  A metaclass that overrides
 ;; __prepare__ -- enum's EnumType, returning an _EnumDict that records every
 ;; member as it is stored -- gets that mapping used as the body's locals.
-;; Returns 0 to mean "keep the fallback".
+;; A failure leaves the fallback with the caller.
 ;; ============================================================================
 BPN_META  equ 8
 BPN_NAME  equ 16
@@ -190,6 +192,7 @@ BPN_ARGS  equ 64
 BPN_KWN   equ 80
 BPN_KWV   equ 88
 BPN_EXC   equ 96          ; current_exception before the call
+BPN_EMPTY equ 104         ; the empty tuple made to stand for no bases, owned
 BPN_FRAME equ 104         ; + 1 push = 112
 DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     push rbx
@@ -199,6 +202,7 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     mov [rbp - BPN_FALL], rcx
     mov [rbp - BPN_KWN], r8
     mov [rbp - BPN_KWV], r9
+    mov qword [rbp - BPN_EMPTY], 0
 
     ; __prepare__ is looked up on the metaclass as an attribute, so a
     ; classmethod arrives already bound.
@@ -223,6 +227,7 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     jnz .have_bases
     xor edi, edi
     call tuple_new
+    mov [rbp - BPN_EMPTY], rax
 .have_bases:
     mov [rbp - BPN_ARGS + 8], rax
     DUNDER_EXC_SAVE [rbp - BPN_EXC]
@@ -231,10 +236,15 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     mov edx, 2
     mov rcx, [rbp - BPN_KWN]
     mov r8, [rbp - BPN_KWV]
-    call bc_call_kw
+    call bc_call_kw             ; err: DUNDER_RAISED below tells a raise from a miss
     mov rbx, rax
     mov rdi, [rbp - BPN_FN]
     call obj_decref
+    mov rdi, [rbp - BPN_EMPTY]
+    test rdi, rdi
+    jz .empty_released
+    call obj_decref
+.empty_released:
     test rbx, rbx
     jnz .have_ns
     ; A NULL means either "there is no usable __prepare__" or "it ran and
@@ -273,7 +283,11 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
     ; for a plain class gives.
     mov rdi, [rbp - BPN_META]
     mov rsi, rbx
-    call bc_raise_bad_prepare   ; does not return
+    call bc_set_bad_prepare
+    ; What it returned was ours, and is nobody's now.
+    mov rcx, rbx
+    DECREF_V rcx, rax
+    jmp .failed
 .none:
     xor eax, eax
     pop rbx
@@ -287,8 +301,8 @@ DEF_FUNC_LOCAL bc_prepare_namespace, BPN_FRAME
 END_FUNC bc_prepare_namespace
 
 ;; ============================================================================
-;; bc_raise_bad_prepare(rdi = the metaclass, rsi = what __prepare__ returned)
-;;   -> does not return: raises CPython's TypeError
+;; bc_set_bad_prepare(rdi = the metaclass, rsi = what __prepare__ returned)
+;;   -> rax = 0, always, with CPython's TypeError pending
 ;;
 ;;   BadMeta.__prepare__() must return a mapping, not NoneType
 ;;   <metaclass>.__prepare__() must return a mapping, not NoneType
@@ -300,7 +314,7 @@ BRP_META  equ 8
 BRP_GOT   equ 16
 BRP_BUF   equ 288
 BRP_FRAME equ 288           ; + 0 pushes = 288, 16-aligned
-DEF_FUNC_LOCAL bc_raise_bad_prepare, BRP_FRAME
+DEF_FUNC_LOCAL bc_set_bad_prepare, BRP_FRAME
     mov [rbp - BRP_META], rdi
     mov [rbp - BRP_GOT], rsi
 
@@ -340,9 +354,10 @@ DEF_FUNC_LOCAL bc_raise_bad_prepare, BRP_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - BRP_BUF]
-    call raise_exception
-    ud2
-END_FUNC bc_raise_bad_prepare
+    call set_exception
+    leave
+    ret
+END_FUNC bc_set_bad_prepare
 
 ;; ============================================================================
 ;; builtin___build_class__(PyObject **args, int64_t nargs) -> rax = Value
@@ -387,6 +402,13 @@ END_FUNC bc_normalize_metatype
 ;; __prepare__ for the namespace, execute the body in it, and hand name,
 ;; bases and namespace to type_from_parts -- or to the metaclass, when one
 ;; was given that is not a metatype we can build directly.
+;;
+;; Everything it builds on the way -- the two keyword tuples, the bases, the
+;; bases as written, the namespace -- is kept in the frame and given back at
+;; the one exit, .bc_out, which a refusal and a finished class both leave by.
+;; A slot is zeroed where its reference is handed on, so the exit releases
+;; exactly what is still held.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC builtin___build_class__, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
@@ -394,7 +416,11 @@ DEF_FUNC builtin___build_class__, 8            ; 5 pushes, so rsp is 16-aligned
     push r13
     push r14
     push r15
-BCL_BASES equ 48        ; the bases tuple built from args[2:]
+; The frame word DEF_FUNC carves is [rbp-8] and the five pushes sit below it,
+; at [rbp-16] to [rbp-48]; the 64 bytes carved after them are [rbp-56] to
+; [rbp-112].  BCL_BASES was 48 -- the slot the caller's r15 is saved in -- so
+; this function returned with r15 holding its bases tuple, or 0.
+BCL_BASES equ 104       ; the bases tuple built from args[2:]
 BCL_META  equ 56        ; the metaclass= keyword, or 0
 BCL_NPOS  equ 64        ; positional arg count (nargs minus the keywords)
 ; bc_split_kwargs fills a three-slot scratch: the metaclass, then the class's
@@ -408,23 +434,28 @@ BCL_OKWV  equ 72
 ; a lower number because the five pushes above occupy [rbp-16, rbp-48]: the
 ; carved space starts below them.
 BCL_ORIG  equ 96
+; Where rsp sits once the prologue is done: the frame word, five pushes and
+; the 64 bytes.
+BCL_RSP   equ 8 + 40 + 64
     sub rsp, 64
+
+    mov rbx, rdi            ; rbx = args
+    xor r15d, r15d          ; no namespace yet
+    mov qword [rbp - BCL_BASES], 0
+    mov qword [rbp - BCL_META], 0
+    mov qword [rbp - BCL_ORIG], 0
+    mov [rbp - BCL_NPOS], rsi
+    mov qword [rbp - BCL_OKWN], 0
+    mov qword [rbp - BCL_OKWV], 0
 
     ; Check nargs >= 2
     cmp rsi, 2
     jl .build_class_error
 
-    mov rbx, rdi            ; rbx = args
-    mov qword [rbp - BCL_META], 0
-    mov qword [rbp - BCL_ORIG], 0
-    mov [rbp - BCL_NPOS], rsi
-
     ; `class C(metaclass=M)` passes M as a keyword, and it arrives in the
     ; positional array with its name in kw_names_pending.  Without splitting
     ; them off, M was treated as a *base* -- which is why metaclass= appeared
     ; to be ignored: the metatype never got a chance to run.
-    mov qword [rbp - BCL_OKWN], 0
-    mov qword [rbp - BCL_OKWV], 0
     mov rax, [gs:ThreadState.kw_names_pending]
     test rax, rax
     jz .bc_no_kwargs
@@ -503,9 +534,11 @@ BCL_ORIG  equ 96
     jmp .bc_no_base
 
 .bc_bases_failed:
-    mov rdi, [rbp - BCL_BASES]
-    mov qword [rbp - BCL_BASES], 0
-    call obj_decref
+    ; Either a base that is not a class and cannot name one, which is ours to
+    ; report, or an __mro_entries__ that raised, which already is.  The
+    ; second used to be reported as the first, over the exception it raised.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .bc_fail
     jmp .build_class_base_error
 
 .bc_no_base:
@@ -649,7 +682,7 @@ BCL_ORIG  equ 96
     jmp .bc_meta_scan
 
 .bc_meta_conflict:
-    RAISE exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases"
+    FAIL exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases", .bc_fail
 
 .bc_meta_scan_done:
     ; The three built-in metatypes go through type_from_parts as before --
@@ -686,8 +719,7 @@ BCL_ORIG  equ 96
     mov r8, [rbp - BCL_OKWN]
     mov r9, [rbp - BCL_OKWV]
     call bc_prepare_namespace
-    cmp rax, -1
-    je .bc_prepare_failed       ; __prepare__ raised; it is already pending
+    ERR_M1 .bc_fail             ; r15 is still the fallback, and the exit's
     test rax, rax
     jz .bc_ns_ready
     mov r15, rax
@@ -716,7 +748,11 @@ BCL_ORIG  equ 96
     test edx, edx
     jnz .bc_body_ok
     cmp qword [gs:ThreadState.current_exception], 0
-    jne .bc_body_raised
+    je .bc_body_ok
+    ; The frame goes here; the namespace and the rest at the exit.
+    mov rdi, r12
+    call frame_free
+    jmp .bc_fail
 .bc_body_ok:
     ; DECREF return value (should be None — TAG_NONE, not a pointer)
     mov rsi, rdx
@@ -751,9 +787,15 @@ BCL_ORIG  equ 96
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - BCL_ORIG]
-    call dict_set               ; takes its own reference
+    call dict_set               ; err: tested once the key is released
     pop rdi
+    push rax                    ; the verdict, across the release
+    sub rsp, 8
     call obj_decref
+    add rsp, 8
+    pop rax
+    ERR_M1 .bc_fail             ; the namespace is the body's: a key of its
+                                ; own refused the comparison
 .bc_orig_release:
     mov rdi, [rbp - BCL_ORIG]
     mov qword [rbp - BCL_ORIG], 0
@@ -791,32 +833,18 @@ BCL_ORIG  equ 96
     mov edx, 3
     mov rcx, [rbp - BCL_OKWN]
     mov r8, [rbp - BCL_OKWV]
-    call bc_call_kw
+    call bc_call_kw             ; err: its 0 is this function's answer too
     ; Kept as a Value, not unpacked: a metaclass that is not a type may answer
     ; anything, including an immediate.  Unpacking here and re-packing in the
     ; epilogue with a hardcoded TAG_PTR turned a returned 42 into a pointer to
     ; address 42.  A class is a pointer, and a pointer is its own Value, so
     ; the ordinary case is unchanged.
-    add rsp, 32
-    push rax
-    mov rdi, [rbp - BCL_BASES]
-    test rdi, rdi
-    jz .bc_meta_bases_done
-    call obj_decref
-.bc_meta_bases_done:
+    ;
     ; The metaclass took its own reference to the namespace -- type.__new__
-    ; increfs before type_from_parts adopts it -- so ours is not the class's.
-    ; Only the no-metaclass path below transfers it; here it was dropped on
-    ; the floor, one dict per class built through a metaclass, which is every
-    ; enum and every ABC.
-    mov rdi, r15
-    test rdi, rdi
-    jz .bc_meta_done
-    xor r15d, r15d
-    call obj_decref
-.bc_meta_done:
-    pop rax
-    jmp .bc_have_value
+    ; increfs before type_from_parts consumes it -- so ours is not the
+    ; class's, and the exit releases it with the bases.
+    add rsp, 32
+    jmp .bc_out
 
 .bc_no_metaclass:
     ; Build the heaptype from (name, bases, namespace); the three-argument
@@ -830,32 +858,60 @@ BCL_ORIG  equ 96
     mov rdi, r14
     mov rsi, [rbp - BCL_BASES]
     mov rdx, r15
-    call type_from_parts
+    call type_from_parts        ; err: its 0 is this function's answer too
+    xor r15d, r15d              ; consumed, whichever way that went
     mov qword [gs:ThreadState.class_kwnames_pending], 0
     mov qword [gs:ThreadState.class_kwvalues_pending], 0
-    push rax
+    ; A class is a pointer and a pointer is its own Value, so what came back
+    ; is the answer as it stands -- as is the 0 of a refusal.
+    jmp .bc_out
+
+.build_class_error:
+    FAIL exc_TypeError_type, "__build_class__: not enough arguments", .bc_fail
+
+.bc_func_error:
+    FAIL exc_TypeError_type, "__build_class__: func must be a function", .bc_fail
+
+.bc_name_error:
+    FAIL exc_TypeError_type, "__build_class__: name is not a string", .bc_fail
+
+.build_class_base_error:
+    SET_EXC exc_TypeError_type, "bases must be types"
+
+.bc_fail:
+    xor eax, eax
+.bc_out:
+    ; rax is the answer: the class, whatever a metaclass returned, or 0 with
+    ; the exception pending.  rbx carries it across the releases -- the
+    ; argument array it held is not read again.
+    lea rsp, [rbp - BCL_RSP]
+    mov rbx, rax
+    mov rdi, [rbp - BCL_OKWN]
+    test rdi, rdi
+    jz .bc_out_kwn
+    call obj_decref
+.bc_out_kwn:
+    mov rdi, [rbp - BCL_OKWV]
+    test rdi, rdi
+    jz .bc_out_kwv
+    call obj_decref
+.bc_out_kwv:
     mov rdi, [rbp - BCL_BASES]
     test rdi, rdi
-    jz .bc_bases_released
-    call obj_decref         ; type_from_parts took its own reference
-.bc_bases_released:
-    pop rax
-    test rax, rax
-    jz .bc_have_class       ; NULL, with the exception already pending
-
-.bc_have_value:
-    ; The metaclass path arrives here with a finished Value in rax.  Same
-    ; unwind as below, minus the re-pack: there is nothing to tag.
-    add rsp, 64
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.bc_have_class:
+    jz .bc_out_bases
+    call obj_decref
+.bc_out_bases:
+    mov rdi, [rbp - BCL_ORIG]
+    test rdi, rdi
+    jz .bc_out_orig
+    call obj_decref
+.bc_out_orig:
+    test r15, r15
+    jz .bc_out_ns
+    mov rdi, r15
+    call obj_decref
+.bc_out_ns:
+    mov rax, rbx
     add rsp, 64        ; must match the sub above: the epilogue unwinds
                        ; the locals by hand before popping the registers
     pop r15
@@ -863,50 +919,8 @@ BCL_ORIG  equ 96
     pop r13
     pop r12
     pop rbx
-    mov edx, TAG_PTR
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
-
-
-.build_class_error:
-    RAISE exc_TypeError_type, "__build_class__: not enough arguments"
-
-.bc_func_error:
-    RAISE exc_TypeError_type, "__build_class__: func must be a function"
-
-.bc_name_error:
-    RAISE exc_TypeError_type, "__build_class__: name is not a string"
-
-.bc_prepare_failed:
-    ; __prepare__ raised.  Release the fallback namespace and the bases and
-    ; let its exception keep unwinding, rather than building the class with
-    ; an exception already pending.
-    mov rdi, r15
-    call obj_decref
-    mov rdi, [rbp - BCL_BASES]
-    test rdi, rdi
-    jz .bc_body_raised_go
-    call obj_decref
-    jmp .bc_body_raised_go
-
-.bc_body_raised:
-    ; Release the frame and the namespace, then let the body's exception
-    ; keep unwinding in the caller's frame.
-    mov rdi, r12
-    call frame_free
-    mov rdi, r15
-    call obj_decref
-    mov rdi, [rbp - BCL_BASES]
-    test rdi, rdi
-    jz .bc_body_raised_go
-    call obj_decref
-.bc_body_raised_go:
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
-
-.build_class_base_error:
-    RAISE exc_TypeError_type, "bases must be types"
 END_FUNC builtin___build_class__
 
 ;; ============================================================================
@@ -1136,6 +1150,9 @@ END_FUNC bc_resolve_bases
 ;;
 ;; A non-tuple answer is CPython's own error, and is raised rather than
 ;; discarded -- it is a mistake in the object, not an object that declines.
+;; So 0 comes back two ways: with an exception pending -- that one, or
+;; whatever __mro_entries__ itself raised -- or with none, for a base that is
+;; not an object at all.
 ;; ============================================================================
 BME_BASES equ 8
 BME_RES   equ 16
@@ -1201,9 +1218,10 @@ DEF_FUNC_LOCAL bc_mro_entries, 40           ; + 1 push = 48, 16-aligned
     ret
 
 .bme_not_tuple:
-    mov rdi, rbx
-    call obj_decref
-    RAISE exc_TypeError_type, "__mro_entries__ must return a tuple"
+    mov rcx, rbx
+    DECREF_V rcx, rax           ; what it answered may be an immediate
+    SET_EXC exc_TypeError_type, "__mro_entries__ must return a tuple"
+    jmp .bme_no
 .bme_release:
     mov rdi, [rbp - BME_RES]
     call obj_decref

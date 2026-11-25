@@ -28,7 +28,7 @@ extern str_new_heap
 extern str_alloc_bytes
 extern ap_memcpy
 extern str_set_length
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_MemoryError_type
 
@@ -428,6 +428,8 @@ END_FUNC ucase_utf8_put
 
 ;; ============================================================================
 ;; str_case_map(rdi = a str, esi = mode) -> rax = a new str
+;;
+;; Fails: 0
 ;;
 ;; One walk over the code points.  The output can be longer than the input --
 ;; eszett becomes SS -- or shorter, so it goes into a buffer sized at four
@@ -889,7 +891,7 @@ DEF_FUNC str_case_map, SC_FRAME
     xor esi, esi                ; counted below; a mapping can change it
     call str_alloc_bytes
     test rax, rax
-    jz .sc_oom
+    jz .sc_oom_buf
     mov [rbp - SC_OUT], rax
     lea rdi, [rax + PyStrObject.data]
     mov rsi, [rbp - SC_BUF]
@@ -909,8 +911,13 @@ DEF_FUNC str_case_map, SC_FRAME
     leave
     ret
 
+.sc_oom_buf:
+    mov rdi, [rbp - SC_BUF]
+    call ap_free
 .sc_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    jmp .sc_out
 
 ;; .sc_sigma_is_final -> ecx = 1 when the sigma just consumed ends a word.
 ;; Reads the caller's SC_DATA/SC_LEN/SC_POS through rbp, which is why it is

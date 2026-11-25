@@ -13,7 +13,6 @@
 
 %include "macros.inc"
 %include "object.inc"
-
 extern ap_free
 extern object_type
 extern ap_malloc
@@ -41,7 +40,7 @@ extern none_singleton
 extern obj_decref
 extern obj_dealloc
 extern obj_incref
-extern raise_exception
+extern set_exception
 extern tuple_new
 extern str_type
 extern tuple_type
@@ -53,8 +52,8 @@ extern builtin_func_new
 extern type_stamp_methods
 extern obj_getattr_opt
 extern obj_call_n
-extern raise_type_error_counted
-extern raise_type_error_with_name
+extern set_type_error_counted
+extern set_type_error_with_name
 
 ;; ============================================================================
 ;; eg_new(PyTypeObject *type, PyObject *msg_str, PyObject *exc_tuple)
@@ -165,7 +164,9 @@ END_FUNC eg_new
 
 ;; ============================================================================
 ;; eg_type_call(PyTypeObject *type, PyObject **args, int64_t nargs)
-;;   -> PyObject*
+;;   -> PyObject*, edx = TAG_PTR
+;; Fails: 0
+;; A tp_new, so a refusal is rax = 0 and edx = 0 with the exception pending.
 ;; Constructor: ExceptionGroup(msg, excs)
 ;; rdi = type, rsi = args array, rdx = nargs
 ;; ============================================================================
@@ -266,6 +267,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     extern get_iterator_opt
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING .egc_propagate
     test rax, rax
     jz .bad_excs
     V_UNPACK rax, rdx
@@ -277,7 +279,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     lea rdi, [rel tuple_type]
     mov edx, 1
     extern tuple_type_call
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     V_UNPACK rax, rdx
     test rax, rax
     jz .egc_propagate
@@ -364,8 +366,9 @@ DEF_FUNC eg_type_call, EGC_FRAME
     CSTRING rdi, "Item "
     CSTRING rdx, " of second argument (exceptions) is not an exception"
     extern exc_ValueError_type
-    extern raise_value_error_counted
-    jmp raise_value_error_counted
+    extern set_value_error_counted
+    call set_value_error_counted
+    jmp .egc_propagate
 
 .egc_members_ok:
     mov rdi, [rbp - EGC_TYPE]
@@ -377,8 +380,8 @@ DEF_FUNC eg_type_call, EGC_FRAME
     ; ExceptionGroup will not hold one.
     mov rdi, r12
     call obj_decref
-    RAISE exc_TypeError_type, \
-          "Cannot nest BaseExceptions in an ExceptionGroup"
+    FAIL exc_TypeError_type, \
+          "Cannot nest BaseExceptions in an ExceptionGroup", .egc_propagate
 .egc_not_eg:
     lea rax, [rel exc_BaseExceptionGroup_type]
     cmp rdi, rax
@@ -436,21 +439,21 @@ DEF_FUNC eg_type_call, EGC_FRAME
     mov rsi, [rbp - EGC_NARGS]
     CSTRING rdi, "BaseExceptionGroup.__new__() takes exactly 2 arguments ("
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .egc_propagate
 
 .bad_msg:
     mov rsi, rbx
     CSTRING rdi, \
         `BaseExceptionGroup.__new__() argument 1 must be str, not \x02`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .egc_propagate
 
 .bad_excs:
-    RAISE exc_TypeError_type, "second argument (exceptions) must be a sequence"
+    FAIL exc_TypeError_type, "second argument (exceptions) must be a sequence", .egc_propagate
 
 .empty_excs:
-    RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"
+    FAIL exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence", .egc_propagate
 
 .empty_excs_decref:
     ; DECREF exc_tuple before raising
@@ -458,7 +461,7 @@ DEF_FUNC eg_type_call, EGC_FRAME
     mov rdi, r12
     call obj_decref
     pop r12
-    RAISE exc_ValueError_type, "second argument (exceptions) must be a non-empty sequence"
+    jmp .empty_excs
 
 END_FUNC eg_type_call
 
@@ -710,8 +713,10 @@ DEF_FUNC eg_setattr, EST2_FRAME
     jmp exc_setattr
 
 .egs_readonly:
+    SET_EXC exc_AttributeError_type, "readonly attribute"
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
     leave
-    RAISE exc_AttributeError_type, "readonly attribute"
+    ret
 END_FUNC eg_setattr
 
 ;; ============================================================================
@@ -788,6 +793,9 @@ END_FUNC eg_getattr
 ;; eg_split(PyExceptionGroupObject *eg, PyTypeObject *match_type)
 ;;   -> rax = match_eg (or NULL if none matched)
 ;;   -> rdx = rest_eg  (or NULL if all matched)
+;; Fails: 0?
+;; A failure -- a condition that is not a class, a derive() that raised -- is
+;; BOTH halves 0 with the exception pending; neither is handed over.
 ;;
 ;; CPython's BaseExceptionGroup.split, which RECURSES: a sub-exception that is
 ;; itself a group is split in turn and each half kept in the matching side, so
@@ -871,6 +879,7 @@ DEF_FUNC eg_split, EGS_FRAME
     ; exc_isinstance(exc, match_type)
     mov rsi, [rbp - EGS_MTYPE]
     call exc_isinstance
+    ERR_M1 .split_fail
     test eax, eax
     jz .split_rest
 
@@ -881,7 +890,7 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_MLIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     jmp .split_next
 
 .split_rest:
@@ -892,7 +901,7 @@ DEF_FUNC eg_split, EGS_FRAME
     mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [r8 + rcx*8]
     mov rdi, [rbp - EGS_RLIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     jmp .split_next
 
 .split_nested:
@@ -910,6 +919,7 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rdi, [r8 + rcx*8]
     mov rsi, [rbp - EGS_MTYPE]
     call eg_split
+    ERR_PENDING .split_fail
     mov [rbp - EGS_SUBM], rax
     mov [rbp - EGS_SUBR], rdx
 
@@ -917,7 +927,7 @@ DEF_FUNC eg_split, EGS_FRAME
     je .split_nested_rest
     mov rdi, [rbp - EGS_MLIST]
     mov rsi, [rbp - EGS_SUBM]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - EGS_SUBM]
     call obj_decref
 .split_nested_rest:
@@ -925,7 +935,7 @@ DEF_FUNC eg_split, EGS_FRAME
     je .split_next
     mov rdi, [rbp - EGS_RLIST]
     mov rsi, [rbp - EGS_SUBR]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - EGS_SUBR]
     call obj_decref
 
@@ -937,11 +947,13 @@ DEF_FUNC eg_split, EGS_FRAME
     mov rdi, [rbp - EGS_EG]
     mov rsi, [rbp - EGS_MLIST]
     call eg_half
+    ERR_PENDING .split_fail
     mov r12, rax                    ; r12 = match_eg, or 0
 
     mov rdi, [rbp - EGS_EG]
     mov rsi, [rbp - EGS_RLIST]
     call eg_half
+    ERR_PENDING .split_fail_match
     mov r13, rax                    ; r13 = rest_eg, or 0
 
     ; DECREF the two temp lists.  eg_half gave each new group a reference of
@@ -965,6 +977,19 @@ DEF_FUNC eg_split, EGS_FRAME
     leave
     ret
 
+.split_fail_match:
+    test r12, r12                   ; the match half was built, and is ours
+    jz .split_fail
+    mov rdi, r12
+    call obj_decref
+.split_fail:
+    ; The exception is pending; both work lists go, and with them every half
+    ; already appended.
+    mov rdi, [rbp - EGS_MLIST]
+    call obj_decref
+    mov rdi, [rbp - EGS_RLIST]
+    call obj_decref
+    jmp .split_nomem_out
 .split_nomem:
     ; list_new failed.  Unreachable while ap_malloc's contract holds -- out of
     ; memory is fatal_error there, not a NULL -- but the arm exists, so it has
@@ -990,6 +1015,7 @@ END_FUNC eg_split
 ;; ============================================================================
 ;; eg_half(rdi = the group being split, rsi = a LIST of exceptions)
 ;;   -> rax = a new group carrying them, or 0 when the list is empty
+;; Fails: 0?
 ;;
 ;; One of the two halves.  eg_exceptions is a TUPLE, so the list is copied into
 ;; one -- but `.args` holds the sequence as PASSED, which for CPython's split is
@@ -1055,7 +1081,7 @@ DEF_FUNC_LOCAL eg_half, EGH_FRAME
 
     mov rdi, [rbp - EGH_EG]
     mov rsi, [rbp - EGH_LIST]
-    call eg_derive
+    call eg_derive              ; err: its 0, with the exception, is this one's
     pop rbx
     leave
     ret
@@ -1077,7 +1103,8 @@ END_FUNC eg_half
 
 ;; ============================================================================
 ;; eg_derive(rdi = the source group, rsi = a LIST of exceptions)
-;;   -> rax = a new group, or 0 with an exception pending
+;;   -> rax = a new group
+;; Fails: 0
 ;;
 ;; CPython's split and subgroup both build their halves through the group's own
 ;; derive(), and then copy the metadata the original carried.  Looking the name
@@ -1120,7 +1147,7 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     mov rdi, rbx
     mov rsi, rsp
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .egd_fail, once derive is released
     add rsp, 16
     mov [rbp - EGDV_NEW], rax
     push rax
@@ -1235,13 +1262,12 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     mov edx, 1
     call obj_call_n
     mov [rbp - EGDV_COPY], rax
-    test rax, rax
-    jz .egd_notes_raised
+    ERR_NULL .egd_notes_raised
     mov rdi, [rbp - EGDV_NEW]
     mov rsi, rbx
     mov rdx, rax
     mov ecx, TAG_PTR
-    call exc_setattr
+    call exc_setattr            ; err: __notes__ is no field name
     mov rdi, [rbp - EGDV_COPY]
     call obj_decref                 ; exc_setattr took a reference of its own
 
@@ -1283,12 +1309,13 @@ DEF_FUNC_LOCAL eg_derive, EGDV_FRAME
     ret
 
 .egd_bad_ref:
-    mov rdi, [rbp - EGDV_NEW]
-    call obj_decref
 .egd_bad:
+    ; Named first and released after: the message reads the type off it.
     mov rsi, [rbp - EGDV_NEW]
     CSTRING rdi, `derive must return an instance of BaseExceptionGroup, not '\x01'`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - EGDV_NEW]
+    DECREF_V rdi, rcx
 .egd_fail:
     xor eax, eax
     pop rbx
@@ -1321,14 +1348,16 @@ DEF_FUNC_LOCAL eg_method_derive, EMD_FRAME
     lea rdi, [rel exc_BaseExceptionGroup_type]
     lea rsi, [rbp - EMD_MSG]
     mov edx, 2
-    call eg_type_call
+    call eg_type_call           ; err: its 0 is this method's own
     leave
     ret
 .emd_arity:
     dec rsi
     CSTRING rdi, "BaseExceptionGroup.derive() takes exactly one argument ("
     CSTRING rdx, " given)"
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC eg_method_derive
 
 ;; ============================================================================
@@ -1352,6 +1381,7 @@ DEF_FUNC_LOCAL eg_method_split, EMS_FRAME
     mov rsi, [rdi + 8]              ; the condition
     mov rdi, rax
     call eg_split
+    ERR_PENDING .ems_out
     mov [rbp - EMS_MATCH], rax
     mov [rbp - EMS_REST], rdx
 
@@ -1399,7 +1429,9 @@ DEF_FUNC_LOCAL eg_method_split, EMS_FRAME
     dec rsi
     CSTRING rdi, "BaseExceptionGroup.split() takes exactly one argument ("
     CSTRING rdx, " given)"
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC eg_method_split
 
 ;; ============================================================================
@@ -1417,6 +1449,7 @@ DEF_FUNC_LOCAL eg_method_subgroup, ESG_FRAME
     mov rsi, [rdi + 8]
     mov rdi, rax
     call eg_split
+    ERR_PENDING .esg_fail
     ; The rest half is not this caller's; only the match is.
     test rdx, rdx
     jz .esg_have
@@ -1435,11 +1468,17 @@ DEF_FUNC_LOCAL eg_method_subgroup, ESG_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.esg_fail:
+    xor eax, eax
+    leave
+    ret
 .esg_arity:
     dec rsi
     CSTRING rdi, "BaseExceptionGroup.subgroup() takes exactly one argument ("
     CSTRING rdx, " given)"
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC eg_method_subgroup
 
 ; EGI_ADD impl, "name" -- one method into BaseExceptionGroup's tp_dict.
@@ -1630,7 +1669,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov r9, [rax + PyTupleObject.ob_item]       ; payloads
     mov rsi, [r9 + rcx*8]
     mov rdi, [rbp - PRS_FLAT]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rax
     pop r8
     pop rcx
@@ -1649,7 +1688,7 @@ DEF_FUNC prep_reraise_star, PRS_FRAME
     mov rsi, [rax + PyListObject.ob_item]       ; payloads
     mov rsi, [rsi + rdx*8]                       ; list item payload
     mov rdi, [rbp - PRS_FLAT]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rcx
     pop rdx
 

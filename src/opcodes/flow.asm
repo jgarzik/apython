@@ -133,6 +133,7 @@ DEF_FUNC_BARE op_pop_jump_if_false
     push rcx                    ; the jump target
     push rdi                    ; the value, for the release below
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov rdi, [rsp]              ; the value
     mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi
@@ -181,6 +182,7 @@ DEF_FUNC_BARE op_pop_jump_if_true
     push rcx                    ; the jump target
     push rdi                    ; the value, for the release below
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov rdi, [rsp]              ; the value
     mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi
@@ -367,7 +369,7 @@ DEF_FUNC op_format_value, FV_FRAME
     lea rdx, [rel fv_format_name]
     mov ecx, TAG_PTR
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .fv_spec_dunder_none
     V_UNPACK rax, rdx
     test edx, edx
     jz .fv_spec_dunder_none
@@ -378,7 +380,8 @@ DEF_FUNC op_format_value, FV_FRAME
     mov rdi, rax
     mov rsi, rdx
     extern format_require_str
-    call format_require_str     ; raises and does not return when it is not
+    call format_require_str
+    ERR_M1_JUMP
     pop rdx
     pop rax
     jmp .fv_have_result         ; __format__ produced the string
@@ -401,7 +404,7 @@ DEF_FUNC op_format_value, FV_FRAME
     V_PACK rdi, rsi
     mov rsi, rax
     extern format_apply_spec
-    call format_apply_spec
+    call format_apply_spec      ; err: .fv_conv_failed, by the tag at .fv_push
     V_UNPACK rax, rdx
     jmp .fv_have_result
 
@@ -446,7 +449,7 @@ DEF_FUNC op_format_value, FV_FRAME
     push rsi
     lea rdx, [rel fv_format_name]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .fv_bare_dunder_none
     V_UNPACK rax, rdx
     pop rdi
     pop rdi                    ; the empty spec, ours to release
@@ -461,7 +464,8 @@ DEF_FUNC op_format_value, FV_FRAME
     push rdx
     mov rdi, rax
     mov rsi, rdx
-    call format_require_str     ; a str, or it does not return
+    call format_require_str
+    ERR_M1_JUMP
     pop rdx
     pop rax
     jmp .fv_have_result
@@ -1054,6 +1058,7 @@ DEF_FUNC_BARE op_get_yield_from_iter
     ; __iter__ is iterable, and `yield from` rejected it.
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .gyfi_error
     push rax                   ; save iterator

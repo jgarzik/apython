@@ -24,7 +24,7 @@ extern tuple_new
 extern obj_dealloc
 extern obj_incref
 extern object_type
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 
 section .text
@@ -117,7 +117,10 @@ END_FUNC type_check_is_class
 
 ;; ============================================================================
 ;; type_custom_check(rdi = class, rsi = object Value, rdx = dunder name cstr)
-;;   -> eax: 1 = yes, 0 = no, -1 = no override, decide the normal way
+;;   -> rax: 1 = yes, 0 = no, -1 = no override, decide the normal way
+;; Fails: -1
+;;   -- the hook raised, or the truth of what it answered could not be asked.
+;;   -1 with nothing pending is still "no override".
 ;;
 ;; A metaclass may define __instancecheck__ / __subclasscheck__; ABCMeta does,
 ;; and that is how isinstance() consults a virtual-subclass registry instead of
@@ -169,6 +172,7 @@ DEF_FUNC type_custom_check, TCI_FRAME
     mov rsi, rsp
     mov edx, 2
     call rcx
+    ERR_PENDING .tcc_raised
     V_UNPACK rax, rdx
     add rsp, 16
     test edx, edx
@@ -179,18 +183,20 @@ DEF_FUNC type_custom_check, TCI_FRAME
     mov rdi, rax
     V_PACK rdi, rdx
     extern obj_is_true
-    call obj_is_true
-    mov ebx, eax
+    call obj_is_true            ; err: its -1, with the exception, is this function's too
+    mov rbx, rax
     pop rdx
     pop rdi
     DECREF_VAL rdi, rdx
-    mov eax, ebx
+    mov rax, rbx
     pop rbx
     leave
     ret
 
+.tcc_raised:                    ; the hook raised: -1 again, but with it pending
+    add rsp, 16
 .tcc_none:
-    mov eax, -1
+    mov rax, -1
     pop rbx
     leave
     ret
@@ -297,6 +303,7 @@ END_FUNC type_mro_fill
 ;; ============================================================================
 ;; mro_compute(rdi = the new type, rsi = bases tuple or NULL)
 ;;   -> rax = new tuple holding the C3 linearization, one strong reference
+;; Fails: 0
 ;;
 ;; L[C] = C + merge(L[B1], ..., L[Bn], [B1, ..., Bn]), taking as the next entry
 ;; the first sequence head that appears in no sequence's tail.
@@ -533,5 +540,13 @@ DEF_FUNC mro_compute, MC_FRAME
     call ap_free
     mov rdi, [rbp - MC_OUT]
     call ap_free
-    RAISE exc_TypeError_type, "Cannot create a consistent method resolution order (MRO) for bases"
+    SET_EXC exc_TypeError_type, "Cannot create a consistent method resolution order (MRO) for bases"
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC mro_compute

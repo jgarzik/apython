@@ -16,9 +16,9 @@
 ASM_INIT
 
 ; --- from io.asm, the half this came out of ---
+extern dict_set_str
 extern io_bases1
-extern io_raise_number
-extern io_raise_typename_q
+extern io_set_number
 extern io_append_i64
 extern io_copy_bounded
 extern io_add_method
@@ -43,7 +43,7 @@ extern bool_true
 extern bool_false
 extern exc_ValueError_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern obj_as_index
 extern type_from_parts
 extern gc_alloc
@@ -140,18 +140,26 @@ bytesio_base_dealloc: dq 0
 
 section .text
 
-;; bytesio_check(rdi = self) -> returns, or raises on a closed buffer
+;; bytesio_check(rdi = self) -> rax = 0 on an open buffer
+;; Fails: -1
+;; An open buffer costs one compare and keeps every register but rax, which
+;; is what lets its callers hold their arguments across it.
 DEF_FUNC_BARE bytesio_check
     cmp qword [rdi + PyBytesIOObject.bio_buf], 0
-    je bytesio_closed_error
+    je .closed
+    xor eax, eax
+    ret
+.closed:
+    ; CPython punctuates this one and not FileIO's, and the wording is what
+    ; a caller sees.
+    push rbp
+    mov rbp, rsp
+    and rsp, -16                ; some callers arrive with a push outstanding
+    SET_EXC exc_ValueError_type, "I/O operation on closed file."
+    mov rax, -1
+    leave
     ret
 END_FUNC bytesio_check
-
-; CPython punctuates this one and not FileIO's, and the wording is what a
-; caller sees.
-DEF_FUNC bytesio_closed_error
-    RAISE exc_ValueError_type, "I/O operation on closed file."
-END_FUNC bytesio_closed_error
 
 ;; ============================================================================
 ;; bytesio_reserve(rdi = self, rsi = the total size needed) -> rax = 1 or 0
@@ -213,6 +221,9 @@ END_FUNC bytesio_reserve
 
 ;; ============================================================================
 ;; BytesIO.__init__(self, initial_bytes=b'')
+;;   -> rax = None, or 0 with the exception pending -- which is what lets
+;;      type_call release the instance a refused BytesIO() was building
+;; Fails: 0
 ;; ============================================================================
 BI_SELF   equ 8
 BI_ARG    equ 16
@@ -302,14 +313,20 @@ DEF_FUNC bytesio_init_fn, BI_FRAME
 .bi_nomem_pop:
     add rsp, 16
 .bi_nomem:
-    RAISE exc_OSError_type, "out of memory"
+    FAIL exc_OSError_type, "out of memory", .bi_fail
 .bi_type:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_byteslike]
     mov rdx, [rbp - BI_ARG]
-    call io_raise_typename_q
+    extern io_set_typename_q
+    call io_set_typename_q
+.bi_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 .bi_argerr:
-    RAISE exc_TypeError_type, "BytesIO() missing self"
+    FAIL exc_TypeError_type, "BytesIO() missing self", .bi_fail
 END_FUNC bytesio_init_fn
 
 ;; ============================================================================
@@ -337,10 +354,12 @@ DEF_FUNC bytesio_read_fn, BR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov r8, rax
 .br_have_size:
     mov rdi, [rbp - BR_SELF]
     call bytesio_check
+    ERR_M1 .fail
 
     ; What is left, clamped by what was asked for.
     mov rcx, [rdi + PyBytesIOObject.bio_size]
@@ -364,7 +383,15 @@ DEF_FUNC bytesio_read_fn, BR_FRAME
     leave
     ret
 .br_argerr:
-    RAISE exc_TypeError_type, "read() missing self"
+    FAIL exc_TypeError_type, "read() missing self", .fail
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_read_fn
 
 ;; ============================================================================
@@ -385,10 +412,12 @@ DEF_FUNC bytesio_readline_fn, BR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fail
     mov r8, rax
 .brl_have_size:
     mov rdi, [rbp - BR_SELF]
     call bytesio_check
+    ERR_M1 .fail
 
     mov rcx, [rdi + PyBytesIOObject.bio_size]
     sub rcx, [rdi + PyBytesIOObject.bio_pos]
@@ -422,7 +451,11 @@ DEF_FUNC bytesio_readline_fn, BR_FRAME
     leave
     ret
 .brl_argerr:
-    RAISE exc_TypeError_type, "readline() missing self"
+    SET_EXC exc_TypeError_type, "readline() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_readline_fn
 
 ;; ============================================================================
@@ -439,10 +472,12 @@ DEF_FUNC bytesio_readinto_fn, BRI_FRAME
     mov rsi, [rdi + 8]
     mov rdi, rax
     call bytesio_check
+    ERR_M1 .fail
     mov rdi, rsi
     mov qword [rel io_readinto_msg], io_msg_binto
     call fileio_writable_buffer   ; rax = data, r10 = length
     mov qword [rel io_readinto_msg], io_msg_readinto
+    ERR_PENDING .fail
 
     mov rdi, [rbp - BRI_SELF]
     mov rcx, [rdi + PyBytesIOObject.bio_size]
@@ -467,7 +502,11 @@ DEF_FUNC bytesio_readinto_fn, BRI_FRAME
     leave
     ret
 .bri_argerr:
-    RAISE exc_TypeError_type, "readinto() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "readinto() takes exactly one argument"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_readinto_fn
 
 ;; ============================================================================
@@ -488,6 +527,7 @@ DEF_FUNC bytesio_write_fn, BW_FRAME
     mov [rbp - BW_ARG], rsi
     mov rdi, rax
     call bytesio_check
+    ERR_M1 .fail
     cmp qword [rdi + PyBytesIOObject.bio_exports], 0
     jne .bw_exported
 
@@ -545,18 +585,23 @@ DEF_FUNC bytesio_write_fn, BW_FRAME
     leave
     ret
 .bw_exported:
-    RAISE exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
+    FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .fail
 .bw_toolarge:
-    RAISE exc_OverflowError_type, "new buffer size too large"
+    FAIL exc_OverflowError_type, "new buffer size too large", .fail
 .bw_nomem:
-    RAISE exc_OSError_type, "out of memory"
+    FAIL exc_OSError_type, "out of memory", .fail
 .bw_type:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_byteslike]
     mov rdx, [rbp - BW_ARG]
-    call io_raise_typename_q
+    call io_set_typename_q
+    jmp .fail
 .bw_argerr:
-    RAISE exc_TypeError_type, "write() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "write() takes exactly one argument"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_write_fn
 
 ;; ============================================================================
@@ -576,6 +621,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fail
     mov [rbp - BS_POS], rax
     pop rsi
     pop rdi
@@ -585,11 +631,13 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fail
     mov r8, rax
 .bs_have_whence:
     push r8
     mov rdi, [rbp - BS_SELF]
     call bytesio_check
+    ERR_M1 .fail
     pop r8
 
     mov rax, [rbp - BS_POS]
@@ -616,8 +664,8 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     call io_copy_bounded
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fail
 .bs_cur:
     add rax, [rdi + PyBytesIOObject.bio_pos]
     jmp .bs_clamp
@@ -645,9 +693,14 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msg_negseek]
     mov rdx, rax
-    call io_raise_number
+    call io_set_number
+    jmp .fail
 .bs_argerr:
-    RAISE exc_TypeError_type, "seek() takes at least one argument"
+    SET_EXC exc_TypeError_type, "seek() takes at least one argument"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_seek_fn
 
 DEF_FUNC bytesio_tell_fn
@@ -655,13 +708,18 @@ DEF_FUNC bytesio_tell_fn
     jz .bt_argerr
     mov rdi, [rdi]
     call bytesio_check
+    ERR_M1 .fail
     mov rdx, [rdi + PyBytesIOObject.bio_pos]
     V_PACK_I64 rdx, rcx
     mov rax, rdx
     leave
     ret
 .bt_argerr:
-    RAISE exc_TypeError_type, "tell() takes no arguments"
+    SET_EXC exc_TypeError_type, "tell() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_tell_fn
 
 BTR_SELF  equ 8
@@ -683,12 +741,14 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     test rax, rax
     jl .btr_negative
     mov [rbp - BTR_SIZE], rax
 .btr_have_size:
     mov rdi, [rbp - BTR_SELF]
     call bytesio_check
+    ERR_M1 .fail
     cmp qword [rdi + PyBytesIOObject.bio_exports], 0
     jne .btr_exported
     mov rax, [rbp - BTR_SIZE]
@@ -708,14 +768,23 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     leave
     ret
 .btr_exported:
-    RAISE exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
+    FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .fail
 .btr_negative:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msg_negsize]
     mov rdx, rax
-    call io_raise_number
+    call io_set_number
+    jmp .fail
 .btr_argerr:
-    RAISE exc_TypeError_type, "truncate() missing self"
+    FAIL exc_TypeError_type, "truncate() missing self", .fail
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_truncate_fn
 
 DEF_FUNC bytesio_getvalue_fn
@@ -723,6 +792,7 @@ DEF_FUNC bytesio_getvalue_fn
     jz .bg_argerr
     mov rdi, [rdi]
     call bytesio_check
+    ERR_M1 .fail
     mov rsi, [rdi + PyBytesIOObject.bio_size]
     mov rdi, [rdi + PyBytesIOObject.bio_buf]
     call bytes_from_data
@@ -730,7 +800,11 @@ DEF_FUNC bytesio_getvalue_fn
     leave
     ret
 .bg_argerr:
-    RAISE exc_TypeError_type, "getvalue() takes no arguments"
+    SET_EXC exc_TypeError_type, "getvalue() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_getvalue_fn
 
 ;; getbuffer() hands out a memoryview over the storage itself, so nothing may
@@ -743,6 +817,7 @@ DEF_FUNC bytesio_getbuffer_fn
     mov rdi, [rdi]
     mov rbx, rdi
     call bytesio_check
+    ERR_M1 .fail
     mov edi, PyMemoryViewObject_size
     call ap_malloc
     test rax, rax
@@ -767,9 +842,16 @@ DEF_FUNC bytesio_getbuffer_fn
     leave
     ret
 .bgb_nomem:
-    RAISE exc_OSError_type, "out of memory"
+    FAIL exc_OSError_type, "out of memory", .fail
 .bgb_argerr:
-    RAISE exc_TypeError_type, "getbuffer() takes no arguments"
+    SET_EXC exc_TypeError_type, "getbuffer() takes no arguments"
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC bytesio_getbuffer_fn
 
 ;; ============================================================================
@@ -800,9 +882,13 @@ DEF_FUNC bytesio_close_fn
     leave
     ret
 .bc_exported:
-    RAISE exc_BufferError_type, "Existing exports of data: object cannot be re-sized"
+    FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .fail
 .bc_argerr:
-    RAISE exc_TypeError_type, "close() takes no arguments"
+    SET_EXC exc_TypeError_type, "close() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_close_fn
 
 DEF_FUNC bytesio_closed_get_fn
@@ -821,7 +907,11 @@ DEF_FUNC bytesio_closed_get_fn
     leave
     ret
 .bcg_argerr:
-    RAISE exc_TypeError_type, "closed getter takes no arguments"
+    SET_EXC exc_TypeError_type, "closed getter takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_closed_get_fn
 
 ;; A BytesIO is readable, writable and seekable whenever it is open, so the
@@ -832,13 +922,18 @@ DEF_FUNC bytesio_true_fn
     jz .btf_argerr
     mov rdi, [rdi]
     call bytesio_check
+    ERR_M1 .fail
     lea rax, [rel bool_true]
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
     ret
 .btf_argerr:
-    RAISE exc_TypeError_type, "takes no arguments"
+    SET_EXC exc_TypeError_type, "takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_true_fn
 
 DEF_FUNC bytesio_enter_fn
@@ -846,13 +941,18 @@ DEF_FUNC bytesio_enter_fn
     jz .ben_argerr
     mov rdi, [rdi]
     call bytesio_check
+    ERR_M1 .fail
     call obj_incref
     mov rax, rdi
     mov edx, TAG_PTR
     leave
     ret
 .ben_argerr:
-    RAISE exc_TypeError_type, "__enter__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__enter__() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_enter_fn
 
 DEF_FUNC bytesio_exit_fn
@@ -863,7 +963,11 @@ DEF_FUNC bytesio_exit_fn
     leave
     ret
 .bex_argerr:
-    RAISE exc_TypeError_type, "__exit__() missing self"
+    SET_EXC exc_TypeError_type, "__exit__() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_exit_fn
 
 ;; ============================================================================
@@ -875,13 +979,18 @@ DEF_FUNC bytesio_iter_fn
     jz .bit_argerr
     mov rdi, [rdi]
     call bytesio_check
+    ERR_M1 .fail
     call obj_incref
     mov rax, rdi
     mov edx, TAG_PTR
     leave
     ret
 .bit_argerr:
-    RAISE exc_TypeError_type, "__iter__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__iter__() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_iter_fn
 
 DEF_FUNC bytesio_next_fn
@@ -891,6 +1000,7 @@ DEF_FUNC bytesio_next_fn
     mov rdi, [rdi]
     mov rbx, rdi
     call bytesio_check
+    ERR_M1 .fail
     mov rax, [rbx + PyBytesIOObject.bio_pos]
     cmp rax, [rbx + PyBytesIOObject.bio_size]
     jge .bnx_stop
@@ -915,7 +1025,14 @@ DEF_FUNC bytesio_next_fn
     leave
     ret
 .bnx_argerr:
-    RAISE exc_TypeError_type, "__next__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__next__() takes no arguments"
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC bytesio_next_fn
 
 ;; ============================================================================
@@ -1058,7 +1175,7 @@ DEF_FUNC_LOCAL io_make_bytesio, MBI_FRAME
     mov rdi, rbx
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi

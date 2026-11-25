@@ -1,9 +1,11 @@
 ; buildclass.asm - Building a class object
 ;
-; type.__new__, type_from_parts, __build_class__, and the keyword handling
-; between them.  This is what `class C(B, metaclass=M): ...` compiles down to:
-; resolve the metaclass, run __prepare__, execute the body into the namespace
-; it returns, build the type, then apply __set_name__ to every descriptor in it.
+; type_from_parts and what it calls.  This is the far end of what
+; `class C(B, metaclass=M): ...` compiles down to: buildclass_stmt.asm resolves
+; the metaclass, runs __prepare__ and executes the body into the namespace it
+; returns; buildclass_type.asm is `type`'s own methods, type.__new__ among
+; them, which is how a metaclass arrives here; this builds the type; and
+; buildclass_ns.asm holds the passes it then makes over that namespace.
 
 %include "macros.inc"
 %include "object.inc"
@@ -19,6 +21,7 @@ extern dunder_call_3
 extern dunder_lookup
 extern dict_get
 extern dict_set
+extern dict_get_mro
 extern str_from_cstr_heap
 extern obj_getattr_opt
 extern obj_call_n
@@ -28,7 +31,7 @@ extern obj_decref
 extern bool_type
 extern gc_alloc
 extern gc_track
-extern raise_exception
+extern set_exception
 extern eval_frame
 extern frame_new
 extern ap_malloc
@@ -66,498 +69,23 @@ extern exc_TypeError_type
 ; --- moved to a sibling file by the split ---
 extern builtins_dict_global
 
+; --- buildclass_ns.asm: the passes over the new class's namespace ---
+extern type_apply_set_name
+extern type_apply_hash_rule
+extern type_wrap_implicit_classmethods
+extern type_mangle_name
+
+; Declared inside type_apply_hash_rule until it moved.  The __doc__ default
+; still uses it.
+extern none_singleton
+
 section .text
 
 ;; ============================================================================
-;; type.__new__(mcls, name, bases, ns) -> a new class whose metatype is mcls
-;;
-;; A metaclass __new__ almost always ends in
-;; `super().__new__(mcls, name, bases, ns)`, and without this that resolved to
-;; object.__new__ and produced an *instance* of the metaclass rather than a
-;; class.  ABCMeta is written exactly that way, so abc.py depends on it.
-;; ============================================================================
-DEF_FUNC type_method_new
-    push rbx
-    push r12
-    ; type.__new__(mcls, name, bases, ns, **kwds): the keywords are for
-    ; __init_subclass__ and are not ours to reject.
-    cmp rsi, 4
-    jl .tmn_error
-    mov rbx, rdi                    ; args
-    mov r12, [rdi]                  ; mcls
-
-    mov rdi, [rbx + 8]              ; name
-    mov rsi, [rbx + 16]             ; bases
-    mov rdx, [rbx + 24]             ; namespace
-    ; type_from_parts adopts a reference to each
-    push rdi
-    call obj_incref
-    pop rdi
-    push rdi
-    mov rdi, rdx
-    call obj_incref
-    pop rdi
-    mov rsi, [rbx + 16]
-    mov rdx, [rbx + 24]
-    ; The metatype is whatever __new__ was handed, not the default, and it has
-    ; to be on the class before its descriptors' __set_name__ run -- which is
-    ; inside type_from_parts.
-    mov [gs:ThreadState.class_metatype_pending], r12
-    call type_from_parts
-    mov qword [gs:ThreadState.class_metatype_pending], 0
-    test rax, rax
-    jz .tmn_failed                  ; a __set_name__ raised, and it is pending
-
-    ; Stamped already unless type_from_parts bailed before reaching it.
-    mov [rax + PyObject.ob_type], r12
-    mov edx, TAG_PTR
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-
-.tmn_failed:
-    xor eax, eax
-    xor edx, edx
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.tmn_error:
-    RAISE exc_TypeError_type, "type.__new__() takes at least 3 arguments"
-END_FUNC type_method_new
-
-;; ============================================================================
-;; type.__init__(cls, ...) -> None
-;;
-;; A no-op, as CPython's type_init is -- but a REGISTERED one.  `type` had no
-;; __init__ in its dict, so a metaclass ending in `super().__init__(name,
-;; bases, ns)` walked past it to object's, which now refuses arguments it
-;; has nowhere to put.  CPython takes one or three besides the class.
-;; ============================================================================
-DEF_FUNC type_method_init
-    ; One or three besides the class.  A builtin here is handed its keyword
-    ; values as further positional arguments, and a metaclass ending in
-    ; `super().__init__(name, bases, ns, **kwds)` is the shape that matters,
-    ; so four or more is taken as the three-argument form with keywords.
-    cmp rsi, 2
-    je .tmi_ok
-    cmp rsi, 4
-    jae .tmi_ok
-    jmp .tmi_error
-.tmi_ok:
-    RET_NONE
-    leave
-    V_PACK rax, rdx
-    ret
-.tmi_error:
-    RAISE exc_TypeError_type, "type.__init__() takes 1 or 3 arguments"
-END_FUNC type_method_init
-
-;; ============================================================================
-;; type_method_prepare(args, nargs) -> Value: a fresh empty dict
-;;
-;; `type.__prepare__(name, bases, **kwds)`, a classmethod.  A metaclass that
-;; wants an ordered or otherwise special namespace overrides it; type's own
-;; answers the plain dict __build_class__ would have made anyway.  Absent, it
-;; was `types.prepare_class` and every cooperative `super().__prepare__(...)`
-;; that could not find it.
-;; ============================================================================
-DEF_FUNC type_method_prepare
-    extern dict_new
-    call dict_new
-    test rax, rax
-    jz .tmp_fail
-    mov edx, TAG_PTR
-    leave
-    V_PACK rax, rdx
-    ret
-.tmp_fail:
-    xor eax, eax
-    leave
-    ret
-END_FUNC type_method_prepare
-
-;; ============================================================================
-;; type_method_instancecheck(args, nargs) -> Value: True or False
-;; type_method_subclasscheck(args, nargs) -> Value: True or False
-;;
-;; `type.__instancecheck__(cls, obj)` and `type.__subclasscheck__(cls, sub)`.
-;;
-;; These are the PLAIN checks, and that is the whole point of them: CPython's
-;; go straight to recursive_isinstance rather than back through
-;; PyObject_IsInstance.  One that consulted the dunder would recurse forever
-;; through a metaclass whose __instancecheck__ ends in
-;; `super().__instancecheck__(obj)` -- which is how ABCMeta's is written.
-;; ============================================================================
-TIC_CLS   equ 8
-TIC_OBJ   equ 16
-TIC_FRAME equ 24            ; + 1 push = 32, 16-aligned
-DEF_FUNC type_method_instancecheck, TIC_FRAME
-    push rbx
-    cmp rsi, 2
-    jne .tic_error
-    mov rax, [rdi]
-    mov [rbp - TIC_CLS], rax
-    mov rax, [rdi + 8]
-    mov [rbp - TIC_OBJ], rax
-
-    mov rdi, [rbp - TIC_CLS]
-        call type_check_is_class
-    test eax, eax
-    jz .tic_error
-
-    ; What the object IS.
-    mov rdi, [rbp - TIC_OBJ]
-    extern value_type
-    call value_type
-    test rax, rax
-    jz .tic_declared
-    mov rdi, rax
-    mov rsi, [rbp - TIC_CLS]
-    extern type_is_subtype
-    call type_is_subtype
-    test eax, eax
-    jnz .tic_true
-
-.tic_declared:
-    ; ...and what it SAYS it is, which is a separate question a mock answers
-    ; differently.  obj_declared_class hands back a new reference.
-    mov rdi, [rbp - TIC_OBJ]
-    extern obj_declared_class
-    call obj_declared_class
-    test rax, rax
-    jz .tic_false
-    mov rbx, rax
-    mov rdi, rax
-    mov rsi, [rbp - TIC_CLS]
-    call type_is_subtype
-    push rax
-    push rax                        ; pad
-    mov rdi, rbx
-    extern obj_decref
-    call obj_decref
-    pop rax
-    pop rax
-    test eax, eax
-    jnz .tic_true
-
-.tic_false:
-    RET_FALSE
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-.tic_true:
-    RET_TRUE
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-.tic_error:
-    RAISE exc_TypeError_type, "__instancecheck__() takes exactly one argument"
-END_FUNC type_method_instancecheck
-
-;; type_method_subclasscheck(args, nargs) -> Value, documented with its twin
-;; above: the same plain check, over two classes rather than a class and an
-;; instance.
-DEF_FUNC type_method_subclasscheck, TIC_FRAME
-    push rbx
-    cmp rsi, 2
-    jne .tsc_error
-    mov rax, [rdi]
-    mov [rbp - TIC_CLS], rax
-    mov rax, [rdi + 8]
-    mov [rbp - TIC_OBJ], rax
-    mov rdi, rax
-    call type_check_is_class
-    test eax, eax
-    jz .tsc_not_a_class
-    mov rdi, [rbp - TIC_CLS]
-    call type_check_is_class
-    test eax, eax
-    jz .tsc_error
-    mov rdi, [rbp - TIC_OBJ]
-    mov rsi, [rbp - TIC_CLS]
-    call type_is_subtype
-    test eax, eax
-    jnz .tsc_true
-    RET_FALSE
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-.tsc_true:
-    RET_TRUE
-    pop rbx
-    leave
-    V_PACK rax, rdx
-    ret
-.tsc_not_a_class:
-    RAISE exc_TypeError_type, "issubclass() arg 1 must be a class"
-.tsc_error:
-    RAISE exc_TypeError_type, "__subclasscheck__() takes exactly one argument"
-END_FUNC type_method_subclasscheck
-
-
-;; ============================================================================
-;; type_apply_set_name(PyTypeObject *cls, PyDictObject *ns)
-;;
-;; Call __set_name__(owner, name) on every value in the class body that defines
-;; one, once the class exists.  It is the hook a descriptor uses to learn what
-;; it was assigned to, and enum is built on it: each member starts as a
-;; _proto_member and __set_name__ is what replaces it with the real member.
-;;
-;; The names are snapshotted first, because a __set_name__ is entitled to
-;; setattr on the owner -- which is this very dict, and rehashing it under the
-;; walk would lose entries.
-;;
-;; Returns 0 when one of them raised.  Returning the class anyway would leave
-;; the exception pending with nothing to attach it to, and the next opcode to
-;; look at a NULL would be the one that crashed.
-;; ============================================================================
-TSN_CLS   equ 8
-TSN_NS    equ 16
-TSN_KEYS  equ 24
-TSN_I     equ 32
-TSN_N     equ 40
-TSN_NAME  equ 48
-TSN_FRAME equ 56          ; + 3 pushes = 80
-DEF_FUNC type_apply_set_name, TSN_FRAME
-    push rbx
-    push r12
-    push r13
-    mov [rbp - TSN_CLS], rdi
-    mov [rbp - TSN_NS], rsi
-    test rsi, rsi
-    jz .done
-
-    ; --- snapshot the keys ---
-    mov r12, [rsi + PyDictObject.capacity]
-    mov r13, [rsi + PyDictObject.entries]
-    xor ebx, ebx
-    xor ecx, ecx
-.count:
-    cmp rcx, r12
-    jae .counted
-    imul rax, rcx, DICT_ENTRY_SIZE
-    cmp qword [r13 + rax + DictEntry.key], 0
-    je .count_next
-    inc rbx
-.count_next:
-    inc rcx
-    jmp .count
-.counted:
-    test rbx, rbx
-    jz .done
-    mov [rbp - TSN_N], rbx
-    mov rdi, rbx
-    call tuple_new
-    test rax, rax
-    jz .done
-    mov [rbp - TSN_KEYS], rax
-    mov rdx, [rax + PyTupleObject.ob_item]
-    mov rsi, [rbp - TSN_NS]
-    mov r12, [rsi + PyDictObject.capacity]
-    mov r13, [rsi + PyDictObject.entries]
-    xor ebx, ebx
-    xor ecx, ecx
-.fill:
-    cmp rcx, r12
-    jae .filled
-    imul rax, rcx, DICT_ENTRY_SIZE
-    mov rdi, [r13 + rax + DictEntry.key]
-    test rdi, rdi
-    jz .fill_next
-    INCREF_V rdi, r8
-    mov [rdx + rbx*8], rdi
-    inc rbx
-.fill_next:
-    inc rcx
-    jmp .fill
-.filled:
-
-    ; --- call each value's __set_name__, if its TYPE defines one ---
-    mov qword [rbp - TSN_I], 0
-.loop:
-    mov rax, [rbp - TSN_I]
-    cmp rax, [rbp - TSN_N]
-    jae .release
-    mov rcx, [rbp - TSN_KEYS]
-    mov rcx, [rcx + PyTupleObject.ob_item]
-    mov rcx, [rcx + rax*8]
-    mov [rbp - TSN_NAME], rcx
-
-    mov rdi, [rbp - TSN_NS]
-    mov rsi, rcx
-    call dict_get
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .next                            ; deleted while we walked
-    ; The classification is the TAG's to make: after V_UNPACK rax holds a
-    ; payload, and testing a payload as if it were a Value calls a small int a
-    ; pointer.
-    cmp edx, TAG_PTR
-    jne .next
-    test rax, rax
-    jz .next
-    mov rbx, rax
-
-    ; Looked up on the type, not the instance: an instance attribute called
-    ; __set_name__ is not the hook.
-    mov rdi, [rbx + PyObject.ob_type]
-    lea rsi, [rel tsn_name]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
-    jz .next
-
-    mov rdi, rbx                        ; self = the value
-    mov rsi, [rbp - TSN_CLS]            ; owner
-    mov rdx, [rbp - TSN_NAME]           ; name
-    lea rcx, [rel tsn_name]
-    mov r8d, TAG_PTR
-    call dunder_call_3
-    test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
-    jz .raised
-    mov rdi, rax
-    DECREF_V rdi, rsi
-.next:
-    inc qword [rbp - TSN_I]
-    jmp .loop
-
-.release:
-    mov rdi, [rbp - TSN_KEYS]
-    call obj_decref
-.done:
-    mov eax, 1
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-.raised:
-    mov rdi, [rbp - TSN_KEYS]
-    call obj_decref
-    xor eax, eax
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC type_apply_set_name
-
-;; ============================================================================
-;; type_mangle_name(rdi = the name, rsi = the class name) -> rax = an OWNED
-;;                  reference: a new string when it mangles, the argument with
-;;                  one more reference when it does not
-;;
-;; CPython's rule, and the same one comp_intern_name applies at compile time:
-;; two leading underscores, not two trailing ones, and the class name with its
-;; own leading underscores stripped -- an all-underscore class name mangles
-;; nothing.  Both have to agree, or a slot and the code that uses it name
-;; different things.
-;; ============================================================================
-TMN_NAME  equ 8
-TMN_CLS   equ 16
-TMN_BUF   equ 24
-TMN_LEN   equ 32
-TMN_FRAME equ 48                ; 32 used + 16 pad = 48, 16-aligned
-global type_mangle_name
-DEF_FUNC type_mangle_name, TMN_FRAME
-    push rbx
-    push r12
-    mov [rbp - TMN_NAME], rdi
-    mov [rbp - TMN_CLS], rsi
-
-    test rsi, rsi
-    jz .tmn_plain
-    mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .tmn_plain
-    mov rax, [rdi + PyObject.ob_type]
-    cmp rax, rcx
-    jne .tmn_plain
-
-    mov rdx, [rdi + PyStrObject.ob_size]
-    cmp rdx, 2
-    jl .tmn_plain
-    cmp byte [rdi + PyStrObject.data], '_'
-    jne .tmn_plain
-    cmp byte [rdi + PyStrObject.data + 1], '_'
-    jne .tmn_plain
-    ; ...but not one that also ends in two underscores.
-    cmp rdx, 4
-    jl .tmn_mangle
-    cmp byte [rdi + PyStrObject.data + rdx - 1], '_'
-    jne .tmn_mangle
-    cmp byte [rdi + PyStrObject.data + rdx - 2], '_'
-    je .tmn_plain
-
-.tmn_mangle:
-    ; Strip the class name's own leading underscores.
-    mov rsi, [rbp - TMN_CLS]
-    lea rbx, [rsi + PyStrObject.data]
-    mov r12, [rsi + PyStrObject.ob_size]
-.tmn_strip:
-    test r12, r12
-    jz .tmn_plain               ; nothing but underscores: no mangling
-    cmp byte [rbx], '_'
-    jne .tmn_stripped
-    inc rbx
-    dec r12
-    jmp .tmn_strip
-.tmn_stripped:
-
-    ; "_" + the stripped class name + the name
-    mov rdi, [rbp - TMN_NAME]
-    mov rax, [rdi + PyStrObject.ob_size]
-    lea rdi, [rax + r12 + 2]
-    mov [rbp - TMN_LEN], rdi
-    call ap_malloc
-    test rax, rax
-    jz .tmn_plain
-    mov [rbp - TMN_BUF], rax
-    mov byte [rax], '_'
-    lea rdi, [rax + 1]
-    mov rsi, rbx
-    mov rdx, r12
-    call ap_memcpy
-    mov rdi, [rbp - TMN_BUF]
-    lea rdi, [rdi + r12 + 1]
-    mov rsi, [rbp - TMN_NAME]
-    mov rdx, [rsi + PyStrObject.ob_size]
-    lea rsi, [rsi + PyStrObject.data]
-    call ap_memcpy
-    mov rdi, [rbp - TMN_BUF]
-    mov rsi, [rbp - TMN_NAME]
-    mov rsi, [rsi + PyStrObject.ob_size]
-    lea rsi, [rsi + r12 + 1]
-    call str_new_heap           ; -> rax = PyStrObject*, refcount 1
-    push rax
-    mov rdi, [rbp - TMN_BUF]
-    call ap_free
-    pop rax
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.tmn_plain:
-    mov rax, [rbp - TMN_NAME]
-    INCREF rax
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC type_mangle_name
-
-;; ============================================================================
 ;; bc_fill_cell(rdi = the class namespace, rsi = a cstring name, rdx = a Value,
-;;              rcx = the refusal to raise when the name is not a cell)
-;;   -> nothing, or does not return
+;;              rcx = the refusal to word when the name is not a cell)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; Fill the cell the compiler left under that name, then take the name back
 ;; out: both cells a class body can leave are plumbing rather than attributes,
@@ -590,7 +118,9 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov [rbp - BFC_KEY], rax
     mov rdi, [rbp - BFC_DICT]
     mov rsi, rax
-    call dict_get                       ; a Value; 0 is the miss
+    call dict_get               ; a Value; 0 is the miss
+    ERR_DICT_GET .bfc_fail_key  ; a foreign key in the namespace refused the
+                                ; comparison
     test rax, rax
     jz .bfc_drop_key
 
@@ -612,28 +142,51 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov rdi, [rbp - BFC_DICT]
     mov rsi, [rbp - BFC_KEY]
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is a str built in this function
 .bfc_drop_key:
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
 .bfc_out:
+    xor eax, eax
     leave
     ret
 
 .bfc_not_a_cell:
-    ; Release the interned key first: the raise abandons this frame.
+    ; What was found stays where it is -- the namespace still holds it -- so
+    ; it can be named after the key is given back.
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
     mov rdi, [rbp - BFC_MSG]
     mov rsi, [rbp - BFC_FOUND]
-    extern raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
     leave
-    jmp raise_type_error_with_name      ; does not return
+    ret
+
+.bfc_fail_key:
+    mov rdi, [rbp - BFC_KEY]
+    call obj_decref
+    mov rax, -1
+    leave
+    ret
 END_FUNC bc_fill_cell
 
 ;; ============================================================================
 ;; type_from_parts(rdi = name str, rsi = bases tuple or NULL, rdx = namespace dict)
 ;;   -> rax = the new type object, one strong reference
+;; Fails: 0
+;;
+;; The name and the bases are BORROWED: the class takes references of its own
+;; to both.  The namespace is CONSUMED, whether a class comes back or not --
+;; an exact dict is copied into tp_dict and released, anything else becomes
+;; tp_dict as it stands -- so a caller hands over a reference and keeps none.
+;;
+;; A refusal gives back everything built so far.  Before the type object
+;; exists that is the namespace; after, it is the type, which owns the rest.
+;; A half-built class already has its MRO, and the first entry of that tuple
+;; is the class -- a cycle a release alone cannot free -- so it is handed to
+;; the collector on the way out, exactly as a finished class would have been.
 ;;
 ;; The heaptype construction shared by __build_class__ and the three-argument
 ;; type().  Extracted rather than duplicated: type() used to fall through to
@@ -707,11 +260,14 @@ DEF_FUNC_LOCAL bc_solid_base
 END_FUNC bc_solid_base
 
 ;; ============================================================================
-;; bc_take_qualname(r12 = the new heaptype) -> nothing
+;; bc_take_qualname(r12 = the new heaptype) -> rax = 0
+;; Fails: -1
 ;;
 ;; Moves __qualname__ out of tp_dict and into ht_qualname.  CPython's type_new
 ;; does the same.  Whether it IS a str was settled by bc_check_qualname before
-;; the type existed, so nothing here raises.
+;; the type existed, so the only failure left is the lookup's own: tp_dict is
+;; a copy of the caller's namespace, and a key in it that is not a str can
+;; refuse to be compared with the name.
 ;; ============================================================================
 BTQ_KEY   equ 8
 BTQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -727,6 +283,7 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     mov rdi, [r12 + PyTypeObject.tp_dict]
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .btq_fail_key
     test rax, rax
     jz .btq_release_key
 
@@ -744,26 +301,32 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     mov rdi, [r12 + PyTypeObject.tp_dict]
     mov rsi, [rbp - BTQ_KEY]
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is a str built in this function
 
 .btq_release_key:
     mov rdi, [rbp - BTQ_KEY]
     call obj_decref
 .btq_done:
+    xor eax, eax
     leave
     ret
 
+.btq_fail_key:
+    mov rdi, [rbp - BTQ_KEY]
+    call obj_decref
+    mov rax, -1
+    leave
+    ret
 END_FUNC bc_take_qualname
 
 ;; ============================================================================
-;; bc_check_qualname(rdi = the class body namespace, or 0) -> nothing; may
-;;   raise and then does not return
+;; bc_check_qualname(rdi = the class body namespace, or 0) -> rax = 0
+;; Fails: -1
 ;;
 ;; "type __qualname__ must be a str, not int", which CPython's type_new says
-;; before it builds anything.  Separate from the move above because it has to
-;; run BEFORE the type object exists: a raise from after the half-built class
-;; is registered in build_class_pending goes through a teardown this early
-;; stage is not ready for.
+;; before it builds anything.  Separate from the move above because it runs
+;; BEFORE the type object exists, where a refusal has only the namespace to
+;; give back.
 ;; ============================================================================
 BCQ_KEY   equ 8
 BCQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -786,6 +349,7 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
     mov [rbp - BCQ_KEY], rax
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .bcq_fail_key
     push rax
     sub rsp, 8
     mov rdi, [rbp - BCQ_KEY]
@@ -803,9 +367,18 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
 .bcq_not_str:
     mov rsi, rax
     lea rdi, [rel bc_qualname_not_str]
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 .bcq_done:
+    xor eax, eax
+    leave
+    ret
+.bcq_fail_key:
+    mov rdi, [rbp - BCQ_KEY]
+    call obj_decref
+    mov rax, -1
     leave
     ret
 END_FUNC bc_check_qualname
@@ -844,8 +417,8 @@ END_FUNC bc_slot_is_dict_name
 ;; ============================================================================
 ;; bc_slots_validate(rdi = slots sequence, rsi = nslots, edx = 1 when a base
 ;;                   already supplies an instance dict)
-;;   -> eax = 1 when one of the names is '__dict__'; raises and does not return
-;;      when an item is not a usable slot name
+;;   -> rax = 1 when one of the names is '__dict__', else 0
+;; Fails: -1
 ;;
 ;; CPython's valid_identifier, plus type_new_slots_impl's two special cases.
 ;; Every item must be a str and every str must be an identifier: a non-str was
@@ -910,19 +483,23 @@ DEF_FUNC_LOCAL bc_slots_validate, BSV_FRAME
     ret
 
 .bsv_not_str:
-    ; rdi is still the item, and raise_type_error_with_name names a Value's
+    ; rdi is still the item, and set_type_error_with_name names a Value's
     ; type whether it is a pointer or not.
     mov rsi, rdi
     CSTRING rdi, `__slots__ items must be strings, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bsv_fail
 
 .bsv_not_identifier:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "__slots__ must be identifiers"
+    FAIL exc_TypeError_type, "__slots__ must be identifiers", .bsv_fail
 
 .bsv_double_dict:
-    RAISE exc_TypeError_type, "__dict__ slot disallowed: we already got one"
+    SET_EXC exc_TypeError_type, "__dict__ slot disallowed: we already got one"
+.bsv_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC bc_slots_validate
 
 DEF_FUNC type_from_parts
@@ -935,7 +512,9 @@ DEF_FUNC type_from_parts
 
 TFP_BASE  equ 48            ; the layout base: the widest of the bases
 TFP_BASES equ 56            ; the bases tuple, or NULL
-TFP_EXC   equ 64            ; current_exception, to tell a raise from a miss
+TFP_FILLED equ 64           ; which of __module__ / __doc__ were filled in here
+TFP_FILLED_MODULE equ 1
+TFP_FILLED_DOC    equ 2
 TFP_SLOTV equ 72            ; the tag of whatever __slots__ holds
 TFP_SLOT1 equ 80            ; a one-tuple built for `__slots__ = 'name'`, owned
 TFP_TAIL  equ 88            ; 1 when the slots go at the instance's TAIL
@@ -946,10 +525,15 @@ TFP_WANTDICT equ 96         ; 1 when __slots__ names '__dict__' itself
 ; bc_base_has_dict reads it through the saved rbp.
 TFP_ADDDICT equ 104
 TFP_ADDWEAK equ 112
+; Where rsp sits once the prologue is done: five pushes and the 88 bytes.  The
+; error exits go back to it, because several of them leave from under pushes
+; the body made around a call.
+TFP_RSP   equ 40 + 88
     mov r14, rdi                ; class name str
     mov r15, rdx                ; namespace dict, becomes tp_dict
     mov [rbp - TFP_BASES], rsi
-    DUNDER_EXC_SAVE [rbp - TFP_EXC]
+    mov qword [rbp - TFP_SLOT1], 0
+    mov qword [rbp - TFP_FILLED], 0
 
     ; tp_dict is a COPY of the namespace, never the namespace itself.  The
     ; caller's reference is transferred to us either way, so the original is
@@ -1063,8 +647,9 @@ TFP_ADDWEAK equ 112
     jmp .tfp_final_scan
 .tfp_final_base:
     mov rdi, [rcx + PyTypeObject.tp_name]
-    extern raise_final_base
-    call raise_final_base
+    extern set_final_base
+    call set_final_base
+    jmp .tfp_fail_ns
 .tfp_final_ok:
 
     ; Two bases whose layouts are unrelated cannot both be laid out in one
@@ -1109,7 +694,7 @@ TFP_ADDWEAK equ 112
     inc rbx
     jmp .tfp_layout_scan
 .tfp_layout_conflict:
-    RAISE exc_TypeError_type, "multiple bases have instance lay-out conflict"
+    FAIL exc_TypeError_type, "multiple bases have instance lay-out conflict", .tfp_fail_ns
 .tfp_layout_ok:
     ; A subtype of int, bytes or tuple cannot carry slots.  int wraps its
     ; value rather than embedding it and the other two keep their data
@@ -1146,6 +731,7 @@ TFP_ADDWEAK equ 112
     mov rdi, r15
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .tfp_fail_ns_key
     V_UNPACK rax, rdx
     mov r12, rax
     mov [rbp - TFP_SLOTV], rdx
@@ -1167,16 +753,15 @@ TFP_ADDWEAK equ 112
     je .tfp_slots_ok
     lea rdi, [rel bc_slots_unsupported]
     mov rsi, r13
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .tfp_fail_ns
 .tfp_slots_ok:
-    ; __qualname__ is checked HERE, before the type object exists.  Refusing
-    ; it once the half-built class is registered in build_class_pending
-    ; unwinds through a teardown that is not prepared for a raise from this
-    ; early -- and the symptom was an interned name released one time too
-    ; many, surfacing at shutdown in an unrelated code object's co_names.
+    ; __qualname__ is checked HERE, before the type object exists, as
+    ; CPython's type_new checks it: there is only the namespace to give back.
     mov rdi, r15
     call bc_check_qualname
+    ERR_M1 .tfp_fail_ns
     mov rax, [rbp - TFP_BASE]
     mov rdx, r15                ; restore namespace (scan clobbered rdx)
 
@@ -1214,9 +799,13 @@ TFP_ADDWEAK equ 112
     mov ecx, (HEAPTYPE_ALLOC_SIZE - 16) / 8
     rep stosq
 
-    ; tp_name: point to class_name string's data area
+    ; tp_name: point to class_name string's data area.  The reference that
+    ; keeps those characters alive is taken with it, so that the type owns
+    ; its name from the first moment it can be released.
     lea rax, [r14 + PyStrObject.data]
     mov [r12 + PyTypeObject.tp_name], rax
+    mov rdi, r14
+    call obj_incref
 
     ; Instance layout.  A heaptype embeds its base's layout and puts its own
     ; __dict__ immediately after it, so both numbers come from the base:
@@ -1355,6 +944,7 @@ TFP_ADDWEAK equ 112
     ; it; here it sat in tp_dict, so every instance of every class answered
     ; its class's -- and vars(C) had an entry CPython's does not.
     call bc_take_qualname
+    ERR_M1 .tfp_fail_type
 
     ; __new__ is an implicit staticmethod.  Without the wrapper, looking it up
     ; through the class or through super() binds it like an ordinary method
@@ -1367,6 +957,7 @@ TFP_ADDWEAK equ 112
     mov rdi, r15
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     mov rbx, rax                ; the current __new__, as a Value
     V_TEST_PTR rbx, rax
     ja .tfp_new_done
@@ -1384,7 +975,7 @@ TFP_ADDWEAK equ 112
     lea rdi, [rel staticmethod_type]
     mov rsi, rsp
     mov edx, 1
-    call staticmethod_construct
+    call staticmethod_construct ; err: rax is tested once the stack is back
     V_UNPACK rax, rdx
     add rsp, 16
     test rax, rax
@@ -1394,6 +985,7 @@ TFP_ADDWEAK equ 112
     mov rsi, [rsp]              ; the "__new__" key
     mov rdx, rbx
     call dict_set
+    ERR_M1 .tfp_fail_type_key_rbx
     mov rdi, rbx
     call obj_decref             ; the dict holds it now
 .tfp_new_done:
@@ -1409,6 +1001,7 @@ TFP_ADDWEAK equ 112
     mov rdi, r15
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .bc_have_module
     mov rcx, [gs:ThreadState.eval_saved_r12]
@@ -1423,7 +1016,8 @@ TFP_ADDWEAK equ 112
     mov rdi, [gs:ThreadState.eval_saved_r12]
     mov rdi, [rdi + PyFrame.globals]
     mov rsi, rax
-    call dict_get
+    call dict_get               ; the caller's globals: anyone's dict
+    ERR_DICT_GET .tfp_fail_type_key2
     V_UNPACK rax, rdx
     pop rdi
     push rax
@@ -1437,6 +1031,8 @@ TFP_ADDWEAK equ 112
     mov rsi, [rsp]                  ; the "__module__" key
     mov rdx, rax
     call dict_set
+    ERR_M1 .tfp_fail_type_key
+    or qword [rbp - TFP_FILLED], TFP_FILLED_MODULE
 .bc_have_module:
     pop rdi
     call obj_decref
@@ -1459,30 +1055,29 @@ TFP_ADDWEAK equ 112
     mov rdi, r15
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     test rax, rax               ; a Value; 0 is the miss
     jnz .bc_have_doc
     mov rdi, r15
     mov rsi, [rsp]
     lea rdx, [rel none_singleton]
     call dict_set
+    ERR_M1 .tfp_fail_type_key
+    or qword [rbp - TFP_FILLED], TFP_FILLED_DOC
 .bc_have_doc:
     pop rdi
     call obj_decref
 .bc_have_doc_key:
 
-    ; INCREF class_name (type object refers to it via tp_name)
-    mov rdi, r14
-    call obj_incref
-
     ; === Parse __slots__ from class_dict ===
     ; r12=type, r15=class_dict, [rbp - TFP_BASE]=base_class
-    mov qword [rbp - TFP_SLOT1], 0
     lea rdi, [rel bc_slots_name]
     call str_from_cstr_heap
     push rax                        ; save __slots__ str
     mov rdi, r15                    ; class_dict
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                         ; __slots__ str
     push rdx                        ; save dict_get tag
@@ -1561,14 +1156,26 @@ TFP_ADDWEAK equ 112
     ; '__dict__' and '__weakref__', could not carry an attribute.
     ; Every item is checked here, before any of it is believed: a str, an
     ; identifier, and '__dict__' at most once and only when no base already
-    ; supplies one.  bc_slots_validate raises and does not return when it is
+    ; supplies one.  bc_slots_validate refuses the whole class when it is
     ; not, so everything below reads names it has vouched for.
     call bc_base_has_dict
     mov edx, eax
     mov rdi, rbx
     mov rsi, r13
     call bc_slots_validate
+    ERR_M1 .tfp_fail_type
     mov [rbp - TFP_WANTDICT], rax
+
+    ; And none of them may already be a name the class body bound: the member
+    ; descriptor would silently replace it.  CPython's type_new_copy_slots
+    ; asks the same thing at the same point, once every name is known good.
+    mov rdi, rbx
+    mov rsi, r15
+    mov rdx, r14
+    mov rcx, [rbp - TFP_FILLED]
+    extern type_slots_conflict
+    call type_slots_conflict
+    ERR_M1 .tfp_fail_type
 
     ; A str subclass keeps its characters inline, so there is no fixed offset
     ; past the header to lay a slot at: one put there writes over the string's
@@ -1728,6 +1335,7 @@ TFP_ADDWEAK equ 112
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
     call dict_set
+    ERR_M1 .tfp_fail_type_key2  ; the descriptor, then the name
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
     pop rdi
@@ -1760,7 +1368,8 @@ TFP_ADDWEAK equ 112
 
     mov rdi, r15            ; class_dict
     mov rsi, rax            ; "__init__" str
-    call dict_get
+    call dict_get_mro       ; a slot being filled in from the type's own
+                            ; namespace, which is what _PyType_Lookup is for
     V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rbx, rax            ; rbx = __init__ func or NULL
 
@@ -1817,6 +1426,7 @@ TFP_ADDWEAK equ 112
     mov rsi, rax
     extern mro_compute
     call mro_compute
+    ERR_NULL .tfp_fail_type
     mov [r12 + PyTypeObject.tp_mro], rax
 
     ; Inherit the family bits from every base, not only the layout one: a
@@ -2123,6 +1733,7 @@ TFP_ADDWEAK equ 112
     mov rdi, r12
     mov rsi, r15
     call type_apply_hash_rule
+    ERR_M1 .tfp_fail_type
 
     ; Two names are implicitly classmethods, whatever the class body wrote.
     ; CPython wraps them in type_new; without it `Template.__init_subclass__()`
@@ -2132,6 +1743,7 @@ TFP_ADDWEAK equ 112
     mov rdi, r12
     mov rsi, r15
     call type_wrap_implicit_classmethods
+    ERR_M1 .tfp_fail_type
 
     ; The metatype, if type.__new__ was handed one, and BEFORE any user code
     ; runs -- __init_subclass__ below and __set_name__ further down alike.  A
@@ -2226,6 +1838,7 @@ TFP_ADDWEAK equ 112
     mov rsi, [rbp - TFP_ADDDICT]
     mov rdx, [rbp - TFP_ADDWEAK]
     call bc_layout_entries
+    ERR_M1 .tfp_fail_type
 
     ; Does anything in this MRO define a __getattribute__ of its own?  Asked
     ; once, here, instead of on every attribute access.  tp_mro, tp_dict and
@@ -2270,16 +1883,13 @@ TFP_ADDWEAK equ 112
     mov rcx, [gs:ThreadState.class_kwnames_pending]
     mov r8, [gs:ThreadState.class_kwvalues_pending]
     call bc_call_kw
+    ; It ran and raised, or was never reached for want of room for the
+    ; keywords: either way the exception is pending and there is no class.
+    ; The error exit puts rsp back, so the argument need not be popped first.
+    ERR_NULL .tfp_fail_type
     add rsp, 16                ; pop fat args
-    test rax, rax
-    jz .bc_init_subclass_failed
     mov rdi, rax
     call obj_decref
-    jmp .bc_no_init_subclass
-
-.bc_init_subclass_failed:
-    ; It ran and raised; the exception is pending and the class is not built.
-    DUNDER_RAISED [rbp - TFP_EXC], .tfp_set_name_failed
 
 .bc_no_init_subclass:
 
@@ -2294,11 +1904,13 @@ TFP_ADDWEAK equ 112
     mov rdx, r12
     lea rcx, [rel bc_classcell_bad]
     call bc_fill_cell
+    ERR_M1 .tfp_fail_type
     mov rdi, r15
     lea rsi, [rel bc_classdictcell_name]
     mov rdx, r15
     lea rcx, [rel bc_classdictcell_bad]
     call bc_fill_cell
+    ERR_M1 .tfp_fail_type
 
     ; Track the type object in GC
     extern gc_track
@@ -2310,7 +1922,7 @@ TFP_ADDWEAK equ 112
     mov rsi, r15
     call type_apply_set_name
     test eax, eax
-    jz .tfp_set_name_failed
+    jz .tfp_fail_type
 
     ; Return the new type object - clear pending flag first
     mov qword [gs:ThreadState.build_class_pending], 0
@@ -2325,12 +1937,67 @@ TFP_ADDWEAK equ 112
     leave
     ret
 
-.tfp_set_name_failed:
-    ; A __set_name__ raised.  The class is discarded and the exception carried
-    ; out as a NULL return, which is what every builtin does.
+.tfp_fail_type_key_rbx:
+    ; ... holding something in rbx as well, over the key.
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+    jmp .tfp_fail_type
+
+.tfp_fail_type_key2:
+    ; ... from under TWO owned references on the machine stack.  Both are
+    ; popped before either is released, so the release runs at the depth the
+    ; body's own did.
+    pop rdi
+    pop rbx
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+    jmp .tfp_fail_type
+
+.tfp_fail_type_key:
+    ; A lookup in the class's namespace failed -- it is a copy of the
+    ; caller's, and a key in it that is not a str may refuse to be compared
+    ; with a name -- from under the name the body pushed.
+    pop rdi
+    call obj_decref
+
+.tfp_fail_type:
+    ; Refused with the type object already built.  It owns everything taken
+    ; since -- the dict the namespace became, the name, the bases, the MRO --
+    ; so releasing it is the whole of the cleanup, bar the one-tuple a bare
+    ; `__slots__ = 'name'` was wrapped in.
+    ;
+    ; Tracked first, if it is not yet.  Its MRO names it, a filled
+    ; __classcell__ names it, each member descriptor names it: cycles, and a
+    ; class the collector has never been told about is one it cannot free.
+    ; An __init_subclass__ that raised used to leave exactly that behind.
+    lea rsp, [rbp - TFP_RSP]
     mov qword [gs:ThreadState.build_class_pending], 0
+    mov rdi, [rbp - TFP_SLOT1]
+    test rdi, rdi
+    jz .tfp_fail_slot1_done
+    call obj_decref
+.tfp_fail_slot1_done:
+    mov rdi, r12
+    call gc_track
     mov rdi, r12
     call obj_decref
+    jmp .tfp_fail
+
+.tfp_fail_ns_key:
+    mov rdi, rbx                ; the name the failed lookup was for
+    call obj_decref
+
+.tfp_fail_ns:
+    ; Refused before anything was built: the namespace is all there is.
+    lea rsp, [rbp - TFP_RSP]
+    test r15, r15
+    jz .tfp_fail
+    mov rdi, r15
+    call obj_decref
+.tfp_fail:
     xor eax, eax
     add rsp, 88                 ; must match the sub in the prologue
     pop r15
@@ -2458,7 +2125,8 @@ END_FUNC bc_base_has_dict
 
 ;; ============================================================================
 ;; bc_layout_entries(rdi = the new heaptype, rsi = 1 to add __dict__,
-;;                   rdx = 1 to add __weakref__) -> nothing
+;;                   rdx = 1 to add __weakref__) -> rax = 0
+;; Fails: -1
 ;;
 ;; One read-only GS_NAMED getset per name, owned by the type, and skipped when
 ;; the name is already taken -- which is what keeps a `__slots__` naming either
@@ -2498,6 +2166,7 @@ DEF_FUNC_LOCAL bc_layout_entries, BLE_FRAME
     extern obj_generic_attr
     lea rdx, [rel obj_generic_attr]
     call bc_add_layout_getset
+    ERR_M1 .ble_out             ; rax is the -1 already
 
 .ble_weak:
     cmp qword [rbp - BLE_ADDW], 0
@@ -2507,8 +2176,11 @@ DEF_FUNC_LOCAL bc_layout_entries, BLE_FRAME
     extern weakref_slot_get
     lea rdx, [rel weakref_slot_get]
     call bc_add_layout_getset
+    ERR_M1 .ble_out
 
 .ble_done:
+    xor eax, eax
+.ble_out:
     pop rbx
     leave
     ret
@@ -2516,7 +2188,8 @@ END_FUNC bc_layout_entries
 
 ;; ============================================================================
 ;; bc_add_layout_getset(rdi = name cstr, rsi = the owning type,
-;;                      rdx = a tp_getattr-shaped getter) -> nothing
+;;                      rdx = a tp_getattr-shaped getter) -> rax = 0
+;; Fails: -1
 ;;
 ;; GS_NAMED means the getter is called (self, gs_name) and answers from the
 ;; name, which is what obj_generic_attr and weakref_slot_get both are; see
@@ -2542,6 +2215,7 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rdi, rbx
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET .bal_fail_name
     test rax, rax               ; a Value; 0 is the miss
     jnz .bal_drop_name          ; the class already has the name
 
@@ -2560,6 +2234,7 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rsi, [rbp - BAL_NAME]
     mov rdx, rax
     call dict_set
+    ERR_M1 .bal_fail_desc
     mov rdi, [rbp - BAL_DESC]
     call obj_decref             ; dict_set took its own
 .bal_drop_name:
@@ -2567,216 +2242,23 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     call obj_decref             ; str_intern_cstr's, and getset_descr_new took
                                 ; one of its own for gs_name
 .bal_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bal_fail_desc:
+    mov rdi, [rbp - BAL_DESC]
+    call obj_decref
+.bal_fail_name:
+    mov rdi, [rbp - BAL_NAME]
+    call obj_decref
+    mov rax, -1
     pop rbx
     leave
     ret
 END_FUNC bc_add_layout_getset
 
-;; ============================================================================
-;; type_apply_hash_rule(rdi = the type, rsi = the class dict)
-;;
-;; Python's inherited-hash rule, which is about a name being ABSENT and so
-;; cannot be a slot wrapper:
-;;
-;;   __hash__ = None in the body   -> unhashable
-;;   __eq__ defined, __hash__ not  -> unhashable
-;;   otherwise                     -> whatever was inherited or installed
-;;
-;; __ne__ does not count: only __eq__ suppresses it.
-;; ============================================================================
-TAH_TYPE  equ 8
-TAH_DICT  equ 16
-TAH_FRAME equ 32            ; + 0 pushes = 32
-DEF_FUNC_LOCAL type_apply_hash_rule, TAH_FRAME
-    mov [rbp - TAH_TYPE], rdi
-    mov [rbp - TAH_DICT], rsi
-    test rsi, rsi
-    jz .tah_done
-
-    CSTRING rdi, "__hash__"
-    mov rsi, [rbp - TAH_DICT]
-    call tah_dict_get
-    test rax, rax
-    jz .tah_no_hash
-
-    ; Present in the body: only None means unhashable.
-    extern none_singleton
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .tah_unhashable_slot
-    jmp .tah_done
-
-.tah_no_hash:
-    ; Absent from the body: __eq__ here suppresses it...
-    CSTRING rdi, "__eq__"
-    mov rsi, [rbp - TAH_DICT]
-    call tah_dict_get
-    test rax, rax
-    jnz .tah_unhashable
-
-    ; ...and so does an INHERITED __hash__ of None, which is how a subclass
-    ; of an unhashable class stays unhashable without a rule of its own.
-    ; The name resolves through the MRO; the slot does not follow it, so the
-    ; two have to be reconciled here.
-    mov rdi, [rbp - TAH_TYPE]
-    CSTRING rsi, "__hash__"
-    extern dunder_lookup
-    call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .tah_done
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    jne .tah_done
-    jmp .tah_unhashable_slot
-
-.tah_unhashable_slot:
-    ; The slot only: the name already says None, here or up the MRO.
-    extern hash_not_implemented
-    mov rax, [rbp - TAH_TYPE]
-    lea rcx, [rel hash_not_implemented]
-    mov [rax + PyTypeObject.tp_hash], rcx
-    jmp .tah_done
-
-.tah_unhashable:
-    mov rax, [rbp - TAH_TYPE]
-    lea rcx, [rel hash_not_implemented]
-    mov [rax + PyTypeObject.tp_hash], rcx
-
-    ; The NAME has to say so too: `Eq.__hash__ is None` is how the stdlib
-    ; asks, and a subclass that defines neither inherits the None through the
-    ; MRO -- which is why SubEq(Eq) is unhashable in CPython without any
-    ; rule of its own.
-    CSTRING rdi, "__hash__"
-    call str_from_cstr_heap
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - TAH_DICT]
-    mov rsi, rax
-    lea rdx, [rel none_singleton]
-    extern dict_set
-    call dict_set
-    add rsp, 8
-    pop rdi
-    call obj_decref
-.tah_done:
-    leave
-    ret
-END_FUNC type_apply_hash_rule
-
-;; ============================================================================
-;; type_wrap_implicit_classmethods(rdi = the type, rsi = the class dict)
-;;
-;; __init_subclass__ and __class_getitem__ are classmethods even when the
-;; class body defines them as plain functions -- CPython does this in
-;; type_new, and it cannot be expressed as a slot.  Anything already wrapped,
-;; or not a plain function at all, is left alone.
-;; ============================================================================
-TWI_TYPE  equ 8
-TWI_DICT  equ 16
-TWI_KEY   equ 24
-TWI_FRAME equ 40            ; + 1 push = 48, 16-aligned
-DEF_FUNC_LOCAL type_wrap_implicit_classmethods, TWI_FRAME
-    push rbx
-    mov [rbp - TWI_TYPE], rdi
-    mov [rbp - TWI_DICT], rsi
-    test rsi, rsi
-    jz .twi_done
-
-    CSTRING rbx, "__init_subclass__"
-    call .twi_one
-    CSTRING rbx, "__class_getitem__"
-    call .twi_one
-.twi_done:
-    pop rbx
-    leave
-    ret
-
-;; rbx = the name, as a C string
-.twi_one:
-    push rbx
-    sub rsp, 8
-    mov rdi, rbx
-    extern str_from_cstr_heap
-    call str_from_cstr_heap
-    add rsp, 8
-    pop rbx
-    mov [rbp - TWI_KEY], rax
-
-    mov rdi, [rbp - TWI_DICT]
-    mov rsi, rax
-    extern dict_get
-    call dict_get
-    test rax, rax
-    jz .twi_release
-
-    ; Only a plain function is wrapped; a classmethod or staticmethod the
-    ; body wrote is already what the author asked for.
-    V_TEST_PTR rax, rcx
-    ja .twi_release
-    mov rcx, [rax + PyObject.ob_type]
-    extern func_type
-    lea rdx, [rel func_type]
-    cmp rcx, rdx
-    jne .twi_release
-
-    push rax                    ; [rsp] is the one-element argument array
-    sub rsp, 8
-    extern classmethod_type
-    extern classmethod_construct
-    lea rdi, [rel classmethod_type]
-    lea rsi, [rsp + 8]
-    mov edx, 1
-    call classmethod_construct
-    add rsp, 8
-    pop rcx
-    test rax, rax
-    jz .twi_release
-
-    push rax
-    sub rsp, 8
-    mov rdi, [rbp - TWI_DICT]
-    mov rsi, [rbp - TWI_KEY]
-    mov rdx, rax
-    extern dict_set
-    call dict_set
-    add rsp, 8
-    pop rdi
-    extern obj_decref
-    call obj_decref             ; dict_set took its own reference
-
-.twi_release:
-    mov rdi, [rbp - TWI_KEY]
-    call obj_decref
-    ret
-END_FUNC type_wrap_implicit_classmethods
-
-;; tah_dict_get(rdi = a name C string, rsi = the dict)
-;;   -> rax = the Value, or 0 when absent
-DEF_FUNC_LOCAL tah_dict_get, 16
-    push rbx
-    sub rsp, 8
-    mov rbx, rsi
-    extern str_from_cstr_heap
-    call str_from_cstr_heap
-    push rax
-    sub rsp, 8
-    mov rdi, rbx
-    mov rsi, rax
-    extern dict_get
-    call dict_get
-    add rsp, 8
-    pop rdi
-    push rax
-    sub rsp, 8
-    call obj_decref             ; the key this built
-    add rsp, 8
-    pop rax
-    add rsp, 8
-    pop rbx
-    leave
-    ret
-END_FUNC tah_dict_get
 
 
 
@@ -2788,6 +2270,7 @@ END_FUNC tah_dict_get
 ;; already uses is kw_names_pending plus the values sitting after the
 ;; positional ones, so both __prepare__ and the metaclass are reached exactly
 ;; the way an ordinary keyword call is.
+;; Fails: 0
 ;; ============================================================================
 BCK_MAX   equ 20
 
@@ -2851,20 +2334,22 @@ DEF_FUNC bc_call_kw, BCK_FRAME
     mov rdi, [rbp - BCK_FN]
     lea rsi, [rbp - BCK_ARGS]
     mov rdx, r12
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     mov qword [gs:ThreadState.kw_names_pending], 0
+.out:
     pop r13
     pop r12
     pop rbx
     leave
     ret
 .too_many:
-    RAISE exc_TypeError_type, "too many class keyword arguments"
+    SET_EXC exc_TypeError_type, "too many class keyword arguments"
+    xor eax, eax
+    jmp .out
 END_FUNC bc_call_kw
 section .rodata
 global bc_prepare_name
 bc_prepare_name: db "__prepare__", 0
-tsn_name: db "__set_name__", 0
 bc_init_name: db "__init__", 0
 ble_dict_name:    db "__dict__", 0
 ble_weakref_name: db "__weakref__", 0

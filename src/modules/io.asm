@@ -25,13 +25,14 @@
 ASM_INIT
 
 ; --- from io_bytesio.asm, the half split out of this one ---
+extern dict_set
+extern dict_set_str
 extern bytesio_check
 extern io_make_bytesio
 extern im_n_BytesIO
 extern im_n_flush
 
 extern dict_new
-extern dict_set
 extern str_from_cstr_heap
 extern module_new
 extern builtin_func_new
@@ -41,7 +42,6 @@ extern obj_dealloc
 extern tuple_new
 extern type_from_parts
 extern none_singleton
-extern raise_exception
 extern set_exception
 extern ap_strlen
 extern posix_embedded_nul
@@ -127,7 +127,7 @@ DEF_FUNC_LOCAL io_new_type, INT_FRAME
     mov rdi, [rbp - INT_NS]
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -140,7 +140,7 @@ DEF_FUNC_LOCAL io_new_type, INT_FRAME
     mov rdi, [rbp - INT_NS]
     mov rsi, rax
     mov rdx, [rbp - INT_NAME]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -244,7 +244,9 @@ DEF_FUNC io_text_encoding_fn
     leave
     ret
 .te_argerr:
-    RAISE exc_TypeError_type, "text_encoding expected at least 1 argument, got 0"
+    SET_EXC exc_TypeError_type, "text_encoding expected at least 1 argument, got 0"
+    leave
+    ret
 END_FUNC io_text_encoding_fn
 
 ;; ============================================================================
@@ -463,7 +465,6 @@ extern str_from_cstr_heap
 extern obj_as_index
 extern int_is_integer
 extern val_to_i64
-extern raise_oserror
 extern bool_true
 extern bool_false
 extern dict_new
@@ -556,26 +557,39 @@ section .rodata
 section .text
 
 ;; ============================================================================
-;; fileio_check(rdi = self) -> returns with the fd in rax, or raises
+;; fileio_check(rdi = self) -> rax = the fd
+;; Fails: -1
 ;;
-;; Every operation on a closed file raises ValueError, which is what the
-;; buffered layer above relies on to notice a double close.
+;; Every operation on a closed file is a ValueError, which is what the
+;; buffered layer above relies on to notice a double close.  An open file
+;; costs one test and keeps every register but rax, which is what lets its
+;; callers hold their arguments across it.
 ;; ============================================================================
 DEF_FUNC_BARE fileio_check
     test qword [rdi + PyFileIOObject.fio_flags], FIO_OPEN
-    jz fileio_closed_error
+    jz .closed
     mov rax, [rdi + PyFileIOObject.fio_fd]
+    ret
+.closed:
+    push rbp
+    mov rbp, rsp
+    and rsp, -16                ; some callers arrive with a push outstanding
+    SET_EXC exc_ValueError_type, "I/O operation on closed file"
+    mov rax, -1
+    leave
     ret
 END_FUNC fileio_check
 
 
 ;; ============================================================================
-;; io_raise_typename(rdi = exception type, rsi = prefix cstr, rdx = an object)
+;; io_set_typename(rdi = exception type, rsi = prefix cstr, rdx = an object)
+;;   -> rax = 0, with the exception pending
 ;;
-;; Builds "<prefix>, not <typename>" and raises it.  CPython names the type it
-;; was handed in every one of these messages, and the name is the useful half:
-;; "must be read-write bytes-like object" leaves the caller guessing what was
-;; wrong with what they passed.
+;; Builds "<prefix>, not <typename>" and makes it the pending exception.
+;; CPython names the type it was handed in every one of these messages, and
+;; the name is the useful half: "must be read-write bytes-like object" leaves
+;; the caller guessing what was wrong with what they passed.
+;;
 ;; ============================================================================
 section .bss
 global io_msgbuf
@@ -584,27 +598,30 @@ io_numbuf: resb 32
 
 section .text
 
-DEF_FUNC io_raise_typename
+global io_set_typename
+DEF_FUNC io_set_typename, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
     mov rbx, rdi                ; the exception type
     mov r12, rdx                ; the object
     xor r13d, r13d              ; plain
-    jmp io_raise_typename_common
-END_FUNC io_raise_typename
+    jmp io_set_typename_common
+END_FUNC io_set_typename
 
 ;; The same, with the name in quotes.  CPython is not consistent about it --
 ;; "must be str, not int" but "a bytes-like object is required, not 'str'" --
 ;; and the wording is what a caller sees, so both forms are here.
-DEF_FUNC io_raise_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
+;; io_set_typename_q(the same three) -> rax = 0, with the exception pending
+global io_set_typename_q
+DEF_FUNC io_set_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
     push r12
     push r13
     mov rbx, rdi
     mov r12, rdx
     mov r13d, 1
-io_raise_typename_common:
+io_set_typename_common:
 
     lea rdi, [rel io_msgbuf]
     mov edx, 200
@@ -647,9 +664,15 @@ io_raise_typename_common:
 
     mov rdi, rbx
     lea rsi, [rel io_msgbuf]
-    call raise_exception
-    ud2
-END_FUNC io_raise_typename_q
+    extern set_exception
+    call set_exception
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC io_set_typename_q
 
 ;; io_copy_bounded(rdi = dest, rsi = src cstr, rdx = max) -> rax = the NUL
 global io_copy_bounded
@@ -673,12 +696,14 @@ END_FUNC io_copy_bounded
 
 
 ;; ============================================================================
-;; io_raise_number(rdi = exception type, rsi = prefix cstr, rdx = the value)
+;; io_set_number(rdi = exception type, rsi = prefix cstr, rdx = the value)
+;;   -> rax = 0, with the exception pending
 ;;
 ;; "negative seek value -1" -- the number is the useful half, and CPython
 ;; prints it in every one of these.
 ;; ============================================================================
-DEF_FUNC io_raise_number
+global io_set_number
+DEF_FUNC io_set_number
     push rbx
     push r12
     mov rbx, rdi
@@ -691,9 +716,13 @@ DEF_FUNC io_raise_number
     call io_append_i64
     mov rdi, rbx
     lea rsi, [rel io_msgbuf]
-    call raise_exception
-    ud2
-END_FUNC io_raise_number
+    call set_exception
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC io_set_number
 
 ;; io_append_i64(rdi = dest, rsi = value) -> writes the decimal and a NUL
 global io_append_i64
@@ -731,29 +760,31 @@ DEF_FUNC io_append_i64
     ret
 END_FUNC io_append_i64
 
-DEF_FUNC fileio_closed_error
-    RAISE exc_ValueError_type, "I/O operation on closed file"
-END_FUNC fileio_closed_error
-
 ;; The wrong mode is UnsupportedOperation, not ValueError -- it is a ValueError
 ;; as well, since UnsupportedOperation derives from both, but code that tests
 ;; the type by name expects the io one.
-DEF_FUNC fileio_not_readable_error
+;; fileio_set_not_readable / fileio_set_not_writable()
+;;   -> rax = 0, with the UnsupportedOperation pending
+DEF_FUNC fileio_set_not_readable
     mov rdi, [rel io_unsupported_type]
     CSTRING rsi, "File not open for reading"
-    call raise_exception
-    ud2
-END_FUNC fileio_not_readable_error
+    call set_exception
+    leave
+    ret
+END_FUNC fileio_set_not_readable
 
-DEF_FUNC fileio_not_writable_error
+DEF_FUNC fileio_set_not_writable
     mov rdi, [rel io_unsupported_type]
     CSTRING rsi, "File not open for writing"
-    call raise_exception
-    ud2
-END_FUNC fileio_not_writable_error
+    call set_exception
+    leave
+    ret
+END_FUNC fileio_set_not_writable
 
 ;; ============================================================================
 ;; fileio_set_attr(rdi = self, rsi = name cstr, rdx = value object, borrowed)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; name / mode / closed are ordinary entries in the instance dict, created on
 ;; demand -- instance_new zero-fills, so the dict is NULL until something
@@ -787,9 +818,11 @@ DEF_FUNC_LOCAL fileio_set_attr, FSA_FRAME
     mov rdi, [rdi + PyFileIOObject.inst_dict]
     mov rsi, [rbp - FSA_KEY]
     mov rdx, [rbp - FSA_VAL]
-    call dict_set
+    call dict_set           ; err: returned to the caller, once the name is released
+    mov [rbp - FSA_VAL], rax
     mov rdi, [rbp - FSA_KEY]
     call obj_decref
+    mov rax, [rbp - FSA_VAL]
     leave
     ret
 END_FUNC fileio_set_attr
@@ -888,6 +921,12 @@ END_FUNC fileio_mode_flags
 ;;
 ;; `file` is a path or an already-open descriptor.  An int means adopt it,
 ;; which is how the buffered layer wraps stdin and stdout.
+;;
+;; -> rax = None, or 0 with the exception pending.  It is reached through
+;; type_call, which releases the instance it was building when this answers 0;
+;; while these refusals jumped into the unwinder instead, every refused
+;; FileIO() leaked the object.
+;; Fails: 0
 ;; ============================================================================
 FI_SELF   equ 8
 FI_FILE   equ 16
@@ -904,9 +943,9 @@ FI_PATHOBJ equ 80           ; what posix_path_arg wants released, or 0
 FI_STAT   equ 88 + StatBuf_size
 FI_FRAME  equ FI_STAT       ; 224, + 0 pushes, 16-aligned
 
-; Every error exit below owns the mode string -- allocated for the default, or
-; INCREF'd from the argument -- and RAISE and raise_exception both abandon the
-; C stack.  Two of them leaked it: a bad mode letter, and a failed open.
+; Every error exit below but one owns the mode string -- allocated for the
+; default, or INCREF'd from the argument -- and drops it before it sets the
+; exception and leaves through .fi_fail.
 %macro FI_DROP_MODE 0
     mov rdi, [rbp - FI_MODE]
     test rdi, rdi
@@ -968,6 +1007,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     push r9
     sub rsp, 8
     call obj_is_true
+    ERR_M1 .fi_fail             ; `leave` drops what is parked; nothing is owned yet
     add rsp, 8
     pop r9
     pop r8
@@ -984,6 +1024,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rdi, [rbp - FI_ARGS]
     mov rdi, [rdi + 24]
     call obj_is_true
+    ERR_M1 .fi_fail
     mov [rbp - FI_CLOSEFD], rax
 .fi_closefd_parsed:
     mov rax, [rbp - FI_SELF]        ; reload: the parsing above returns in rax
@@ -1079,6 +1120,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov rdi, [rbp - FI_FILE]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fi_path_refused     ; the mode string is this frame's to drop
     test rax, rax
     jl .fi_fd_bad
     mov rdi, [rbp - FI_SELF]
@@ -1106,8 +1148,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     xor esi, esi                ; the whole sentence comes from the kind
     mov edx, 3                  ; POSIX_PATH_KIND_IO: _io's own sentence
     call posix_path_arg
-    test rax, rax
-    jz .fi_path_refused         ; 0 with the exception already pending
+    ERR_NULL .fi_path_refused   ; 0 with the exception already pending
     mov [rbp - FI_PATHOBJ], rdx
     mov rdi, rax
     mov rsi, [rbp - FI_OFLAGS]
@@ -1195,6 +1236,7 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     lea rsi, [rel im_a_name]
     mov rdx, [rbp - FI_FILE]
     call fileio_set_attr
+    ERR_M1 .fi_path_refused     ; a second __init__, over a __dict__ that refuses
 
     ; mode and closed are properties, so neither is an instance attribute:
     ; CPython's FileIO keeps only `name` in its instance dict, and code that
@@ -1212,30 +1254,30 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     ret
 
 .fi_is_dir:
+    ; The descriptor is closed here, so the object must not think it holds
+    ; one: it is released by type_call now that this returns, and a dealloc
+    ; that still saw FIO_OPEN would close the number a second time.
     mov rax, [rbp - FI_SELF]
+    and qword [rax + PyFileIOObject.fio_flags], ~FIO_OPEN
     mov rdi, [rax + PyFileIOObject.fio_fd]
     call sys_close
+    FI_DROP_MODE
     mov edi, EISDIR
     mov rsi, [rbp - FI_FILE]
-    call raise_oserror
-    ud2
-
+    extern set_oserror
+    call set_oserror
+    jmp .fi_fail
 .fi_closefd_path:
     FI_DROP_MODE
-    RAISE exc_ValueError_type, "Cannot use closefd=False with file name"
-
+    FAIL exc_ValueError_type, "Cannot use closefd=False with file name", .fi_fail
 .fi_path_refused:
-    ; posix_path_arg answered 0 and left the exception pending, so this is the
-    ; one place the mode string can still be released -- which is what the
-    ; whole returning contract buys.  Nothing is pushed here: the frame is the
-    ; one DEF_FUNC carved.
     FI_DROP_MODE
+.fi_fail:
+    ; The exception is pending, and nothing this frame owned is still held.
     xor eax, eax
     xor edx, edx
     leave
     ret
-
-
 .fi_open_failed:
     neg rax
     push rax
@@ -1245,14 +1287,14 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     pop rax
     mov rdi, rax
     mov rsi, [rbp - FI_FILE]
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fi_fail
 .fi_mode_bad:
     FI_DROP_MODE
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_msg_onemode]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fi_fail
 .fi_mode_letter:
     FI_DROP_MODE
     lea rdi, [rel io_badmode_msg]
@@ -1264,27 +1306,31 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     mov byte [rax + 1], 0
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel io_badmode_msg]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fi_fail
 .fi_fd_bad:
     FI_DROP_MODE
-    RAISE exc_ValueError_type, "negative file descriptor"
+    FAIL exc_ValueError_type, "negative file descriptor", .fi_fail
 .fi_file_type:
     FI_DROP_MODE
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_filetype]
     mov rdx, [rbp - FI_FILE]
-    call io_raise_typename
+    call io_set_typename
+    jmp .fi_fail
 .fi_mode_type:
+    ; The mode is still the caller's here -- it is INCREF'd only once it is
+    ; known to be a str -- so there is nothing to drop.
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_modetype]
     mov rdx, [rbp - FI_MODE]
-    call io_raise_typename
+    call io_set_typename
+    jmp .fi_fail
 .fi_argerr:
     lea rdi, [rel exc_TypeError_type]
     CSTRING rsi, "FileIO() missing required argument 'file' (pos 1)"
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fi_fail
 END_FUNC fileio_init_fn
 
 ;; ============================================================================
@@ -1315,12 +1361,14 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fail
     pop rsi
     mov r8, rax
 .fr_have_size:
     mov [rbp - FR_SIZE], r8
     mov rdi, [rbp - FR_SELF]
     call fileio_check
+    ERR_M1 .fail
     test qword [rdi + PyFileIOObject.fio_flags], FIO_READABLE
     jz .fr_not_readable
     cmp qword [rbp - FR_SIZE], 0
@@ -1360,7 +1408,7 @@ DEF_FUNC fileio_read_fn, FR_FRAME
 
 .fr_readall:
     mov rdi, [rbp - FR_SELF]
-    call fileio_readall_impl
+    call fileio_readall_impl    ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     ret
@@ -1376,16 +1424,14 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     call ap_free
     pop rdi
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .fr_handler_raised:
     ; A Python signal handler raised; its exception is the caller's, and the
     ; buffer this frame allocated is not.
     mov rdi, [rbp - FR_BUF]
     call ap_free
-    extern eval_exception_unwind
-    leave
-    jmp eval_exception_unwind
+    jmp .fail
 
 .fr_would_block:
     mov rdi, [rbp - FR_BUF]
@@ -1398,11 +1444,16 @@ DEF_FUNC fileio_read_fn, FR_FRAME
     leave
     ret
 .fr_nomem:
-    RAISE exc_OSError_type, "out of memory"
+    FAIL exc_OSError_type, "out of memory", .fail
 .fr_not_readable:
-    jmp fileio_not_readable_error
+    call fileio_set_not_readable
+    jmp .fail
 .fr_argerr:
-    RAISE exc_TypeError_type, "read() missing self"
+    SET_EXC exc_TypeError_type, "read() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_read_fn
 
 ;; ============================================================================
@@ -1466,6 +1517,7 @@ DEF_IO_RETRY write, sys_write_intr
 
 ;; ============================================================================
 ;; fileio_readall_impl(rdi = self) -> rax = bytes
+;; Fails: 0
 ;;
 ;; Reads to EOF, growing by st_blksize and doubling once the file turns out to
 ;; be bigger than its own block size -- which is how a 10 MB file costs a
@@ -1542,19 +1594,22 @@ DEF_FUNC_LOCAL fileio_readall_impl, FRA_FRAME
     call ap_free
     pop rdi
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .fra_handler_raised:
     mov rdi, [rbp - FRA_BUF]
     call ap_free
-    leave
-    jmp eval_exception_unwind
+    jmp .fail
 
 .fra_nomem_free:
     mov rdi, [rbp - FRA_BUF]
     call ap_free
 .fra_nomem:
-    RAISE exc_OSError_type, "out of memory"
+    SET_EXC exc_OSError_type, "out of memory"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_readall_impl
 
 DEF_FUNC fileio_readall_fn
@@ -1562,12 +1617,17 @@ DEF_FUNC fileio_readall_fn
     jz .fral_argerr
     mov rdi, [rdi]
     call fileio_check
-    call fileio_readall_impl
+    ERR_M1 .fail
+    call fileio_readall_impl    ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     ret
 .fral_argerr:
-    RAISE exc_TypeError_type, "readall() missing self"
+    SET_EXC exc_TypeError_type, "readall() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_readall_fn
 
 ;; ============================================================================
@@ -1587,11 +1647,13 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     mov rsi, [rdi + 8]
     mov rdi, rax
     call fileio_check
+    ERR_M1 .fail
     test qword [rdi + PyFileIOObject.fio_flags], FIO_READABLE
     jz .fri_not_readable
 
     mov rdi, rsi
     call fileio_writable_buffer   ; rax = data, r10 = length
+    ERR_PENDING .fail
     mov rsi, rax
     mov rdx, r10
     mov rdi, [rbp - FRI_SELF]
@@ -1612,11 +1674,10 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     je .fri_would_block
     mov rdi, rax
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .fri_handler_raised:
-    leave
-    jmp eval_exception_unwind
+    jmp .fail
 
 .fri_would_block:
     LOAD_NONE rax
@@ -1627,13 +1688,20 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     leave
     ret
 .fri_not_readable:
-    jmp fileio_not_readable_error
+    call fileio_set_not_readable
+    jmp .fail
 .fri_argerr:
-    RAISE exc_TypeError_type, "readinto() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "readinto() takes exactly one argument"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_readinto_fn
 
 ;; ============================================================================
 ;; fileio_writable_buffer(rdi = a Value) -> rax = data, r10 = length
+;; Fails: 0?
+;; (an empty buffer's data pointer may itself be 0)
 ;;
 ;; readinto() writes through its argument, so a bytes is not acceptable even
 ;; though bytes_like_ptr_len would happily hand back its data.
@@ -1667,7 +1735,10 @@ DEF_FUNC fileio_writable_buffer, 8            ; 1 push, so rsp is 16-aligned
     lea rdi, [rel exc_TypeError_type]
     mov rsi, [rel io_readinto_msg]
     mov rdx, rbx
-    call io_raise_typename
+    call io_set_typename
+    pop rbx
+    leave
+    ret
 END_FUNC fileio_writable_buffer
 
 ;; ============================================================================
@@ -1686,6 +1757,7 @@ DEF_FUNC fileio_write_fn, FW_FRAME
     mov [rbp - FW_ARG], rsi
     mov rdi, rax
     call fileio_check
+    ERR_M1 .fail
     test qword [rdi + PyFileIOObject.fio_flags], FIO_WRITABLE
     jz .fw_not_writable
 
@@ -1713,11 +1785,10 @@ DEF_FUNC fileio_write_fn, FW_FRAME
     je .fw_would_block
     mov rdi, rax
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .fw_handler_raised:
-    leave
-    jmp eval_exception_unwind
+    jmp .fail
 
 .fw_would_block:
     LOAD_NONE rax
@@ -1728,14 +1799,20 @@ DEF_FUNC fileio_write_fn, FW_FRAME
     leave
     ret
 .fw_not_writable:
-    jmp fileio_not_writable_error
+    call fileio_set_not_writable
+    jmp .fail
 .fw_type:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel io_msg_byteslike]
     mov rdx, [rbp - FW_ARG]
-    call io_raise_typename_q
+    call io_set_typename_q
+    jmp .fail
 .fw_argerr:
-    RAISE exc_TypeError_type, "write() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "write() takes exactly one argument"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_write_fn
 
 ;; ============================================================================
@@ -1755,6 +1832,7 @@ DEF_FUNC fileio_seek_fn, FS_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fail
     mov [rbp - FS_POS], rax
     pop rsi
     pop rdi
@@ -1764,11 +1842,13 @@ DEF_FUNC fileio_seek_fn, FS_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fail
     mov r8, rax
 .fs_have_whence:
     push r8
     mov rdi, [rbp - FS_SELF]
     call fileio_check
+    ERR_M1 .fail
     pop rdx
     mov rdi, rax
     mov rsi, [rbp - FS_POS]
@@ -1784,10 +1864,14 @@ DEF_FUNC fileio_seek_fn, FS_FRAME
     neg rax
     mov rdi, rax
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .fs_argerr:
-    RAISE exc_TypeError_type, "seek() takes at least one argument"
+    SET_EXC exc_TypeError_type, "seek() takes at least one argument"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_seek_fn
 
 DEF_FUNC fileio_tell_fn
@@ -1795,6 +1879,7 @@ DEF_FUNC fileio_tell_fn
     jz .ft_argerr
     mov rdi, [rdi]
     call fileio_check
+    ERR_M1 .fail
     mov rdi, rax
     xor esi, esi
     mov edx, SEEK_CUR
@@ -1810,10 +1895,14 @@ DEF_FUNC fileio_tell_fn
     neg rax
     mov rdi, rax
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .ft_argerr:
-    RAISE exc_TypeError_type, "tell() takes no arguments"
+    SET_EXC exc_TypeError_type, "tell() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_tell_fn
 
 ;; ============================================================================
@@ -1843,11 +1932,13 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
     mov rdi, rcx
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rbp - FT_SIZE], rax
     mov qword [rbp - FT_GIVEN], 1
 .ftr_have_size:
     mov rdi, [rbp - FT_SELF]
     call fileio_check
+    ERR_M1 .fail
     test qword [rdi + PyFileIOObject.fio_flags], FIO_WRITABLE
     jz .ftr_not_writable
     ; A caller-supplied negative size is an error, not the sentinel: sharing
@@ -1884,17 +1975,26 @@ DEF_FUNC fileio_truncate_fn, FT_FRAME
     neg rax
     mov rdi, rax
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .ftr_negative:
     mov edi, EINVAL
     xor esi, esi
-    call raise_oserror
-    ud2
+    call set_oserror
+    jmp .fail
 .ftr_not_writable:
-    jmp fileio_not_writable_error
+    call fileio_set_not_writable
+    jmp .fail
 .ftr_argerr:
-    RAISE exc_TypeError_type, "truncate() missing self"
+    FAIL exc_TypeError_type, "truncate() missing self", .fail
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_truncate_fn
 
 ;; ============================================================================
@@ -1929,7 +2029,11 @@ DEF_FUNC fileio_close_fn, FC_FRAME
     leave
     ret
 .fc_argerr:
-    RAISE exc_TypeError_type, "close() takes no arguments"
+    SET_EXC exc_TypeError_type, "close() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_close_fn
 
 
@@ -1941,6 +2045,7 @@ DEF_FUNC fileio_flush_fn
     jz .ffl_argerr
     mov rdi, [rdi]
     call fileio_check
+    ERR_M1 .fail
     LOAD_NONE rax
     mov rdi, rax
     call obj_incref
@@ -1949,7 +2054,11 @@ DEF_FUNC fileio_flush_fn
     leave
     ret
 .ffl_argerr:
-    RAISE exc_TypeError_type, "flush() takes no arguments"
+    SET_EXC exc_TypeError_type, "flush() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_flush_fn
 
 DEF_FUNC bytesio_flush_fn
@@ -1957,6 +2066,7 @@ DEF_FUNC bytesio_flush_fn
     jz .bfl_argerr
     mov rdi, [rdi]
     call bytesio_check
+    ERR_M1 .fail
     LOAD_NONE rax
     mov rdi, rax
     call obj_incref
@@ -1965,7 +2075,11 @@ DEF_FUNC bytesio_flush_fn
     leave
     ret
 .bfl_argerr:
-    RAISE exc_TypeError_type, "flush() takes no arguments"
+    SET_EXC exc_TypeError_type, "flush() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytesio_flush_fn
 
 DEF_FUNC fileio_fileno_fn
@@ -1973,13 +2087,18 @@ DEF_FUNC fileio_fileno_fn
     jz .ffn_argerr
     mov rdi, [rdi]
     call fileio_check
+    ERR_M1 .fail
     mov rdx, rax
     V_PACK_I64 rdx, rcx
     mov rax, rdx
     leave
     ret
 .ffn_argerr:
-    RAISE exc_TypeError_type, "fileno() takes no arguments"
+    SET_EXC exc_TypeError_type, "fileno() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_fileno_fn
 
 FIT_BUF   equ 80            ; struct termios is 60 bytes
@@ -1990,6 +2109,7 @@ DEF_FUNC fileio_isatty_fn, FIT_FRAME
     jz .fit_argerr
     mov rdi, [rdi]
     call fileio_check
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, TCGETS
     lea rdx, [rbp - FIT_BUF]
@@ -2006,7 +2126,11 @@ DEF_FUNC fileio_isatty_fn, FIT_FRAME
     leave
     ret
 .fit_argerr:
-    RAISE exc_TypeError_type, "isatty() takes no arguments"
+    SET_EXC exc_TypeError_type, "isatty() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_isatty_fn
 
 ;; A predicate answers about the mode the file was opened in, and raises on a
@@ -2017,6 +2141,7 @@ DEF_FUNC %1
     jz %%argerr
     mov rdi, [rdi]
     call fileio_check
+    ERR_M1 %%fail
     test qword [rdi + PyFileIOObject.fio_flags], %2
     jz %%false
     lea rax, [rel bool_true]
@@ -2029,7 +2154,11 @@ DEF_FUNC %1
     leave
     ret
 %%argerr:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+%%fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1
 %endmacro
 
@@ -2045,6 +2174,7 @@ DEF_FUNC fileio_seekable_fn
     mov rdi, [rdi]
     mov rbx, rdi
     call fileio_check
+    ERR_M1 .fail
     test qword [rbx + PyFileIOObject.fio_flags], FIO_SEEK_KNOWN
     jnz .fsk_known
     mov rdi, rax
@@ -2072,7 +2202,14 @@ DEF_FUNC fileio_seekable_fn
     leave
     ret
 .fsk_argerr:
-    RAISE exc_TypeError_type, "seekable() takes no arguments"
+    SET_EXC exc_TypeError_type, "seekable() takes no arguments"
+    leave
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC fileio_seekable_fn
 
 ;; ============================================================================
@@ -2084,13 +2221,18 @@ DEF_FUNC fileio_enter_fn
     jz .fen_argerr
     mov rdi, [rdi]
     call fileio_check
+    ERR_M1 .fail
     call obj_incref
     mov rax, rdi
     mov edx, TAG_PTR
     leave
     ret
 .fen_argerr:
-    RAISE exc_TypeError_type, "__enter__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__enter__() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_enter_fn
 
 DEF_FUNC fileio_exit_fn
@@ -2101,7 +2243,11 @@ DEF_FUNC fileio_exit_fn
     leave
     ret
 .fex_argerr:
-    RAISE exc_TypeError_type, "__exit__() missing self"
+    SET_EXC exc_TypeError_type, "__exit__() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_exit_fn
 
 ;; ============================================================================
@@ -2130,24 +2276,28 @@ DEF_FUNC fileio_repr_fn, FRP_FRAME
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     lea rdi, [rel im_repr_mid]
     call str_from_cstr_heap
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     mov rdi, [rbp - FRP_SELF]
     call fileio_mode_str
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     lea rdi, [rel im_repr_end]
     call str_from_cstr_heap
     mov rsi, rax
     lea rdi, [rbp - FRP_PARTS]
     call fileio_str_append
+    ERR_NULL .fail
 
     mov rax, [rbp - FRP_PARTS]
     mov edx, TAG_PTR
@@ -2160,19 +2310,29 @@ DEF_FUNC fileio_repr_fn, FRP_FRAME
     leave
     ret
 .frp_argerr:
-    RAISE exc_TypeError_type, "__repr__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__repr__() takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_repr_fn
 
-;; fileio_str_append(rdi = slot address holding a str, rsi = an owned str)
-;; concatenates in place and releases both inputs.
+;; fileio_str_append(rdi = slot address holding a str, rsi = an owned str, or 0)
+;;   -> rax = the concatenation, which the slot now holds; both inputs released
+;; Fails: 0
+;; when the second is 0 -- an obj_repr that raised, handed straight on -- with
+;; that exception still pending and the slot emptied.
 DEF_FUNC_LOCAL fileio_str_append
     push rbx
     push r12
     sub rsp, 16
     mov rbx, rdi
     mov r12, rsi
+    test rsi, rsi
+    jz .fsa_fail
     mov rdi, [rbx]
     call str_concat
+    ERR_NULL .fsa_fail
     mov [rsp], rax
     mov rdi, [rbx]
     call obj_decref
@@ -2180,6 +2340,21 @@ DEF_FUNC_LOCAL fileio_str_append
     call obj_decref
     mov rax, [rsp]
     mov [rbx], rax
+    add rsp, 16
+    pop r12
+    pop rbx
+    leave
+    ret
+.fsa_fail:
+    mov rdi, [rbx]
+    mov qword [rbx], 0
+    call obj_decref
+    test r12, r12
+    jz .fsa_fail_out
+    mov rdi, r12
+    call obj_decref
+.fsa_fail_out:
+    xor eax, eax
     add rsp, 16
     pop r12
     pop rbx
@@ -2244,7 +2419,11 @@ DEF_FUNC fileio_mode_get_fn
     leave
     ret
 .fmg_argerr:
-    RAISE exc_TypeError_type, "mode getter takes no arguments"
+    SET_EXC exc_TypeError_type, "mode getter takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_mode_get_fn
 
 DEF_FUNC fileio_closed_get_fn
@@ -2263,7 +2442,11 @@ DEF_FUNC fileio_closed_get_fn
     leave
     ret
 .fcg_argerr:
-    RAISE exc_TypeError_type, "closed getter takes no arguments"
+    SET_EXC exc_TypeError_type, "closed getter takes no arguments"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC fileio_closed_get_fn
 
 
@@ -2384,7 +2567,7 @@ DEF_FUNC io_add_method, IAM_FRAME
     mov rdi, [rbp - IAM_NS]
     mov rsi, rax
     mov rdx, [rbp - IAM_FN]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - IAM_FN]
     call obj_decref
     mov rdi, [rbp - IAM_KEY]
@@ -2435,7 +2618,7 @@ DEF_FUNC iobase_enter_fn, IBE_FRAME
     mov rdi, rax
     push rax
     sub rsp, 8
-    call obj_is_true
+    call obj_is_true            ; err: tested below, once `closed` is released
     add rsp, 8
     pop rdi
     push rax
@@ -2443,6 +2626,7 @@ DEF_FUNC iobase_enter_fn, IBE_FRAME
     DECREF_V rdi, rcx
     add rsp, 8
     pop rax
+    ERR_M1 .fail                ; its __bool__ raised
     test rax, rax
     jnz .ibe_closed
 
@@ -2453,9 +2637,13 @@ DEF_FUNC iobase_enter_fn, IBE_FRAME
     leave
     ret
 .ibe_closed:
-    RAISE exc_ValueError_type, "I/O operation on closed file."
+    FAIL exc_ValueError_type, "I/O operation on closed file.", .fail
 .ibe_argerr:
-    RAISE exc_TypeError_type, "__enter__() missing self"
+    SET_EXC exc_TypeError_type, "__enter__() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC iobase_enter_fn
 
 ;; ============================================================================
@@ -2494,7 +2682,7 @@ DEF_FUNC iobase_exit_fn
     ja .ibx_none
     lea rsi, [rel im_n_close]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .ibx_maybe_raised
     test rax, rax               ; dunder_call_1 answers with a Value; 0 is absent-or-raised
     jz .ibx_maybe_raised
     ; Already a Value; packing it again read rdx as a tag and handed
@@ -2514,7 +2702,11 @@ DEF_FUNC iobase_exit_fn
     leave
     ret
 .ibx_argerr:
-    RAISE exc_TypeError_type, "__exit__() missing self"
+    SET_EXC exc_TypeError_type, "__exit__() missing self"
+.fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC iobase_exit_fn
 
 %macro IO_METHOD 2              ; %1 = name symbol, %2 = implementation
@@ -2558,7 +2750,7 @@ DEF_FUNC io_add_property, IAP_FRAME
     lea rdi, [rel property_type]
     lea rsi, [rbp - IAP_ARG]
     mov edx, 1
-    call property_construct
+    call property_construct     ; err: one positional and no keywords, which it never refuses
     V_UNPACK rax, rdx
     mov [rbp - IAP_PROP], rax
 
@@ -2571,7 +2763,7 @@ DEF_FUNC io_add_property, IAP_FRAME
     mov rdi, [rbp - IAP_NS]
     mov rsi, rax
     mov rdx, [rbp - IAP_PROP]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - IAP_PROP]
     call obj_decref
     mov rdi, [rbp - IAP_KEY]
@@ -2629,7 +2821,7 @@ DEF_FUNC_LOCAL io_make_fileio, MFI_FRAME
     mov rdi, rbx
     mov rsi, [rsp + 8]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi

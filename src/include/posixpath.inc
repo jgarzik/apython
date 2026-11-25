@@ -36,10 +36,9 @@ POSIX_PATH_KIND_IO      equ 3
 ;; argument leaked its resolved path.
 ;;
 ;; POSIX_PATH_DONE is the release, and it belongs immediately after the
-;; syscall and BEFORE the POSIX_CHECK: by then the kernel has copied the path
-;; out, and the check reports the caller's own argument rather than this.
-;; Putting it after the check would not run at all, since a raise abandons the
-;; C stack.
+;; syscall: by then the kernel has copied the path out.  A caller whose error
+;; names the path uses POSIX_PATH_CHECK_RET instead, which releases it on both
+;; arms.
 ;;
 ;; An embedded NUL is refused: the syscall would silently see a shorter path,
 ;; and CPython raises ValueError for exactly this.
@@ -47,8 +46,8 @@ POSIX_PATH_KIND_IO      equ 3
 ;; EVERY refusal answers rax = 0 with the exception already pending, and none
 ;; of them raises: not a bad type, not an embedded NUL, not a __fspath__ that
 ;; raised, not a __fspath__ that handed back something that is not a path.
-;; So every caller must test rax, and `jz` reaches a path that still has to
-;; clean up and return 0 itself.
+;; Its docblock carries `Fails: 0`, so every caller writes `ERR_NULL .fail`,
+;; and .fail still has to clean up and return 0 itself.
 ;;
 ;; It returns rather than raising because of the callers that resolve TWO
 ;; paths.  rename, symlink, link and putenv convert the first, hold what it
@@ -72,20 +71,24 @@ POSIX_PATH_KIND_IO      equ 3
     pop rax
 %endmacro
 
-;; The pair of them, in the order they have to happen: the errno check names
-;; the RESOLVED path, so the release cannot come first -- CPython reports
-;; "No such file or directory: '/tmp/x'", not the PathLike object that
-;; produced it.  raise_oserror_owned builds the exception, releases the
-;; resolved path, and only then raises.
-%macro POSIX_PATH_CHECK 3       ; %1 = result, %2 = the original Value,
-                                ; %3 = the slot holding the resolved path
+;; The check and the release, in the order they have to happen: the errno
+;; check names the RESOLVED path, so the release cannot come first -- CPython
+;; reports "No such file or directory: '/tmp/x'", not the PathLike object that
+;; produced it.  The OSError is recorded through set_oserror_owned, which
+;; releases the resolved path as it does so, and control goes to the caller's
+;; error exit.  On success it falls through with the path released.
+%macro POSIX_PATH_CHECK_RET 4   ; %1 = result, %2 = the original Value,
+                                ; %3 = the slot holding the resolved path,
+                                ; %4 = the error exit
     cmp %1, -4095
     jb %%ok
     mov rdi, %1
     neg rdi
     mov rsi, %2
     mov rdx, %3
-    call raise_oserror_owned    ; does not return
+    call set_oserror_owned
+    mov qword %3, 0             ; released there; the exit must not again
+    jmp %4
 %%ok:
     POSIX_PATH_DONE %3
 %endmacro

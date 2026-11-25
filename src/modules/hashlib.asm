@@ -46,7 +46,7 @@ extern ap_realloc
 extern ap_free
 extern ap_memset
 extern obj_as_index
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_MemoryError_type
@@ -110,6 +110,7 @@ HC_MAX_DIGEST equ 64
     mov rdi, [rbp - SC_ARGS]
     mov esi, %1
     call hc_arg_int
+    ERR_M1 .fail
     test rax, rax
     js .failed
     mov [rbp - %2], rax
@@ -223,6 +224,7 @@ section .text
 ;; ============================================================================
 ;; hc_handle_at(rdi = handle index, rsi = the kind wanted) -> rax = HcHandle*,
 ;;     or 0 with a ValueError pending
+;; Fails: 0
 ;;
 ;; Bounds-checked, because the index came from Python, and magic-checked,
 ;; because a freed slot's memory may have been reused and OpenSSL dereferences
@@ -251,13 +253,15 @@ DEF_FUNC_LOCAL hc_handle_at, HAT_FRAME
 .wrong_kind:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_kind]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_handle]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC hc_handle_at
 
 ;; ============================================================================
@@ -342,7 +346,8 @@ DEF_FUNC_BARE hc_handle_drop
 END_FUNC hc_handle_drop
 
 ;; ============================================================================
-;; hc_arg_int(rdi = args, rsi = index) -> rax = the int, or raises
+;; hc_arg_int(rdi = args, rsi = index) -> rax = the int
+;; Fails: -1
 ;;
 ;; obj_as_index, not int_to_i64: the latter reads PyIntObject.compact off
 ;; whatever it is handed, so a str argument had its header read as a number.
@@ -350,12 +355,19 @@ END_FUNC hc_handle_drop
 DEF_FUNC_BARE hc_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    jmp obj_as_index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index           ; err: its -1 and its exception are this one's
+    add rsp, 8
+    ret
 END_FUNC hc_arg_int
 
 ;; ============================================================================
 ;; hc_buffer(rdi = a Value) -> rax = data pointer, rdx = length; rax = 0 and a
 ;;     TypeError pending when it is not bytes-like
+;; Fails: 0?
+;;
+;; 0 alone is an answer: an empty bytearray may have no buffer at all, and
+;; its length of 0 means nothing ever reads the pointer.
 ;;
 ;; bytes and bytearray only.  A memoryview would need the buffer protocol
 ;; acquired and released around the call, which no caller here needs.
@@ -399,8 +411,9 @@ DEF_FUNC_LOCAL hc_buffer, HB_FRAME
 .bad:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_bytes]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .sub_bytes:
     mov rdi, [rbp - HB_OBJ]
 .is_bytes:
@@ -552,18 +565,18 @@ DEF_FUNC hc_md_names, MN_FRAME
     mov rdi, rcx
     call obj_decref
 .oom:
-    ; A raise, not an INCREF'd None.  Answering None made
+    ; An error, not an INCREF'd None.  Answering None made
     ; `frozenset(_core.md_names())` a confusing TypeError instead of the
-    ; MemoryError it actually was; this entry point is reached from Python
-    ; with a live frame, so raise_exception is correct here.
+    ; MemoryError it actually was.
     mov rsp, r13
     pop r13
     pop r12
     pop rbx
     lea rdi, [rel exc_MemoryError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC hc_md_names
 
 ;; ============================================================================
@@ -682,8 +695,9 @@ DEF_FUNC hc_new, 56
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_init]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom_slot:
     mov rcx, [rbp - NW_H]
     mov rdi, [rcx + HcHandle.ctx]
@@ -700,29 +714,33 @@ DEF_FUNC hc_new, 56
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .unknown:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_unknown]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_name:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_unknown]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC hc_new
 
 ;; ============================================================================
@@ -740,13 +758,16 @@ DEF_FUNC hc_update, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_EVP
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - UP_H], rax
     mov rdi, [rbp - UP_ARGS]
     mov rdi, [rdi + 8]
     call hc_buffer              ; rax = data, rdx = length
+    ERR_PENDING .fail
     mov rcx, [rbp - UP_H]
     mov rdi, [rcx + HcHandle.ctx]
     mov rsi, rax
@@ -764,15 +785,25 @@ DEF_FUNC hc_update, 40
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_update]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_update
 
 ;; ============================================================================
@@ -798,9 +829,11 @@ DEF_FUNC hc_digest, DG_FRAME
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_EVP
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - DG_H], rax
 
     call EVP_MD_CTX_new wrt ..plt
@@ -839,8 +872,9 @@ DEF_FUNC hc_digest, DG_FRAME
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_final]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .copy_failed:
     mov rdi, [rbp - DG_TMP]
     call EVP_MD_CTX_free wrt ..plt
@@ -848,22 +882,33 @@ DEF_FUNC hc_digest, DG_FRAME
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_copy]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_digest
 
 ;; ============================================================================
@@ -892,13 +937,16 @@ DEF_FUNC hc_xof_digest, 56
     mov qword [rbp - XD_TMP], 0
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_EVP
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - XD_H], rax
     mov rdi, [rbp - XD_ARGS]
     mov esi, 1
     call hc_arg_int
+    ERR_M1 .fail
     test rax, rax
     js .bad_length
     mov [rbp - XD_LEN], rax
@@ -966,29 +1014,41 @@ DEF_FUNC hc_xof_digest, 56
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_final]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_length:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_final]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_xof_digest
 
 ;; ============================================================================
@@ -1007,9 +1067,11 @@ DEF_FUNC hc_copy, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_EVP
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - CP_SRC], rax
 
     mov edi, HcHandle_size
@@ -1065,15 +1127,25 @@ DEF_FUNC hc_copy, 40
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_copy]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_copy
 
 ;; ============================================================================
@@ -1095,8 +1167,9 @@ DEF_FUNC hc_free, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov [rbp - FR_IDX], rax
-    ; Not hc_handle_at: that raises, and this must tolerate a stale index.
+    ; Not hc_handle_at: that refuses, and this must tolerate a stale index.
     test rax, rax
     js .done
     cmp rax, [rel hc_handle_n]
@@ -1137,8 +1210,17 @@ DEF_FUNC hc_free, 40
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_free
 
 ;; ============================================================================
@@ -1160,9 +1242,11 @@ DEF_FUNC hc_info, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_EVP
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - IN_H], rax
     mov rsp, rbx
     pop rbx
@@ -1174,12 +1258,22 @@ DEF_FUNC hc_info, 40
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_info
 
 ;; ============================================================================
 ;; hc_info_tuple(rdi = HcHandle*) -> the 4-tuple, shared by both families
+;; Fails: 0
 ;; ============================================================================
 IT_H     equ 8
 IT_TUP   equ 16
@@ -1227,14 +1321,14 @@ DEF_FUNC_LOCAL hc_info_tuple, IT_FRAME
     leave
     ret
 .oom:
-    ; A raise, not an INCREF'd None: the caller unpacks a 4-tuple, and None
+    ; An error, not an INCREF'd None: the caller unpacks a 4-tuple, and None
     ; there surfaces as a TypeError about iteration rather than as the
     ; MemoryError it is.
-    leave
     lea rdi, [rel exc_MemoryError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC hc_info_tuple
 
 ;; ============================================================================
@@ -1279,23 +1373,27 @@ DEF_FUNC hc_pbkdf2, 88
     mov rdi, [rbp - PK_ARGS]
     mov rdi, [rdi + 8]
     call hc_buffer
+    ERR_PENDING .fail
     mov [rbp - PK_PASS], rax
     mov [rbp - PK_PLEN], rdx
     mov rdi, [rbp - PK_ARGS]
     mov rdi, [rdi + 16]
     call hc_buffer
+    ERR_PENDING .fail
     mov [rbp - PK_SALT], rax
     mov [rbp - PK_SLEN], rdx
 
     mov rdi, [rbp - PK_ARGS]
     mov esi, 3
     call hc_arg_int
+    ERR_M1 .fail
     test rax, rax
     jle .bad_iter
     mov [rbp - PK_ITER], rax
     mov rdi, [rbp - PK_ARGS]
     mov esi, 4
     call hc_arg_int
+    ERR_M1 .fail
     test rax, rax
     jle .bad_dklen
     mov [rbp - PK_DKLEN], rax
@@ -1345,44 +1443,58 @@ DEF_FUNC hc_pbkdf2, 88
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_pbkdf2]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_iter:
 .bad_dklen:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_pbkdf2]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .unknown:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_unknown]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_name:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_unknown]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_pbkdf2
 
 ;; ============================================================================
@@ -1416,11 +1528,13 @@ DEF_FUNC hc_scrypt, 104
 
     mov rdi, [rdi]
     call hc_buffer
+    ERR_PENDING .fail
     mov [rbp - SC_PASS], rax
     mov [rbp - SC_PLEN], rdx
     mov rdi, [rbp - SC_ARGS]
     mov rdi, [rdi + 8]
     call hc_buffer
+    ERR_PENDING .fail
     mov [rbp - SC_SALT], rax
     mov [rbp - SC_SLEN], rdx
 
@@ -1482,22 +1596,33 @@ DEF_FUNC hc_scrypt, 104
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_scrypt]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_scrypt
 
 ;; ============================================================================
@@ -1520,6 +1645,7 @@ DEF_FUNC hc_hmac_new, 72
 
     mov rdi, [rdi]
     call hc_buffer
+    ERR_PENDING .fail
     mov [rbp - HM_KEY], rax
     mov [rbp - HM_KLEN], rdx
 
@@ -1607,29 +1733,41 @@ DEF_FUNC hc_hmac_new, 72
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_init]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .unknown:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_unknown]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_name:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_unknown]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_hmac_new
 
 ;; ============================================================================
@@ -1647,13 +1785,16 @@ DEF_FUNC hc_hmac_update, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_HMAC
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - HU_H], rax
     mov rdi, [rbp - HU_ARGS]
     mov rdi, [rdi + 8]
     call hc_buffer
+    ERR_PENDING .fail
     mov rcx, [rbp - HU_H]
     mov rdi, [rcx + HcHandle.ctx]
     mov rsi, rax
@@ -1671,15 +1812,25 @@ DEF_FUNC hc_hmac_update, 40
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_update]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_hmac_update
 
 ;; ============================================================================
@@ -1703,9 +1854,11 @@ DEF_FUNC hc_hmac_digest, HD_FRAME
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_HMAC
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - HD_H], rax
 
     call HMAC_CTX_new wrt ..plt
@@ -1743,22 +1896,33 @@ DEF_FUNC hc_hmac_digest, HD_FRAME
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_final]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_hmac_digest
 
 ;; ============================================================================
@@ -1777,9 +1941,11 @@ DEF_FUNC hc_hmac_copy, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_HMAC
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - HP_SRC], rax
 
     mov edi, HcHandle_size
@@ -1833,15 +1999,25 @@ DEF_FUNC hc_hmac_copy, 40
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_copy]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_hmac_copy
 
 ;; ============================================================================
@@ -1858,9 +2034,11 @@ DEF_FUNC hc_hmac_info, 40
     jne .nargs
     xor esi, esi
     call hc_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     mov esi, HC_HMAC
     call hc_handle_at
+    ERR_NULL .fail
     mov [rbp - HI_H], rax
     mov rsp, rbx
     pop rbx
@@ -1872,8 +2050,17 @@ DEF_FUNC hc_hmac_info, 40
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_hmac_info
 
 ;; ============================================================================
@@ -1905,11 +2092,13 @@ DEF_FUNC hc_compare_digest, 40
     jne .nargs
     mov rdi, [rdi]
     call hc_buffer
+    ERR_PENDING .fail
     mov [rbp - CD_A], rax
     mov [rbp - CD_ALEN], rdx
     mov rdi, [rbp - CD_ARGS]
     mov rdi, [rdi + 8]
     call hc_buffer              ; rax = b, rdx = blen
+    ERR_PENDING .fail
     cmp rdx, [rbp - CD_ALEN]
     jne .not_equal
     mov rdi, [rbp - CD_A]
@@ -1935,8 +2124,17 @@ DEF_FUNC hc_compare_digest, 40
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel hc_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
+.fail:
+    ; An argument was refused and its exception is pending.  Nothing is held
+    ; yet: every argument is converted before the first allocation.
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC hc_compare_digest
 
 ;; ============================================================================

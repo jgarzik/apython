@@ -40,10 +40,10 @@ extern ap_strcmp
 extern str_new
 extern str_from_cstr
 extern str_from_cstr_heap
-extern raise_exception
-extern raise_type_error_with_name
+extern set_exception
+extern set_type_error_with_name
 extern exc_new
-extern eval_exception_unwind
+extern exc_install
 extern type_name_message
 extern dunder_lookup
 extern dunder_bind
@@ -139,6 +139,7 @@ END_FUNC int_dunder_invoke
 ;; ============================================================================
 ;; builtin_int_fn(rdi = the argument array, rsi = how many) -> rax:edx = the
 ;;   Value, or 0 with the exception recorded
+;; Fails: 0
 ;;
 ;; int(), int(x) and int(x, base).  Four converters wearing one name: a str,
 ;; bytes or bytearray argument is parsed in the base given; a float is
@@ -284,7 +285,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 .int_from_inline_float:
     ; A float immediate — delegate to float_int for the NaN/inf checks
     mov rdi, rbx
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     V_UNPACK rax, rdx           ; .int_ret hands back the pair, not the Value
     jmp .int_ret
 
@@ -292,7 +293,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; A float subclass instance.  float_int unboxes one itself now, so the
     ; Value goes straight in; this arm used to read the double out by hand.
     mov rdi, rbx
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     V_UNPACK rax, rdx
     jmp .int_ret
 
@@ -326,6 +327,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_DATA]
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_xlat
     test edx, edx
     jz .int_str_parse_error_x
     push rax
@@ -376,6 +378,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]            ; buffer (still on stack)
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
     mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
@@ -440,6 +443,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
     mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
@@ -481,6 +485,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]
     mov esi, 10
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax              ; save result payload
     push rdx                  ; save result tag
     mov rdi, [rsp + 8]       ; buffer ptr (under tag on stack)
@@ -517,7 +522,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; Call __int__(self), BOUND first -- see .int_call_dunder below.
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .int_bind_raised
     call int_dunder_invoke
@@ -544,7 +549,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; __int__ returned non-int
     mov rdi, rax
     call obj_decref
-    RAISE exc_TypeError_type, "__int__ returned non-int (type float)"
+    FAIL exc_TypeError_type, "__int__ returned non-int (type float)", .int_fail
 
 .int_from_int_sub_extract:
     ; rbx = PyIntSubclassObject with no __int__ method
@@ -592,15 +597,34 @@ DEF_FUNC builtin_int_fn, BI_FRAME
 
     jmp .int_type_error
 
+.int_fail_xlat:
+    ; int_from_cstr_base refused the number itself (the digit limit); the
+    ; translated copy of the string, when there is one, is still ours.
+    mov rdi, [rbp - BI_XLAT]
+    test rdi, rdi
+    jz .int_fail
+    call ap_free
+    jmp .int_fail
+.int_fail_buf:
+    ; The same, with the NUL-terminated copy on top of the stack.
+    pop rdi
+    call ap_free
+    jmp .int_fail
+
+.int_sub_warn_raised:
+    ; As below, with the dunder's answer still held.
+    mov rdi, [rbp - BI_ARGS]
+    call obj_decref
 .int_bind_raised:
     ; __get__ raised; the exception is already recorded.
-    jmp eval_exception_unwind
-
 .int_trunc_warn_raised:
     ; warn() raised, which is what a filter set to "error" does.  The
-    ; exception is already recorded; unwind with it.
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
+    ; exception is already recorded.
+.int_fail:
+    ; The error exit: (0, 0), through the epilogue every answer takes.
+    ; .int_ret resets rsp, so a site may arrive with pushes outstanding.
+    RET_NULL
+    jmp .int_ret
 
 .int_call_dunder:
     ; rax = what the MRO answered with, rbx = self.
@@ -615,7 +639,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; object worked.
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .int_bind_raised
     call int_dunder_invoke
@@ -639,11 +663,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov r8, [rcx + PyTypeObject.tp_flags]
     test r8, TYPE_FLAG_INT_SUBCLASS
     jnz .int_subclass_result
-    ; Not int-like, and CPython names what it got.
+    ; Not int-like, and CPython names what it got.  A heap object, by the
+    ; tests above, and ours to release once it has been named.
+    mov [rbp - BI_ARGS], rax
     mov rsi, rax
     V_PACK rsi, rdx
     CSTRING rdi, `__int__ returned non-int (type \x01)`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - BI_ARGS]
+    call obj_decref
+    jmp .int_fail
 
 .int_subclass_result:
     ; CPython accepts a strict subclass of int here and DEPRECATES it, naming
@@ -660,7 +689,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rax
     call deprecation_warn
     test eax, eax
-    jz .int_trunc_warn_raised
+    jz .int_sub_warn_raised
     mov rax, [rbp - BI_ARGS]
     mov rdx, [rbp - BI_BASE]
     lea rcx, [rel bool_type]
@@ -702,7 +731,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; CPython 3.12: tries __index__ on result, but NOT __int__
     mov rdi, rax
     mov rsi, rbx
-    call dunder_bind
+    call dunder_bind            ; err: edx = 2 is the raise, tested below
     cmp edx, 2
     je .int_bind_raised
     call int_dunder_invoke
@@ -787,7 +816,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rax
     call obj_decref
 .int_index_nonint_error:
-    RAISE exc_TypeError_type, "__index__ returned non-int"
+    FAIL exc_TypeError_type, "__index__ returned non-int", .int_fail
 
 .int_trunc_no_index:
     mov rax, [rbx + PyObject.ob_type]
@@ -822,14 +851,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp + 16]                    ; prefix str
     mov rsi, [rsp + 8]                     ; name str
     mov ecx, TAG_PTR                       ; right_tag (heap str)
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     push rax                               ; save partial
 
     ; Concat: partial + suffix
     mov rdi, rax                           ; partial
     mov rsi, [rsp + 8]                     ; suffix str
     mov ecx, TAG_PTR                       ; right_tag (heap str)
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     mov rbx, rax                           ; rbx = full message str
 
     ; DECREF intermediate strings (5 items on stack: partial, suffix, name, prefix, type_name_cstr)
@@ -853,17 +882,18 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     call obj_decref                        ; DECREF msg str
     pop rax                                ; exc obj
 
-    ; Store exception and jump to unwind
-    mov [gs:ThreadState.current_exception], rax
-    jmp eval_exception_unwind
+    ; Record the exception; the error exit does the rest
+    mov rdi, rax
+    call exc_install
+    jmp .int_fail
 
 .int_trunc_nonint_error:
     ; __trunc__ returned non-pointer non-int (TAG_FLOAT, TAG_NONE, etc)
-    RAISE exc_TypeError_type, "__trunc__ returned non-Integral"
+    FAIL exc_TypeError_type, "__trunc__ returned non-Integral", .int_fail
 
 .int_dunder_returned_float:
     ; __int__/__trunc__ returned TAG_FLOAT — TypeError (non-int return)
-    RAISE exc_TypeError_type, "__int__ returned non-int (type float)"
+    FAIL exc_TypeError_type, "__int__ returned non-int (type float)", .int_fail
 
 .int_convert_bool_result:
     ; rax = bool_true or bool_false, convert to SmallInt
@@ -888,11 +918,11 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     ; nothing after it -- the one word a reader needs.
     mov rsi, rbx                ; the argument, as a Value
     CSTRING rdi, `int() argument must be a string, a bytes-like object or a real number, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .int_fail
 
 .int_error:
-    RAISE exc_TypeError_type, "int() takes at most 2 arguments"
+    FAIL exc_TypeError_type, "int() takes at most 2 arguments", .int_fail
 
 ; ------- int(x, base) -------
 .int_two_args:
@@ -1058,6 +1088,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rbp - BI_DATA]
     mov rsi, [rbp - BI_NARGS]      ; base
     call int_from_cstr_base
+    ERR_PENDING .int_fail_xlat
     test edx, edx            ; check tag (not payload — SmallInt 0 is valid)
     jz .int_base_str_parse_error_x
     push rax
@@ -1118,6 +1149,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp]                 ; buffer
     mov rsi, [rbp - BI_NARGS]      ; base
     call int_from_cstr_base
+    ERR_PENDING .int_fail_buf
     mov rbx, rax                   ; save result payload
     push rdx                       ; save result tag
     mov rdi, [rsp + 8]            ; buffer ptr (under tag on stack)
@@ -1138,14 +1170,14 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rsi, [rbp - BI_ARGS]
     mov rsi, [rsi + 8]
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .int_fail
 
 .int_base_type_error_str:
-    RAISE exc_TypeError_type, "int() can't convert non-string with explicit base"
+    FAIL exc_TypeError_type, "int() can't convert non-string with explicit base", .int_fail
 
 .int_base_range_error:
-    RAISE exc_ValueError_type, "int() base must be >= 2 and <= 36, or 0"
+    FAIL exc_ValueError_type, "int() base must be >= 2 and <= 36, or 0", .int_fail
 
 .int_base_parse_error:
     ; Restore rbx from BI_OBJ (may have been clobbered in bytes path)
@@ -1245,7 +1277,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp + 48]
     mov rsi, [rsp + 56]
     mov ecx, TAG_PTR            ; right_tag (heap str)
-    call str_concat
+    call str_concat           ; err: obj_repr answered, and it answers a str
     mov [rsp + 64], rax
 
     ; DECREF prefix_str and repr_str
@@ -1265,16 +1297,9 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, [rsp + 64]
     call obj_decref
 
-    ; DECREF previous exception if any
-    mov rax, [gs:ThreadState.current_exception]
-    test rax, rax
-    jz .int_ile_no_prev
-    mov rdi, rax
-    call obj_decref
-.int_ile_no_prev:
-    mov [gs:ThreadState.current_exception], rbx
-    add rsp, 72
-    jmp eval_exception_unwind
+    mov rdi, rbx
+    call exc_install            ; takes the reference, and any earlier one down
+    jmp .int_fail
 
 .int_ret:
     ; Common epilogue: rax = payload, edx = tag (set by callee)

@@ -16,6 +16,7 @@
 
 ; External functions
 extern frozenset_type
+extern require_self_refused
 extern int_is_integer
 extern complex_type
 extern obj_decref
@@ -28,7 +29,7 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern int_type
 extern obj_is_true
@@ -70,6 +71,7 @@ section .text
 ;; It also has to be findable: enum decides which base is the "data type" by
 ;; asking whether __new__ or __init__ is in that base's __dict__, and int and
 ;; str had neither.
+;; Fails: 0
 ;; ============================================================================
 extern int_sub_new
 extern str_sub_new
@@ -131,7 +133,7 @@ DEF_FUNC scalar_dunder_new
     mov rdi, r12
     mov rsi, rsi                ; the argument count, less the class
     extern builtin_str_fn
-    call builtin_str_fn
+    call builtin_str_fn         ; err: its 0 is this function's own
     pop r12
     pop rbx
     leave
@@ -156,7 +158,7 @@ DEF_FUNC scalar_dunder_new
     mov rdi, rbx
     mov rdx, rsi
     mov rsi, r12
-    call float_type_call
+    call float_type_call        ; err: its (0, 0) is this function's own
     pop r12
     pop rbx
     leave
@@ -168,7 +170,7 @@ DEF_FUNC scalar_dunder_new
     mov rdi, rbx
     mov rdx, rsi
     mov rsi, r12
-    call complex_type_call
+    call complex_type_call      ; err: its (0, 0) is this function's own
     pop r12
     pop rbx
     leave
@@ -176,7 +178,12 @@ DEF_FUNC scalar_dunder_new
     ret
 
 .sdn_bad:
-    RAISE exc_TypeError_type, "__new__() argument 1 must be a subclass of int or str"
+    SET_EXC exc_TypeError_type, "__new__() argument 1 must be a subclass of int or str"
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC scalar_dunder_new
 
 ;; ============================================================================
@@ -188,6 +195,7 @@ END_FUNC scalar_dunder_new
 ;; subclass inherits it.  Without one, `class F(float)` inherited OBJECT's,
 ;; which refuses any non-empty spec: format(F(2.5), ".2f") was "unsupported
 ;; format string passed to object.__format__".
+;; Fails: 0
 ;; ============================================================================
 extern format_apply_spec
 
@@ -205,13 +213,19 @@ DEF_FUNC builtin_method_format
     jne .bmf_bad_spec
     mov rsi, rax
     mov rdi, [rdi]
-    call format_apply_spec
+    call format_apply_spec      ; err: its 0 is this method's own
     leave
     ret
 .bmf_bad:
-    RAISE exc_TypeError_type, "__format__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__format__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 .bmf_bad_spec:
-    RAISE exc_TypeError_type, "__format__() argument must be str"
+    SET_EXC exc_TypeError_type, "__format__() argument must be str"
+    xor eax, eax
+    leave
+    ret
 END_FUNC builtin_method_format
 
 ;; object.__format__(self, format_spec)
@@ -219,6 +233,7 @@ END_FUNC builtin_method_format
 ;; An empty spec is str(self); anything else is an error, because object has no
 ;; formatting of its own to apply.  enum reaches for this by name when it
 ;; decides whether a mixin overrode it.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC object_method_format
     cmp rsi, 2
@@ -239,11 +254,20 @@ DEF_FUNC object_method_format
     leave
     ret
 .omf_bad:
-    RAISE exc_TypeError_type, "__format__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__format__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 .omf_bad_spec:
-    RAISE exc_TypeError_type, "__format__() argument must be str"
+    SET_EXC exc_TypeError_type, "__format__() argument must be str"
+    xor eax, eax
+    leave
+    ret
 .omf_unsupported:
-    RAISE exc_TypeError_type, "unsupported format string passed to object.__format__"
+    SET_EXC exc_TypeError_type, "unsupported format string passed to object.__format__"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_format
 
 ;; ============================================================================
@@ -279,7 +303,7 @@ END_FUNC object_method_sizeof
 DEF_FUNC object_method_dir
     extern dir_default
     mov rdi, [rdi]              ; args[0] = self, a Value
-    call dir_default
+    call dir_default          ; err: its 0 is this method's own answer
     leave
     ret
 END_FUNC object_method_dir
@@ -302,6 +326,7 @@ END_FUNC object_method_dir
 ;; tarfile, whose addfile() copies its TarInfo.
 ;;
 ;; object.__reduce__(self) is protocol 0, as CPython's is.
+;; Fails: 0
 ;; ============================================================================
 ORX_ARGS  equ 16            ; two Values: args[0] = self, args[1] = protocol
 ORX_FN    equ 24
@@ -320,6 +345,7 @@ DEF_FUNC object_method_reduce, ORX_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .orx_fail
     add rsp, 8
     pop rdi
 .orx_have_proto:
@@ -340,7 +366,7 @@ DEF_FUNC object_method_reduce, ORX_FRAME
     lea rsi, [rbp - ORX_ARGS]
     mov edx, 2
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     push rax
     sub rsp, 8
     mov rdi, [rbp - ORX_ARGS + 8]
@@ -351,9 +377,16 @@ DEF_FUNC object_method_reduce, ORX_FRAME
     ret
 
 .orx_failed:
-    RAISE exc_TypeError_type, "cannot pickle this object: _reduce is not available"
+    mov rdi, [rbp - ORX_ARGS + 8]
+    DECREF_V rdi, rcx           ; the protocol int, which V_PACK may have boxed
+    SET_EXC exc_TypeError_type, "cannot pickle this object: _reduce is not available"
+    jmp .orx_fail
 .orx_nargs:
-    RAISE exc_TypeError_type, "__reduce_ex__() missing self"
+    SET_EXC exc_TypeError_type, "__reduce_ex__() missing self"
+.orx_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_reduce
 
 ;; ============================================================================
@@ -386,7 +419,7 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - ORI_MOD], rax
     mov rdi, [rbp - ORI_KEY]
     extern obj_decref
@@ -402,7 +435,7 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get           ; err: a 0 goes to .ori_fail either way, with whatever is pending
     push rax
     mov rdi, [rbp - ORI_KEY]
     call obj_decref
@@ -428,6 +461,7 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
 END_FUNC object_reduce_impl
 
 ;; ============================================================================
+;; Fails: 0
 extern str_from_cstr
 OMI_SELF  equ 8
 OMI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -466,16 +500,24 @@ DEF_FUNC object_method_init, OMI_FRAME
     ret
 
 .omi_own_init:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
           "object.__init__() takes exactly one argument (the instance to initialize)"
+    xor eax, eax
+    leave
+    ret
 .omi_no_args:
     mov rsi, [rbp - OMI_SELF]
     CSTRING rdi, \
         `\x01.__init__() takes exactly one argument (the instance to initialize)`
-    extern raise_type_error_with_typename
-    jmp raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_init
 
+;; object_method_str(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC object_method_str
     ; object.__str__ defers to __repr__, which is what CPython does.  It must
     ; not call obj_str: that dispatches back to tp_str, which looks up
@@ -488,12 +530,16 @@ DEF_FUNC object_method_str
     leave
     ret
 .oms_bad:
-    RAISE exc_TypeError_type, "__str__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__str__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_str
 
 ;; object.__repr__ is the *default* implementation, not a re-dispatch: it
 ;; writes "<Name object>" straight out.  Calling obj_repr here would come
 ;; back through tp_repr to this same method.
+;; Fails: 0
 OMR_BUF   equ 136
 OMR_FRAME equ 160           ; + 0 pushes = 160
 DEF_FUNC object_method_repr, OMR_FRAME
@@ -550,7 +596,10 @@ DEF_FUNC object_method_repr, OMR_FRAME
     ret
 
 .omr_bad:
-    RAISE exc_TypeError_type, "__repr__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__repr__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_repr
 
 ;; ============================================================================
@@ -558,6 +607,7 @@ END_FUNC object_method_repr
 ;; A no-op hook every class inherits, so that a real one can end with
 ;; `super().__init_subclass__()` -- which is how they are written.  Keywords
 ;; are an error here: whoever declared them should have consumed them.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC object_method_init_subclass
     cmp rsi, 2
@@ -569,7 +619,10 @@ DEF_FUNC object_method_init_subclass
     V_PACK rax, rdx
     ret
 .omis_bad:
-    RAISE exc_TypeError_type, "__init_subclass__() takes no keyword arguments"
+    SET_EXC exc_TypeError_type, "__init_subclass__() takes no keyword arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_init_subclass
 
 ;; ============================================================================
@@ -593,6 +646,7 @@ DEF_FUNC %1_dunder_%2
     CSTRING rcx, %3             ; %2 is the slot name, not the dunder's
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     V_TEST_PTR rdi, rax
     ja %%immediate
@@ -616,8 +670,11 @@ DEF_FUNC %1_dunder_%2
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -641,6 +698,7 @@ DEF_FUNC %1_dunder_len
 
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rcx, [rax + PyTypeObject.tp_as_mapping]
@@ -658,18 +716,29 @@ DEF_FUNC %1_dunder_len
     jz %%bad
 %%have:
     call rcx
+    ERR_M1 %%failed
     mov edx, TAG_SMALLINT
     leave
     V_PACK rax, rdx
+    ret
+%%failed:
+    xor eax, eax
+    leave
     ret
 %%arity:
     dec rsi
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 %%bad:
-    RAISE exc_TypeError_type, "object has no len()"
+    SET_EXC exc_TypeError_type, "object has no len()"
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_len
 %endmacro
 
@@ -705,6 +774,7 @@ DEF_FUNC %1_dunder_call, DDC_FRAME
     CSTRING rcx, "__call__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax                ; the receiver, checked
 
     lea rax, [rel %1_type]
@@ -719,13 +789,19 @@ DEF_FUNC %1_dunder_call, DDC_FRAME
     leave
     ret
 %%bad:
-    RAISE exc_TypeError_type, "object is not callable"
+    SET_EXC exc_TypeError_type, "object is not callable"
+    xor eax, eax
+    leave
+    ret
 %%noself:
     xor edi, edi
     xor edx, edx
     mov esi, 1
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_call
 %endmacro
 
@@ -757,6 +833,7 @@ DEF_FUNC %1_dunder_iter
 
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_iter]
@@ -779,10 +856,16 @@ DEF_FUNC %1_dunder_iter
     dec rsi
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 %%bad:
-    RAISE exc_TypeError_type, "object is not iterable"
+    SET_EXC exc_TypeError_type, "object is not iterable"
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_iter
 %endmacro
 
@@ -838,6 +921,7 @@ DEF_FUNC %1_dunder_next, DN_FRAME
     CSTRING rcx, "__next__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
 
     DUNDER_EXC_SAVE [rbp - DN_EXC]
@@ -875,10 +959,16 @@ DEF_FUNC %1_dunder_next, DN_FRAME
     dec rsi
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 %%bad:
-    RAISE exc_TypeError_type, "object is not an iterator"
+    SET_EXC exc_TypeError_type, "object is not an iterator"
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_next
 %endmacro
 
@@ -902,6 +992,7 @@ DEF_DUNDER_ITER range
 ;; bytes-like object has a protocol to ask rather than a type to recognise.
 ;; Exact bytes answer with themselves; a subclass answers with an exact copy,
 ;; as CPython's bytes_bytes does.
+;; Fails: 0
 ;; ============================================================================
 extern bytes_type
 DEF_FUNC bytes_dunder_bytes
@@ -912,6 +1003,7 @@ DEF_FUNC bytes_dunder_bytes
     xor edx, edx
     CSTRING rcx, "__bytes__"
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel bytes_type]
@@ -932,7 +1024,10 @@ DEF_FUNC bytes_dunder_bytes
     dec rsi
     xor edi, edi
     xor edx, edx
-    call raise_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_dunder_bytes
 
 ;; The builtin iterators, which had a tp_iternext and a tp_iter and no way
@@ -1037,6 +1132,7 @@ DEF_FUNC %1_dunder_%2
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
@@ -1053,8 +1149,11 @@ DEF_FUNC %1_dunder_%2
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -1091,6 +1190,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
     DUNDER_EXC_SAVE [rbp - DB_EXC]
@@ -1109,8 +1209,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     ; a bare "unsupported operand type" -- or, where the dunder tail-jumps
     ; into the slot, as a NULL that bound nothing at all.
     mov rsi, [rbp - DB_RHS]
-    extern seq_repeat_not_index
-    jmp seq_repeat_not_index
+    extern set_seq_repeat_not_index
+    call set_seq_repeat_not_index
+    xor eax, eax
+    leave
+    ret
 %else
     ; The implementation declined the pair without raising.  Called by name,
     ; that has to read as NotImplemented so the caller can try the reflected
@@ -1123,7 +1226,10 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %endif
 %endif
 %%bad:
-    RAISE exc_TypeError_type, "unsupported operand type"
+    SET_EXC exc_TypeError_type, "unsupported operand type"
+    xor eax, eax
+    leave
+    ret
 %%out:
     leave
     ret
@@ -1146,6 +1252,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
     DUNDER_EXC_SAVE [rbp - DB_EXC]
@@ -1156,11 +1263,17 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     EXC_RAISED_SINCE [rbp - DB_EXC], rcx, %%out
 %if %0 >= 4
     mov rsi, [rbp - DB_RHS]
-    extern seq_repeat_not_index
-    jmp seq_repeat_not_index
+    extern set_seq_repeat_not_index
+    call set_seq_repeat_not_index
+    xor eax, eax
+    leave
+    ret
 %endif
 %%bad:
-    RAISE exc_TypeError_type, "unsupported operand type"
+    SET_EXC exc_TypeError_type, "unsupported operand type"
+    xor eax, eax
+    leave
+    ret
 %%out:
     leave
     ret
@@ -1368,6 +1481,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rsi, rax
     mov rdi, [rbp - DB_RHS]
 %else
@@ -1381,6 +1495,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
 %endif
@@ -1450,7 +1565,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
 %endif
     mov esi, 3
     extern %7
-    call %7
+    call %7                     ; err: its 0 is this wrapper's own
     leave
     ret
 %endif
@@ -1462,8 +1577,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -1503,6 +1621,7 @@ DEF_FUNC %1_dunder_%2, 16
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
 
     ; The operand that is not self has to be one this type accepts, as for
     ; the other binary dunders.  The reflected form already put self SECOND.
@@ -1534,8 +1653,11 @@ DEF_FUNC %1_dunder_%2, 16
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -1550,6 +1672,7 @@ DEF_FUNC %1_dunder_bool
     CSTRING rcx, "__bool__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     lea rax, [rel %1_type]
     mov rax, [rax + PyTypeObject.tp_as_number]
@@ -1559,6 +1682,8 @@ DEF_FUNC %1_dunder_bool
     test rax, rax
     jz %%bad
     call rax
+    movsxd rax, eax             ; 0 or 1, or -1 with it raised
+    ERR_M1 %%failed
     test eax, eax
     jz %%false
     extern bool_true
@@ -1572,13 +1697,20 @@ DEF_FUNC %1_dunder_bool
     INCREF rax
     leave
     ret
+%%failed:
+    xor eax, eax
+    leave
+    ret
 %%bad:
     ; CPython reports both counts, and counts self in neither.
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_bool
 %endmacro
 
@@ -1726,7 +1858,7 @@ DEF_FUNC object_method_getattribute, OGA2_FRAME
     jz .omg_plain
     mov [gs:ThreadState.instance_getattr_skip], rax
 .omg_plain:
-    call builtin_getattr        ; with the wrong count it raises, as it should
+    call builtin_getattr        ; err: its 0 is this function's own, once the skip is cleared
     mov qword [gs:ThreadState.instance_getattr_skip], 0
     leave
     ret
@@ -1743,6 +1875,7 @@ END_FUNC object_method_getattribute
 ;; instance_dealloc walk the same words by OFFSET, which is all they need --
 ;; so the names come from where they are actually recorded: the member
 ;; descriptors in each type's dict along the MRO.
+;; Fails: 0
 OGS_SELF  equ 8
 OGS_DICT  equ 16
 OGS_SLOTS equ 24
@@ -1817,7 +1950,10 @@ DEF_FUNC object_method_getstate, OGS_FRAME
     V_PACK rax, rdx
     ret
 .ogs_bad:
-    RAISE exc_TypeError_type, "__getstate__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__getstate__() takes no arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_getstate
 
 ;; ============================================================================
@@ -1915,8 +2051,8 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     mov rdx, [rdi]
     mov rsi, [rax + PyMemberDescrObject.md_name]
     mov rdi, [rbp - OCS_DICT]
-    extern dict_set
-    call dict_set
+    extern dict_set_str
+    call dict_set_str           ; a dict made here, keyed by slot names
 
 .ocs_next_entry:
     inc qword [rbp - OCS_IDX]
@@ -2029,6 +2165,7 @@ DEF_DUNDER_BINARY frozenset, ror,  nb_or,       1, dunder_operand_any
 
 ;; int's nb_bool takes the (payload, tag) pair rather than a Value -- it hands
 ;; the pair straight to int_unwrap -- so it cannot go through the macro.
+;; Fails: 0
 DEF_FUNC int_dunder_bool
     REQUIRE_SELF int_type, "__bool__"
     cmp rsi, 1
@@ -2053,8 +2190,11 @@ DEF_FUNC int_dunder_bool
     dec rsi
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC int_dunder_bool
 
 DEF_DUNDER_STRREPR str, str, "__str__"
@@ -2156,8 +2296,11 @@ DEF_FUNC object_method_%1
     dec rsi                     ; rsi is still nargs on this path
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_%1
 %endmacro
 
@@ -2166,6 +2309,8 @@ DEF_OBJECT_ORDERING le
 DEF_OBJECT_ORDERING gt
 DEF_OBJECT_ORDERING ge
 
+;; object_method_eq(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC object_method_eq
     cmp rsi, 2
     jne .ome_error
@@ -2192,12 +2337,18 @@ DEF_FUNC object_method_eq
     mov rsi, rbx
     mov edx, CMP_EQ
     call rax
+    ERR_PENDING .ome_failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .ome_notimpl
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.ome_failed:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 .ome_notimpl:
     lea rax, [rel notimpl_singleton]
@@ -2225,11 +2376,15 @@ DEF_FUNC object_method_eq
     V_PACK rax, rdx
     ret
 .ome_error:
-    RAISE exc_TypeError_type, "__eq__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__eq__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_eq
 
 ;; __ne__ delegates to the type's own EQ comparison and inverts it, so a class
 ;; that defines only __eq__ still gets a correct !=.
+;; Fails: 0
 DEF_FUNC object_method_ne
     cmp rsi, 2
     jne .omn_error
@@ -2247,6 +2402,7 @@ DEF_FUNC object_method_ne
     mov rsi, rbx
     mov edx, CMP_EQ
     call rax
+    ERR_PENDING .omn_failed
     V_UNPACK rax, rdx
     test edx, edx
     jz .omn_notimpl
@@ -2258,11 +2414,13 @@ DEF_FUNC object_method_ne
     mov rdi, rax
     V_PACK rdi, rdx
     extern obj_is_true
-    call obj_is_true
-    mov ebx, eax
+    call obj_is_true            ; err: tested as rbx below, once the answer is released
+    mov rbx, rax
     pop rdx
     pop rdi
     DECREF_VAL rdi, rdx
+    cmp rbx, -1                 ; never an answer: __bool__ raised
+    je .omn_failed
     test ebx, ebx
     jz .omn_true
     lea rax, [rel bool_false]
@@ -2294,8 +2452,16 @@ DEF_FUNC object_method_ne
     leave
     V_PACK rax, rdx
     ret
+.omn_failed:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 .omn_error:
-    RAISE exc_TypeError_type, "__ne__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__ne__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_ne
 
 ;; object.__hash__(self) -- the address, which is what obj_hash falls back to
@@ -2308,6 +2474,7 @@ END_FUNC object_method_ne
 ;; biased, so it was biased twice and int.__hash__(5) was
 ;; -1125899906842619.  object_hash takes the decoded pointer; the bias
 ;; belongs only on the way out.
+;; Fails: 0
 DEF_FUNC object_method_hash
     cmp rsi, 1
     jl .omh_error
@@ -2322,7 +2489,10 @@ DEF_FUNC object_method_hash
     V_PACK rax, rdx
     ret
 .omh_error:
-    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__hash__() takes no arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC object_method_hash
 
 
@@ -2343,20 +2513,29 @@ extern dict_subscript
 
 
 ;; generic_method_hash(args, nargs): args[0]=self
+;; Fails: 0
 DEF_FUNC generic_method_hash
     cmp rsi, 1
     jne .gmh_error
     mov rdi, [rdi]
     extern obj_hash
     call obj_hash
+    ERR_M1 .gmh_raised
     mov rdi, rax                ; boxed, not biased: see DEF_DUNDER_HASH
     extern int_from_i64
     call int_from_i64
     leave
     V_PACK rax, rdx
     ret
+.gmh_raised:
+    xor eax, eax
+    leave
+    ret
 .gmh_error:
-    RAISE exc_TypeError_type, "__hash__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__hash__() takes no arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC generic_method_hash
 
 ;; ============================================================================
@@ -2384,6 +2563,7 @@ DEF_FUNC %1_dunder_hash
     CSTRING rcx, "__hash__"
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     V_UNPACK rdi, rdx
     lea rax, [rel %1_type]
@@ -2391,6 +2571,7 @@ DEF_FUNC %1_dunder_hash
     test rax, rax
     jz %%bad
     call rax
+    ERR_M1 %%failed
     ; A hash is a full int64 and most of them fall outside the +-2^50 an
     ; immediate holds, so it has to be boxed rather than biased: adding
     ; V_INT_BIAS to a large one lands in the float range, and
@@ -2401,12 +2582,19 @@ DEF_FUNC %1_dunder_hash
     leave
     V_PACK rax, rdx
     ret
+%%failed:
+    xor eax, eax
+    leave
+    ret
 %%bad:
     dec rsi
     xor edi, edi
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_hash
 %endmacro
 
@@ -2437,6 +2625,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     CSTRING_DUNDER rcx, %2
     extern dunder_require_self
     call dunder_require_self
+    ERR_NULL require_self_refused       ; nothing is held yet
     mov rdi, rax
     mov rsi, [rbp - DB_RHS]
 
@@ -2468,8 +2657,11 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
     xor edx, edx                ; check_num_args' wording, with no gap
-    extern raise_wrapper_arity
-    call raise_wrapper_arity
+    extern set_wrapper_arity
+    call set_wrapper_arity
+    xor eax, eax
+    leave
+    ret
 END_FUNC %1_dunder_%2
 %endmacro
 
@@ -2521,6 +2713,7 @@ DEF_DUNDER_HASH slice
 ;; any type's dict, so `frozenset(names).__contains__` -- keyword.py's
 ;; iskeyword, among others -- raised AttributeError.  One implementation
 ;; serves every type that has the slot.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC generic_method_contains
     cmp rsi, 2
@@ -2540,11 +2733,17 @@ DEF_FUNC generic_method_contains
     mov rsi, [rdi + 8]          ; the item, as a Value
     mov rdi, rax
     call rcx
+    movsxd rax, eax             ; 0 or 1, or -1 with it raised
+    ERR_M1 .gmc_failed
     test eax, eax
     jz .gmc_false
     RET_TRUE
     leave
     V_PACK rax, rdx
+    ret
+.gmc_failed:
+    xor eax, eax
+    leave
     ret
 .gmc_false:
     RET_FALSE
@@ -2552,7 +2751,10 @@ DEF_FUNC generic_method_contains
     V_PACK rax, rdx
     ret
 .gmc_error:
-    RAISE exc_TypeError_type, "__contains__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__contains__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC generic_method_contains
 
 ;; ============================================================================
@@ -2574,8 +2776,8 @@ END_FUNC generic_method_contains
 ;; ============================================================================
 ;; ============================================================================
 ;; new_check_class(rdi = the type this __new__ belongs to, rsi = args,
-;;                 rdx = nargs) -> rax = args[0], the class to build; or the
-;;                 TypeError is raised and this does not return
+;;                 rdx = nargs) -> rax = args[0], the class to build
+;; Fails: 0
 ;;
 ;; The three things CPython's tp_new_wrapper checks before any __new__ runs,
 ;; in its order and with its wording: there is a first argument, it is a type,
@@ -2586,7 +2788,7 @@ END_FUNC generic_method_contains
 ;; ============================================================================
 extern type_check_is_class
 extern type_is_subtype
-extern raise_new_bad_class
+extern set_new_bad_class
 NCC_OWNER equ 8
 NCC_ARGS  equ 16
 NCC_FRAME equ 24                        ; + 1 push = 32, 16-aligned
@@ -2643,24 +2845,33 @@ DEF_FUNC new_check_class, NCC_FRAME
     mov rsi, [rbp - NCC_ARGS]
     mov rsi, [rsi]
     mov edx, 3
-    call raise_new_bad_class
+    call set_new_bad_class
+    jmp .ncc_fail
 .ncc_no_arg:
     mov rdi, rbx
     xor esi, esi
     xor edx, edx
-    call raise_new_bad_class
+    call set_new_bad_class
+    jmp .ncc_fail
 .ncc_not_type:
     mov rdi, rbx
     mov rsi, [rbp - NCC_ARGS]
     mov rsi, [rsi]
     mov edx, 1
-    call raise_new_bad_class
+    call set_new_bad_class
+    jmp .ncc_fail
 .ncc_not_subtype:
     mov rdi, rbx
     mov rsi, [rbp - NCC_ARGS]
     mov rsi, [rsi]
     mov edx, 2
-    call raise_new_bad_class
+    call set_new_bad_class
+    jmp .ncc_fail
+.ncc_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC new_check_class
 
 ;; ============================================================================
@@ -2679,6 +2890,7 @@ END_FUNC new_check_class
 ;; in the MRO; reaching for cls->tp_new here would re-enter that and recurse.
 ;; The owner's constructor already takes the class to build as its first
 ;; argument, which is how a subclass instance still comes out.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
     push rbx
@@ -2688,7 +2900,8 @@ DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
     mov r12, rsi                        ; args
     mov r13, rdx                        ; nargs
 
-    call new_check_class                ; raises for all three refusals
+    call new_check_class                ; refuses in three ways
+    ERR_NULL .nfs_fail
 
     mov rax, [rbx + PyTypeObject.tp_new]
     test rax, rax
@@ -2707,7 +2920,14 @@ DEF_FUNC new_from_slot, 8               ; 3 pushes, so rsp is 16-aligned
     mov rdi, rbx
     mov rsi, [r12]
     mov edx, 2
-    call raise_new_bad_class
+    call set_new_bad_class
+.nfs_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC new_from_slot
 
 ;; ============================================================================
@@ -2732,9 +2952,10 @@ DEF_FUNC %1                     ; 2 pushes + frame 0 = 16, 16-aligned
     lea rdi, [rel %2]
     mov rsi, rbx
     mov rdx, r12
-    call new_check_class        ; raises for a bad class argument; rax = cls
+    call new_check_class        ; refuses a bad class argument; rax = cls
+    ERR_NULL %%fail
 %if %0 >= 4
-    NO_KEYWORDS_TP_INIT %2, %4
+    NO_KEYWORDS_TP_INIT_RET %2, %4, %%fail
 %endif
     ; __new__ CONSUMES the keywords, which is the contract type_call states --
     ; it hands them back to __init__ from its own saved copy.  Leaving them set
@@ -2746,10 +2967,14 @@ DEF_FUNC %1                     ; 2 pushes + frame 0 = 16, 16-aligned
     mov rdi, rbx
     mov rsi, r12
     call %3
+%%out:
     pop r12
     pop rbx
     leave
     ret
+%%fail:
+    xor eax, eax
+    jmp %%out
 END_FUNC %1
 %endmacro
 

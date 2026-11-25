@@ -28,6 +28,7 @@
 %include "value.inc"
 %include "compiler.inc"
 
+extern dict_get
 extern ast_make
 extern ast_at
 extern ast_span_at
@@ -51,7 +52,6 @@ extern obj_call_n
 extern obj_decref
 extern obj_dealloc
 extern import_module
-extern dict_get
 extern str_from_cstr_heap
 extern int_from_i64
 
@@ -526,7 +526,7 @@ DEF_FUNC_LOCAL al_prep_fn, ALP_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - ALP_MOD], rax
     mov rdi, [rbp - ALP_KEY]
     call obj_decref
@@ -540,7 +540,7 @@ DEF_FUNC_LOCAL al_prep_fn, ALP_FRAME
     mov rdi, [rbp - ALP_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get           ; err: a 0 goes to .alp_fail either way, with whatever is pending
     push rax
     push rax                    ; twice: keeps rsp 16-aligned for the calls
     mov rdi, [rbp - ALP_KEY]
@@ -616,7 +616,7 @@ DEF_FUNC compile_ast_input, CAI_FRAME
     mov rdi, [rbp - CAI_FN]
     lea rsi, [rbp - CAI_ARGS]
     mov edx, 3
-    call obj_call_n
+    call obj_call_n             ; err: .cai_fail, below
     mov [rbp - CAI_RES], rax
     mov rdi, [rbp - CAI_ARGS + 16]
     DECREF_V rdi, rcx           ; the flags, ours

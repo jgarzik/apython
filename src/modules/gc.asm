@@ -19,6 +19,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern obj_decref
@@ -31,7 +32,7 @@ extern obj_as_index
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 
@@ -69,6 +70,7 @@ DEF_FUNC gc_mod_collect, GMCF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     test rax, rax
     jl .gmc_range
     cmp rax, 2
@@ -84,9 +86,17 @@ DEF_FUNC gc_mod_collect, GMCF_FRAME
     ret
 
 .gmc_args:
-    RAISE exc_TypeError_type, "collect() takes at most 1 argument"
+    SET_EXC exc_TypeError_type, "collect() takes at most 1 argument"
+    leave
+    ret
 .gmc_range:
-    RAISE exc_ValueError_type, "invalid generation"
+    SET_EXC exc_ValueError_type, "invalid generation"
+    leave
+    ret
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC gc_mod_collect
 
 ;; ============================================================================
@@ -190,7 +200,9 @@ DEF_FUNC gc_mod_get_count
     V_PACK rax, rdx
     ret
 .gmgc_args:
-    RAISE exc_TypeError_type, "get_count() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_count() takes no arguments"
+    leave
+    ret
 END_FUNC gc_mod_get_count
 
 DEF_FUNC gc_mod_get_threshold
@@ -205,7 +217,9 @@ DEF_FUNC gc_mod_get_threshold
     V_PACK rax, rdx
     ret
 .gmgt_args:
-    RAISE exc_TypeError_type, "get_threshold() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_threshold() takes no arguments"
+    leave
+    ret
 END_FUNC gc_mod_get_threshold
 
 ;; ============================================================================
@@ -226,6 +240,7 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_gen0_threshold], rax
 
     cmp qword [rbp - GST_NARGS], 2
@@ -234,6 +249,7 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_gen1_threshold], rax
 
     cmp qword [rbp - GST_NARGS], 3
@@ -242,6 +258,7 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_gen2_threshold], rax
 
 .gst_done:
@@ -251,7 +268,13 @@ DEF_FUNC gc_mod_set_threshold, GST_FRAME
     V_PACK rax, rdx
     ret
 .gst_args:
-    RAISE exc_TypeError_type, "set_threshold() takes 1 to 3 arguments"
+    SET_EXC exc_TypeError_type, "set_threshold() takes 1 to 3 arguments"
+    leave
+    ret
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC gc_mod_set_threshold
 
 ;; ============================================================================
@@ -280,6 +303,7 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
     je .ggo_have_gen
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .ggo_fail
     cmp rax, 2
     jg .ggo_range
     mov [rbp - GGO_GEN], rax    ; negative means all of them, as CPython has it
@@ -315,9 +339,14 @@ DEF_FUNC gc_mod_get_objects, GGO_FRAME
     ret
 
 .ggo_args:
-    RAISE exc_TypeError_type, "get_objects() takes at most 1 argument"
+    FAIL exc_TypeError_type, "get_objects() takes at most 1 argument", .ggo_fail
 .ggo_range:
-    RAISE exc_ValueError_type, "generation parameter must be less than the number of available generations (3)"
+    FAIL exc_ValueError_type, "generation parameter must be less than the number of available generations (3)", .ggo_fail
+.ggo_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC gc_mod_get_objects
 
 ;; ============================================================================
@@ -422,7 +451,7 @@ DEF_FUNC gc_mod_get_referrers, GGF_FRAME
 .ggf_hit:
     mov rdi, [rbp - GGF_LIST]
     mov rsi, r12
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
 .ggf_edges_done:
     mov rdi, r13
     call obj_decref
@@ -527,7 +556,7 @@ DEF_FUNC gc_mod_get_stats, GGS_FRAME
 
     mov rdi, [rbp - GGS_LIST]
     mov rsi, [rbp - GGS_DICT]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, [rbp - GGS_DICT]
     call obj_decref
     inc qword [rbp - GGS_I]
@@ -556,7 +585,7 @@ DEF_FUNC_LOCAL gm_stat_put
     mov rdx, r12
     V_PACK_I64 rdx, rcx
     extern dict_set
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop r12
@@ -594,7 +623,9 @@ DEF_FUNC gc_mod_is_tracked
     V_PACK rax, rdx
     ret
 .git_args:
-    RAISE exc_TypeError_type, "is_tracked() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "is_tracked() takes exactly one argument"
+    leave
+    ret
 END_FUNC gc_mod_is_tracked
 
 ;; ============================================================================
@@ -614,7 +645,7 @@ DEF_FUNC_LOCAL gm_visit_append, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov rdi, [rel gm_referents_out]
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: the caller's own list, built for this walk
     pop rbx
     leave
     ret
@@ -685,6 +716,7 @@ DEF_FUNC gc_mod_set_debug
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .idx_fail
     mov [rel gc_debug], rax
     LOAD_NONE rax
     mov edx, TAG_PTR
@@ -692,7 +724,13 @@ DEF_FUNC gc_mod_set_debug
     V_PACK rax, rdx
     ret
 .gsd_args:
-    RAISE exc_TypeError_type, "set_debug() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "set_debug() takes exactly one argument"
+    leave
+    ret
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC gc_mod_set_debug
 
 DEF_FUNC gc_mod_get_debug
@@ -704,7 +742,9 @@ DEF_FUNC gc_mod_get_debug
     V_PACK rax, rdx
     ret
 .ggd_args:
-    RAISE exc_TypeError_type, "get_debug() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_debug() takes no arguments"
+    leave
+    ret
 END_FUNC gc_mod_get_debug
 
 ;; ============================================================================
@@ -737,7 +777,7 @@ DEF_FUNC_LOCAL gm_add, GMA_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - GMA_FUNC]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - GMA_KEY]
     call obj_decref
     mov rdi, [rbp - GMA_FUNC]
@@ -898,7 +938,7 @@ DEF_FUNC_LOCAL gm_add_empty_list, GME_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - GME_LIST]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - GME_KEY]
     call obj_decref
     mov rdi, [rbp - GME_LIST]
@@ -930,7 +970,7 @@ DEF_FUNC_LOCAL gm_add_int, GMI_FRAME
     mov rdi, rbx
     mov rsi, rax
     mov rdx, [rbp - GMI_VAL]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - GMI_KEY]
     call obj_decref
     mov rdi, [rbp - GMI_VAL]

@@ -12,6 +12,7 @@
 %include "object.inc"
 %include "eventloop.inc"
 
+extern dict_set_str
 extern ap_strcmp
 extern obj_is_true
 extern task_type
@@ -29,8 +30,7 @@ extern dict_set
 extern module_new
 extern builtin_func_new
 extern none_singleton
-extern raise_exception
-extern raise_exception_obj
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_RuntimeError_type
@@ -50,6 +50,7 @@ extern list_append
 
 ;; ============================================================================
 ;; asyncio_run(args, nargs) — asyncio.run(coro)
+;; Fails: 0
 ;; Main event loop entry point.
 ;; ============================================================================
 AR_FRAME equ 16             ; + 2 pushes = 32
@@ -114,33 +115,34 @@ DEF_FUNC asyncio_run_func, AR_FRAME
 .ar_raise_root:
     mov qword [gs:ThreadState.eventloop_root_exception], 0
     mov rdi, rcx
-    pop r12
-    pop rbx
-    leave
-    extern raise_exception_obj
-    jmp raise_exception_obj     ; takes the reference; does not return
+    extern exc_install
+    call exc_install            ; takes the reference
+    jmp .ar_fail
 
 .ar_not_coro:
     ; The loop was initialised above; leave it as it was found.  CPython's
     ; runner raises ValueError here where everything else raises TypeError,
     ; so the TypeError task_new recorded is replaced rather than propagated.
     call eventloop_teardown
-    pop r12
-    pop rbx
-    RAISE exc_ValueError_type, "a coroutine was expected"
+.ar_type_error:
+    FAIL exc_ValueError_type, "a coroutine was expected", .ar_fail
 
 .ar_error:
-    RAISE exc_TypeError_type, "asyncio.run() takes exactly 1 argument"
-
-.ar_type_error:
-    RAISE exc_ValueError_type, "a coroutine was expected"
+    FAIL exc_TypeError_type, "asyncio.run() takes exactly 1 argument", .ar_fail
 
 .ar_reentrant:
-    RAISE exc_RuntimeError_type, "asyncio.run() cannot be called from a running event loop"
+    SET_EXC exc_RuntimeError_type, "asyncio.run() cannot be called from a running event loop"
+.ar_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC asyncio_run_func
 
 ;; ============================================================================
 ;; asyncio_sleep(args, nargs) — asyncio.sleep(delay)
+;; Fails: 0
 ;; Returns a SleepAwaitable.
 ;; ============================================================================
 DEF_FUNC asyncio_sleep_func, 8            ; 1 pushes, so rsp is 16-aligned
@@ -205,10 +207,15 @@ DEF_FUNC asyncio_sleep_func, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .as_error:
-    RAISE exc_TypeError_type, "asyncio.sleep() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "asyncio.sleep() takes exactly 1 argument", .as_fail
 
 .as_type_error:
-    RAISE exc_TypeError_type, "asyncio.sleep() delay must be a number"
+    SET_EXC exc_TypeError_type, "asyncio.sleep() delay must be a number"
+.as_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC asyncio_sleep_func
 
 ;; ============================================================================
@@ -257,6 +264,7 @@ END_FUNC sleep_awaitable_traverse
 
 ;; ============================================================================
 ;; asyncio_wait_fd_func(args, nargs) -- _asynciocore.wait_fd(fd, events)
+;; Fails: 0
 ;;
 ;; The primitive the Python stream layer is built on: an awaitable that
 ;; suspends the running task until a descriptor is ready, and answers None.
@@ -285,6 +293,7 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     V_UNPACK rdi, rdx           ; of them eight bytes out of alignment
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .awf_fail
     test rax, rax
     js .awf_value_error
     mov rbx, rax
@@ -294,6 +303,7 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     mov rdi, [rdi + 8]          ; the poll mask
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .awf_fail
     shl rax, 32
     or rbx, rax
 
@@ -314,12 +324,15 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
     ret
 
 .awf_error:
-    RAISE exc_TypeError_type, "wait_fd() takes exactly 2 arguments"
-.awf_type_error:
-    RAISE exc_TypeError_type, "wait_fd() arguments must be int"
+    FAIL exc_TypeError_type, "wait_fd() takes exactly 2 arguments", .awf_fail
 .awf_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "wait_fd() fd must not be negative"
+    SET_EXC exc_ValueError_type, "wait_fd() fd must not be negative"
+.awf_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC asyncio_wait_fd_func
 
 DEF_FUNC_BARE io_wait_awaitable_iter_self
@@ -354,6 +367,7 @@ END_FUNC io_wait_awaitable_traverse
 
 ;; ============================================================================
 ;; asyncio_wait_for_func(args, nargs) — asyncio.wait_for(coro, timeout)
+;; Fails: 0
 ;; Creates inner task, wraps in WaitForAwaitable.
 ;; ============================================================================
 WF_INNER equ 8
@@ -445,10 +459,20 @@ DEF_FUNC asyncio_wait_for_func, WF_FRAME
     ret
 
 .wf_error:
-    RAISE exc_TypeError_type, "asyncio.wait_for() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "asyncio.wait_for() takes exactly 2 arguments", .wf_fail
 
 .wf_type_error:
-    RAISE exc_TypeError_type, "asyncio.wait_for() timeout must be a number"
+    ; The inner task is already queued, and the queue holds a reference of
+    ; its own; the one task_new handed over is released here.
+    SET_EXC exc_TypeError_type, "asyncio.wait_for() timeout must be a number"
+    mov rdi, [rbp - WF_INNER]
+    call obj_decref
+.wf_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
 END_FUNC asyncio_wait_for_func
 
 ;; ============================================================================
@@ -462,6 +486,7 @@ END_FUNC wait_for_awaitable_iter_self
 
 ;; ============================================================================
 ;; wait_for_awaitable_iternext — tp_iternext for WaitForAwaitable
+;; Fails: 0?
 ;; State 0: first call — yield self; task_step intercepts it by ob_type.
 ;; State 1: resumed — check inner task, return result or raise TimeoutError.
 ;; State 2+: exhausted.
@@ -518,7 +543,7 @@ DEF_FUNC_BARE wait_for_awaitable_iternext
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov rdi, [rax + AsyncTask.exception]
     INCREF rdi
-    call raise_exception_obj
+    call exc_install
     RET_NULL
     pop rbx
     ret
@@ -528,7 +553,7 @@ DEF_FUNC_BARE wait_for_awaitable_iternext
     mov rax, [rbx + WaitForAwaitable.inner_task]
     mov dword [rax + AsyncTask.cancelling], 1
 
-    RAISE exc_TimeoutError_type, "asyncio.wait_for() timed out"
+    SET_EXC exc_TimeoutError_type, "asyncio.wait_for() timed out"
     RET_NULL
     pop rbx
     ret
@@ -592,6 +617,7 @@ END_FUNC wait_for_awaitable_clear
 
 ;; ============================================================================
 ;; asyncio_create_task(args, nargs) — asyncio.create_task(coro)
+;; Fails: 0
 ;; ============================================================================
 ACT_TASK equ 8
 ACT_FRAME equ 16            ; + 0 pushes = 16
@@ -633,16 +659,17 @@ DEF_FUNC asyncio_create_task_func, ACT_FRAME
 .act_not_coro:
     mov rsi, rdi                ; the value, before CSTRING takes rdi
     CSTRING rdi, `a coroutine was expected, got \x01`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
-    ud2
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .act_failed
 
 .act_error:
-    RAISE exc_TypeError_type, "asyncio.create_task() takes exactly 1 argument"
+    FAIL exc_TypeError_type, "asyncio.create_task() takes exactly 1 argument", .act_failed
 END_FUNC asyncio_create_task_func
 
 ;; ============================================================================
 ;; asyncio_gather(args, nargs) — asyncio.gather(*coros)
+;; Fails: 0
 ;; Creates tasks for all args, returns a GatherAwaitable.
 ;; For simplicity: create tasks, return a list of results when all done.
 ;; Implementation: returns a coroutine that awaits all tasks.
@@ -700,6 +727,7 @@ DEF_FUNC asyncio_gather_func, AGF_FRAME
     call obj_is_true
     pop rdx
     pop rcx
+    ERR_M1 .ag_nomem            ; return_exceptions= could not be asked
     mov [rbp - AGF_RETEX], rax
     mov rax, rcx
     inc rdx
@@ -805,18 +833,19 @@ DEF_FUNC asyncio_gather_func, AGF_FRAME
     jmp ap_free
 .ag_type_error:
     call .ag_release
-    pop rbx
-    RAISE exc_TypeError_type, "An asyncio.Future, a coroutine or an awaitable is required"
+    FAIL exc_TypeError_type, "An asyncio.Future, a coroutine or an awaitable is required", .ag_nomem
 .ag_bad_kw:
     lea rdi, [r8 + PyStrObject.data]
-    call ag_raise_bad_keyword
+    call ag_set_bad_keyword
+    jmp .ag_nomem
 END_FUNC asyncio_gather_func
 
-;; ag_raise_bad_keyword(rdi = the keyword's name, as a C string) -- no return
+;; ag_set_bad_keyword(rdi = the keyword's name, as a C string)
+;;   -> rax = 0, always, with the TypeError pending
 AGK_NAME  equ 8
 AGK_BUF   equ 176
 AGK_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL ag_raise_bad_keyword, AGK_FRAME
+DEF_FUNC_LOCAL ag_set_bad_keyword, AGK_FRAME
     mov [rbp - AGK_NAME], rdi
     lea rdi, [rbp - AGK_BUF]
     CSTRING rsi, "gather() got an unexpected keyword argument '"
@@ -830,8 +859,10 @@ DEF_FUNC_LOCAL ag_raise_bad_keyword, AGK_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - AGK_BUF]
-    call raise_exception
-END_FUNC ag_raise_bad_keyword
+    call set_exception
+    leave
+    ret
+END_FUNC ag_set_bad_keyword
 
 ;; ============================================================================
 ;; The gather awaitable.
@@ -908,7 +939,7 @@ DEF_FUNC gather_awaitable_iternext, GAI_FRAME
     mov rsi, [rax + AsyncTask.result]
 .gai_append:
     mov rdi, [rsp + 8]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - GAI_I]
     jmp .gai_gather
 
@@ -1071,6 +1102,7 @@ END_FUNC gather_awaitable_clear
 
 ;; ============================================================================
 ;; asyncio_get_running_loop(args, nargs)
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC asyncio_get_running_loop_func
     cmp dword [gs:ThreadState.eventloop + EventLoop.running], 1
@@ -1088,7 +1120,9 @@ DEF_FUNC asyncio_get_running_loop_func
     ret
 
 .grl_error:
-    RAISE exc_RuntimeError_type, "no running event loop"
+    SET_EXC exc_RuntimeError_type, "no running event loop"
+    leave
+    ret
 END_FUNC asyncio_get_running_loop_func
 
 ;; ============================================================================
@@ -1117,7 +1151,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1134,7 +1168,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1151,7 +1185,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1168,7 +1202,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1185,7 +1219,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1202,7 +1236,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1220,7 +1254,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1237,7 +1271,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel exc_CancelledError_type]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1247,7 +1281,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel exc_TimeoutError_type]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1258,7 +1292,7 @@ DEF_FUNC asyncio_module_create
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel task_type]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 

@@ -38,6 +38,22 @@ extern obj_dealloc
 extern str_from_cstr_heap
 extern str_type
 extern tuple_new
+;; ============================================================================
+;; MV_LIVE_OR reg, label -- go to label when the view in reg has been released
+;;
+;; Every operation on a released view is refused, which is the whole point of
+;; release(): it lets the buffer's owner resize again, so anything still
+;; pointing into the old buffer has to be refused rather than read.  One
+;; compare and one branch, preserving every register -- and asked again after
+;; anything that ran Python, because an __index__ or a __float__ can release
+;; the very view it was called for.  The label is the function's own stub:
+;; memoryview_set_released, then its error exit.
+;; ============================================================================
+%macro MV_LIVE_OR 2             ; %1 = register holding the view, %2 = label
+    cmp qword [%1 + PyMemoryViewObject.mv_buf], MV_RELEASED
+    je %2
+%endmacro
+
 section .text
 
 extern ap_malloc
@@ -46,7 +62,7 @@ extern ap_memcpy
 extern type_type
 extern obj_incref
 extern obj_decref
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern int_type
 extern bool_type
@@ -66,6 +82,8 @@ MV_ARG   equ 8              ; args[0] as it arrived, for the refusal
 MV_BUF   equ 16             ; what a tp_as_buffer slot answered, held across
 MV_LEN   equ 24             ;   the allocation and the acquire
 MV_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+;; memoryview_type_call(type, args, nargs) -> (rax, edx) = a view, TAG_PTR
+;; Fails: 0
 DEF_FUNC memoryview_type_call, MV_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     cmp rdx, 1
@@ -141,7 +159,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
 .mv_from_view:
     ; memoryview(memoryview) shares the same window, as CPython's does -- but
     ; there is no window to share once the original has been released.
-    call memoryview_check
+    MV_LIVE_OR rdi, .mv_released
     push rdi
     mov edi, PyMemoryViewObject_size
     call ap_malloc
@@ -181,8 +199,9 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov rsi, rdx
     CSTRING rdx, " given)"
     CSTRING rdi, "memoryview() takes at most 1 argument ("
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .mv_fail
 
 .mv_error:
     ; Before refusing, ask the TYPE.  bytes, bytearray and memoryview each have
@@ -207,8 +226,9 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     jnz .mv_dunder_done         ; it raised: 0, with the exception pending
     mov rsi, [rbp - MV_ARG]
     CSTRING rdi, `memoryview: a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .mv_fail
 .mv_from_slot:
     ; The generic exporter road: a read-only view of one-byte items over
     ; whatever the slot points at.  Read-only because a buffer reached this way
@@ -306,12 +326,13 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.mv_released:
+    call memoryview_set_released
 .mv_dunder_raised:
-    ; The exception __buffer__ left is carried out non-locally, as every other
-    ; refusal in this constructor is.
+.mv_fail:
+    RET_NULL                    ; nothing has been built on any path here
     leave
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
+    ret
 END_FUNC memoryview_type_call
 
 ;; ============================================================================
@@ -353,8 +374,7 @@ DEF_FUNC memoryview_from_dunder_buffer, MDB_FRAME
     mov edx, 2
     extern obj_call_n
     call obj_call_n
-    test rax, rax
-    jz .mdb_raised
+    ERR_NULL .mdb_raised
     V_TEST_PTR rax, rcx
     ja .mdb_wrong
     lea rcx, [rel memoryview_type]
@@ -450,22 +470,13 @@ DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligne
     ret
 END_FUNC memoryview_dealloc_proper
 
-;; ============================================================================
-;; memoryview_check(rdi = self) -> returns, or raises
-;;
-;; Every operation on a released view raises, which is the whole point of
-;; release(): it lets the buffer's owner resize again, so anything still
-;; pointing into the old buffer has to be refused rather than read.
-;; ============================================================================
-DEF_FUNC_BARE memoryview_check
-    cmp qword [rdi + PyMemoryViewObject.mv_buf], MV_RELEASED
-    je memoryview_released_error
+;; memoryview_set_released() -> rax = 0, always, with the ValueError pending
+DEF_FUNC memoryview_set_released
+    SET_EXC exc_ValueError_type, "operation forbidden on released memoryview object"
+    xor eax, eax
+    leave
     ret
-END_FUNC memoryview_check
-
-DEF_FUNC memoryview_released_error
-    RAISE exc_ValueError_type, "operation forbidden on released memoryview object"
-END_FUNC memoryview_released_error
+END_FUNC memoryview_set_released
 
 ;; ============================================================================
 ;; memoryview_item_value(rdi = self, rsi = item index) -> rax = the item, as a
@@ -660,10 +671,12 @@ END_FUNC mv_value_from_u64
 ;; cannot, because the value would change under the table.  This answered
 ;; "unhashable type: 'memoryview'" for both, which is neither.
 ;; ============================================================================
+;; memoryview_hash(rdi = self) -> rax = the hash
+;; Fails: -1
 DEF_FUNC memoryview_hash, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
-    call memoryview_check
+    MV_LIVE_OR rbx, .mvh_released
     cmp qword [rbx + PyMemoryViewObject.mv_readonly], 0
     je .mvh_writable
     ; CPython restricts hashing to the byte-shaped formats, and it is not
@@ -681,8 +694,7 @@ DEF_FUNC memoryview_hash, 8            ; 1 pushes, so rsp is 16-aligned
 .mvh_ok:
     mov rdi, rbx
     call memoryview_as_bytes
-    test rax, rax
-    jz .mvh_fail
+    ERR_NULL .mvh_fail
     push rax
     mov rdi, rax
     extern bytes_hash
@@ -695,16 +707,17 @@ DEF_FUNC memoryview_hash, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 .mvh_badfmt:
-    RAISE exc_ValueError_type, \
-        "memoryview: hashing is restricted to formats 'B', 'b' or 'c'"
-
+    FAIL exc_ValueError_type, \
+        "memoryview: hashing is restricted to formats 'B', 'b' or 'c'", .mvh_fail
+.mvh_writable:
+    FAIL exc_ValueError_type, "cannot hash writable memoryview object", .mvh_fail
+.mvh_released:
+    call memoryview_set_released
 .mvh_fail:
-    xor eax, eax
+    mov rax, -1                 ; tp_hash: -1 with the exception pending
     pop rbx
     leave
     ret
-.mvh_writable:
-    RAISE exc_ValueError_type, "cannot hash writable memoryview object"
 END_FUNC memoryview_hash
 
 ;; ============================================================================
@@ -714,12 +727,15 @@ END_FUNC memoryview_hash
 ;; that reads a pointer and a length.
 ;; ============================================================================
 global memoryview_as_bytes
+;; memoryview_as_bytes(rdi = self) -> rax = a new bytes
+;; Fails: 0
+;; for a released view.
 DEF_FUNC memoryview_as_bytes
     ; A released view answers no questions -- that is what release() is for --
     ; and `bytes(m)` reached this straight from bytes_type_call, which read a
     ; buffer that is no longer there.  Asked before the pushes, so the raise
     ; leaves nothing on this frame.
-    call memoryview_check
+    MV_LIVE_OR rdi, .mab_released
     push rbx
     push r12
     mov rbx, rdi
@@ -736,6 +752,10 @@ DEF_FUNC memoryview_as_bytes
 .mab_done:
     pop r12
     pop rbx
+    leave
+    ret
+.mab_released:                  ; reached before the pushes
+    call memoryview_set_released
     leave
     ret
 END_FUNC memoryview_as_bytes
@@ -813,7 +833,7 @@ DEF_FUNC_LOCAL mrc_substitute
     je .mrs_no
     cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
     je .mrs_no
-    call memoryview_as_bytes
+    call memoryview_as_bytes  ; err: a released view was turned away just above
     leave
     ret
 .mrs_no:
@@ -901,6 +921,9 @@ MVG_FRAME equ 32            ; + 0 pushes = 32
     jz %2
 %endmacro
 
+;; memoryview_getattr(rdi = self, rsi = name str) -> rax = Value, or NULL
+;; Fails: 0?
+;; A released view refuses every attribute that reads through it.
 DEF_FUNC memoryview_getattr, MVG_FRAME
     mov [rbp - MVG_SELF], rdi
     mov [rbp - MVG_NAME], rsi
@@ -938,14 +961,14 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
 
 .mvg_nbytes:
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov rdi, [rbp - MVG_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_len]
     jmp .mvg_int
 
 .mvg_itemsize:
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov rdi, [rbp - MVG_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_itemsize]
     jmp .mvg_int
@@ -960,7 +983,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
 
 .mvg_format:
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov rdi, [rbp - MVG_SELF]
     mov rdi, [rdi + PyMemoryViewObject.mv_format]
     call str_from_cstr_heap
@@ -969,7 +992,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
 
 .mvg_readonly:
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov rdi, [rbp - MVG_SELF]
     cmp qword [rdi + PyMemoryViewObject.mv_readonly], 0
     jne .mvg_true
@@ -987,7 +1010,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     ; A released view has no .obj to report, and CPython refuses rather than
     ; answering None -- the source is exactly what release() let go of.
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov rdi, [rbp - MVG_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_source]
     test rax, rax
@@ -1005,7 +1028,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
 .mvg_shape:
     ; One dimension, so a 1-tuple of the item count.
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov edi, 1
     call tuple_new
     test rax, rax
@@ -1030,7 +1053,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     ; made `memoryview(b)[::2].strides` (1,) where CPython says (2,) -- and
     ; the whole point of the field is to say how far apart the items are.
     mov rdi, [rbp - MVG_SELF]
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvg_released
     mov edi, 1
     call tuple_new
     test rax, rax
@@ -1045,6 +1068,12 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     mov [rcx], rax
     mov rax, [rbp - MVG_NAME]
     mov edx, TAG_PTR
+    leave
+    ret
+
+.mvg_released:
+    call memoryview_set_released
+    RET_NULL
     leave
     ret
 
@@ -1084,12 +1113,14 @@ MVM_ARG   equ 16
 MVM_TMP   equ 24
 MVM_FRAME equ 32            ; + 0 pushes = 32
 
+;; memoryview.tobytes(): (rdi = args, rsi = nargs) -> rax = a new bytes
+;; Fails: 0
 DEF_FUNC memoryview_method_tobytes, MVM_FRAME
     test rsi, rsi
     jz .mvt_argerr
     mov rdi, [rdi]
     mov [rbp - MVM_SELF], rdi
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvt_released
     ; A strided view has no contiguous run to hand over, so the bytes are
     ; built empty and filled item by item.
     mov rdi, [rbp - MVM_SELF]
@@ -1112,7 +1143,10 @@ DEF_FUNC memoryview_method_tobytes, MVM_FRAME
     leave
     ret
 .mvt_argerr:
-    RAISE exc_TypeError_type, "tobytes() takes no arguments"
+    FAIL exc_TypeError_type, "tobytes() takes no arguments", .mvt_fail
+.mvt_released:
+    call memoryview_set_released
+    jmp .mvt_fail
 END_FUNC memoryview_method_tobytes
 
 ;; ============================================================================
@@ -1123,18 +1157,20 @@ END_FUNC memoryview_method_tobytes
 ;; caller could write through it.  The copy is memoryview(memoryview)'s, with
 ;; the one field changed.
 ;; ============================================================================
+;; memoryview.toreadonly(): (rdi = args, rsi = nargs) -> rax = a read-only view
+;; Fails: 0
 DEF_FUNC memoryview_method_toreadonly, MVM_FRAME
     test rsi, rsi
     jz .mvro_argerr
     mov rdi, [rdi]
     mov [rbp - MVM_SELF], rdi
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvro_released
     mov rdi, [rbp - MVM_SELF]
     mov rsi, rdi
     lea rdi, [rel memoryview_type]
     mov edx, 1                      ; nargs
     lea rsi, [rbp - MVM_SELF]
-    call memoryview_type_call
+    call memoryview_type_call ; err: the 0 is tested just below, after the unpack
     V_UNPACK rax, rdx
     test rax, rax
     jz .mvro_fail
@@ -1148,9 +1184,15 @@ DEF_FUNC memoryview_method_toreadonly, MVM_FRAME
     leave
     ret
 .mvro_argerr:
-    RAISE exc_TypeError_type, "toreadonly() takes no arguments"
+    FAIL exc_TypeError_type, "toreadonly() takes no arguments", .mvro_fail
+.mvro_released:
+    call memoryview_set_released
+    jmp .mvro_fail
 END_FUNC memoryview_method_toreadonly
 
+;; memoryview.release(): (rdi = args, rsi = nargs) -> rax = None
+;; Fails: 0
+;; for a call with no self; releasing twice is not an error.
 DEF_FUNC memoryview_method_release, MVM_FRAME
     test rsi, rsi
     jz .mvrl_argerr
@@ -1190,38 +1232,52 @@ DEF_FUNC memoryview_method_release, MVM_FRAME
     leave
     ret
 .mvrl_argerr:
-    RAISE exc_TypeError_type, "release() takes no arguments"
+    SET_EXC exc_TypeError_type, "release() takes no arguments"
+    RET_NULL
+    leave
+    ret
 END_FUNC memoryview_method_release
 
 ;; __enter__ hands the view back; __exit__ releases it.  `with memoryview(b)
 ;; as view:` is how _pyio wraps every readinto.
+;; memoryview.__enter__(): (rdi = args, rsi = nargs) -> rax = the view
+;; Fails: 0
 DEF_FUNC memoryview_method_enter, MVM_FRAME
     test rsi, rsi
     jz .mve_argerr
     mov rax, [rdi]
-    push rax
-    mov rdi, rax
-    call memoryview_check
-    pop rax
+    MV_LIVE_OR rax, .mve_released
     inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
     leave
     ret
 .mve_argerr:
-    RAISE exc_TypeError_type, "__enter__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__enter__() takes no arguments"
+    jmp .mve_fail
+.mve_released:
+    call memoryview_set_released
+.mve_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC memoryview_method_enter
 
+;; memoryview.__exit__(*exc): (rdi = args, rsi = nargs) -> rax = None
+;; Fails: 0
 DEF_FUNC memoryview_method_exit, MVM_FRAME
     test rsi, rsi
     jz .mvx_argerr
     mov esi, 1
-    call memoryview_method_release
+    call memoryview_method_release    ; err: it is handed one argument, and refuses only none
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .mvx_argerr:
-    RAISE exc_TypeError_type, "__exit__() takes three arguments"
+    SET_EXC exc_TypeError_type, "__exit__() takes three arguments"
+    RET_NULL
+    leave
+    ret
 END_FUNC memoryview_method_exit
 
 ;; memoryview.cast(fmt) -- what re._compiler._bytes_to_codes calls with 'I'.
@@ -1231,6 +1287,8 @@ MVC_SIZE  equ 24
 MVC_STR   equ 32
 MVC_FRAME equ 48            ; + 0 pushes = 48
 
+;; memoryview.cast(fmt): (rdi = args, rsi = nargs) -> rax = a new view
+;; Fails: 0
 DEF_FUNC memoryview_method_cast, MVC_FRAME
     cmp rsi, 2
     jl .mvc_argerr
@@ -1239,7 +1297,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov rcx, [rdi + 8]
     mov [rbp - MVC_STR], rcx
     mov rdi, rax
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvc_released
 
     ; A cast reinterprets a contiguous run of bytes, so a strided view has
     ; nothing to cast; CPython refuses it with this wording.
@@ -1327,13 +1385,20 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     ret
 
 .mvc_not_contiguous:
-    RAISE exc_TypeError_type, "memoryview: casts are restricted to C-contiguous views"
+    FAIL exc_TypeError_type, "memoryview: casts are restricted to C-contiguous views", .mvc_fail
 .mvc_badfmt:
-    RAISE exc_ValueError_type, "memoryview: destination format must be a native single character format prefixed with an optional '@'"
+    FAIL exc_ValueError_type, "memoryview: destination format must be a native single character format prefixed with an optional '@'", .mvc_fail
 .mvc_badlen:
-    RAISE exc_TypeError_type, "memoryview: length is not a multiple of itemsize"
+    FAIL exc_TypeError_type, "memoryview: length is not a multiple of itemsize", .mvc_fail
 .mvc_argerr:
-    RAISE exc_TypeError_type, "cast() takes at least 1 argument"
+    SET_EXC exc_TypeError_type, "cast() takes at least 1 argument"
+    jmp .mvc_fail
+.mvc_released:
+    call memoryview_set_released
+.mvc_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC memoryview_method_cast
 
 ;; memoryview.tolist() and .hex()
@@ -1342,13 +1407,15 @@ MVL_OUT   equ 16
 MVL_N     equ 24
 MVL_FRAME equ 32            ; + 1 push = 40
 
+;; memoryview.tolist(): (rdi = args, rsi = nargs) -> rax = a list
+;; Fails: 0
 DEF_FUNC memoryview_method_tolist, 40
     push rbx
     test rsi, rsi
     jz .mvtl_argerr
     mov rdi, [rdi]
     mov [rbp - MVL_SELF], rdi
-    call memoryview_check
+    MV_LIVE_OR rdi, .mvtl_released
     mov rdi, [rbp - MVL_SELF]
     mov rax, [rdi + PyMemoryViewObject.mv_len]
     xor edx, edx
@@ -1370,7 +1437,7 @@ DEF_FUNC memoryview_method_tolist, 40
     mov rdi, [rbp - MVL_OUT]
     push rsi
     push rsi
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rsi
     pop rsi
     DECREF_V rsi, rcx           ; V_PACK may have boxed it
@@ -1389,7 +1456,10 @@ DEF_FUNC memoryview_method_tolist, 40
     leave
     ret
 .mvtl_argerr:
-    RAISE exc_TypeError_type, "tolist() takes no arguments"
+    FAIL exc_TypeError_type, "tolist() takes no arguments", .mvtl_fail
+.mvtl_released:
+    call memoryview_set_released
+    jmp .mvtl_fail
 END_FUNC memoryview_method_tolist
 
 ;; ============================================================================
@@ -1397,10 +1467,12 @@ END_FUNC memoryview_method_tolist
 ;; failed -- and _pyio iterates a view in more than one place.  The index is
 ;; checked against the current length each time, as the bytes iterator does.
 ;; ============================================================================
+;; memoryview_tp_iter(rdi = self) -> rax = a new iterator
+;; Fails: 0
 DEF_FUNC memoryview_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
-    call memoryview_check
+    MV_LIVE_OR rbx, .mvi_released
     mov edi, PyBytesIterObject_size
     call ap_malloc
     mov qword [rax + PyObject.ob_refcnt], 1
@@ -1409,6 +1481,11 @@ DEF_FUNC memoryview_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov [rax + PyBytesIterObject.it_seq], rbx
     mov qword [rax + PyBytesIterObject.it_index], 0
     inc qword [rbx + PyObject.ob_refcnt]
+    pop rbx
+    leave
+    ret
+.mvi_released:
+    call memoryview_set_released
     pop rbx
     leave
     ret
@@ -1428,6 +1505,8 @@ MVH_ARGS  equ 40            ; three Values: the temporary bytes and the two
 MVH_NARGS equ 48
 MVH_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
 
+;; memoryview.hex([sep[, n]]): (rdi = args, rsi = nargs) -> rax = a str
+;; Fails: 0
 DEF_FUNC memoryview_method_hex, MVH_FRAME
     test rsi, rsi
     jz .mvh_argerr
@@ -1436,20 +1515,27 @@ DEF_FUNC memoryview_method_hex, MVH_FRAME
     lea rdx, [rsi - 1]          ; how many beyond self
     lea rsi, [rdi + 8]          ; and where they start
     mov rdi, [rdi]
-    push rsi
-    push rdx
-    call memoryview_check
-    pop rdx
-    pop rsi
-    call memoryview_method_hex_self
+    MV_LIVE_OR rdi, .mvh_released
+    call memoryview_method_hex_self   ; err: its 0 is this method's own answer
     leave
     ret
 .mvh_argerr:
-    RAISE exc_TypeError_type, "hex() takes no arguments"
+    SET_EXC exc_TypeError_type, "hex() takes no arguments"
+    jmp .mvh_fail
 .mvh_too_many:
-    RAISE exc_TypeError_type, "hex() takes at most 2 arguments"
+    SET_EXC exc_TypeError_type, "hex() takes at most 2 arguments"
+    jmp .mvh_fail
+.mvh_released:
+    call memoryview_set_released
+.mvh_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC memoryview_method_hex
 
+;; memoryview_method_hex_self(rdi = the view, rsi = the extra arguments,
+;;   rdx = how many) -> rax = a str
+;; Fails: 0
 DEF_FUNC memoryview_method_hex_self, MVH_FRAME
     ; rdi = the memoryview, rsi = the arguments beyond self, rdx = how many.
     mov [rbp - MVH_NARGS], rdx
@@ -1466,14 +1552,13 @@ DEF_FUNC memoryview_method_hex_self, MVH_FRAME
 .mvhs_have_extra2:
     mov [rbp - MVH_ARGS + 16], rax
     call memoryview_as_bytes
-    test rax, rax
-    jz .mvhs_fail
+    ERR_NULL .mvhs_fail
     mov [rbp - MVH_TMP], rax
     mov [rbp - MVH_ARGS], rax
     lea rdi, [rbp - MVH_ARGS]
     mov rsi, [rbp - MVH_NARGS]
     inc rsi                     ; plus the temporary bytes standing in for self
-    call bytes_method_hex
+    call bytes_method_hex       ; err: its 0 is this method's own, after the release
     push rax
     push rax
     mov rdi, [rbp - MVH_TMP]
@@ -1529,12 +1614,14 @@ MS_START equ 24
 MS_COUNT equ 32
 MS_STEP  equ 40
 MS_FRAME equ 48             ; 40 used + 8 pad = 48, + 0 pushes
+;; memoryview_subscript(rdi = self, rsi = key Value) -> rax = an item Value or a new view
+;; Fails: 0
 DEF_FUNC memoryview_subscript, MS_FRAME
     ; A view indexes in ITEMS, not bytes.  They are the same thing until
     ; cast() has been called, which is why the byte length stood in for the
     ; item count here and the count was one divide away from being wrong.
     mov [rbp - MS_OBJ], rdi
-    call memoryview_check
+    MV_LIVE_OR rdi, .ms_released
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
     mov [rbp - MS_KEY], rsi
 
@@ -1554,6 +1641,10 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rsi, rax
     mov rdi, [rbp - MS_KEY]            ; slice obj
     call slice_indices                 ; rax=start, rdx=stop, rcx=step
+    ERR_M1 .ms_fail
+    ; A bound's __index__ is Python, and can release this very view.
+    mov rdi, [rbp - MS_OBJ]
+    MV_LIVE_OR rdi, .ms_released
 
     ; The item count for a step of any sign: ceil((stop - start) / step),
     ; clamped at zero, which is what range() answers for the same three.
@@ -1673,17 +1764,23 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     lea rsi, [rel ms_index_msg]
     extern obj_as_index_seq
     call obj_as_index_seq
+    ERR_M1 .ms_fail
     mov rsi, rax
+    mov rdi, [rbp - MS_OBJ]
+    MV_LIVE_OR rdi, .ms_released       ; the key's __index__ ran
     jmp .ms_int_index
 
 .ms_index_error:
-    RAISE exc_IndexError_type, "index out of bounds on dimension 1"
+    FAIL exc_IndexError_type, "index out of bounds on dimension 1", .ms_fail
 
 .ms_step_error:
-    RAISE exc_NotImplementedError_type, "memoryview: only step 1 is supported"
+    FAIL exc_NotImplementedError_type, "memoryview: only step 1 is supported", .ms_fail
 
 .ms_type_error:
-    RAISE exc_TypeError_type, "memoryview: invalid slice key"
+    FAIL exc_TypeError_type, "memoryview: invalid slice key", .ms_fail
+.ms_released:
+    call memoryview_set_released
+    jmp .ms_fail
 END_FUNC memoryview_subscript
 
 section .rodata
@@ -1726,11 +1823,13 @@ MA_I      equ 64
 MA_FMT    equ 72            ; the format character, kept across the range checks
 MA_FRAME  equ 80            ; 72 used + 8 pad = 80, + 0 pushes
 
+;; memoryview_ass_subscript(rdi = self, rsi = key Value, rdx = value Value) -> rax = 0
+;; Fails: -1
 DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov [rbp - MA_OBJ], rdi
     mov [rbp - MA_KEY], rsi
     mov [rbp - MA_VAL], rdx
-    call memoryview_check
+    MV_LIVE_OR rdi, .ma_released
     test rdx, rdx
     jz .ma_del_error
     cmp qword [rdi + PyMemoryViewObject.mv_readonly], 0
@@ -1744,8 +1843,10 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_KEY]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .ma_fail
     mov rsi, rax
     mov rdi, [rbp - MA_OBJ]
+    MV_LIVE_OR rdi, .ma_released       ; the key's __index__ ran
     push rsi
     call memoryview_nitems
     pop rsi
@@ -1785,6 +1886,11 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .ma_fail
+    ; The value's __index__ ran, and may have released the view: the write
+    ; below goes through its buffer pointer.
+    mov rdi, [rbp - MA_OBJ]
+    MV_LIVE_OR rdi, .ma_released
 
     ; The range is the format's, not the byte's.  An eight-byte field takes
     ; whatever obj_as_index answered, which is already an i64.
@@ -1845,9 +1951,11 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     extern math_to_double
     call math_to_double         ; xmm0, eax = 0 when it is not a number
+    ERR_M1 .ma_fail
     test eax, eax
     jz .ma_value_type
     mov rdi, [rbp - MA_OBJ]
+    MV_LIVE_OR rdi, .ma_released       ; a __float__ ran
     mov rcx, [rbp - MA_START]
     MV_ITEM_ADDR rsi, rdi, rcx, r8
     mov rcx, [rbp - MA_FMT]
@@ -1864,7 +1972,9 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rdi, [rbp - MA_VAL]
     extern obj_is_true
     call obj_is_true
+    ERR_M1 .ma_fail
     mov rdi, [rbp - MA_OBJ]
+    MV_LIVE_OR rdi, .ma_released       ; a __bool__ ran
     mov rcx, [rbp - MA_START]
     push rax
     MV_ITEM_ADDR rsi, rdi, rcx, r8
@@ -1906,6 +2016,9 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     mov rsi, rax
     mov rdi, [rbp - MA_KEY]
     call slice_indices                 ; rax=start, rdx=stop, rcx=step
+    ERR_M1 .ma_fail
+    mov rdi, [rbp - MA_OBJ]
+    MV_LIVE_OR rdi, .ma_released       ; a bound's __index__ ran
     ; The count for a step of any sign, as memoryview_subscript computes it.
     mov [rbp - MA_STEP], rcx
     mov [rbp - MA_START], rax
@@ -1967,21 +2080,28 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     jmp .ma_write_loop
 
 .ma_del_error:
-    RAISE exc_TypeError_type, "cannot delete memory"
+    FAIL exc_TypeError_type, "cannot delete memory", .ma_fail
 .ma_readonly:
-    RAISE exc_TypeError_type, "cannot modify read-only memory"
+    FAIL exc_TypeError_type, "cannot modify read-only memory", .ma_fail
 .ma_index_error:
-    RAISE exc_IndexError_type, "index out of bounds on dimension 1"
+    FAIL exc_IndexError_type, "index out of bounds on dimension 1", .ma_fail
 .ma_value_range:
-    RAISE exc_ValueError_type, "memoryview: invalid value for format 'B'"
+    FAIL exc_ValueError_type, "memoryview: invalid value for format 'B'", .ma_fail
 .ma_value_type:
-    RAISE exc_TypeError_type, "memoryview: invalid type for assignment"
+    FAIL exc_TypeError_type, "memoryview: invalid type for assignment", .ma_fail
 .ma_size_error:
-    RAISE exc_ValueError_type, "memoryview assignment: lvalue and rvalue have different structures"
+    FAIL exc_ValueError_type, "memoryview assignment: lvalue and rvalue have different structures", .ma_fail
 .ma_step_error:
-    RAISE exc_NotImplementedError_type, "memoryview: only step 1 is supported"
+    FAIL exc_NotImplementedError_type, "memoryview: only step 1 is supported", .ma_fail
 .ma_key_type:
-    RAISE exc_TypeError_type, "memoryview: invalid slice key"
+    SET_EXC exc_TypeError_type, "memoryview: invalid slice key"
+    jmp .ma_fail
+.ma_released:
+    call memoryview_set_released
+.ma_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC memoryview_ass_subscript
 
 ;; ============================================================================
@@ -1989,9 +2109,16 @@ END_FUNC memoryview_ass_subscript
 ;; ============================================================================
 ;; len() counts ITEMS, so a view cast to 'I' is a quarter as long as its
 ;; bytes; and a released view answers no questions at all.
+;; memoryview_len(rdi = self) -> rax = the length in items
+;; Fails: -1
 DEF_FUNC memoryview_len
-    call memoryview_check
+    MV_LIVE_OR rdi, .ml_released
     call memoryview_nitems
+    leave
+    ret
+.ml_released:
+    call memoryview_set_released
+    mov rax, -1
     leave
     ret
 END_FUNC memoryview_len
@@ -1999,19 +2126,26 @@ END_FUNC memoryview_len
 ;; The by-name half of the two slots above.  A slot with no matching entry in
 ;; tp_dict answers hasattr() and getattr() wrong, and _pyio reaches
 ;; __setitem__ through the abstract base classes rather than the syntax.
+;; memoryview.__getitem__: (rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 DEF_FUNC memoryview_dunder_getitem
     REQUIRE_SELF memoryview_type, "__getitem__"
     cmp rsi, 2
     jne .mdg_bad
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
-    call memoryview_subscript
+    call memoryview_subscript ; err: its 0 is this method's own answer
     leave
     ret
 .mdg_bad:
-    RAISE exc_TypeError_type, "expected exactly one argument"
+    SET_EXC exc_TypeError_type, "expected exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC memoryview_dunder_getitem
 
+;; memoryview.__setitem__: (rdi = args, rsi = nargs) -> rax = None
+;; Fails: 0
 DEF_FUNC memoryview_dunder_setitem
     REQUIRE_SELF memoryview_type, "__setitem__"
     cmp rsi, 3
@@ -2020,27 +2154,39 @@ DEF_FUNC memoryview_dunder_setitem
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
     call memoryview_ass_subscript
+    ERR_M1 .mds_fail
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .mds_bad:
-    RAISE exc_TypeError_type, "expected exactly two arguments"
+    SET_EXC exc_TypeError_type, "expected exactly two arguments"
+.mds_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC memoryview_dunder_setitem
 
+;; memoryview.__len__: (rdi = args, rsi = nargs) -> rax = an int Value
+;; Fails: 0
 DEF_FUNC memoryview_dunder_len
     REQUIRE_SELF memoryview_type, "__len__"
     test rsi, rsi
     jz .mdl_bad
     mov rdi, [rdi]
     call memoryview_len
+    ERR_M1 .mdl_fail
     mov rdx, rax
     V_PACK_I64 rdx, rcx
     mov rax, rdx
     leave
     ret
 .mdl_bad:
-    RAISE exc_TypeError_type, "__len__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__len__() takes no arguments"
+.mdl_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC memoryview_dunder_len
 
 ;; ============================================================================
@@ -2060,12 +2206,14 @@ END_FUNC memoryview_dunder_len
 MSQ_SELF  equ 8
 MSQ_IDX   equ 16            ; the index, across the two calls
 MSQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+;; memoryview_sq_item(rdi = self, rsi = the item index) -> rax = the item Value
+;; Fails: 0
 DEF_FUNC_LOCAL memoryview_sq_item, MSQ_FRAME
     ; Frame slots, not pushes: a lone push before a call leaves it eight bytes
     ; out of alignment, and everything under it inherits that.
     mov [rbp - MSQ_SELF], rdi
     mov [rbp - MSQ_IDX], rsi
-    call memoryview_check
+    MV_LIVE_OR rdi, .msqi_released
     mov rdi, [rbp - MSQ_SELF]
     call memoryview_nitems
     mov rsi, [rbp - MSQ_IDX]
@@ -2079,7 +2227,14 @@ DEF_FUNC_LOCAL memoryview_sq_item, MSQ_FRAME
     leave
     ret
 .msqi_range:
-    RAISE exc_IndexError_type, "index out of bounds"
+    SET_EXC exc_IndexError_type, "index out of bounds"
+    xor eax, eax
+    leave
+    ret
+.msqi_released:
+    call memoryview_set_released
+    leave
+    ret
 END_FUNC memoryview_sq_item
 
 section .data

@@ -30,6 +30,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
 extern dict_get
 extern type_mro_next
 extern obj_decref
@@ -241,7 +242,7 @@ DEF_FUNC_BARE tc_walk
     test rdi, rdi
     jz .tcw_next
     mov rsi, r12
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jnz .tcw_found

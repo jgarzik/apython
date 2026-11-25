@@ -22,7 +22,7 @@ extern str_new_heap
 extern tuple_new
 extern obj_call_n
 extern int_to_i64
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern int_type
@@ -46,6 +46,7 @@ section .text
 ;; Extract raw i64 from self, handling both SmallInt and heap int (subclasses).
 ;; Input: rdi = args pointer (args[0] = self)
 ;; Output: rax = raw i64
+;; Fails: -1
 ;; Clobbers: rcx, rdx
 ;; ============================================================================
 DEF_FUNC int_method_self_to_i64
@@ -79,16 +80,22 @@ DEF_FUNC int_method_self_to_i64
     V_PACK rdi, rdx
     mov rsi, rdi
     CSTRING rdi, `descriptor for 'int' objects doesn't apply to a '\x01' object`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 END_FUNC int_method_self_to_i64
 
 ;; ============================================================================
 ;; num_self_to_mpz(rdi = args, rsi = a 16-byte mpz_t the caller owns)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; Initialises *rsi with self's exact value, whatever shape it is in: an
 ;; immediate, a bool, a compact heap int, a GMP-backed one, or an int subclass
-;; wrapping any of those.  The caller must __gmpz_clear it.
+;; wrapping any of those.  The caller must __gmpz_clear it -- unless this
+;; failed, in which case nothing was initialised.
 ;;
 ;; The methods below used to reach for int_method_self_to_i64 instead, which
 ;; truncates: (2**70).bit_count() was 2 and (2**70+3).to_bytes(16,'big') was
@@ -120,6 +127,7 @@ DEF_FUNC num_self_to_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rbx
     extern __gmpz_init_set_si
     call __gmpz_init_set_si wrt ..plt
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -129,6 +137,7 @@ DEF_FUNC num_self_to_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rbx
     extern __gmpz_init_set
     call __gmpz_init_set wrt ..plt
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -137,12 +146,17 @@ DEF_FUNC num_self_to_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     V_PACK rdi, rdx
     mov rsi, rdi
     CSTRING rdi, `descriptor for 'int' objects doesn't apply to a '\x01' object`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC num_self_to_mpz
 
 ;; ============================================================================
 ;; int_method_bit_length(args, nargs) -> SmallInt
+;; Fails: 0
 ;; args[0] = self (SmallInt or heap int subclass)
 ;; Returns number of bits needed to represent abs(self), excluding sign and
 ;; leading zeros. bit_length(0) = 0.
@@ -182,8 +196,11 @@ DEF_FUNC int_method_bit_length, IBL_FRAME
 .ibl_bad:
     mov rsi, rax
     CSTRING rdi, `descriptor 'bit_length' for 'int' objects doesn't apply to a '\x01' object`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .ibl_use_mpz:
     mov [rbp - IBL_SELF], rax
     lea rdi, [rax + PyIntObject.mpz]
@@ -238,6 +255,7 @@ END_FUNC int_method_bit_length
 
 ;; ============================================================================
 ;; int_method_bit_count(args, nargs) -> SmallInt
+;; Fails: 0
 ;; Returns number of ones in the binary representation of abs(self).
 ;; ============================================================================
 IBC_TMP   equ 16            ; an mpz_t
@@ -251,6 +269,7 @@ DEF_FUNC int_method_bit_count, IBC_FRAME
     ; (2**64-1).bit_count() was 63.
     lea rsi, [rbp - IBC_TMP]
     call num_self_to_mpz
+    ERR_M1 .ibc_fail
 
     ; mpz_popcount answers ULONG_MAX for a negative operand, and Python counts
     ; the bits of abs(n), so take the absolute value first.
@@ -272,11 +291,17 @@ DEF_FUNC int_method_bit_count, IBC_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ibc_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC int_method_bit_count
 
 
 ;; ============================================================================
 ;; int_method_conjugate(args, nargs) -> SmallInt
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC int_method_conjugate
     ; n.conjugate() is n.  Truncating through int_method_self_to_i64 made
@@ -305,13 +330,17 @@ DEF_FUNC int_method_conjugate
     V_PACK rdi, rdx
     mov rsi, rdi
     CSTRING rdi, `descriptor 'conjugate' for 'int' objects doesn't apply to a '\x01' object`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 END_FUNC int_method_conjugate
 
 
 
 ;; ============================================================================
 ;; int_method_to_bytes(args, nargs) -> bytes
+;; Fails: 0
 ;; args[0]=self, args[1]=length, args[2]=byteorder ("big" or "little")
 ;; Optional kwarg: signed=False (via kw_names_pending)
 ;; ============================================================================
@@ -427,6 +456,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     mov rdi, [rbp - ITB_KWVAL]
     extern obj_is_true
     call obj_is_true
+    ERR_M1 .itb_kw_fail
     mov [rbp - ITB_SIGNED], rax
     jmp .itb_kw_next
 
@@ -441,6 +471,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .itb_kw_fail
     mov [rbp - ITB_LEN], rax
     jmp .itb_kw_next
 
@@ -506,6 +537,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .itb_fail
     mov [rbp - ITB_LEN], rax
 
     cmp r12, 3
@@ -527,6 +559,7 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     mov rdi, rbx
     lea rsi, [rbp - ITB_V]
     call num_self_to_mpz
+    ERR_M1 .itb_fail
 
     ; Does it fit?  nbits = 8 * length; b = the bit length of abs(self).
     ;   unsigned: self >= 0 and b <= nbits
@@ -682,35 +715,50 @@ DEF_FUNC int_method_to_bytes, ITB_FRAME
     ret
 
 .itb_overflow:
-    ; RAISE does not return, so an mpz_t initialised above it is never
-    ; cleared: a loop probing widths leaked GMP memory linearly.  Both are
-    ; live here; only ITB_V is at the negative check.
+    ; An mpz_t initialised above is cleared before the error leaves: a loop
+    ; probing widths leaked GMP memory linearly.  Both are live here; only
+    ; ITB_V is at the negative check.
     lea rdi, [rbp - ITB_T]
     call __gmpz_clear wrt ..plt
     lea rdi, [rbp - ITB_V]
     call __gmpz_clear wrt ..plt
-    RAISE exc_OverflowError_type, "int too big to convert"
+    SET_EXC exc_OverflowError_type, "int too big to convert"
+    jmp .itb_fail
 
 .itb_negative_error:
     lea rdi, [rbp - ITB_V]
     call __gmpz_clear wrt ..plt
-    RAISE exc_OverflowError_type, "can't convert negative int to unsigned"
+    SET_EXC exc_OverflowError_type, "can't convert negative int to unsigned"
+    jmp .itb_fail
 
 .itb_length_error:
-    RAISE exc_ValueError_type, "length argument must be non-negative"
+    SET_EXC exc_ValueError_type, "length argument must be non-negative"
+    jmp .itb_fail
 
 .itb_kw_error:
-    RAISE exc_TypeError_type, "to_bytes() got an unexpected keyword argument"
+    SET_EXC exc_TypeError_type, "to_bytes() got an unexpected keyword argument"
+    jmp .itb_fail
 
 .itb_error:
-    RAISE exc_TypeError_type, "to_bytes() requires (length, byteorder) arguments"
+    SET_EXC exc_TypeError_type, "to_bytes() requires (length, byteorder) arguments"
+    jmp .itb_fail
 
 .itb_order_error:
-    RAISE exc_ValueError_type, "byteorder must be either 'little' or 'big'"
+    SET_EXC exc_ValueError_type, "byteorder must be either 'little' or 'big'"
+    jmp .itb_fail
+.itb_kw_fail:
+    add rsp, 32                 ; the four words parked across a keyword
+.itb_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC int_method_to_bytes
 
 ;; ============================================================================
 ;; int_classmethod_from_bytes(args, nargs) -> SmallInt
+;; Fails: 0
 ;; args[0]=cls (type), args[1]=bytes, args[2]=byteorder ("big" or "little")
 ;; This is a classmethod: cls is passed as first arg.
 ;; ============================================================================
@@ -780,6 +828,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     jnz .ifb_kw_not_signed
     mov rdi, [rbp - IFB_KWVAL]
     call obj_is_true
+    ERR_M1 .ifb_kw_fail
     mov [rbp - IFB_SIGNED], rax
     jmp .ifb_kw_next
 
@@ -874,8 +923,7 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     extern obj_call_n
     call obj_call_n
     mov rsi, [rbp - IFB_NARGS]
-    test rax, rax
-    jz .ifb_failed
+    ERR_NULL .ifb_failed
     mov [rbp - IFB_OWNED], rax
 .ifb_have_bytes:
     mov [rbp - IFB_BYTES], rax
@@ -1026,6 +1074,8 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     leave
     ret
 
+.ifb_kw_fail:
+    add rsp, 32                 ; the four words parked across a keyword
 .ifb_failed:
     xor eax, eax
     xor edx, edx
@@ -1036,13 +1086,16 @@ DEF_FUNC int_classmethod_from_bytes, IFB_FRAME
     ret
 
 .ifb_kw_error:
-    RAISE exc_TypeError_type, "from_bytes() got an unexpected keyword argument"
+    SET_EXC exc_TypeError_type, "from_bytes() got an unexpected keyword argument"
+    jmp .ifb_failed
 
 .ifb_error:
-    RAISE exc_TypeError_type, "from_bytes() requires (bytes, byteorder) arguments"
+    SET_EXC exc_TypeError_type, "from_bytes() requires (bytes, byteorder) arguments"
+    jmp .ifb_failed
 
 .ifb_order_error:
-    RAISE exc_ValueError_type, "byteorder must be either 'little' or 'big'"
+    SET_EXC exc_ValueError_type, "byteorder must be either 'little' or 'big'"
+    jmp .ifb_failed
 END_FUNC int_classmethod_from_bytes
 
 
@@ -1207,6 +1260,7 @@ END_FUNC fir_pow2_scale
 ;; ============================================================================
 ;; float_method_as_integer_ratio(rdi = args, rsi = nargs)
 ;;   -> rax = a Value: the 2-tuple (numerator, denominator)
+;; Fails: 0
 ;;
 ;; Exact for every finite float.  This used to build both halves in one 64-bit
 ;; register, which was wrong three ways at once:
@@ -1352,9 +1406,15 @@ DEF_FUNC float_method_as_integer_ratio, FIR_FRAME
     ret
 
 .fir_inf:
-    RAISE exc_OverflowError_type, "cannot convert Infinity to integer ratio"
+    SET_EXC exc_OverflowError_type, "cannot convert Infinity to integer ratio"
+    jmp .fir_fail
 .fir_nan:
-    RAISE exc_ValueError_type, "cannot convert NaN to integer ratio"
+    SET_EXC exc_ValueError_type, "cannot convert NaN to integer ratio"
+.fir_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC float_method_as_integer_ratio
 
 ;; ============================================================================
@@ -1620,6 +1680,7 @@ END_FUNC ffh_ishex
 
 ;; ============================================================================
 ;; float_classmethod_fromhex(args, nargs) -> Value: a float, or cls(float)
+;; Fails: 0
 ;; args[0] = cls, args[1] = the string
 ;;
 ;; CPython's grammar, in CPython's order
@@ -1683,6 +1744,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     mov rdi, [rdi + 8]              ; args[1]
     CSTRING rsi, "bad argument type for built-in operation"
     call str_require_str
+    ERR_NULL .ffh_fail
     mov [rbp - FFH_STR], rax
     mov qword [rbp - FFH_BUF], 0
     mov qword [rbp - FFH_ESTART], 0
@@ -1976,7 +2038,7 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     mov rdi, [rbp - FFH_CLS]
     lea rsi, [rbp - FFH_RES]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     pop r13
     pop r12
     pop rbx
@@ -1984,10 +2046,12 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     ret
 
 .ffh_nomem:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    jmp .ffh_fail
 
 .ffh_overflow:
-    RAISE exc_OverflowError_type, "hexadecimal value too large to represent as a float"
+    SET_EXC exc_OverflowError_type, "hexadecimal value too large to represent as a float"
+    jmp .ffh_fail
 
 .ffh_bad:
     mov rdi, [rbp - FFH_BUF]
@@ -1995,11 +2059,19 @@ DEF_FUNC float_classmethod_fromhex, FFH_FRAME
     jz .ffh_bad_raise
     call ap_free
 .ffh_bad_raise:
-    RAISE exc_ValueError_type, "invalid hexadecimal floating-point string"
+    SET_EXC exc_ValueError_type, "invalid hexadecimal floating-point string"
+.ffh_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC float_classmethod_fromhex
 
 ;; ============================================================================
 ;; float_classmethod_getformat(args, nargs) -> str
+;; Fails: 0
 ;; float.__getformat__('double') and ('float').
 ;;
 ;; CPython declares it METH_O|METH_CLASS, so args[0] is the class and args[1]
@@ -2023,6 +2095,7 @@ DEF_FUNC float_classmethod_getformat, 8   ; 1 pushes, so rsp is 16-aligned
     je .fgf_none
     CSTRING rsi, `__getformat__() argument must be str, not \x01`
     call str_require_str
+    ERR_NULL .fgf_fail
     lea rbx, [rax + PyStrObject.data]
 
     mov rdi, rbx
@@ -2045,10 +2118,16 @@ DEF_FUNC float_classmethod_getformat, 8   ; 1 pushes, so rsp is 16-aligned
     ret
 
 .fgf_none:
-    RAISE exc_TypeError_type, "__getformat__() argument must be str, not None"
+    SET_EXC exc_TypeError_type, "__getformat__() argument must be str, not None"
+    jmp .fgf_fail
 
 .fgf_bad:
-    RAISE exc_ValueError_type, "__getformat__() argument 1 must be 'double' or 'float'"
+    SET_EXC exc_ValueError_type, "__getformat__() argument 1 must be 'double' or 'float'"
+.fgf_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC float_classmethod_getformat
 
 ;; ============================================================================

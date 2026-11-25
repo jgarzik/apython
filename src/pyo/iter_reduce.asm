@@ -34,6 +34,7 @@
 %include "object.inc"
 %include "value.inc"
 
+extern dict_get
 extern int_from_i64
 extern tuple_new
 extern list_new
@@ -43,7 +44,6 @@ extern bytearray_new
 extern obj_incref
 extern obj_decref
 extern obj_as_index
-extern dict_get
 extern str_from_cstr_heap
 extern builtins_dict_global
 extern str_byte_to_cp
@@ -52,7 +52,7 @@ extern str_iter_type
 extern str_type
 extern none_singleton
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern range_new
 extern range_new_v
 extern range_obj_type
@@ -89,7 +89,7 @@ DEF_FUNC ir_iter_builtin, IIB_FRAME
     mov [rbp - IIB_NAME], rax
     mov rdi, [rbp - IIB_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get       ; err: a 0 goes to .iib_none either way, with whatever is pending
     mov [rbp - IIB_DICT], rax   ; the answer, borrowed from builtins
     mov rdi, [rbp - IIB_NAME]
     call obj_decref             ; the name
@@ -341,7 +341,9 @@ DEF_FUNC %1_reduce
     leave
     ret
 %%noarg:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    leave
+    ret
 END_FUNC %1_reduce
 %endmacro
 
@@ -353,6 +355,7 @@ DEF_SEQITER_REDUCE bytearray_iter, ir_empty_bytearray, 0
 
 ;; ============================================================================
 ;; seqiter_setstate(rdi = args Value[], rsi = nargs) -> rax = None
+;; Fails: 0
 ;;
 ;; Shared by all five.  CPython clamps rather than refusing: below zero is the
 ;; start, past the end is exhausted.  The index is left in the iterator's own
@@ -370,6 +373,7 @@ DEF_FUNC seqiter_setstate, SSS_FRAME
     mov rdi, [rdi + 8]          ; the state
     V_UNPACK rdi, rdx           ; obj_as_index still takes (payload, tag)
     call obj_as_index
+    ERR_M1 .sss_fail
     ; obj_as_index raises for anything that is not an index, so rax is one.
     test rax, rax
     jns .sss_clamp_low
@@ -394,11 +398,17 @@ DEF_FUNC seqiter_setstate, SSS_FRAME
     leave
     ret
 .sss_args:
-    RAISE exc_TypeError_type, "__setstate__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__setstate__() takes exactly one argument"
+.sss_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC seqiter_setstate
 
 ;; ============================================================================
 ;; seqiter_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; Fails: 0
 ;;
 ;; How many are left, which is what operator.length_hint asks for and what
 ;; list() uses to size itself.  Never negative: an index past the end is an
@@ -448,7 +458,9 @@ DEF_FUNC seqiter_length_hint, SLH_FRAME
     leave
     ret
 .slh_args:
-    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    leave
+    ret
 END_FUNC seqiter_length_hint
 
 
@@ -475,7 +487,7 @@ DEF_FUNC ir_getattr_builtin, IGB_FRAME
     mov [rbp - IGB_NAME], rax
     mov rdi, [rbp - IGB_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get       ; err: a 0 goes to .igb_none either way, with whatever is pending
     mov [rbp - IGB_DICT], rax
     mov rdi, [rbp - IGB_NAME]
     call obj_decref
@@ -543,6 +555,7 @@ END_FUNC ir_bound_reduce
 
 ;; ============================================================================
 ;; builtin_func_reduce(rdi = args Value[], rsi = nargs) -> rax = a Value
+;; Fails: 0
 ;;
 ;; CPython's meth_reduce: an UNBOUND builtin reduces to its own name, which
 ;; pickle then saves as a global lookup, and a bound one to
@@ -596,11 +609,14 @@ DEF_FUNC builtin_func_reduce
     leave
     ret
 .bfr_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    leave
+    ret
 END_FUNC builtin_func_reduce
 
 ;; ============================================================================
 ;; method_reduce(rdi = args Value[], rsi = nargs) -> rax = a Value
+;; Fails: 0
 ;;
 ;; A bound method -- which in this tree is also what a bound BUILTIN is, the
 ;; divergence DIVERGENCES.md records -- reduces to (getattr, (self, name)),
@@ -645,9 +661,13 @@ DEF_FUNC method_reduce, MTR_FRAME
 .mtr_unnamed:
     ; Nothing to name it by; let the generic reduction refuse it, as CPython's
     ; does for a method whose function has no __name__.
-    RAISE exc_TypeError_type, "cannot pickle this method"
+    SET_EXC exc_TypeError_type, "cannot pickle this method"
+    leave
+    ret
 .mtr_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    leave
+    ret
 END_FUNC method_reduce
 
 
@@ -681,6 +701,7 @@ END_FUNC ir_three_tuple
 
 ;; ============================================================================
 ;; range_reduce(rdi = args Value[], rsi = nargs) -> rax = (range, (a, b, c))
+;; Fails: 0
 ;;
 ;; CPython's range_reduce.  The three bounds are the Values a range already
 ;; keeps beside its int64s, so a wide range reduces as exactly as a narrow one.
@@ -719,11 +740,15 @@ DEF_FUNC range_reduce, RGR_FRAME
     leave
     ret
 .rgr_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    pop rbx
+    leave
+    ret
 END_FUNC range_reduce
 
 ;; ============================================================================
 ;; slice_reduce(rdi = args Value[], rsi = nargs) -> rax = (slice, (a, b, c))
+;; Fails: 0
 ;; ============================================================================
 SLR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC slice_reduce, SLR_FRAME
@@ -758,7 +783,10 @@ DEF_FUNC slice_reduce, SLR_FRAME
     leave
     ret
 .slr_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    pop rbx
+    leave
+    ret
 END_FUNC slice_reduce
 
 ;; ============================================================================
@@ -775,6 +803,7 @@ DEF_FUNC ir_name_reduce
 END_FUNC ir_name_reduce
 
 ;; ellipsis_reduce(rdi = args Value[], rsi = nargs) -> rax = 'Ellipsis'
+;; Fails: 0
 DEF_FUNC ellipsis_reduce
     test rsi, rsi
     jz .elr_args
@@ -783,10 +812,13 @@ DEF_FUNC ellipsis_reduce
     leave
     ret
 .elr_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    leave
+    ret
 END_FUNC ellipsis_reduce
 
 ;; notimpl_reduce(rdi = args Value[], rsi = nargs) -> rax = 'NotImplemented'
+;; Fails: 0
 DEF_FUNC notimpl_reduce
     test rsi, rsi
     jz .nir_args
@@ -795,12 +827,15 @@ DEF_FUNC notimpl_reduce
     leave
     ret
 .nir_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    leave
+    ret
 END_FUNC notimpl_reduce
 
 ;; ============================================================================
 ;; range_iter_reduce(rdi = args Value[], rsi = nargs)
 ;;   -> rax = (iter, (range(current, stop, step),), None)
+;; Fails: 0
 ;;
 ;; CPython hands back the REMAINING range rather than the original plus an
 ;; index, so an iterator half way through pickles as a fresh iterator over
@@ -852,11 +887,15 @@ DEF_FUNC range_iter_reduce, RIR_FRAME
     leave
     ret
 .rir_args:
-    RAISE exc_TypeError_type, "__reduce__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+    pop rbx
+    leave
+    ret
 END_FUNC range_iter_reduce
 
 ;; ============================================================================
 ;; range_iter_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int
+;; Fails: 0
 ;;
 ;; How many are left: (stop - current + step -+ 1) / step, floored at zero.
 ;; ============================================================================
@@ -890,7 +929,9 @@ DEF_FUNC range_iter_length_hint
     leave
     ret
 .rlh_args:
-    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    leave
+    ret
 END_FUNC range_iter_length_hint
 
 section .bss
@@ -901,6 +942,7 @@ section .text
 
 ;; ============================================================================
 ;; dictiter_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; Fails: 0
 ;; setiter_length_hint -- the same, over a set's narrower entries
 ;; dictrev_length_hint -- the same, counting DOWN
 ;;
@@ -929,11 +971,14 @@ DEF_FUNC dictiter_length_hint, DLH_FRAME
     leave
     ret
 .dlh_args:
-    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    leave
+    ret
 END_FUNC dictiter_length_hint
 
 ;; ============================================================================
 ;; setiter_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC setiter_length_hint, DLH_FRAME
     test rsi, rsi
@@ -946,11 +991,14 @@ DEF_FUNC setiter_length_hint, DLH_FRAME
     leave
     ret
 .slhx_args:
-    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    leave
+    ret
 END_FUNC setiter_length_hint
 
 ;; ============================================================================
 ;; dictrev_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC dictrev_length_hint, DLH_FRAME
     test rsi, rsi
@@ -963,7 +1011,9 @@ DEF_FUNC dictrev_length_hint, DLH_FRAME
     leave
     ret
 .drlh_args:
-    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    leave
+    ret
 END_FUNC dictrev_length_hint
 
 ;; ============================================================================
@@ -1027,6 +1077,7 @@ END_FUNC dlh_count
 
 ;; ============================================================================
 ;; reversed_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
+;; Fails: 0
 ;;
 ;; A reversed iterator counts DOWN, so what is left is the index plus one --
 ;; and an index of -1 is exhaustion, which answers 0 rather than a negative.
@@ -1047,5 +1098,7 @@ DEF_FUNC reversed_length_hint, RLH_FRAME
     leave
     ret
 .rlh_args:
-    RAISE exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__length_hint__() takes exactly one argument"
+    leave
+    ret
 END_FUNC reversed_length_hint

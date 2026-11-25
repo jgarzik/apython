@@ -38,7 +38,6 @@ extern obj_decref
 extern obj_dealloc
 extern type_type
 extern obj_incref
-extern eval_exception_unwind
 extern get_iterator
 extern call_iternext
 extern gc_alloc
@@ -218,6 +217,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     jnz .dvr_recursive
     mov rdi, [rbp - DVR_VIEW]
     call repr_push
+    ERR_M1 .dvr_failed          ; too deep: nothing was pushed
 
     xor edi, edi
     extern list_new
@@ -230,7 +230,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     mov r12, rax
 .dvr_loop:
     mov rdi, r12
-    call dict_iter_next
+    call dict_iter_next       ; err: no Python runs between two steps, so the dict cannot change size under it
     V_UNPACK rax, rdx
     test edx, edx
     jz .dvr_done
@@ -240,7 +240,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     mov rsi, rax
     V_PACK rsi, rdx
     extern list_append
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     ; dict_iter_next hands back an OWNED reference and list_append takes its
@@ -376,6 +376,7 @@ END_FUNC dict_keys_view_contains
 ;; second element is the right operand, so a probe carrying a type with an
 ;; __eq__ is offered the reflected operand by the ordinary rule rather than
 ;; being asked first.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     push rbx
@@ -391,7 +392,9 @@ DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     mov rdi, [rdi + PyDictViewObject.dv_dict]
     mov rax, [rbx + PyTupleObject.ob_item]
     mov rsi, [rax]                      ; the key
-    call dict_get                       ; a borrowed Value, or 0
+    extern dict_get
+    call dict_get                   ; a borrowed Value, or 0
+    ERR_PENDING .divc_error
     test rax, rax
     jz .divc_no
 
@@ -415,10 +418,11 @@ DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     ret
 
 .divc_error:
-    ; sq_contains has no error channel; the exception is already pending.
+    ; sq_contains answers -1 with the exception pending.
+    mov rax, -1
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC dict_items_view_contains
 
 ;; ============================================================================
@@ -456,7 +460,7 @@ DEF_FUNC_LOCAL dict_view_to_set, DVS_FRAME
     lea rdi, [rel set_type]
     mov edx, 1
     extern set_type_call
-    call set_type_call
+    call set_type_call        ; err: its 0 is this function's own answer
     V_UNPACK rax, rdx
     leave
     ret
@@ -523,12 +527,16 @@ DEF_VIEW_BINOP nb_xor, NB_XOR
 
 ;; ============================================================================
 ;; dvr_len(rdi = a set, a frozenset or a keys/items view) -> rax = its length
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE dvr_len
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     mov rax, [rax + PySequenceMethods.sq_length]
-    jmp rax
+    sub rsp, 8
+    call rax
+    add rsp, 8
+    ret
 END_FUNC dvr_len
 
 ;; ============================================================================
@@ -553,8 +561,7 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     mov esi, TAG_PTR            ; a is always a set or a view, so a pointer
     extern get_iterator
     call get_iterator
-    test rax, rax
-    jz .dac_error
+    ERR_NULL .dac_error
     mov r12, rax
 
 .dac_loop:
@@ -570,7 +577,9 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_as_sequence]
     mov rax, [rax + PySequenceMethods.sq_contains]
-    call rax                    ; sq_contains unwinds rather than reporting
+    call rax                    ; 0 or 1, or -1 with it raised
+    movsxd rax, eax
+    ERR_M1 .dac_contains_raised
     mov r13d, eax
     mov rdi, rbx
     DECREF_V rdi, rcx
@@ -590,6 +599,11 @@ DEF_FUNC_LOCAL dvr_all_contained_in, DAC_FRAME
     EXC_RAISED_SINCE [rbp - DAC_EXC], rcx, .dac_error
     mov eax, 1
     jmp .dac_out
+.dac_contains_raised:
+    mov rdi, rbx
+    DECREF_V rdi, rcx
+    mov rdi, r12
+    call obj_decref
 .dac_error:
     mov eax, -1
 .dac_out:
@@ -659,9 +673,11 @@ DEF_FUNC_LOCAL dict_view_richcompare, DVC_FRAME
 .dvc_ok:
     mov rdi, [rbp - DVC_SELF]
     call dvr_len
+    ERR_M1 .dvc_fail
     mov [rbp - DVC_LSELF], rax
     mov rdi, [rbp - DVC_OTHER]
     call dvr_len
+    ERR_M1 .dvc_fail
     mov [rbp - DVC_LOTHER], rax
 
     mov rax, [rbp - DVC_LSELF]
@@ -813,6 +829,7 @@ section .text
 ;; type already carries the kind that tells keys from values from items.  So
 ;; this is dict_reversed with the view's own dv_kind rather than a hardcoded
 ;; zero, which is exactly what CPython's dictview_reversed does.
+;; Fails: 0
 ;; ============================================================================
 DVREV_FRAME equ 24          ; + 1 push = 32, 16-aligned
 DEF_FUNC dict_view_reversed, DVREV_FRAME
@@ -867,8 +884,11 @@ DEF_FUNC dict_view_reversed, DVREV_FRAME
     ret
 .dvr_args:
     extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "__reversed__() takes exactly one argument"
+    extern set_exception
+    SET_EXC exc_TypeError_type, "__reversed__() takes exactly one argument"
+    pop rbx
+    leave
+    ret
 END_FUNC dict_view_reversed
 
 section .text
@@ -907,6 +927,7 @@ END_FUNC dict_view_get_mapping
 ;; holds each item -- which is a dict lookup for a keys view and a key-and-value
 ;; comparison for an items view.  Both are already written as sq_contains, so
 ;; this is the walk and nothing else.
+;; Fails: 0
 ;; ============================================================================
 DVJ_SELF  equ 8
 DVJ_ITER  equ 16
@@ -924,8 +945,7 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
-    test rax, rax
-    jz .dvj_raised
+    ERR_NULL .dvj_raised
     mov [rbp - DVJ_ITER], rax
 
 .dvj_loop:
@@ -949,6 +969,8 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     mov rdi, [rbp - DVJ_SELF]
     mov rsi, rbx
     call rax
+    movsxd rax, eax             ; 0 or 1, or -1 with it raised
+    ERR_M1 .dvj_contains_raised
     push rax
     push rax
     mov rdi, rbx
@@ -995,6 +1017,9 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     leave
     ret
 
+.dvj_contains_raised:
+    mov rdi, rbx
+    DECREF_V rdi, rcx
 .dvj_raised_iter:
     mov rdi, [rbp - DVJ_ITER]
     DECREF_V rdi, rcx
@@ -1006,8 +1031,8 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     ret
 .dvj_args:
     extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "isdisjoint() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "isdisjoint() takes exactly one argument"
+    jmp .dvj_raised
 END_FUNC dict_view_isdisjoint
 
 section .data

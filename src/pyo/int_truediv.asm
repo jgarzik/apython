@@ -18,7 +18,6 @@ ASM_INIT
 
 extern int_binop_unpack
 extern int_promote_mpz
-extern raise_exception
 extern exc_ZeroDivisionError_type
 extern exc_OverflowError_type
 extern __gmpz_init
@@ -46,6 +45,7 @@ section .text
 ;; int / int always returns float in Python, and the float is CORRECTLY
 ;; ROUNDED: the exact rational quotient rounded once, half to even, which is
 ;; what CPython's long_true_divide computes.
+;; Fails: 0
 ;; ============================================================================
 ITD_LTAG   equ 8
 ITD_SIGN   equ 16
@@ -321,14 +321,19 @@ DEF_FUNC int_true_divide, ITD_FRAME
     pop r12
     pop rbx
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "integer division result too large for a float"
+    extern set_exception
+    SET_EXC exc_OverflowError_type, "integer division result too large for a float"
+    leave
+    ret
 
 .itd_divzero:
     call itd_clear
     pop r13
     pop r12
     pop rbx
-    RAISE exc_ZeroDivisionError_type, "division by zero"
+    SET_EXC exc_ZeroDivisionError_type, "division by zero"
+    leave
+    ret
 
 ;; The four mpz_t this frame owns.  A local rather than a function, because it
 ;; addresses the caller's frame.

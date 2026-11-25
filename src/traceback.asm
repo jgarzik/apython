@@ -29,6 +29,7 @@
 %include "macros.inc"
 %include "value.inc"
 
+extern dict_get
 extern sys_write
 extern sys_open
 extern sys_read
@@ -1802,7 +1803,7 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     lea rsi, [rbp - TPH_ARGV]
     mov edx, 1
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: a hook that raises is reported below
     push rax
     ; A hook that raises is reported against the HOOK, and the exception it
     ; was given is dropped -- CPython says "Exception ignored in
@@ -1890,7 +1891,6 @@ TPN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 
 extern list_type
 extern obj_repr
-extern dict_get
 extern type_is_subtype
 
 DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
@@ -1909,14 +1909,14 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     mov [rbp - TPN_IDX], rax                ; the name, owned, briefly
     mov rdi, [rbp - TPN_TMP]
     mov rsi, rax
-    call dict_get
+    call dict_get           ; err: a failure is dropped at .tpn_miss, once the name is released
     mov [rbp - TPN_NOTES], rax
     mov rdi, [rbp - TPN_IDX]
     call obj_decref
 
     mov rax, [rbp - TPN_NOTES]
     test rax, rax
-    jz .tpn_out
+    jz .tpn_miss
     V_TEST_PTR rax, rcx
     ja .tpn_repr
     mov rdi, [rax + PyObject.ob_type]
@@ -1976,6 +1976,17 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     CSTRING rdi, `\n`
     call tb_write_cstr
 
+.tpn_miss:
+    ; No notes -- or the exception's dict could not be searched, and a report
+    ; prints what it can.  The exception being reported is still the pending
+    ; one here, so only something NEW is dropped: .tpn_out is about to write
+    ; the old one back over it.
+    mov rdi, [gs:ThreadState.current_exception]
+    cmp rdi, [rbp - TPN_EXC]
+    je .tpn_out
+    test rdi, rdi
+    jz .tpn_out
+    call obj_decref
 .tpn_out:
     mov rax, [rbp - TPN_EXC]
     mov [gs:ThreadState.current_exception], rax
@@ -1991,11 +2002,25 @@ TP_LASTL equ 40          ; line number of the previous entry
 TP_CNT   equ 48          ; length of the current run of identical entries
 TP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 TB_RECURSIVE_CUTOFF equ 3
-DEF_FUNC traceback_print
+TPR_EXC   equ 8
+TPR_SAVED equ 16
+DEF_FUNC traceback_print, 16
+    ; The report runs Python -- the exception's own __str__, a file's write --
+    ; and what is being reported is usually still the exception in flight.
+    ; It is taken out of the global for the duration, as everything that runs
+    ; Python under a pending exception does (exc_fetch, src/eval.asm); callers
+    ; that go on to release current_exception find it where they left it.
+    mov [rbp - TPR_EXC], rdi
+    extern exc_fetch
+    extern exc_restore
+    call exc_fetch
+    mov [rbp - TPR_SAVED], rax
     mov qword [gs:ThreadState.tb_seen_n], 0
-    mov rsi, rdi
+    mov rsi, [rbp - TPR_EXC]
     xor edi, edi
     call tb_print_one
+    mov rdi, [rbp - TPR_SAVED]
+    call exc_restore
     leave
     ret
 END_FUNC traceback_print

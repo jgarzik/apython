@@ -26,9 +26,10 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_index
+extern dict_set
 extern instance_setattr
 extern member_descr_type
-extern dict_get_index
 extern unbound_local_raise
 extern obj_dealloc
 extern opcode_dispatch_table
@@ -48,7 +49,6 @@ extern attr_may_be_data_descr
 
 extern eval_dispatch
 extern obj_decref
-extern dict_set
 extern dict_type
 extern raise_exception
 extern eval_exception_unwind
@@ -149,6 +149,7 @@ DEF_FUNC_BARE op_store_name
     push r9
     push r10
     call dict_set
+    ERR_M1_JUMP
     pop r10
     pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
@@ -169,6 +170,8 @@ DEF_FUNC_BARE op_store_name
     push r9
     push r10
     call rax
+    movsxd rax, eax             ; the slot answers 0, or -1 with it raised
+    ERR_M1_JUMP
     pop r10
     pop r9
     DECREF_VAL r9, r10
@@ -184,6 +187,7 @@ DEF_FUNC_BARE op_store_name
     push r9
     push r10
     call dict_set
+    ERR_M1_JUMP
     pop r10
     pop r9
     DECREF_VAL r9, r10
@@ -211,6 +215,7 @@ DEF_FUNC_BARE op_store_global
     push r9
     push r10
     call dict_set
+    ERR_M1_JUMP
     pop r10
     pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
@@ -299,7 +304,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdx, [rbp - SA_VAL]      ; value
     mov ecx, [rbp - SA_VTAG]     ; value tag
     V_PACK rdx, rcx              ; property_descr_set takes a value Value
-    call property_descr_set
+    call property_descr_set     ; err: .sa_descr_cleanup asks whether anything was raised
     jmp .sa_descr_cleanup
 
 .sa_check_general_set:
@@ -324,7 +329,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rdx, [rbp - SA_VAL]     ; value
     lea rcx, [rel dunder_set]
     mov r8d, [rbp - SA_VTAG]    ; value tag
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .sa_descr_cleanup
     V_UNPACK rax, rdx           ; returns a Value
     ; DECREF result if non-NULL
     test edx, edx
@@ -366,6 +371,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov ecx, [rbp - SA_VTAG]
     V_PACK rdx, rcx             ; tp_setattr takes a value Value
     call rax
+    ERR_M1 .sa_stored           ; refused: nothing happened, so nothing to cache
 
     ; Specialize, now that the store has happened.
     ;
@@ -381,6 +387,7 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov rsi, [rbp - SA_NAME]
     mov rdx, rbx
     call sa_try_specialize
+.sa_stored:
 
     ; DECREF value (tag-aware)
     mov rdi, [rbp - SA_VAL]
@@ -488,6 +495,7 @@ DEF_FUNC_BARE op_delete_name
     push rsi
     extern dict_del_opt
     call dict_del_opt
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
     test eax, eax
@@ -505,10 +513,10 @@ DEF_FUNC_BARE op_delete_name
     push rsi
     xor edx, edx               ; a NULL value is a delete
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
-    ; A mapping that refuses has already raised, and slot_mp_ass_subscript
-    ; does not even return in that case; there is nothing to report here.
     jmp .dn_ok
 .dn_globals:
     mov rdi, [r12 + PyFrame.globals]
@@ -516,6 +524,7 @@ DEF_FUNC_BARE op_delete_name
                                ; handler, so a call needs an even push list
     push rsi
     call dict_del_opt
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
     test eax, eax
@@ -539,6 +548,7 @@ DEF_FUNC_BARE op_delete_global
     push rsi
     extern dict_del_opt
     call dict_del_opt
+    ERR_M1_JUMP
     pop rsi
     add rsp, 8
     test eax, eax
@@ -857,6 +867,7 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     mov rsi, r13
     xor edx, edx
     call dict_get_index
+    ERR_DICT_IDX_JUMP
     test rax, rax
     js .sts_out
     cmp rax, 0xFFFF                 ; the cache field is 16 bits wide

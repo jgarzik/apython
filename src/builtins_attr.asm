@@ -26,9 +26,6 @@ extern bool_true
 extern bool_false
 extern instance_setattr
 extern type_setattr
-extern raise_no_attribute
-extern raise_type_error_counted
-extern raise_type_error_with_name
 extern obj_dealloc
 extern str_from_cstr
 extern dict_get
@@ -40,7 +37,8 @@ GA_EXC   equ 24
 section .text
 
 ;; ============================================================================
-;; attr_require_name(rdi = the name argument, a Value) -> returns, or raises
+;; attr_require_name(rdi = the name argument, a Value) -> rax = 0
+;; Fails: -1
 ;;
 ;; getattr, setattr, delattr and hasattr all read the name as a PyStrObject
 ;; without asking what it is: `getattr(x, 0)` read a small integer's Value as
@@ -61,17 +59,45 @@ DEF_FUNC_LOCAL attr_require_name, ARN_FRAME
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jz .arn_bad
 .arn_ok:
+    xor eax, eax
     leave
     ret
 .arn_bad:
     mov rsi, [rbp - ARN_ARG]
     CSTRING rdi, `attribute name must be string, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
 END_FUNC attr_require_name
 
 ;; ============================================================================
+;; attr_found_swallow(rax = the attribute a lookup FOUND) -> rax, unchanged
+;;
+;; obj_getattr_raw leaves a __getattr__ hook's AttributeError pending so that
+;; a MISS can be re-raised in the hook's own words.  It is also still there
+;; when the walk went on past the hook and found the name -- a module with a
+;; PEP 562 hook, asked for __class__ -- and then it is nobody's.  The same
+;; release obj_getattr_opt makes, for the two callers that use the raw form.
+;; ============================================================================
+AFS_VAL   equ 8
+AFS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+DEF_FUNC_LOCAL attr_found_swallow, AFS_FRAME
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .afs_done
+    mov [rbp - AFS_VAL], rax
+    extern attr_miss_swallow
+    call attr_miss_swallow
+    mov rax, [rbp - AFS_VAL]
+.afs_done:
+    leave
+    ret
+END_FUNC attr_found_swallow
+
+;; ============================================================================
 ;; builtin_getattr(rdi = args, rsi = nargs) -> rax = Value
+;; Fails: 0
 ;; getattr(obj, name[, default]): the default is answered only for an
 ;; AttributeError, so anything else the lookup raises still propagates.
 ;; ============================================================================
@@ -91,12 +117,15 @@ DEF_FUNC builtin_getattr, 32
     ; the property object instead of calling it.
     mov rdi, [rbx + 8]
     call attr_require_name
+    ERR_M1 .getattr_propagate
     DUNDER_EXC_SAVE [rbp - GA_EXC]
     mov rdi, [rbx]                 ; args[0], as a Value
     mov rsi, [rbx + 8]             ; args[1], the name
-    call obj_getattr_opt
+    extern obj_getattr_raw
+    call obj_getattr_raw
     test rax, rax
     jz .getattr_missing
+    call attr_found_swallow     ; found: a hook's "absent" behind it is stale
     pop r12
     pop rbx
     leave
@@ -157,26 +186,30 @@ DEF_FUNC builtin_getattr, 32
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
     xor edx, edx                ; a get, so .name and .obj are filled in
-    extern raise_no_attribute
-    call raise_no_attribute
+    extern set_no_attribute
+    call set_no_attribute
+    jmp .getattr_propagate
 
 .getattr_too_few:
     mov rsi, r12
     CSTRING rdi, "getattr expected at least 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .getattr_propagate
 
 .getattr_error:
     mov rsi, r12
     CSTRING rdi, "getattr expected at most 3 arguments, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .getattr_propagate
 END_FUNC builtin_getattr
 
 ;; ============================================================================
 ;; 18. builtin_hasattr(rdi = args, rsi = nargs) - hasattr(obj, name)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 HA_EXC    equ 8              ; current_exception before the lookup
 DEF_FUNC builtin_hasattr, 24
@@ -190,12 +223,15 @@ DEF_FUNC builtin_hasattr, 24
     ; which is what CPython does for anything but an AttributeError.
     mov rdi, [rbx + 8]
     call attr_require_name
+    ERR_M1 .hasattr_propagate
     DUNDER_EXC_SAVE [rbp - HA_EXC]
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
-    call obj_getattr_opt
+    extern obj_getattr_raw
+    call obj_getattr_raw
     test rax, rax
     jz .hasattr_missing
+    call attr_found_swallow
     mov rdi, rax
     DECREF_V rdi, rsi
     lea rax, [rel bool_true]
@@ -236,13 +272,14 @@ DEF_FUNC builtin_hasattr, 24
 .hasattr_error:
     CSTRING rdi, "hasattr expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .hasattr_propagate
 END_FUNC builtin_hasattr
 
 ;; ============================================================================
 ;; 19. builtin_setattr(rdi = args, rsi = nargs) - setattr(obj, name, value)
 ;;   -> rax = Value
+;; Fails: 0
 ;; ============================================================================
 SETA_EXC equ 16     ; the exception pending before tp_setattr ran
 SETA_GENERIC equ 24 ; non-zero when this is object.__setattr__
@@ -254,6 +291,7 @@ END_FUNC builtin_setattr
 
 ;; ============================================================================
 ;; object_generic_setattr(rdi = args, rsi = nargs) -> the None Value
+;; Fails: 0
 ;;
 ;; object.__setattr__ and object.__delattr__: the GENERIC store, which must not
 ;; go through the type's tp_setattr.  For a class that defines __setattr__ that
@@ -270,6 +308,7 @@ END_FUNC object_generic_setattr
 
 ;; ============================================================================
 ;; setattr_impl(rdi = args, rsi = nargs, edx = generic?) -> the None Value
+;; Fails: 0
 ;;
 ;; The body both of the above share.  edx picks the store; everything else is
 ;; identical, including the wording of both errors.
@@ -286,6 +325,7 @@ DEF_FUNC_LOCAL setattr_impl
 
     mov rdi, [rbx + 8]           ; the name, before anything reads it as one
     call attr_require_name
+    ERR_M1 .setattr_raised
 
     V_TEST_PTR_M [rbx], r11      ; args[0] a pointer?
     ja .setattr_no_attr
@@ -356,21 +396,22 @@ DEF_FUNC_LOCAL setattr_impl
     ; setattr(5, "x", 1) is AttributeError: 'int' object has no attribute 'x'.
     mov rdi, [rbx]
     mov rsi, [rbx + 8]
-    mov edx, 1
-    extern raise_no_attribute
-    call raise_no_attribute
+    extern set_no_attribute_store
+    call set_no_attribute_store
+    jmp .setattr_raised
 
 .setattr_error:
     CSTRING rdi, "setattr expected 3 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .setattr_raised
 END_FUNC setattr_impl
 
 
 ;; ============================================================================
 ;; builtin_delattr_fn(rdi = args, rsi = nargs) - delattr(obj, name)
 ;;   -> rax = Value
+;; Fails: 0
 ;; Calls tp_setattr(obj, name, NULL) to delete
 ;; ============================================================================
 global builtin_delattr_fn
@@ -386,6 +427,7 @@ END_FUNC builtin_delattr_fn
 
 ;; ============================================================================
 ;; object_generic_delattr(rdi = args, rsi = nargs) -> the None Value
+;; Fails: 0
 ;;
 ;; object.__delattr__: the generic delete, which must not go through the
 ;; type's tp_setattr.  The same recursion object_generic_setattr avoids.
@@ -398,6 +440,7 @@ END_FUNC object_generic_delattr
 
 ;; ============================================================================
 ;; delattr_impl(rdi = args, rsi = nargs, edx = generic?) -> the None Value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL delattr_impl, DA2_FRAME
     mov [rbp - DA2_GENERIC], rdx
@@ -414,6 +457,7 @@ DEF_FUNC_LOCAL delattr_impl, DA2_FRAME
     sub rsp, 8
     mov rdi, rax
     call attr_require_name
+    ERR_M1 .da2_raised
     add rsp, 8
     pop rdi
 
@@ -474,13 +518,12 @@ DEF_FUNC_LOCAL delattr_impl, DA2_FRAME
 .da2_no_attr:
     mov rdi, [rbp - DA2_OBJ]
     mov rsi, [rbp - DA2_NAME]
-    mov edx, 1
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    call set_no_attribute_store
+    jmp .da2_raised
 
 .da2_nargs_error:
     CSTRING rdi, "delattr expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .da2_raised
 END_FUNC delattr_impl

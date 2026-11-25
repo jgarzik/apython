@@ -50,7 +50,7 @@ extern str_from_cstr_heap
 extern builtin_func_new
 extern int_from_i64
 extern obj_as_index
-extern raise_exception
+extern set_exception
 extern exc_RuntimeError_type
 extern exc_ValueError_type
 extern tstate_install
@@ -112,12 +112,13 @@ section .text
 ;; ============================================================================
 ;; tc_int_arg(rdi = args, rsi = index) -> rax = that argument as an int64
 ;;
-;; Raises TypeError for anything that is not an integer.
+;; TypeError for anything that is not an integer.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_LOCAL tc_int_arg
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and its exception are ours
     leave
     ret
 END_FUNC tc_int_arg
@@ -154,8 +155,7 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     lea rsi, [rbx + ThreadStart.argv]
     mov edx, 3
     call obj_call_n
-    test rax, rax
-    jz .te_raised
+    ERR_NULL .te_raised
     DECREF_V rax, rcx
     jmp .te_finished
 .te_raised:
@@ -227,6 +227,7 @@ END_FUNC thread_entry
 
 ;; ============================================================================
 ;; _threadcore.start(bootstrap, function, args, kwargs) -> the thread's ident
+;; Fails: 0
 ;;
 ;; Start a pthread that calls bootstrap(function, args, kwargs).  The thread
 ;; is detached -- nothing joins it at the pthread level; Thread.join waits on
@@ -333,9 +334,12 @@ DEF_FUNC tc_start, TS_FRAME
     DECREF_V rdi, rcx
     mov rdi, rbx
     call ap_free
+    SET_EXC exc_RuntimeError_type, "can't start new thread"
+    xor eax, eax
     pop r12
     pop rbx
-    RAISE exc_RuntimeError_type, "can't start new thread"
+    leave
+    ret
 END_FUNC tc_start
 
 ;; ============================================================================
@@ -394,10 +398,15 @@ SSS_FRAME equ 16                ; + 0 pushes = 16, 16-aligned
 DEF_FUNC tc_set_stack_size, SSS_FRAME
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov rdi, [rel tc_stack_size]
     mov [rel tc_stack_size], rax
     call int_from_i64
     V_PACK rax, rdx
+    leave
+    ret
+.fail:
+    xor eax, eax
     leave
     ret
 END_FUNC tc_set_stack_size
@@ -428,11 +437,16 @@ END_FUNC tc_thread_dict
 DEF_FUNC tc_interrupt_main
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov rdi, rax
     call signal_mark_pending
     RET_NONE
     leave
     V_PACK rax, rdx
+    ret
+.fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC tc_interrupt_main
 
@@ -465,6 +479,7 @@ DEF_FUNC tc_lock_free, LF_FRAME
     push rbx
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov rbx, rax
     mov rdi, rax
     call sem_destroy
@@ -474,6 +489,11 @@ DEF_FUNC tc_lock_free, LF_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC tc_lock_free
 
@@ -486,6 +506,7 @@ END_FUNC tc_lock_free
 DEF_FUNC tc_lock_reinit
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov rdi, rax
     xor esi, esi
     mov edx, 1
@@ -493,6 +514,10 @@ DEF_FUNC tc_lock_reinit
     RET_NONE
     leave
     V_PACK rax, rdx
+    ret
+.fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC tc_lock_reinit
 
@@ -514,10 +539,12 @@ DEF_FUNC tc_lock_acquire, LA_FRAME
     mov rbx, rdi                ; args, for the moment
     mov esi, 1
     call tc_int_arg
+    ERR_M1 .la_fail
     mov [rbp - LA_TMO], rax
     mov rdi, rbx
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .la_fail
     mov rbx, rax                ; the semaphore
 
     mov rdi, rbx
@@ -591,6 +618,11 @@ DEF_FUNC tc_lock_acquire, LA_FRAME
     pop rbx
     leave
     ret
+.la_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC tc_lock_acquire
 
 ;; ============================================================================
@@ -605,6 +637,7 @@ DEF_FUNC tc_lock_release, LR_FRAME
     push rbx
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov rbx, rax
     mov rdi, rbx
     lea rsi, [rbp - LR_VAL]
@@ -619,8 +652,12 @@ DEF_FUNC tc_lock_release, LR_FRAME
     V_PACK rax, rdx
     ret
 .lr_unlocked:
+    SET_EXC exc_RuntimeError_type, "release unlocked lock"
+.fail:
+    xor eax, eax
     pop rbx
-    RAISE exc_RuntimeError_type, "release unlocked lock"
+    leave
+    ret
 END_FUNC tc_lock_release
 
 ;; ============================================================================
@@ -631,6 +668,7 @@ LL_FRAME equ 16                 ; + 0 pushes = 16, 16-aligned
 DEF_FUNC tc_lock_locked, LL_FRAME
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov rdi, rax
     lea rsi, [rbp - LL_VAL]
     call sem_getvalue
@@ -640,6 +678,10 @@ DEF_FUNC tc_lock_locked, LL_FRAME
     lea rax, [rel bool_false]
 .ll_have:
     INCREF rax
+    leave
+    ret
+.fail:
+    xor eax, eax
     leave
     ret
 END_FUNC tc_lock_locked
@@ -693,6 +735,7 @@ END_FUNC tc_get_interval
 DEF_FUNC tc_set_interval
     xor esi, esi
     call tc_int_arg
+    ERR_M1 .fail
     mov ecx, 1
     cmp rax, 1
     cmovl rax, rcx
@@ -700,6 +743,10 @@ DEF_FUNC tc_set_interval
     RET_NONE
     leave
     V_PACK rax, rdx
+    ret
+.fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC tc_set_interval
 

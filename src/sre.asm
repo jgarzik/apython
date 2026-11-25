@@ -1,7 +1,7 @@
 ; sre.asm - SRE match engine for apython
 ; Direct u32 interpreter implementing CPython's regex bytecode
 ;
-; Main entry: sre_match(SRE_State*, u32* pattern) -> 0/1/-1
+; Main entry: sre_match(SRE_State*, u32* pattern) -> 0/1
 ;             sre_search(SRE_State*) -> 0/1/-1
 ;
 ; Match engine registers (within sre_match):
@@ -21,7 +21,6 @@ extern ap_realloc
 extern ap_memcpy
 extern obj_decref
 extern obj_incref
-extern raise_exception
 extern exc_RuntimeError_type
 extern sre_getchar
 extern sre_category
@@ -36,8 +35,11 @@ extern sre_uni_isword
 ;; ============================================================================
 ;; sre_state_init(SRE_State* state, SRE_PatternObject* pattern,
 ;;                PyStrObject* string, i64 pos, i64 endpos,
-;;                SRE_CpCache* cache) -> void
-;; Initialize match state for a string.
+;;                SRE_CpCache* cache) -> rax = 0
+;; Fails: -1
+;; Initialize match state for a string.  It fails only when the subject is
+;; refused, before anything is allocated: the state is all zeros then, which
+;; sre_state_fini takes, so a caller may release it or not.
 ;;
 ;; cache may be NULL, and is for callers that init a state repeatedly over the
 ;; same subject -- the scanner behind finditer is the only one.  A non-ASCII
@@ -83,6 +85,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov rdi, r13
     mov rsi, r12
     call sre_require_subject
+    ERR_M1 .ssi_fail
 
     ; Set basic fields
     mov [rbx + SRE_State.pattern], r12
@@ -318,7 +321,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     ; r8 is the full codepoint count, before any endpos clamp -- which is what
     ; the cache must hold, since endpos narrows a single match and the next
     ; one may not narrow at all.
-    mov qword [rbx + SRE_State.owns_cpbuf], 1
+    mov dword [rbx + SRE_State.owns_cpbuf], 1
     mov rax, [rbp - SSI_CACHE]
     test rax, rax
     jz .utf8_clamp
@@ -334,7 +337,7 @@ DEF_FUNC sre_state_init, SSI_FRAME
     call obj_incref
     pop r8
     pop rax
-    mov qword [rbx + SRE_State.owns_cpbuf], 0   ; the cache owns it now
+    mov dword [rbx + SRE_State.owns_cpbuf], 0   ; the cache owns it now
     ; ...and this state is READING it, so it counts as a borrower like any
     ; other.  Only the borrow path registered, so the state that filled the
     ; cache was invisible to the eviction check -- and a nested scan on
@@ -381,16 +384,22 @@ DEF_FUNC sre_state_init, SSI_FRAME
     mov rdi, rbx
     call sre_state_reset_marks
 
+    xor eax, eax
+.ssi_out:
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret
+.ssi_fail:
+    mov rax, -1
+    jmp .ssi_out
 END_FUNC sre_state_init
 
 ;; ============================================================================
-;; sre_require_subject(rdi = the subject Value) -- returns, or raises
+;; sre_require_subject(rdi = the subject Value, rsi = the pattern) -> rax = 0
+;; Fails: -1
 ;;
 ;; A bytes-like subject is a different refusal from "that is not a string":
 ;; the pattern is a str pattern, and CPython says so.  Both are TypeError.
@@ -448,6 +457,8 @@ extern ap_memcpy
     jmp .srs_ok
 
 .srs_ok:
+    xor eax, eax
+.srs_out:
     pop r12
     pop rbx
     leave
@@ -455,15 +466,18 @@ extern ap_memcpy
 
 .srs_want_str:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "cannot use a string pattern on a bytes-like object"
+    FAIL exc_TypeError_type, "cannot use a string pattern on a bytes-like object", .srs_fail
 .srs_want_bytes:
-    RAISE exc_TypeError_type, "cannot use a bytes pattern on a string-like object"
+    FAIL exc_TypeError_type, "cannot use a bytes pattern on a string-like object", .srs_fail
 
 .srs_not_string:
-    extern raise_type_error_with_name
+    extern set_type_error_with_name
     mov rsi, rbx
     CSTRING rdi, `expected string or bytes-like object, got '\x01'`
-    call raise_type_error_with_name     ; does not return
+    call set_type_error_with_name
+.srs_fail:
+    mov rax, -1
+    jmp .srs_out
 END_FUNC sre_require_subject
 
 ;; ============================================================================
@@ -541,6 +555,7 @@ END_FUNC sre_new_slice
 
 ;; ============================================================================
 ;; sre_concat(rdi = a Value, rsi = a Value, edx = 1 for bytes) -> a Value
+;; Fails: 0
 ;;
 ;; str_concat for one kind and bytes concatenation for the other.  Both take
 ;; over neither reference: the caller owns what it passed in, as str_concat
@@ -571,14 +586,14 @@ DEF_FUNC sre_concat, SCC_FRAME
     cmp rax, rcx
     jne .scc_str_type_error
     extern str_concat
-    call str_concat
+    call str_concat           ; err: both were just checked to be exact strs
     leave
     ret
 .scc_str_type_error:
     mov rsi, [rbp - SCC_B]
     lea rdi, [rel scc_notstr]
-    extern raise_type_error_with_name
-    call raise_type_error_with_name     ; does not return
+    call set_type_error_with_name
+    jmp .scc_fail
 .scc_bytes:
     ; Both operands used to be dereferenced as bytes objects, and one of them
     ; is whatever a callable replacement returned: `re.sub(b'a', lambda m: 5,
@@ -632,8 +647,8 @@ DEF_FUNC sre_concat, SCC_FRAME
     ; found".  The item index is not knowable here; the rest is.
     mov rsi, [rbp - SCC_B]
     lea rdi, [rel scc_notbytes]
-    extern raise_type_error_with_name
-    call raise_type_error_with_name     ; does not return
+    call set_type_error_with_name
+    jmp .scc_fail
 END_FUNC sre_concat
 
 section .rodata
@@ -690,7 +705,7 @@ DEF_FUNC sre_state_fini, 8            ; 1 pushes, so rsp is 16-aligned
 
     ; Free the codepoint buffer, unless it is borrowed from a cache that
     ; outlives this state.
-    cmp qword [rbx + SRE_State.owns_cpbuf], 0
+    cmp dword [rbx + SRE_State.owns_cpbuf], 0
     je .no_cp
     mov rdi, [rbx + SRE_State.codepoint_buf]
     test rdi, rdi
@@ -860,6 +875,12 @@ END_FUNC sre_string_len
 ;; sre_match(SRE_State* state, u32* pattern) -> 0/1
 ;; Core recursive match engine.
 ;;
+;; It reports its one error -- the recursion limit -- as 0 with
+;; SRE_State.error set and the RuntimeError pending, not through a return
+;; value of its own: twenty sites in here recurse and read the answer as a
+;; boolean, and a failure is the path that already releases what each holds.
+;; A caller outside this file reads the flag after a 0; sre_search does.
+;;
 ;; Frame layout constants
 ;; ============================================================================
 ;; sre_match(rdi = state, rsi = pattern, edx = toplevel)
@@ -898,6 +919,10 @@ DEF_FUNC sre_match, SM_MFRAME
     mov rbx, rsi               ; rbx = pc (pattern pointer)
     mov r13, [rdi + SRE_State.str_pos]  ; r13 = current pos
     mov r15, [rdi + SRE_State.repeat_ctx]  ; r15 = repeat ctx
+
+    ; Once the match has raised, nothing is tried again: see SRE_State.error.
+    cmp dword [r12 + SRE_State.error], 0
+    jne .aborted
 
     ; Check recursion depth limit
     mov eax, [r12 + SRE_State.match_depth]
@@ -2429,6 +2454,12 @@ DEF_FUNC sre_match, SM_MFRAME
     jmp .op_failure
 
 .return:
+    ; A match that raised is a failure at every level, whatever this one
+    ; concluded, so the cleanup below runs all the way up.
+    cmp dword [r12 + SRE_State.error], 0
+    je .return_verdict
+    xor eax, eax
+.return_verdict:
     ; On failure, free any RepeatContexts allocated during this invocation
     test eax, eax
     jnz .return_ok
@@ -2458,11 +2489,14 @@ DEF_FUNC sre_match, SM_MFRAME
     ret
 
 .recursion_error:
-    ; Raise RuntimeError for recursion overflow
+    ; RuntimeError for recursion overflow, set once and flagged in the state.
     lea rdi, [rel exc_RuntimeError_type]
     lea rsi, [rel sre_recursion_err_msg]
-    call raise_exception
-    mov eax, SRE_MATCH_ERROR
+    extern set_exception
+    call set_exception
+    mov dword [r12 + SRE_State.error], 1
+.aborted:
+    xor eax, eax                ; "no match"; match_depth was not raised
     pop r15
     pop r14
     pop r13
@@ -2591,7 +2625,9 @@ END_FUNC sre_restore_marks
 
 ;; ============================================================================
 ;; sre_search(SRE_State* state) -> 0/1
-;; Linear scan: try sre_match at each position from pos to endpos.
+;; Fails: -1
+;; Linear scan: try sre_match at each position from pos to endpos.  The -1
+;; is the matcher's own exception (SRE_State.error), in all of rax.
 ;; ============================================================================
 DEF_FUNC sre_search, 40
     push rbx
@@ -2625,9 +2661,19 @@ DEF_FUNC sre_search, 40
     call sre_match
     test eax, eax
     jnz .search_found
+    cmp dword [r12 + SRE_State.error], 0
+    jne .search_raised
 
     inc r13
     jmp .search_loop
+
+.search_raised:
+    mov rax, -1
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .search_found:
     mov eax, 1

@@ -33,19 +33,19 @@ extern none_singleton
 extern builtin_func_new
 extern dict_set
 extern ap_memcmp
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ImportError_type
 extern import_find_and_load_asm
 extern pc_dynload
 extern list_new
 extern list_append
-extern eval_exception_unwind
 
 section .text
 
 ;; ============================================================================
 ;; impcore_create_builtin(args, nargs) -> the module, a new reference
+;; Fails: 0
 ;;
 ;; One argument, the module's name.  The interpreter's own loader finds it in
 ;; the module table or among the lib/ stand-ins; an exception its body raises
@@ -82,7 +82,7 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     sub rsp, 8
     mov rdi, [rel icb_dirs]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     add rsp, 8
     pop rdi
     call obj_decref
@@ -90,7 +90,7 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     mov rax, [rel icb_dirs]
     mov [gs:ThreadState.import_path_override], rax
     mov rdi, [rbp - ICB_NAME]
-    call import_find_and_load_asm
+    call import_find_and_load_asm   ; err: either 0 goes to .icb_failed, once the override is cleared
     mov qword [gs:ThreadState.import_path_override], 0
     test rax, rax
     jz .icb_failed
@@ -98,13 +98,15 @@ DEF_FUNC impcore_create_builtin, ICB_FRAME
     ret
 .icb_failed:
     DUNDER_RAISED [rbp - ICB_EXC], .icb_propagate
-    RAISE exc_ImportError_type, "no built-in module by that name"
+    SET_EXC exc_ImportError_type, "no built-in module by that name"
 .icb_propagate:
-    jmp eval_exception_unwind
+    xor eax, eax
+    leave
+    ret
 .icb_arity:
-    RAISE exc_TypeError_type, "create_builtin() takes exactly one argument"
+    FAIL exc_TypeError_type, "create_builtin() takes exactly one argument", .icb_propagate
 .icb_type:
-    RAISE exc_TypeError_type, "create_builtin() argument must be str"
+    FAIL exc_TypeError_type, "create_builtin() argument must be str", .icb_propagate
 END_FUNC impcore_create_builtin
 
 ;; ============================================================================
@@ -195,6 +197,7 @@ END_FUNC icf_update
 
 ;; ============================================================================
 ;; impcore_fix_co_filename(args, nargs) -> None
+;; Fails: 0
 ;;
 ;; (code, path).  Nothing happens when the code already names that path.
 ;; ============================================================================
@@ -246,9 +249,13 @@ DEF_FUNC impcore_fix_co_filename, IFC_FRAME
     leave
     ret
 .ifc_arity:
-    RAISE exc_TypeError_type, "_fix_co_filename() takes exactly two arguments"
+    SET_EXC exc_TypeError_type, "_fix_co_filename() takes exactly two arguments"
+    leave                           ; rax = 0
+    ret
 .ifc_type:
-    RAISE exc_TypeError_type, "_fix_co_filename() takes a code object and a str"
+    SET_EXC exc_TypeError_type, "_fix_co_filename() takes a code object and a str"
+    leave
+    ret
 END_FUNC impcore_fix_co_filename
 
 ;; ============================================================================

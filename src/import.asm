@@ -4,6 +4,10 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get
+extern dict_set
+extern dict_get_str
+extern dict_set_str
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
@@ -20,20 +24,16 @@ extern str_type
 extern none_singleton
 extern module_type
 extern obj_call_n
-extern exc_raise_import
+extern exc_set_import
+extern set_exception
 extern str_from_cstr_heap
 extern str_intern_cstr
 extern dict_new
-extern dict_get
-extern dict_set
-extern dict_del
-extern eval_exception_unwind
 extern list_new
 extern list_append
 extern type_type
 extern module_new
 extern fatal_error
-extern raise_exception
 extern eval_frame
 extern frame_new
 extern frame_free
@@ -56,6 +56,13 @@ extern builtins_dict_global
 extern exc_ImportError_type
 extern exc_ModuleNotFoundError_type
 extern str_concat
+
+; The path search, src/import_find.asm
+extern import_abspath
+extern import_source_path
+extern import_search_syspath
+extern import_search_dirs
+extern import_make_namespace
 
 ; Builtin modules
 
@@ -104,6 +111,7 @@ IM_PATH_MARGIN equ 64
 ;; ============================================================================
 ;; import_resolve_relative(rdi = name str, rsi = globals dict, rdx = level)
 ;;   -> rax = the absolute name, a new reference
+;; Fails: 0
 ;;
 ;; `from . import x` inside a package: level counts how far up from the
 ;; importing module's package to start.  Level was read off the stack and then
@@ -133,11 +141,12 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     mov rbx, rax
     pop rdi
     mov rsi, rbx
-    call dict_get
+    call dict_get           ; err: tested once the key is released
     push rax
     mov rdi, rbx
     call obj_decref
     pop rax
+    ERR_PENDING .irr_fail       ; the globals held a key that would not compare
     test rax, rax
     jz .irr_no_package
     V_TEST_PTR rax, rcx
@@ -205,9 +214,15 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     ret
 
 .irr_beyond_top:
-    RAISE exc_ImportError_type, "attempted relative import beyond top-level package"
+    FAIL exc_ImportError_type, "attempted relative import beyond top-level package", .irr_fail
 .irr_no_package:
-    RAISE exc_ImportError_type, "attempted relative import with no known parent package"
+    SET_EXC exc_ImportError_type, "attempted relative import with no known parent package"
+.irr_fail:
+    xor eax, eax                ; nothing is held: the package name is borrowed
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC import_resolve_relative
 
 ;; ============================================================================
@@ -246,7 +261,7 @@ DEF_FUNC_LOCAL import_add_path_cstr
     sub rsp, 8
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: startup, before anything can be sorting sys.path
     add rsp, 8
     pop rdi
     call obj_decref
@@ -295,7 +310,7 @@ DEF_FUNC import_init
     pop rsi                     ; key = "builtins"
     push rsi                    ; re-save key for DECREF
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi                     ; DECREF key (dict_set INCREF'd)
     call obj_decref
     mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
@@ -327,7 +342,7 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref                         ; the key; dict_set took its own
@@ -382,7 +397,7 @@ DEF_FUNC import_init
     push rcx
     mov rdi, [rel sys_path_list]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: startup, before anything can be sorting sys.path
     pop rcx
     pop rdi
     call obj_decref
@@ -425,8 +440,9 @@ DEF_FUNC import_init
 END_FUNC import_init
 
 ;; ============================================================================
-;; import_raise_no_module(rdi = name C string, rsi = name length,
-;;                        rdx = parent length or 0) -- does not return
+;; import_set_no_module(rdi = name C string, rsi = name length,
+;;                      rdx = parent length or 0)
+;;   -> rax = 0, always, with the ModuleNotFoundError pending
 ;;
 ;; Raises ModuleNotFoundError, matching CPython's two wordings:
 ;;
@@ -439,7 +455,7 @@ END_FUNC import_init
 ;; is a second length into the same buffer, so neither needs a copy.
 ;; ============================================================================
 IRNM_BUF equ 520                ; + 3 pushes = 544, 16-aligned
-DEF_FUNC_LOCAL import_raise_no_module, IRNM_BUF
+DEF_FUNC_LOCAL import_set_no_module, IRNM_BUF
     push rbx
     push r12
     push r13
@@ -479,9 +495,13 @@ DEF_FUNC_LOCAL import_raise_no_module, IRNM_BUF
     lea rdi, [rel exc_ModuleNotFoundError_type]
     xor ecx, ecx                ; .path is None
     mov r8d, 1                  ; the name string is ours to hand over
-    call exc_raise_import
-    ud2
-END_FUNC import_raise_no_module
+    call exc_set_import         ; rax = 0
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC import_set_no_module
 
 ;; ============================================================================
 ;; irnm_cat_cstr(rdi = buffer, rcx = offset, rdx = NUL-terminated source)
@@ -540,11 +560,8 @@ END_FUNC irnm_cat_n
 ;; ============================================================================
 global import_clear_attr_error
 DEF_FUNC import_clear_attr_error
-    cmp qword [gs:ThreadState.attr_error_pending], 0
-    je .ica_done
-    mov qword [gs:ThreadState.attr_error_pending], 0
-    mov qword [gs:ThreadState.current_exception], 0
-.ica_done:
+    extern attr_miss_swallow
+    call attr_miss_swallow      ; which RELEASES it; zeroing the word leaked it
     leave
     ret
 END_FUNC import_clear_attr_error
@@ -552,6 +569,7 @@ END_FUNC import_clear_attr_error
 ;; ============================================================================
 ;; import_parent_is_package(rdi = whatever sys.modules holds for the parent)
 ;;     -> rax = 1 if a submodule of it may be imported, 0 if not
+;; Fails: -1
 ;;
 ;; CPython reads `parent.__path__` and turns an AttributeError into "'a' is not
 ;; a package".  A plain module without __path__ answers no, and so does the
@@ -596,7 +614,8 @@ DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
 .ipp_have_key:
     mov rsi, rax
     mov rdi, [rbx + PyModuleObject.mod_dict]
-    call dict_get               ; a Value; 0 is the miss
+    call dict_get           ; a Value; 0 is the miss
+    ERR_PENDING .ipp_raised
     test rax, rax
     jz .ipp_no
 .ipp_yes:
@@ -609,10 +628,16 @@ DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
     pop rbx
     leave
     ret
+.ipp_raised:                    ; the module's dict could not be searched
+    mov rax, -1
+    pop rbx
+    leave
+    ret
 END_FUNC import_parent_is_package
 
 ;; ============================================================================
-;; import_raise_halted(rdi = module name C string) -- does not return
+;; import_set_halted(rdi = module name C string)
+;;   -> rax = 0, always, with the ModuleNotFoundError pending
 ;;
 ;; A None sitting in sys.modules is a deliberate BLOCK, not a cached module.
 ;; `test.support.import_fresh_module(m, blocked=[x])` puts one there and
@@ -626,7 +651,7 @@ END_FUNC import_parent_is_package
 ;; The type is ModuleNotFoundError, an ImportError subclass.
 ;; ============================================================================
 IRH_BUF equ 264                 ; + 1 push = 272, 16-aligned
-DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
+DEF_FUNC_LOCAL import_set_halted, IRH_BUF
     push rbx
     mov rbx, rdi                ; the name, kept across the message build
     mov rsi, rdi                ; the name
@@ -664,7 +689,7 @@ DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
 .irh_done:
     mov byte [rdi + rcx], 0
     ; CPython sets .name to the module that was blocked, and leaves .path None.
-    ; The string is built only for this, and exc_raise_import does not return,
+    ; The string is built only for this, and nothing here reads it again,
     ; so it is handed over to be released there.
     push rdi                    ; the message buffer, on this frame
     sub rsp, 8
@@ -676,12 +701,15 @@ DEF_FUNC_LOCAL import_raise_halted, IRH_BUF
     lea rdi, [rel exc_ModuleNotFoundError_type]
     xor ecx, ecx                ; .path is None
     mov r8d, 1                  ; the name string is ours to hand over
-    call exc_raise_import
-    ud2
-END_FUNC import_raise_halted
+    call exc_set_import         ; rax = 0
+    pop rbx
+    leave
+    ret
+END_FUNC import_set_halted
 
 ;; ============================================================================
 ;; import_module(PyObject *name_str, PyObject *fromlist, int64_t level) -> PyObject*
+;; Fails: 0
 ;; Main import entry point
 ;; name_str = module name from co_names
 ;; fromlist = tuple of names or None
@@ -711,6 +739,7 @@ DEF_FUNC import_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
     call dict_get
+    ERR_PENDING .fail           ; nothing is held yet
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_cached
@@ -730,7 +759,7 @@ DEF_FUNC import_module, IF_FRAME
 .no_dot:
     ; Simple name, no dots
     mov rdi, [rbp - IF_NAME]
-    call import_find_and_load
+    call import_find_and_load   ; err: either 0 goes to .import_error, which asks what was raised
     test rax, rax
     jz .import_error
     mov r12, rax                ; r12 = module
@@ -774,6 +803,7 @@ DEF_FUNC import_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
     call dict_get
+    ERR_PENDING .walk_get_raised
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .walk_have_module
 
@@ -802,6 +832,7 @@ DEF_FUNC import_module, IF_FRAME
     jz .walk_load
     mov rdi, rax
     call import_parent_is_package
+    ERR_M1 .walk_get_raised
     test eax, eax
     jnz .walk_load
     mov rcx, [rsp + 8]              ; where this component ends
@@ -815,7 +846,7 @@ DEF_FUNC import_module, IF_FRAME
 
 .walk_load:
     mov rdi, [rsp]
-    call import_find_and_load
+    call import_find_and_load   ; err: either 0 goes to .walk_load_failed, and on to .import_error
     test rax, rax
     jz .walk_load_failed
 
@@ -846,6 +877,7 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, [rsp]
     mov rdx, [rsp + 8]          ; this prefix's module
     call dict_set
+    ERR_M1 .walk_set_raised
 .walk_drop_key:
     pop rdi
     call obj_decref
@@ -911,12 +943,20 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_FAILLEN], rcx ; `import sys.foo.bar` fails at `sys.foo`
     jmp .import_error
 
+.walk_set_raised:               ; the parent's dict refused the store
+    pop rdi                     ; the bare component
+    call obj_decref
+    pop r13
+    jmp .walk_oom
+.walk_get_raised:               ; sys.modules, or the parent, could not be searched
+    pop rdi                     ; the prefix string
+    call obj_decref
 .walk_oom:
     pop rcx
     jmp .import_error
 
 .found_cached:
-    ; A None here is a BLOCK, not a module -- see import_raise_halted.  It has
+    ; A None here is a BLOCK, not a module -- see import_set_halted.  It has
     ; to be tested before the want-top rewrite below, which would otherwise
     ; read PyStrObject fields off the None while looking for the first
     ; component.
@@ -940,6 +980,7 @@ DEF_FUNC import_module, IF_FRAME
     push rax                    ; and a slot for the helper's one argument
     CSTRING rdi, "_ensure_initialized"
     call im_importlib_func
+    ERR_PENDING .cached_wait_raised
     test rax, rax
     jz .cached_waited           ; importlib is not up yet: nothing to wait on
     mov rcx, [rbp - IF_NAME]
@@ -948,14 +989,14 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, rsp
     mov edx, 1
     call obj_call_n
-    test rax, rax
-    jz .cached_wait_raised
+    ERR_NULL .cached_wait_raised
     DECREF_V rax, rcx
     ; The import this waited for may have FAILED and taken the module back
     ; out, so ask sys.modules again rather than trust what was read before.
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
     call dict_get
+    ERR_PENDING .cached_wait_raised
     add rsp, 16
     test rax, rax
     jz .not_cached
@@ -1003,7 +1044,7 @@ DEF_FUNC import_module, IF_FRAME
     push rax
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get           ; err: tested below, once the prefix string is released
     V_UNPACK rax, rdx
     mov rcx, rax
     pop rdi
@@ -1012,13 +1053,17 @@ DEF_FUNC import_module, IF_FRAME
     pop rcx
     pop rax
     test rcx, rcx
-    jz .cached_as_is            ; not cached after all; the full one will do
+    jnz .cached_have_top
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .cached_as_is            ; not cached after all; the full one will do
+    jmp .fail                   ; sys.modules could not be searched
+.cached_have_top:
     mov rax, rcx
     jmp .cached_as_is
 .cached_blocked:
     mov rdi, rbx                ; the name C string, still live from the entry
-    call import_raise_halted
-    ud2
+    call import_set_halted
+    jmp .fail
 
 .cached_pop_as_is:
     pop rax
@@ -1036,7 +1081,7 @@ DEF_FUNC import_module, IF_FRAME
     ; `except ImportError:` -- which is how the whole stdlib probes for its
     ; optional C accelerators -- a bare test sees the handled exception and
     ; re-propagates it in place of the real one.
-    DUNDER_RAISED [rbp - IF_EXC], .propagate_pending
+    DUNDER_RAISED [rbp - IF_EXC], .fail
 
     ; ModuleNotFoundError, not a bare ImportError: it is an ImportError
     ; subclass and stdlib code catches it specifically.  CPython's wording
@@ -1044,11 +1089,15 @@ DEF_FUNC import_module, IF_FRAME
     mov rdi, rbx                ; the dotted name buffer
     mov rsi, [rbp - IF_FAILLEN] ; the prefix that actually failed
     mov rdx, [rbp - IF_FAILPAR] ; and its parent, when that is the reason
-    call import_raise_no_module
-    ; does not return
+    call import_set_no_module
 
-.propagate_pending:
-    jmp eval_exception_unwind
+.fail:
+    ; Reached from inside the dotted walk and the cached arm with their
+    ; pushes outstanding, so rsp goes back to the five saved registers.
+    ; Nothing is owned at any of them: every module seen so far is
+    ; sys.modules', and each arm released the prefix string it had built.
+    lea rsp, [rbp - IF_FRAME - 40]
+    xor eax, eax
 
 .done:
     pop r15
@@ -1064,6 +1113,10 @@ END_FUNC import_module
 ;; ============================================================================
 ;; import_submodule_attr(rdi = a package module, rsi = an attribute name str)
 ;;   -> rax = the submodule, BORROWED (sys.modules owns it), or 0
+;; Fails: 0?
+;;   -- 0 alone is "the package has no such submodule"; 0 with an exception
+;;   pending is an import that was attempted and raised, which is the
+;;   caller's to hand on rather than to report as a missing name.
 ;;
 ;; `from pkg import sub` and `from pkg import *` both have to IMPORT a
 ;; submodule that the package's own body never bound.  CPython does it in
@@ -1091,6 +1144,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     ; ModuleNotFoundError for exactly that submodule taken as "absent".
     CSTRING rdi, "_import_submodule"
     call im_importlib_func
+    ERR_PENDING .isa_none
     test rax, rax
     jz .isa_own
     ; (module, name) as an argument array: ISA_T2 is the lower address.
@@ -1102,8 +1156,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     lea rsi, [rbp - ISA_T2]
     mov edx, 2
     call obj_call_n
-    test rax, rax
-    jz .isa_out_raw                ; it raised: 0 with the exception pending
+    ERR_NULL .isa_out_raw          ; it raised: 0 with the exception pending
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .isa_absent
@@ -1144,7 +1197,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     call import_module_dict
     mov rdi, rax
     mov rsi, [rbp - ISA_T1]
-    call dict_get
+    call dict_get           ; err: a 0 goes to .isa_none either way; both callers hand on what is pending
     V_UNPACK rax, rdx
     mov [rbp - ISA_T2], rax
     mov rdi, [rbp - ISA_T1]
@@ -1161,7 +1214,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     mov rdi, [rbp - ISA_T2]
     mov rsi, rax
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     mov [rbp - ISA_T2], rax
     mov rdi, [rbp - ISA_T1]
     call obj_decref
@@ -1171,7 +1224,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     mov rdi, [rbp - ISA_T2]
     mov rsi, [rbp - ISA_ATTR]
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: its 0 is [ISA_T1], tested below once T2 is released
     mov [rbp - ISA_T1], rax
     mov rdi, [rbp - ISA_T2]
     call obj_decref
@@ -1179,7 +1232,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     je .isa_none
 
     mov rdi, [rbp - ISA_T1]
-    call import_find_and_load
+    call import_find_and_load   ; err: its 0 is [ISA_T2], tested below: this function's own 0 either way
     mov [rbp - ISA_T2], rax
     mov rdi, [rbp - ISA_T1]
     call obj_decref
@@ -1193,8 +1246,15 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     mov rsi, [rbp - ISA_ATTR]
     mov rdx, [rbp - ISA_T2]
     call dict_set
+    ERR_M1 .isa_set_raised
 .isa_out:
     mov rax, [rbp - ISA_T2]
+    leave
+    ret
+.isa_set_raised:                ; the package's dict refused the binding
+    mov rdi, [rbp - ISA_T2]
+    call obj_decref             ; the submodule is not the answer any more
+    xor eax, eax
     leave
     ret
 .isa_none:
@@ -1210,6 +1270,7 @@ section .text
 
 ;; ============================================================================
 ;; ifl_get(rdi = a dict, rsi = C string key) -> rax = the Value, BORROWED, or 0
+;; Fails: 0?
 ;; ============================================================================
 IFG_DICT  equ 8
 IFG_KEY   equ 16
@@ -1222,7 +1283,7 @@ DEF_FUNC_LOCAL ifl_get, IFG_FRAME
     mov [rbp - IFG_KEY], rax
     mov rdi, [rbp - IFG_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get           ; err: returned to the caller as is, once the key is released
     mov [rbp - IFG_VAL], rax
     mov rdi, [rbp - IFG_KEY]
     call obj_decref
@@ -1234,6 +1295,7 @@ END_FUNC ifl_get
 ;; ============================================================================
 ;; im_importlib_func(rdi = C string) -> rax = that function of
 ;;   lib/_importlib_bootstrap.py, BORROWED, or 0 while it is not loaded yet
+;; Fails: 0?
 ;;
 ;; Looked up each time rather than cached: a process-lifetime pointer to a
 ;; module attribute dangles when the module is dropped from sys.modules.
@@ -1244,7 +1306,7 @@ DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
     mov [rbp - IIF_NAME], rdi
     mov rdi, [rel sys_modules_dict]
     CSTRING rsi, "_importlib_bootstrap"
-    call ifl_get
+    call ifl_get                ; err: a 0 goes to .iif_none, which returns it with what is pending
     test rax, rax
     jz .iif_none
     V_TEST_PTR rax, rcx
@@ -1257,7 +1319,7 @@ DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
     test rdi, rdi
     jz .iif_none
     mov rsi, [rbp - IIF_NAME]
-    call ifl_get
+    call ifl_get                ; err: returned to the caller as is
     leave
     ret
 .iif_none:
@@ -1267,8 +1329,13 @@ DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
 END_FUNC im_importlib_func
 
 ;; ============================================================================
-;; import_find_and_load(PyObject *name_str) -> PyObject*, a new reference,
-;;   or NULL with the exception pending
+;; import_find_and_load(PyObject *name_str) -> PyObject*, or 0
+;; Fails: 0?
+;;   -- 0 with an exception pending is an import that failed.  0 ALONE is
+;;   "there is no such module", and only the interpreter's own loader below
+;;   says it that way: importlib's miss arrives as its ModuleNotFoundError.
+;;   Every caller has to tell the two apart, and import_module words the
+;;   second.
 ;;
 ;; What the import statement does on a sys.modules miss: CPython's
 ;; _bootstrap._find_and_load, reached through lib/_importlib_bootstrap.py --
@@ -1284,6 +1351,7 @@ DEF_FUNC import_find_and_load, IFL_FRAME
     mov [rbp - IFL_NAME], rdi
     CSTRING rdi, "_find_and_load"
     call im_importlib_func
+    ERR_PENDING .ifl_fail
     test rax, rax
     jz .ifl_own
     mov rcx, [rbp - IFL_NAME]
@@ -1291,21 +1359,28 @@ DEF_FUNC import_find_and_load, IFL_FRAME
     mov rdi, rax
     lea rsi, [rbp - IFL_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     leave
     ret
 .ifl_own:
     mov rdi, [rbp - IFL_NAME]
-    call import_find_and_load_asm
+    call import_find_and_load_asm   ; err: returned to the caller as is, either 0 included
+    leave
+    ret
+.ifl_fail:                      ; sys.modules could not be searched
+    xor eax, eax
     leave
     ret
 END_FUNC import_find_and_load
 
 ;; ============================================================================
-;; import_find_and_load_asm(PyObject *name_str) -> PyObject*
+;; import_find_and_load_asm(PyObject *name_str) -> PyObject*, or 0
+;; Fails: 0?
+;;   -- 0 alone is "not found anywhere"; 0 with an exception pending is a
+;;   module that was found and could not be loaded, or a name sys.modules
+;;   has blocked.
 ;; Find module on disk and load it, without importlib.
 ;; For dotted names (e.g. "unittest.case"), searches parent package's __path__.
-;; Returns module object or NULL.
 ;; ============================================================================
 global import_find_and_load_asm
 DEF_FUNC import_find_and_load_asm, FL_FRAME
@@ -1321,6 +1396,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
     call dict_get
+    ERR_PENDING .fl_fail        ; nothing is held yet
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .found_in_sysmod
 
@@ -1380,7 +1456,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; Look up parent in sys.modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, r12
-    call dict_get
+    call dict_get           ; err: tested at .fl_parent_miss, once the name is released
     V_UNPACK rax, rdx           ; dict_get returns a Value
     mov r13, rax                ; r13 = parent module payload (or 0)
     push rdx                    ; save dict_get tag for found check
@@ -1392,7 +1468,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; If parent not found, fall through to sys.path search
     pop rdx                     ; restore dict_get tag
     test edx, edx
-    jz .search_sys_path
+    jz .fl_parent_miss
 
     ; Get parent's __path__ attribute (from module dict)
     ; Module dict is at module.ob_dict (PyModuleObject.ob_dict)
@@ -1413,6 +1489,9 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     mov rdi, r13                ; parent module
     mov rsi, rax                ; "__path__" key
     call rcx                    ; tp_getattr
+    GETATTR_HOOK_SKIP .fl_path_ok
+    ERR_PENDING .fl_path_failed
+.fl_path_ok:
     mov r12, rax                ; r12 = __path__ list (or NULL)
     pop rdi                     ; DECREF "__path__" str
     call obj_decref
@@ -1493,14 +1572,31 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ret
 
 .found_in_sysmod:
-    ; A None here is a BLOCK, not a module; see import_raise_halted.
+    ; A None here is a BLOCK, not a module; see import_set_halted.
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     jne .fis_real
     mov rdi, [rbp - FL_NAME]
     lea rdi, [rdi + PyStrObject.data]
-    call import_raise_halted
-    ud2
+    call import_set_halted      ; rax = 0
+    jmp .fl_fail
+.fl_parent_miss:                ; absent, or sys.modules could not be searched
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .search_sys_path
+    jmp .fl_fail
+.fl_path_failed:
+    pop rdi                     ; the "__path__" string
+    call obj_decref
+.fl_fail:
+    lea rsp, [rbp - FL_FRAME - 40]
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .fis_real:
     ; Already imported — return INCREF'd reference
     inc qword [rax + PyObject.ob_refcnt]
@@ -1548,1214 +1644,6 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ret
 END_FUNC import_find_and_load_asm
 
-;; ============================================================================
-;; sd_pyc_ok(rdi = an open fd on a .pyc, rsi = its path) -> rax = the fd when
-;;   the .pyc may be used, eax = 0 when it may not.  Closes the fd and returns
-;;   0 for a .pyc whose source has been edited since it was written, so the
-;;   search falls through to the next pattern and, in the end, to the source.
-;; ============================================================================
-SPO_FD    equ 8
-SPO_FRAME equ 16            ; + 0 pushes = 16
-DEF_FUNC_LOCAL sd_pyc_ok, SPO_FRAME
-    mov [rbp - SPO_FD], rdi
-    call pyc_is_stale
-    test eax, eax
-    jnz .spo_stale
-    mov rax, [rbp - SPO_FD]
-    leave
-    ret
-.spo_stale:
-    mov rdi, [rbp - SPO_FD]
-    call sys_close
-    xor eax, eax
-    leave
-    ret
-END_FUNC sd_pyc_ok
-
-;; ============================================================================
-;; pyc_is_stale(rdi = an OPEN fd on the .pyc, rsi = its path) -> eax = 1 when
-;;   the source beside it has been edited since it was written
-;;
-;; A .pyc records the source's mtime and size in its header, and CPython
-;; refuses one whose source no longer matches -- otherwise editing a module
-;; and running it again silently runs the old code, which is what happened
-;; here.  The check only applies to the timestamp form: a hash-based .pyc
-;; (flags bit 0) records a hash instead, and an unchecked one is meant to be
-;; taken on trust.  A .pyc with no source beside it is CPython's sourceless
-;; form and is always fresh.
-;;
-;; The fd is left where it was: this reads the header and seeks back.
-;; ============================================================================
-PIS_FD    equ 8
-PIS_HDR   equ 24            ; the 16-byte header
-PIS_STAT  equ 24 + 144      ; STAT_SIZE
-PIS_FRAME equ ((PIS_STAT + 15) / 16) * 16 + 8   ; + 1 push = 16-aligned
-DEF_FUNC_LOCAL pyc_is_stale, PIS_FRAME
-    push rbx
-    mov [rbp - PIS_FD], rdi
-    mov rbx, rsi
-
-    ; The source it was built from, if the name says there is one.
-    mov rdi, rbx
-    call import_source_path
-    cmp rax, rbx
-    je .pis_fresh               ; sourceless: nothing to compare against
-    mov rdi, rax
-    lea rsi, [rbp - PIS_STAT]
-    call sys_stat
-    test rax, rax
-    js .pis_fresh               ; the source is gone; the .pyc stands alone
-
-    ; The header: magic, flags, mtime, size.
-    mov rdi, [rbp - PIS_FD]
-    lea rsi, [rbp - PIS_HDR]
-    mov edx, 16
-    call sys_read
-    push rax
-    mov rdi, [rbp - PIS_FD]
-    xor esi, esi
-    xor edx, edx
-    extern sys_lseek
-    call sys_lseek              ; back to the start, for the real reader
-    pop rax
-    cmp rax, 16
-    jne .pis_fresh
-
-    mov eax, [rbp - PIS_HDR + 4]
-    test eax, 1
-    jnz .pis_fresh              ; hash-based: not a timestamp to compare
-
-    mov eax, [rbp - PIS_HDR + 8]        ; the source mtime it recorded
-    mov ecx, [rbp - PIS_STAT + 88]      ; st_mtime, low 32 bits
-    cmp eax, ecx
-    jne .pis_stale
-    mov eax, [rbp - PIS_HDR + 12]       ; and its size
-    mov ecx, [rbp - PIS_STAT + 48]      ; st_size, low 32 bits
-    cmp eax, ecx
-    jne .pis_stale
-.pis_fresh:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-.pis_stale:
-    mov eax, 1
-    pop rbx
-    leave
-    ret
-END_FUNC pyc_is_stale
-
-;; ============================================================================
-;; import_source_path(rdi = the path a search matched) -> rax = the path to
-;;   record as __file__, which is rdi itself unless it is a __pycache__ entry
-;;
-;; "<dir>/__pycache__/<name>.<tag>.pyc" becomes "<dir>/<name>.py", for either
-;; of the two cache tags im_open_pyc reads.  The
-;; other two cache shapes the search tries -- a bare "<name>.cpython-312.pyc"
-;; beside the source, and a package's __init__ -- are handled by the same
-;; rewrite, since both keep the name in the last component.  A .pyc that is
-;; NOT in a __pycache__ directory is CPython's sourceless form, whose
-;; __file__ is the .pyc, so it is left alone.
-;;
-;; The answer is written into a buffer of its own: the caller's path is the
-;; one the code object was loaded from and is still needed.
-;; ============================================================================
-global import_source_path
-DEF_FUNC import_source_path
-    push rbx
-    push r12
-    push r13
-    push r14                    ; four pushes keep rsp 16-aligned at the call
-    mov rbx, rdi
-
-    ; It has to end in one of the two cache tags.
-    mov rdi, rbx
-    call ap_strlen
-    mov r12, rax                ; the length
-    cmp r12, 16 + 13            ; the suffix, plus the shortest marker
-    jb .isp_keep
-    ; ap_memcmp with an explicit length, not ap_strcmp: that one compares
-    ; eight bytes at a time and reads past the terminator, and the path here
-    ; sits in a heap buffer whose tail was never written.  Valgrind says so.
-    lea rdi, [rbx + r12 - 16]
-    lea rsi, [rel isp_suffix]
-    mov edx, 16
-    call ap_memcmp
-    test eax, eax
-    jz .isp_tagged
-    lea rdi, [rbx + r12 - 16]
-    lea rsi, [rel isp_ap_suffix]
-    mov edx, 16
-    call ap_memcmp
-    test eax, eax
-    jnz .isp_keep
-.isp_tagged:
-
-    ; ...and contain "/__pycache__/" somewhere before the last component.
-    xor r13, r13                ; the index of the marker, once found
-    mov r14, -1
-.isp_scan:
-    lea rax, [r13 + 13]
-    cmp rax, r12
-    ja .isp_scanned
-    push r13
-    lea rdi, [rbx + r13]
-    lea rsi, [rel isp_marker]
-    mov edx, 13
-    call ap_memcmp
-    pop r13
-    test eax, eax
-    jnz .isp_scan_next
-    mov r14, r13
-.isp_scan_next:
-    inc r13
-    jmp .isp_scan
-.isp_scanned:
-    cmp r14, -1
-    je .isp_keep
-
-    ; <dir> is everything before the marker; <name> is between the marker's
-    ; trailing slash and the suffix.
-    lea rax, [r14 + 13]         ; the first byte of <name>
-    lea rcx, [r12 - 16]         ; one past its last
-    cmp rcx, rax
-    jbe .isp_keep
-    sub rcx, rax                ; the name's length
-    lea rdx, [r14 + rcx + 4]    ; <dir> + '/' + <name> + ".py" + NUL
-    cmp rdx, ISP_BUFSZ
-    jae .isp_keep
-
-    lea rdi, [rel isp_buf]
-    mov rsi, rbx
-    mov rdx, r14
-    push rcx
-    push rax
-    call ap_memcpy              ; <dir>, without the trailing slash
-    pop rax
-    pop rcx
-    lea rdi, [rel isp_buf]
-    add rdi, r14
-    mov byte [rdi], '/'
-    inc rdi
-    lea rsi, [rbx + rax]
-    mov rdx, rcx
-    push rcx
-    call ap_memcpy
-    pop rcx
-    lea rdi, [rel isp_buf]
-    add rdi, r14
-    add rdi, rcx
-    inc rdi
-    mov dword [rdi], `.py\0`
-    lea rax, [rel isp_buf]
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.isp_keep:
-    mov rax, rbx
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC import_source_path
-
-;; ============================================================================
-;; im_open_pyc(rdi = a path ending in a sixteen-byte cache tag, rsi = its
-;;   length) -> rax = an open fd on a FRESH .pyc, or -1
-;;
-;; Two spellings are tried, in order: ".apython-312.pyc" and
-;; ".cpython-312.pyc".  They are the same sixteen characters long, so the
-;; second is the first with the tag overwritten in place.
-;;
-;; The two tags exist because this interpreter both READS CPython's caches --
-;; `make check` feeds it .pyc files python3 compiled, and it must -- and now
-;; WRITES its own.  Writing under CPython's tag would put bytecode from this
-;; compiler where a python3 running in the same tree would pick it up: valid
-;; 3.12 bytecode, but not the bytecode CPython would have produced, and the
-;; sweeps in tests/ measure apython against exactly such a shared tree.  So:
-;; read both, write ours.  PEP 3147's cache tag is there for this.
-;; ============================================================================
-IOP_BUF   equ 8
-IOP_LEN   equ 16
-IOP_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
-DEF_FUNC_LOCAL im_open_pyc, IOP_FRAME
-    mov [rbp - IOP_BUF], rdi
-    mov [rbp - IOP_LEN], rsi
-    cmp rsi, IM_TAG_LEN
-    jb .iop_none
-
-    lea rsi, [rel im_ap_pyc_tag]
-    mov rdi, [rbp - IOP_BUF]
-    add rdi, [rbp - IOP_LEN]
-    sub rdi, IM_TAG_LEN
-    mov edx, IM_TAG_LEN
-    call ap_memcpy
-    mov rdi, [rbp - IOP_BUF]
-    xor esi, esi                        ; O_RDONLY
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    js .iop_second
-    mov rdi, rax
-    mov rsi, [rbp - IOP_BUF]
-    call sd_pyc_ok
-    test rax, rax
-    jnz .iop_out
-
-.iop_second:
-    lea rsi, [rel im_cp_pyc_tag]
-    mov rdi, [rbp - IOP_BUF]
-    add rdi, [rbp - IOP_LEN]
-    sub rdi, IM_TAG_LEN
-    mov edx, IM_TAG_LEN
-    call ap_memcpy
-    mov rdi, [rbp - IOP_BUF]
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    js .iop_none
-    mov rdi, rax
-    mov rsi, [rbp - IOP_BUF]
-    call sd_pyc_ok
-    test rax, rax
-    jnz .iop_out
-
-.iop_none:
-    mov rax, -1
-.iop_out:
-    leave
-    ret
-END_FUNC im_open_pyc
-
-;; ============================================================================
-;; import_search_dirs(PyListObject *dirs, const char *leaf, int64_t leaf_len) -> int
-;; Search a list of directory strings for a module named 'leaf'.
-;; Tries: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc (package)
-;;        <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
-;;        <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
-;; On success, sets import_path_buf_ptr contents and returns 1 (package) or 2 (module).
-;; On failure returns 0.
-;; ============================================================================
-
-;; ============================================================================
-;; Frame layout for import_search_dirs
-;; ============================================================================
-SD_DIRS     equ 8             ; dirs list
-SD_LEAF     equ 16            ; leaf cstr
-SD_LEAFLEN  equ 24            ; leaf length
-SD_FULLPATH equ 32            ; optional full path component (with slashes)
-SD_IDX      equ 40            ; current search index
-SD_COUNT    equ 48            ; number of dirs
-SD_FRAME    equ 56          ; + 5 pushes = 96
-
-DEF_FUNC import_search_dirs, SD_FRAME
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-
-    mov [rbp - SD_DIRS], rdi
-    mov [rbp - SD_LEAF], rsi
-    mov [rbp - SD_LEAFLEN], rdx
-    mov qword [rbp - SD_FULLPATH], 0
-
-    ; Get list size and item array
-    mov r14, [rdi + PyListObject.ob_size]   ; count
-    mov [rbp - SD_COUNT], r14
-    mov qword [rbp - SD_IDX], 0
-
-.sd_loop:
-    mov rax, [rbp - SD_IDX]
-    cmp rax, [rbp - SD_COUNT]
-    jge .sd_not_found
-
-    ; Get dir string (fat list: 16-byte stride)
-    mov rdi, [rbp - SD_DIRS]
-    mov rcx, [rdi + PyListObject.ob_item]
-    mov rax, [rbp - SD_IDX]
-    mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
-    V_UNPACK rbx, r8
-    cmp r8d, TAG_SMALLINT
-    je .sd_next                 ; skip SmallInts
-    test rbx, rbx
-    jz .sd_next
-
-    ; Build path in import_path_buf_ptr
-    mov r12, [rel import_path_buf_ptr]  ; r12 = dest buf
-
-    ; Bound the assembled path before writing any of it.  Nothing checked
-    ; it: a sys.path entry longer than the buffer memcpy'd straight past the
-    ; end of the 8192-byte heap block, so sys.path.insert(0, "A"*9000)
-    ; followed by any import corrupted the heap.  Too long simply means the
-    ; module is not findable here.
-    lea rsi, [rbx + PyStrObject.data]
-    mov r13, [rbx + PyStrObject.ob_size] ; r13 = offset (dir length)
-    mov rax, r13
-    add rax, [rbp - SD_LEAFLEN]
-    add rax, IM_PATH_MARGIN
-    cmp rax, PATHBUF_SIZE
-    jae .sd_next
-
-    ; Copy dir to buffer
-    test r13, r13
-    jz .sd_no_dir
-    mov rdi, r12
-    mov rdx, r13
-    call ap_memcpy
-.sd_no_dir:
-
-    ; Append '/' if dir non-empty
-    test r13, r13
-    jz .sd_no_slash
-    mov byte [r12 + r13], '/'
-    inc r13
-.sd_no_slash:
-    ; r13 = current write offset
-
-    ; --- Pattern 1: <dir>/<leaf>/__pycache__/__init__.cpython-312.pyc ---
-    ; Append leaf name
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SD_LEAF]
-    mov rdx, [rbp - SD_LEAFLEN]
-    mov r15, rdx                ; save leaf len
-    call ap_memcpy
-    lea r14, [r13 + r15]       ; r14 = offset after leaf
-
-    ; Append suffix
-    mov rdi, r12
-    add rdi, r14
-    lea rsi, [rel im_pkg_pyc_suffix]
-    mov rdx, im_pkg_pyc_suffix_len
-    call ap_memcpy
-    add r14, im_pkg_pyc_suffix_len
-    mov byte [r12 + r14], 0
-
-    mov rdi, r12
-    mov rsi, r14
-    call im_open_pyc
-    test rax, rax
-    jns .sd_found_package
-
-.sd_p2:
-    ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
-    ; Rebuild from dir offset (r13 already has dir+slash offset)
-    ; Re-read r13 from dir
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .sd_p2_no_slash
-    inc r13                     ; account for '/'
-.sd_p2_no_slash:
-
-    ; Append "__pycache__/"
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pycache_prefix]
-    mov rdx, im_pycache_prefix_len
-    call ap_memcpy
-    add r13, im_pycache_prefix_len
-
-    ; Append leaf name
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SD_LEAF]
-    mov rdx, [rbp - SD_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SD_LEAFLEN]
-
-    ; Append ".cpython-312.pyc"
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pyc_suffix]
-    mov rdx, im_pyc_suffix_len
-    call ap_memcpy
-    add r13, im_pyc_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    mov rsi, r13
-    call im_open_pyc
-    test rax, rax
-    jns .sd_found_module
-
-.sd_p3:
-    ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .sd_p3_no_slash
-    inc r13
-.sd_p3_no_slash:
-
-    ; Append leaf name
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SD_LEAF]
-    mov rdx, [rbp - SD_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SD_LEAFLEN]
-
-    ; Append ".cpython-312.pyc"
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pyc_suffix]
-    mov rdx, im_pyc_suffix_len
-    call ap_memcpy
-    add r13, im_pyc_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    mov rsi, r13
-    call im_open_pyc
-    test rax, rax
-    jns .sd_found_module
-
-.sd_p4:
-    ; --- Pattern 4: <dir>/<leaf>/__init__.py (a package, from source) ---
-    ; The source patterns come last, so a .pyc that is already there still
-    ; wins and nothing an existing user has changes behaviour.
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .sd_p4_no_slash
-    inc r13
-.sd_p4_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SD_LEAF]
-    mov rdx, [rbp - SD_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SD_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pkg_py_suffix]
-    mov rdx, im_pkg_py_suffix_len
-    call ap_memcpy
-    add r13, im_pkg_py_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    jns .sd_found_package
-
-    ; --- Pattern 5: <dir>/<leaf>.py (a module, from source) ---
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .sd_p5_no_slash
-    inc r13
-.sd_p5_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SD_LEAF]
-    mov rdx, [rbp - SD_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SD_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_py_suffix]
-    mov rdx, im_py_suffix_len
-    call ap_memcpy
-    add r13, im_py_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    jns .sd_found_module
-
-    ; --- Pattern 5b: <dir>/<leaf>.pyc (CPython's sourceless form) ---
-    ; Last, as CPython's FileFinder puts it last: a .py beside it wins.  The
-    ; tagged "<leaf>.cpython-312.pyc" above is what this tree writes; a bare
-    ; "<leaf>.pyc" is what a distributor ships with the sources stripped, and
-    ; what `os.rename(cache_from_source(p), p + "c")` leaves behind.
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .sd_p5b_no_slash
-    inc r13
-.sd_p5b_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SD_LEAF]
-    mov rdx, [rbp - SD_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SD_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_legacy_pyc_suffix]
-    mov rdx, im_legacy_pyc_suffix_len
-    call ap_memcpy
-    add r13, im_legacy_pyc_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    js .sd_next
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .sd_found_module
-
-.sd_next:
-    inc qword [rbp - SD_IDX]
-    jmp .sd_loop
-
-.sd_found_package:
-    ; Close the test fd
-    mov rdi, rax
-    call sys_close
-    mov eax, 1                  ; return 1 = package
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.sd_found_module:
-    ; Close the test fd
-    mov rdi, rax
-    call sys_close
-    mov eax, 2                  ; return 2 = module
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.sd_not_found:
-    xor eax, eax               ; return 0 = not found
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC import_search_dirs
-
-;; ============================================================================
-;; import_search_syspath(PyListObject *sys_path, const char *leaf, int64_t leaf_len,
-;;                       const char *full_component) -> int
-;; Searches sys.path for a module. For dotted names, full_component has slashes.
-;; Tries patterns:
-;;   <dir>/<full_component>/__pycache__/__init__.cpython-312.pyc (package)
-;;   <dir>/__pycache__/<leaf>.cpython-312.pyc (module)
-;;   <dir>/<leaf>.cpython-312.pyc (module, no __pycache__)
-;; Returns 1 (package), 2 (module), 3 (a PEP 420 namespace package, whose
-;; portion directories are left in import_ns_portions), or 0 (not found).
-;;
-;; The namespace case is the last pattern and it does NOT return: a directory
-;; with no __init__.py is a package under PEP 420, but only if nothing else on
-;; the whole of sys.path answers to the name.  A regular package or module
-;; WINS wherever it sits, which is the opposite of the first-match rule every
-;; other pattern follows -- so a matching bare directory is recorded and the
-;; scan continues, and the portions are the answer only if the loop runs out.
-;; They accumulate, because a namespace package's __path__ is every matching
-;; directory rather than the first; that is what lets two distributions each
-;; ship part of one package, and it is the point of the PEP.
-;; ============================================================================
-
-SS_DIRS     equ 8
-SS_LEAF     equ 16
-SS_LEAFLEN  equ 24
-SS_FULL     equ 32            ; full path component (dots->slashes)
-SS_IDX      equ 40
-SS_COUNT    equ 48
-SS_STAT     equ 56 + 144      ; STAT_SIZE, for the is-it-a-directory test
-SS_DIRLEN   equ SS_STAT + 8   ; how long <dir>/<full> came out
-SS_FRAME    equ ((SS_DIRLEN + 15) / 16) * 16 + 8   ; + 5 pushes = 16-aligned
-
-DEF_FUNC import_search_syspath, SS_FRAME
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-
-    mov [rbp - SS_DIRS], rdi
-    mov [rbp - SS_LEAF], rsi
-    mov [rbp - SS_LEAFLEN], rdx
-    mov [rbp - SS_FULL], rcx
-
-    mov r14, [rdi + PyListObject.ob_size]
-    mov [rbp - SS_COUNT], r14
-    mov qword [rbp - SS_IDX], 0
-
-    ; Any portions a previous search collected are not this one's.
-    call import_ns_portions_clear
-
-.ss_loop:
-    mov rax, [rbp - SS_IDX]
-    cmp rax, [rbp - SS_COUNT]
-    jge .ss_not_found
-
-    ; Get dir string (fat list: 16-byte stride)
-    mov rdi, [rbp - SS_DIRS]
-    mov rcx, [rdi + PyListObject.ob_item]
-    mov rax, [rbp - SS_IDX]
-    mov rbx, [rcx + rax * 8]      ; rbx = dir str obj payload
-    V_UNPACK rbx, r8
-    cmp r8d, TAG_SMALLINT
-    je .ss_next                 ; skip SmallInts
-    test rbx, rbx
-    jz .ss_next
-
-    mov r12, [rel import_path_buf_ptr]  ; dest buf
-
-    ; Same bound as the search loop above.
-    lea rsi, [rbx + PyStrObject.data]
-    mov r13, [rbx + PyStrObject.ob_size]
-    mov rax, r13
-    add rax, [rbp - SS_LEAFLEN]
-    add rax, IM_PATH_MARGIN
-    cmp rax, PATHBUF_SIZE
-    jae .ss_next
-
-    ; Copy dir to buffer
-    test r13, r13
-    jz .ss_no_dir
-    mov rdi, r12
-    mov rdx, r13
-    call ap_memcpy
-.ss_no_dir:
-    test r13, r13
-    jz .ss_no_slash
-    mov byte [r12 + r13], '/'
-    inc r13
-.ss_no_slash:
-
-    ; --- Pattern 1: <dir>/<full>/__pycache__/__init__.cpython-312.pyc ---
-    ; Append full component (dots->slashes)
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_FULL]
-    push r13                    ; save dir offset
-    mov rdi, rsi                ; strlen(full)
-    call ap_strlen
-    mov r15, rax                ; r15 = full component length
-    pop r13
-    ; The dotted component can be longer than the leaf checked above.
-    mov rax, r13
-    add rax, r15
-    add rax, IM_PATH_MARGIN
-    cmp rax, PATHBUF_SIZE
-    jae .ss_next
-
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_FULL]
-    mov rdx, r15
-    call ap_memcpy
-    lea r14, [r13 + r15]       ; offset after full component
-
-    ; Append package suffix
-    mov rdi, r12
-    add rdi, r14
-    lea rsi, [rel im_pkg_pyc_suffix]
-    mov rdx, im_pkg_pyc_suffix_len
-    call ap_memcpy
-    add r14, im_pkg_pyc_suffix_len
-    mov byte [r12 + r14], 0
-
-    mov rdi, r12
-    mov rsi, r14
-    call im_open_pyc
-    test rax, rax
-    jns .ss_found_package
-.ss_after_pyc0:
-
-    ; --- Pattern 2: <dir>/__pycache__/<leaf>.cpython-312.pyc ---
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .ss_p2_no_slash
-    inc r13
-.ss_p2_no_slash:
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pycache_prefix]
-    mov rdx, im_pycache_prefix_len
-    call ap_memcpy
-    add r13, im_pycache_prefix_len
-
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_LEAF]
-    mov rdx, [rbp - SS_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SS_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pyc_suffix]
-    mov rdx, im_pyc_suffix_len
-    call ap_memcpy
-    add r13, im_pyc_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    mov rsi, r13
-    call im_open_pyc
-    test rax, rax
-    jns .ss_found_module
-.ss_after_pyc1:
-
-    ; --- Pattern 3: <dir>/<leaf>.cpython-312.pyc ---
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .ss_p3_no_slash
-    inc r13
-.ss_p3_no_slash:
-
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_LEAF]
-    mov rdx, [rbp - SS_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SS_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pyc_suffix]
-    mov rdx, im_pyc_suffix_len
-    call ap_memcpy
-    add r13, im_pyc_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    mov rsi, r13
-    call im_open_pyc
-    test rax, rax
-    jns .ss_found_module
-.ss_after_pyc2:
-
-    ; --- Pattern 4: <dir>/<full>/__init__.py (a package, from source) ---
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .ss_p4_no_slash
-    inc r13
-.ss_p4_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_FULL]
-    mov rdx, r15                ; the dotted component's length, from pattern 1
-    call ap_memcpy
-    add r13, r15
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_pkg_py_suffix]
-    mov rdx, im_pkg_py_suffix_len
-    call ap_memcpy
-    add r13, im_pkg_py_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    jns .ss_found_package
-
-    ; --- Pattern 5: <dir>/<leaf>.py (a module, from source) ---
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .ss_p5_no_slash
-    inc r13
-.ss_p5_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_LEAF]
-    mov rdx, [rbp - SS_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SS_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_py_suffix]
-    mov rdx, im_py_suffix_len
-    call ap_memcpy
-    add r13, im_py_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    jns .ss_found_module
-
-    ; --- Pattern 5b: <dir>/<leaf>.pyc (CPython's sourceless form) ---
-    ; Last of the file patterns, as CPython's FileFinder has it: a .py beside
-    ; it wins.  See the same pattern in import_search_dirs for why it exists.
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .ss_p5b_no_slash
-    inc r13
-.ss_p5b_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_LEAF]
-    mov rdx, [rbp - SS_LEAFLEN]
-    call ap_memcpy
-    add r13, [rbp - SS_LEAFLEN]
-
-    mov rdi, r12
-    add rdi, r13
-    lea rsi, [rel im_legacy_pyc_suffix]
-    mov rdx, im_legacy_pyc_suffix_len
-    call ap_memcpy
-    add r13, im_legacy_pyc_suffix_len
-    mov byte [r12 + r13], 0
-
-    mov rdi, r12
-    xor esi, esi
-    xor edx, edx
-    call sys_open
-    test rax, rax
-    js .ss_p6
-    mov rdi, rax
-    mov rsi, r12
-    call sd_pyc_ok
-    test eax, eax
-    jnz .ss_found_module
-
-.ss_p6:
-    ; --- Pattern 6: <dir>/<full> is a DIRECTORY (PEP 420) ---
-    ; Recorded rather than returned; see the header.  Nothing here can be a
-    ; regular package, because patterns 1 and 4 have already asked this same
-    ; directory for its __init__.
-    mov r13, [rbx + PyStrObject.ob_size]
-    test r13, r13
-    jz .ss_p6_no_slash
-    inc r13
-.ss_p6_no_slash:
-    mov rdi, r12
-    add rdi, r13
-    mov rsi, [rbp - SS_FULL]
-    mov rdx, r15                ; the dotted component's length, from pattern 1
-    call ap_memcpy
-    add r13, r15
-    mov byte [r12 + r13], 0
-    mov [rbp - SS_DIRLEN], r13
-
-    mov rdi, r12
-    lea rsi, [rbp - SS_STAT]
-    call sys_stat
-    test rax, rax
-    js .ss_next
-    mov eax, [rbp - SS_STAT + StatBuf.st_mode]   ; 32-bit field
-    and eax, S_IFMT
-    cmp eax, S_IFDIR
-    jne .ss_next
-    mov rdi, r12
-    mov rsi, [rbp - SS_DIRLEN]
-    call import_ns_portions_add
-
-.ss_next:
-    inc qword [rbp - SS_IDX]
-    jmp .ss_loop
-
-.ss_found_package:
-    mov rdi, rax
-    call sys_close
-    mov eax, 1
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.ss_found_module:
-    mov rdi, rax
-    call sys_close
-    mov eax, 2
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.ss_not_found:
-    ; Nothing regular answered to the name anywhere, so the bare directories
-    ; recorded along the way are the package.
-    mov rax, [rel import_ns_portions]
-    test rax, rax
-    jz .ss_really_not_found
-    cmp qword [rax + PyListObject.ob_size], 0
-    je .ss_really_not_found
-    mov eax, 3
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-.ss_really_not_found:
-    xor eax, eax
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
-END_FUNC import_search_syspath
-
-;; ============================================================================
-;; import_ns_portions_clear() -> nothing; drops whatever the last search
-;;   collected, so a search never inherits another's portions
-;;
-;; The PEP 420 portions live in a global between import_search_syspath and
-;; the caller that turns them into a module.  A global rather than an
-;; out-parameter because the path itself already travels that way, in
-;; import_path_buf_ptr, and the search's answer is an int -- one more channel
-;; of the shape already there rather than a new one.
-;; ============================================================================
-DEF_FUNC_LOCAL import_ns_portions_clear
-    mov rdi, [rel import_ns_portions]
-    test rdi, rdi
-    jz .inpc_done
-    mov qword [rel import_ns_portions], 0
-    call obj_decref
-.inpc_done:
-    leave
-    ret
-END_FUNC import_ns_portions_clear
-
-;; ============================================================================
-;; import_ns_portions_add(rdi = a directory path, rsi = its length)
-;;   -> nothing; the path is appended to the portion list, which is built on
-;;      first use.  A failure to allocate leaves the list as it was, and the
-;;      search then answers "not found" rather than a short namespace package.
-;; ============================================================================
-INPA_PATH equ 8
-INPA_LEN  equ 16
-INPA_STR  equ 24
-INPA_FRAME equ 32           ; + 0 pushes = 32, 16-aligned
-DEF_FUNC_LOCAL import_ns_portions_add, INPA_FRAME
-    mov [rbp - INPA_PATH], rdi
-    mov [rbp - INPA_LEN], rsi
-
-    mov rax, [rel import_ns_portions]
-    test rax, rax
-    jnz .inpa_have_list
-    xor edi, edi
-    call list_new
-    test rax, rax
-    jz .inpa_done
-    mov [rel import_ns_portions], rax
-.inpa_have_list:
-    mov rdi, [rbp - INPA_PATH]
-    mov rsi, [rbp - INPA_LEN]
-    call str_new_heap
-    test rax, rax
-    jz .inpa_done
-    mov [rbp - INPA_STR], rax
-    mov rdi, [rel import_ns_portions]
-    mov rsi, rax
-    call list_append
-    ; list_append took its own reference.
-    mov rdi, [rbp - INPA_STR]
-    call obj_decref
-.inpa_done:
-    leave
-    ret
-END_FUNC import_ns_portions_add
-
-;; ============================================================================
-;; import_make_namespace(rdi = the dotted name, as a str) -> PyObject*
-;;   the new module, registered in sys.modules, or 0
-;;
-;; A PEP 420 namespace package: the directories import_search_syspath
-;; collected become its __path__, and there is no code to run, because there
-;; is no __init__.py -- that is what makes it one.  Everything else a module
-;; carries is set the way import_load_module sets it, with __file__ None
-;; rather than absent, which is what CPython leaves on a namespace module and
-;; what a caller that asks for it sees.
-;; ============================================================================
-IMN_NAME  equ 8
-IMN_DICT  equ 16
-IMN_MOD   equ 24
-IMN_KEY   equ 32
-IMN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
-DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
-    mov [rbp - IMN_NAME], rdi
-
-    call dict_new
-    test rax, rax
-    jz .imn_fail
-    mov [rbp - IMN_DICT], rax
-
-    ; __name__ = the dotted name
-    lea rdi, [rel im_dunder_name]
-    mov rsi, [rbp - IMN_NAME]
-    call .imn_set
-    ; __package__ = the same: a namespace package IS a package
-    lea rdi, [rel im_dunder_package]
-    mov rsi, [rbp - IMN_NAME]
-    call .imn_set
-    ; __path__ = the portions
-    lea rdi, [rel im_dunder_path]
-    mov rsi, [rel import_ns_portions]
-    call .imn_set
-    ; __file__, __loader__ and __spec__ are all None here.  None rather than
-    ; absent for __file__: CPython leaves the name bound, and code that asks
-    ; whether a module has a file reads None rather than catching.
-    lea rdi, [rel im_dunder_file]
-    lea rsi, [rel none_singleton]
-    call .imn_set
-    lea rdi, [rel im_dunder_loader]
-    lea rsi, [rel none_singleton]
-    call .imn_set
-    lea rdi, [rel im_dunder_spec]
-    lea rsi, [rel none_singleton]
-    call .imn_set
-    lea rdi, [rel im_dunder_builtins]
-    mov rsi, [rel builtins_dict_global]
-    call .imn_set
-
-    mov rdi, [rbp - IMN_NAME]
-    mov rsi, [rbp - IMN_DICT]
-    call module_new
-    test rax, rax
-    jz .imn_fail_dict
-    mov [rbp - IMN_MOD], rax
-
-    mov rdi, [rel sys_modules_dict]
-    mov rsi, [rbp - IMN_NAME]
-    mov rdx, rax
-    call dict_set
-
-    ; The module owns the dict now; release what dict_new gave us.
-    mov rdi, [rbp - IMN_DICT]
-    call obj_decref
-    mov rax, [rbp - IMN_MOD]
-    leave
-    ret
-
-.imn_fail_dict:
-    mov rdi, [rbp - IMN_DICT]
-    call obj_decref
-.imn_fail:
-    xor eax, eax
-    leave
-    ret
-
-;; rdi = the key, as a C string; rsi = the value.  The key is interned into a
-;; str, set, and released -- the shape every dunder store above it uses.
-.imn_set:
-    mov [rbp - IMN_KEY], rsi
-    call str_from_cstr_heap
-    test rax, rax
-    jz .imn_set_done
-    mov rdi, [rbp - IMN_DICT]
-    mov rsi, rax
-    mov rdx, [rbp - IMN_KEY]
-    push rax
-    push rax                    ; a pair, so the call stays 16-byte aligned
-    call dict_set
-    pop rdi
-    pop rdi
-    call obj_decref
-.imn_set_done:
-    ret
-END_FUNC import_make_namespace
-
-;; ============================================================================
-;; import_abspath(rdi = a path as a C string) -> rax = an absolute path in a
-;;   static buffer, or rdi unchanged when it is already absolute or will not fit
-;;
-;; `__file__` and `__cached__` are absolute in CPython from 3.4 onward, and a
-;; relative sys.path entry -- "." is what `-m` puts there -- made ours
-;; relative.  test_import compares __cached__ against
-;; os.path.join(os.getcwd(), ...) and saw "./__pycache__/x.pyc".
-;;
-;; A leading "./" is dropped rather than kept, because os.path.join produces
-;; no such segment and the comparison is textual.
-;; ============================================================================
-IAP_PATH  equ 8
-IAP_FRAME equ 24            ; + 1 push = 32, 16-aligned
-global import_abspath
-DEF_FUNC import_abspath, IAP_FRAME
-    push rbx
-    mov [rbp - IAP_PATH], rdi
-    test rdi, rdi
-    jz .iap_asis
-    cmp byte [rdi], '/'
-    je .iap_asis
-
-    lea rdi, [rel iap_buf]
-    mov esi, IAP_BUFSZ - 1
-    call sys_getcwd
-    test rax, rax
-    js .iap_asis
-    lea rdi, [rel iap_buf]
-    call ap_strlen
-    mov rbx, rax
-    cmp rbx, 1
-    jbe .iap_have_cwd                   ; "/" already ends in a slash
-    lea rdi, [rel iap_buf]
-    mov byte [rdi + rbx], '/'
-    inc rbx
-.iap_have_cwd:
-
-    mov rsi, [rbp - IAP_PATH]
-    cmp word [rsi], 0x2f2e               ; "./", little-endian
-    jne .iap_copy
-    add rsi, 2
-.iap_copy:
-    push rsi
-    mov rdi, rsi
-    call ap_strlen
-    pop rsi
-    lea rcx, [rbx + rax]
-    cmp rcx, IAP_BUFSZ - 1
-    jae .iap_asis
-    lea rdi, [rel iap_buf]
-    add rdi, rbx
-    mov rdx, rax
-    add rbx, rax                        ; ap_memcpy answers the DEST, not the
-                                        ; length, so the sum is taken first
-    call ap_memcpy
-    lea rdi, [rel iap_buf]
-    mov byte [rdi + rbx], 0
-    mov rax, rdi
-    pop rbx
-    leave
-    ret
-.iap_asis:
-    mov rax, [rbp - IAP_PATH]
-    pop rbx
-    leave
-    ret
-END_FUNC import_abspath
 
 ;; ============================================================================
 ;; import_load_module(PyObject *name_str, const char *path_cstr, int is_package) -> PyObject*
@@ -2840,7 +1728,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -2865,7 +1753,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -2895,7 +1783,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -2908,7 +1796,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -2919,7 +1807,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -2934,7 +1822,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -2987,7 +1875,7 @@ DEF_FUNC import_load_module, IF_FRAME
     push r8
     mov rdi, r8
     mov rsi, [rsp + 8]         ; pkg dir str
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     ; DECREF pkg dir str
     mov rdi, [rsp + 8]
     call obj_decref
@@ -2999,7 +1887,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]         ; list
-    call dict_set
+    call dict_set_str
     pop rdi                     ; key
     call obj_decref
     pop rdi                     ; list
@@ -3039,7 +1927,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -3057,6 +1945,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rsi, rbx                ; name_str
     mov rdx, r13
     call dict_set
+    ERR_M1 .fl_register_failed
 
     ; Set __builtins__ in module dict
     lea rdi, [rel im_dunder_builtins]
@@ -3065,7 +1954,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -3124,7 +2013,8 @@ DEF_FUNC import_load_module, IF_FRAME
     ; r13` could hand back freed memory.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
-    call dict_get               ; borrowed Value, or 0 for a miss
+    call dict_get           ; borrowed Value, or 0 for a miss
+    ERR_PENDING .fl_reread_failed
     test rax, rax
     jz .fl_keep_created         ; the body deleted itself; hand back what we made
     V_TEST_PTR rax, rcx
@@ -3147,6 +2037,26 @@ DEF_FUNC import_load_module, IF_FRAME
     pop rbx
     leave
     ret
+
+.fl_reread_failed:
+    ; sys.modules could not be searched after the body ran.  The frame, the
+    ; code and the dict have gone back; the module is all that is left.
+    mov rdi, r13
+    call obj_decref
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fl_register_failed:
+    ; sys.modules refused the new module: nothing ran and there is no frame.
+    mov rdi, r14                ; the code
+    call obj_decref
+    jmp .br_not_cached
 
 .load_failed:
     ; Free inner import's marshal refs array (if allocated)
@@ -3193,12 +2103,13 @@ DEF_FUNC import_load_module, IF_FRAME
     ; itself, so look before deleting -- dict_del raises on a missing key.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
-    call dict_get
+    call dict_get           ; err: cleanup under the body's exception; a miss and a failure both skip the delete
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jz .br_not_cached
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
-    call dict_del
+    extern dict_del_opt
+    call dict_del_opt           ; err: cleanup under the body's exception; the answer changes nothing below
 .br_not_cached:
 
     mov rdi, r13                ; our own reference to the module
@@ -3228,55 +2139,26 @@ im_halted_prefix:    db "import of ", 0
 im_halted_suffix:    db " halted; None in sys.modules", 0
 irr_package_key:    db "__package__", 0
 im_builtins:        db "builtins", 0
+global im_dunder_name
 im_dunder_name:     db "__name__", 0
+global im_dunder_file
 im_dunder_file:     db "__file__", 0
 im_dunder_cached:   db "__cached__", 0
+global im_dunder_loader
 im_dunder_loader:   db "__loader__", 0
+global im_dunder_spec
 im_dunder_spec:     db "__spec__", 0
+global im_dunder_package
 im_dunder_package:  db "__package__", 0
+global im_dunder_path
 im_dunder_path:     db "__path__", 0
+global im_dunder_builtins
 im_dunder_builtins: db "__builtins__", 0
 im_empty:           db "", 0
 im_dot:             db ".", 0
 
-; Path suffixes for module search
-im_pkg_pyc_suffix:     db "/__pycache__/__init__.cpython-312.pyc", 0
-im_pkg_pyc_suffix_len  equ $ - im_pkg_pyc_suffix - 1
-
-im_pycache_prefix:     db "__pycache__/", 0
-im_pycache_prefix_len  equ $ - im_pycache_prefix - 1
-
-im_pyc_suffix:         db ".cpython-312.pyc", 0
-im_pyc_suffix_len      equ $ - im_pyc_suffix - 1
-
-; CPython's sourceless form: a .pyc beside the module rather than under
-; __pycache__, which is what a stripped distribution ships.
-im_legacy_pyc_suffix:     db ".pyc", 0
-im_legacy_pyc_suffix_len  equ $ - im_legacy_pyc_suffix - 1
-
-; The two cache tags im_open_pyc swaps between, without their NULs: they must
-; be the same length, and they are.
-im_ap_pyc_tag:         db ".apython-312.pyc"
-im_cp_pyc_tag:         db ".cpython-312.pyc"
-IM_TAG_LEN             equ 16
-
-im_pkg_py_suffix:      db "/__init__.py", 0
-im_pkg_py_suffix_len   equ $ - im_pkg_py_suffix - 1
-
-im_py_suffix:          db ".py", 0
-im_py_suffix_len       equ $ - im_py_suffix - 1
-
-section .rodata
-isp_suffix: db ".cpython-312.pyc", 0
-isp_ap_suffix: db ".apython-312.pyc", 0
-isp_marker: db "/__pycache__/", 0
-
 section .bss
 im_path_key:        resq 1      ; the interned "__path__", built on first use
-ISP_BUFSZ equ 4096
-isp_buf: resb ISP_BUFSZ
-IAP_BUFSZ equ 4096
-iap_buf: resb IAP_BUFSZ
 
 section .bss
 ; The builtins module, borrowed: sys.modules holds the reference for the life
@@ -3285,11 +2167,9 @@ section .bss
 global builtins_module_obj
 builtins_module_obj: resq 1
 
+global import_path_buf_ptr
 import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
 
-; The PEP 420 portion directories the last search collected, as a list of
-; str, or 0.  Owned; cleared at the start of every search.
-import_ns_portions: resq 1
 
 ; A list searched in place of sys.path by the interpreter's own finder, or 0.
 ; _impcore.create_builtin points it at the lib/ directory alone.

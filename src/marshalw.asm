@@ -53,6 +53,7 @@ MARSHAL_FLAG_REF              equ 0x80
 ; header and nothing else.
 MW_SET_ENTRY_KEY              equ 8
 
+extern dict_get
 extern ap_malloc
 extern ap_realloc
 extern ap_free
@@ -79,7 +80,7 @@ extern complex_type
 extern code_type
 extern exc_ValueError_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern int_to_i64
 extern int_is_compact
 extern __gmpz_sizeinbase
@@ -963,14 +964,14 @@ DEF_FUNC marshal_dumps_fn, MDS_FRAME
     ; allocator.  CPython words the first "unmarshallable object".
     cmp qword [rel mw_error], 2
     jne .mds_oom
-    RAISE exc_ValueError_type, "unmarshallable object"
+    SET_EXC exc_ValueError_type, "unmarshallable object"
 .mds_oom:
     xor eax, eax
     xor edx, edx
     leave
     ret
 .mds_args:
-    RAISE exc_TypeError_type, "dumps() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, "dumps() takes 1 or 2 arguments", .mds_oom
 END_FUNC marshal_dumps_fn
 
 ;; ============================================================================
@@ -984,7 +985,7 @@ extern obj_getattr_opt
 extern obj_dealloc
 extern str_from_cstr_heap
 extern obj_call_n
-extern raise_no_attribute
+extern set_no_attribute
 extern str_intern_cstr
 MDP_ARGS  equ 24            ; the one Value handed to .write; see the note on
                             ; an argument array growing upward
@@ -1036,11 +1037,11 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
     mov rdi, rax
     lea rsi, [rbp - MDP_ARGS]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .mdp_propagate, below
     push rax
     push rax
     mov rdi, [rbp - MDP_FILE]
-    call obj_decref
+    DECREF_V rdi, rcx                   ; a Value: `write = 5` is an immediate
     mov rdi, [rbp - MDP_BYTES]
     call obj_decref
     pop rax
@@ -1067,8 +1068,8 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
     mov rdi, [rbp - MDP_FILE]
     mov rsi, [rbp - MDP_NAME]
     xor edx, edx
-    pop rbx
-    call raise_no_attribute
+    call set_no_attribute
+    jmp .mdp_propagate
 .mdp_release:
     mov rdi, [rbp - MDP_BYTES]
     call obj_decref
@@ -1081,9 +1082,9 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
 .mdp_failed:
     cmp qword [rel mw_error], 2
     jne .mdp_propagate
-    RAISE exc_ValueError_type, "unmarshallable object"
+    FAIL exc_ValueError_type, "unmarshallable object", .mdp_propagate
 .mdp_args:
-    RAISE exc_TypeError_type, "dump() takes 2 or 3 arguments"
+    FAIL exc_TypeError_type, "dump() takes 2 or 3 arguments", .mdp_propagate
 END_FUNC marshal_dump_fn
 
 ;; ============================================================================
@@ -1133,11 +1134,11 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
     xor edx, edx
     push rdi
     push rdi
-    call obj_call_n
+    call obj_call_n             ; err: .mdl_fail, below
     pop rdi
     pop rcx
     mov [rbp - MDL_DATA], rax
-    call obj_decref                     ; the bound method
+    DECREF_V rdi, rcx                   ; the bound method, or whatever `read` is
     mov rax, [rbp - MDL_DATA]
     test rax, rax
     jz .mdl_fail
@@ -1145,7 +1146,7 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
     mov [rbp - MDL_ARGS], rax
     lea rdi, [rbp - MDL_ARGS]
     mov esi, 1
-    call marshal_loads_fn
+    call marshal_loads_fn       ; err: its 0 is this function's, once the data is released
     mov [rbp - MDL_ARGS], rax
     mov rdi, [rbp - MDL_DATA]
     DECREF_V rdi, rsi
@@ -1158,14 +1159,14 @@ DEF_FUNC marshal_load_fn, MDL_FRAME
     mov rdi, [rbp - MDL_FILE]
     mov rsi, [rbp - MDL_NAME]
     xor edx, edx
-    call raise_no_attribute
+    call set_no_attribute
 .mdl_fail:
     xor eax, eax
     xor edx, edx
     leave
     ret
 .mdl_args:
-    RAISE exc_TypeError_type, "load() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, "load() takes 1 or 2 arguments", .mdl_fail
 END_FUNC marshal_load_fn
 
 ;; ============================================================================
@@ -1289,7 +1290,6 @@ extern sys_rename
 extern sys_getpid
 extern ap_strlen
 extern ap_memset
-extern dict_get
 extern sys_module_obj
 
 PYCW_MAGIC       equ 0x0a0d0dcb
@@ -1334,7 +1334,7 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     mov rsi, rax
     push rax
     push rax
-    call dict_get
+    call dict_get                   ; err: tested below, once the name is released
     pop rcx
     pop rdi
     push rax
@@ -1343,7 +1343,16 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     pop rax
     pop rcx
     test rax, rax
-    jz .pw_have_flag                    ; absent means write
+    jnz .pw_flag_found
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .pw_have_flag                    ; absent means write
+    ; sys's dict could not be searched.  A cache entry is an optimisation:
+    ; drop the error with it, as every other failure in here is dropped.
+    xor edi, edi
+    extern exc_restore
+    call exc_restore
+    jmp .pw_out
+.pw_flag_found:
     lea rcx, [rel bool_false]
     cmp rax, rcx
     jne .pw_out

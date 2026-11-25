@@ -27,7 +27,7 @@ extern bool_true
 extern bool_false
 extern int_from_i64
 extern int_to_i64
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern str_byte_to_cp
 extern str_type
@@ -54,6 +54,7 @@ section .text
 ;; ============================================================================
 ;; str_method_count(args, nargs) -> SmallInt count of occurrences
 ;; args[0]=self, args[1]=sub
+;; Fails: 0
 ;; ============================================================================
 ;; start and end were ignored and the scan used the C-string ap_strstr, so
 ;; "abcabc".count("b", 3) was 2 and "a\x00b".count("b") was 0.  Counting an
@@ -88,6 +89,7 @@ DEF_FUNC str_method_count, CNT_FRAME
     mov rdx, [rbp - CNT_NARGS]
     lea rcx, [rbp - CNT_WPTR]
     call str_search_window
+    ERR_M1 .count_fail
     test eax, eax
     jz .count_done                  ; nothing can match: zero
 
@@ -159,8 +161,14 @@ DEF_FUNC str_method_count, CNT_FRAME
     ; REQUIRE_STR_TYPE touches it, and CPython names its type.
     mov rsi, rax
     CSTRING rdi, `must be str, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+.count_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_count
 
 ;; ============================================================================
@@ -378,7 +386,7 @@ DEF_FUNC str_method_title
     mov rdi, rax
     mov esi, 2
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -396,7 +404,7 @@ DEF_FUNC str_method_capitalize
     mov rdi, rax
     mov esi, 3
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -414,7 +422,7 @@ DEF_FUNC str_method_swapcase
     mov rdi, rax
     mov esi, 4
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -432,7 +440,7 @@ DEF_FUNC str_method_casefold
     mov rdi, rax
     mov esi, 5
     extern str_case_map
-    call str_case_map
+    call str_case_map           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -449,7 +457,7 @@ END_FUNC str_method_casefold
 ;; padded with 'x', and `"abc".center(10, None)` padded with whatever byte sat
 ;; at that offset in the None singleton.
 ;;
-;; Does not return on failure.
+;; Fails: 0
 ;; ============================================================================
 SFC_ARG   equ 8
 SFC_FRAME equ 16            ; + 0 pushes = 16-aligned
@@ -476,17 +484,24 @@ DEF_FUNC str_fill_char, SFC_FRAME
 .sfc_not_str:
     mov rsi, [rbp - SFC_ARG]
     CSTRING rdi, `The fill character must be a unicode character, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .sfc_bad_length:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
           "The fill character must be exactly one character long"
+    xor eax, eax
+    leave
+    ret
 END_FUNC str_fill_char
 
 ;; ============================================================================
 ;; str_pad_width(rdi = the width argument, a Value; esi = 0 for a value that
 ;;               has to fit a C ssize_t, 1 for one that has to fit a C int)
 ;;   -> rax = it, as an i64
+;; Fails: -1
 ;;
 ;; A width is an index, and may be any object with __index__ -- but it also
 ;; has to FIT one: obj_as_index truncates, so `"abc".center(2**70)` came back
@@ -520,6 +535,7 @@ DEF_FUNC str_pad_width, SPW_FRAME
     mov rdi, [rbp - SPW_ARG]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .spw_done                    ; -1 and pending: hand both on
     cmp qword [rbp - SPW_MODE], 0
     je .spw_done
     cmp rax, 0x7FFFFFFF
@@ -533,9 +549,14 @@ DEF_FUNC str_pad_width, SPW_FRAME
     extern exc_OverflowError_type
     cmp qword [rbp - SPW_MODE], 0
     jne .spw_overflow_int
-    RAISE exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+    SET_EXC exc_OverflowError_type, "Python int too large to convert to C ssize_t"
+    jmp .spw_fail
 .spw_overflow_int:
-    RAISE exc_OverflowError_type, "Python int too large to convert to C int"
+    SET_EXC exc_OverflowError_type, "Python int too large to convert to C int"
+.spw_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC str_pad_width
 
 ;; ============================================================================
@@ -660,6 +681,7 @@ DEF_FUNC str_method_center, PA_FRAME
     extern str_pad_width
     xor esi, esi                        ; a width has to fit a C ssize_t
     call str_pad_width
+    ERR_M1 .center_fail
     mov r13, rax
 
     ; The fill, which has to be one character and a str.  Reading a byte off
@@ -671,6 +693,7 @@ DEF_FUNC str_method_center, PA_FRAME
     mov rdi, [rax + 16]                 ; args[2]
     extern str_fill_char
     call str_fill_char
+    ERR_NULL .center_fail
     mov r12, rax
 .center_have_fill:
 
@@ -713,6 +736,13 @@ DEF_FUNC str_method_center, PA_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.center_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_center
 
 ;; ============================================================================
@@ -736,6 +766,7 @@ DEF_FUNC str_method_ljust, PA_FRAME
     extern str_pad_width
     xor esi, esi                        ; a width has to fit a C ssize_t
     call str_pad_width
+    ERR_M1 .ljust_fail
     mov r13, rax
 
     ; The fill, which has to be one character and a str.  Reading a byte off
@@ -747,6 +778,7 @@ DEF_FUNC str_method_ljust, PA_FRAME
     mov rdi, [rax + 16]                 ; args[2]
     extern str_fill_char
     call str_fill_char
+    ERR_NULL .ljust_fail
     mov r12, rax
 .ljust_have_fill:
 
@@ -778,6 +810,13 @@ DEF_FUNC str_method_ljust, PA_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ljust_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_ljust
 
 ;; ============================================================================
@@ -800,6 +839,7 @@ DEF_FUNC str_method_rjust, PA_FRAME
     extern str_pad_width
     xor esi, esi                        ; a width has to fit a C ssize_t
     call str_pad_width
+    ERR_M1 .rjust_fail
     mov r13, rax
 
     ; The fill, which has to be one character and a str.  Reading a byte off
@@ -811,6 +851,7 @@ DEF_FUNC str_method_rjust, PA_FRAME
     mov rdi, [rax + 16]                 ; args[2]
     extern str_fill_char
     call str_fill_char
+    ERR_NULL .rjust_fail
     mov r12, rax
 .rjust_have_fill:
 
@@ -842,6 +883,13 @@ DEF_FUNC str_method_rjust, PA_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.rjust_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_rjust
 
 ;; ============================================================================
@@ -865,7 +913,8 @@ DEF_FUNC str_method_zfill, PA_FRAME
     mov rdi, [rax + 8]                  ; args[1], the width
     xor esi, esi
     call str_pad_width                  ; an index, and one that FITS one:
-    mov r13, rax                        ; obj_as_index alone truncates
+    ERR_M1 .zfill_fail                  ; obj_as_index alone truncates
+    mov r13, rax
 
     cmp r13, [rbp - PA_CPLEN]
     jle .zfill_return_self
@@ -935,5 +984,12 @@ DEF_FUNC str_method_zfill, PA_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.zfill_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC str_method_zfill

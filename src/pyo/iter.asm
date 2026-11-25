@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "opcodes.inc"
+extern set_exception
 extern none_singleton
 extern int_promote_mpz
 extern obj_dealloc
@@ -24,7 +25,6 @@ extern int_type
 extern bool_type
 extern exc_ValueError_type
 extern exc_TypeError_type
-extern raise_exception
 
 ;; ============================================================================
 ;; list_iter_new(PyListObject *list) -> PyListIterObject*
@@ -661,6 +661,9 @@ END_FUNC range_obj_dealloc
 ;; ============================================================================
 ;; range_obj_sq_length(PyRangeObject *self) -> int64_t
 ;; Returns max(0, ceil((stop - start) / step))
+;; Fails: -1
+;; Only for a WIDE range, whose length may not fit: a narrow one's is
+;; arithmetic, and a caller that has ruled the wide form out says so.
 ;; ============================================================================
 DEF_FUNC_BARE range_obj_sq_length
     cmp qword [rdi + PyRangeObject.wide], 0
@@ -702,7 +705,8 @@ DEF_FUNC_BARE range_obj_sq_length
 END_FUNC range_obj_sq_length
 
 ;; ============================================================================
-;; range_wide_length(PyRangeObject *self) -> int64_t, or it raises
+;; range_wide_length(PyRangeObject *self) -> int64_t
+;; Fails: -1
 ;;
 ;; A wide range's length is an ordinary int, and it may still fit: only
 ;; `len()` needs an int64, and CPython raises when it does not.  The message
@@ -740,7 +744,7 @@ DEF_FUNC_LOCAL range_wide_length, RWL_FRAME
     mov rdi, [rbp - RWL_LEN]
     DECREF_V rdi, rcx
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, \
+    SET_EXC exc_OverflowError_type, \
           "Python int too large to convert to C ssize_t"
 .rwl_pending:
     ; range_len_value left an exception; -1 is what a failing sq_length is.
@@ -752,6 +756,7 @@ END_FUNC range_wide_length
 ;; ============================================================================
 ;; range_obj_sq_item(PyRangeObject *self, int64_t index) -> fat(rax, edx)
 ;; Returns start + index * step as SmallInt. Raises IndexError if out of range.
+;; Fails: 0
 ;; ============================================================================
 extern exc_IndexError_type
 DEF_FUNC range_obj_sq_item
@@ -762,6 +767,7 @@ DEF_FUNC range_obj_sq_item
 
     ; Get length
     call range_obj_sq_length
+    ERR_M1 .sq_item_fail
     ; rax = length
 
     ; Handle negative index
@@ -788,8 +794,13 @@ DEF_FUNC range_obj_sq_item
     ret
 
 .index_error:
-    extern raise_exception
-    RAISE exc_IndexError_type, "range object index out of range"
+    SET_EXC exc_IndexError_type, "range object index out of range"
+.sq_item_fail:
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC range_obj_sq_item
 
 ;; ============================================================================
@@ -801,6 +812,7 @@ END_FUNC range_obj_sq_item
 ;; backwards, could not run.  Slicing a range gives a range, computed the way
 ;; CPython's compute_slice does: the slice's resolved indices are positions in
 ;; this range, so each maps back through start + i*step.
+;; Fails: 0
 ;; ============================================================================
 extern slice_type
 extern slice_indices
@@ -833,11 +845,10 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index_object
     call obj_as_index_object
-    test rax, rax
-    jz .rms_pending
+    ERR_NULL .rms_pending
     mov rdi, rbx
     mov rsi, rax
-    call range_wide_item
+    call range_wide_item            ; err: its 0 is this slot's own answer
     pop rbx
     leave
     ret
@@ -852,9 +863,10 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .rms_pending
     mov rdi, rbx
     mov rsi, rax
-    call range_obj_sq_item          ; already a Value
+    call range_obj_sq_item          ; already a Value -- err: its 0 is this slot's own
     pop rbx
     leave
     ret
@@ -863,7 +875,7 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     cmp qword [rbx + PyRangeObject.wide], 0
     je .rms_slice_narrow
     mov rdi, rbx
-    call range_wide_slice
+    call range_wide_slice           ; err: its 0 is this slot's own answer
     pop rbx
     leave
     ret
@@ -872,10 +884,11 @@ DEF_FUNC range_obj_mp_subscript, RMS_FRAME
     mov [rbp - RMS_SELF], rbx
     mov [rbp - RMS_START], rsi      ; the slice, across the length call
     mov rdi, rbx
-    call range_obj_sq_length
+    call range_obj_sq_length        ; err: a narrow range, whose length is arithmetic
     mov rdi, [rbp - RMS_START]      ; the slice
     mov rsi, rax                    ; the range's length
     call slice_indices              ; rax = start, rdx = stop, rcx = step
+    ERR_M1 .rms_pending
 
     ; substart = r.start + start * r.step,  substop = r.start + stop * r.step,
     ; substep  = r.step * step.
@@ -915,7 +928,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     jne .rev_wide
 
     ; Get length
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     ; rax = length
     test rax, rax
     jz .rev_empty
@@ -1111,11 +1124,11 @@ DEF_FUNC range_obj_richcompare, 8            ; 3 pushes, so rsp is 16-aligned
     jne .rrc_wide
 
     mov rdi, rbx
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     mov rdi, rax                ; our length
     push rdi
     mov rdi, r12
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     pop rdi
     cmp rdi, rax
     jne .rrc_false
@@ -1186,7 +1199,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     mov rbx, rdi
     cmp qword [rdi + PyRangeObject.wide], 0
     jne .roh_wide
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     mov rcx, rax                ; the length
 
     mov eax, 0x345678
@@ -1213,7 +1226,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     mov [rbp - ROH_LEN], rax
     mov rdi, rax
     extern obj_hash
-    call obj_hash
+    call obj_hash               ; err: an int, whose hash cannot raise
     mov rcx, rax
 
     mov eax, 0x345678
@@ -1231,7 +1244,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     jnz .roh_wide_done          ; empty, or the comparison raised
 
     mov rdi, [rbx + PyRangeObject.vstart]
-    call obj_hash
+    call obj_hash               ; err: an int, whose hash cannot raise
     mov rcx, rax
     mov rax, [rbp - ROH_ACC]
     imul rax, 1000003
@@ -1247,7 +1260,7 @@ DEF_FUNC range_obj_hash, ROH_FRAME
     jnz .roh_wide_done          ; one element: the step cannot be observed
 
     mov rdi, [rbx + PyRangeObject.vstep]
-    call obj_hash
+    call obj_hash               ; err: an int, whose hash cannot raise
     mov rcx, rax
     mov rax, [rbp - ROH_ACC]
     imul rax, 1000003
@@ -1289,7 +1302,7 @@ DEF_FUNC_BARE range_index_of
     test rax, rax
     js .rio_no                  ; before the start
     push rax
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     pop rcx
     cmp rcx, rax
     jge .rio_no                 ; past the end
@@ -1350,6 +1363,7 @@ END_FUNC range_arg_i64
 ;; but O(n) -- and `r.__contains__(x)` raised, because generic_method_contains
 ;; has nothing to call.  Anything that is not an integer is compared the slow
 ;; way, as CPython does, so `1.0 in range(3)` is still True.
+;; Fails: -1
 ;; ============================================================================
 RSC_VAL   equ 8
 RSC_SELF  equ 16
@@ -1396,7 +1410,7 @@ DEF_FUNC_LOCAL range_obj_sq_contains, RSC_FRAME
     mov r13, [rbp - RSC_ARG]    ; range_arg_i64 clobbered rsi
     mov rbx, [rbp - RSC_SELF]
     mov rdi, rbx
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     mov r12, rax                ; the count
 .rsc_loop:
     test r12, r12
@@ -1404,17 +1418,20 @@ DEF_FUNC_LOCAL range_obj_sq_contains, RSC_FRAME
     dec r12
     mov rdi, rbx
     mov rsi, r12
-    call range_obj_sq_item      ; returns a Value
+    call range_obj_sq_item      ; returns a Value -- err: the index is below the length
     mov rdi, rax
     mov rsi, r13
     mov edx, CMP_EQ
     call obj_richcompare_bool
     test eax, eax
     jg .rsc_walk_yes
-    js .rsc_walk_no             ; the comparison raised; leave it pending
+    js .rsc_walk_raised         ; the comparison raised: -1, as sq_contains says it
     jmp .rsc_loop
 .rsc_walk_yes:
     mov eax, 1
+    jmp .rsc_walk_done
+.rsc_walk_raised:
+    mov rax, -1
     jmp .rsc_walk_done
 .rsc_walk_no:
     xor eax, eax
@@ -1434,6 +1451,7 @@ END_FUNC range_obj_sq_contains
 
 
 ;; range_method_index(args, nargs) -> the index of the value
+;; Fails: 0
 RMI_VAL   equ 8
 RMI_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC range_method_index, RMI_FRAME
@@ -1471,30 +1489,32 @@ DEF_FUNC range_method_index, RMI_FRAME
     leave
     ret
 .rmi_wide_missing:
-    pop rbx
-    RAISE exc_ValueError_type, "sequence.index(x): x not in sequence"
+.rmi_not_integer:
+    SET_EXC exc_ValueError_type, "sequence.index(x): x not in sequence"
+    jmp .rmi_fail
 
 .rmi_missing:
     ; CPython has two wordings here and they differ by what was asked for:
     ; an integer that is simply not a member names itself, and anything that
     ; could never be a member at all gets the generic sequence message.
-    pop rbx
     mov rsi, [rbp - RMI_VAL]
-    call range_raise_not_in
-.rmi_not_integer:
-    pop rbx
-    RAISE exc_ValueError_type, "sequence.index(x): x not in sequence"
+    call range_set_not_in
+    jmp .rmi_fail
 .rmi_arity:
+    SET_EXC exc_TypeError_type, "index() takes exactly one argument"
+.rmi_fail:
+    xor eax, eax
     pop rbx
-    RAISE exc_TypeError_type, "index() takes exactly one argument"
+    leave
+    ret
 END_FUNC range_method_index
 
-;; range_raise_not_in(rsi = the value) -- does not return
+;; range_set_not_in(rsi = the value) -> rax = 0, always, with it pending
 ;; "6 is not in range", CPython's wording for an integer that is not a member.
 RRN_N     equ 8
 RRN_BUF   equ 176
 RRN_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL range_raise_not_in, RRN_FRAME
+DEF_FUNC_LOCAL range_set_not_in, RRN_FRAME
     mov [rbp - RRN_N], rsi
     lea rdi, [rbp - RRN_BUF]
     CSTRING rsi, ""
@@ -1509,10 +1529,13 @@ DEF_FUNC_LOCAL range_raise_not_in, RRN_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rbp - RRN_BUF]
-    call raise_exception
-END_FUNC range_raise_not_in
+    call set_exception
+    leave
+    ret                         ; rax = 0, with it pending
+END_FUNC range_set_not_in
 
 ;; range_method_count(args, nargs) -> 1 when the value is in the range, else 0
+;; Fails: 0
 RMC_VAL   equ 8
 RMC_FRAME equ 24            ; + 1 push = 32, 16-aligned
 DEF_FUNC range_method_count, RMC_FRAME
@@ -1558,8 +1581,10 @@ DEF_FUNC range_method_count, RMC_FRAME
     ret
 
 .rmc_arity:
+    SET_EXC exc_TypeError_type, "count() takes exactly one argument"
     pop rbx
-    RAISE exc_TypeError_type, "count() takes exactly one argument"
+    leave
+    ret
 END_FUNC range_method_count
 
 ;; The three fields, as getset descriptors.  A range is immutable, so there
@@ -1582,17 +1607,20 @@ DEF_RANGE_GETTER step
 ;; tp_dict at all -- every one of these lived only in a slot.  The stdlib asks
 ;; by name: collections.abc.Sequence.register(range) leans on __getitem__ and
 ;; __len__ being there, and reversed(range(n)) goes through __reversed__.
+;; Fails: 0
 DEF_FUNC range_dunder_getitem
     cmp rsi, 2
     jne .rdg_bad
     mov rax, [rdi]
     mov rsi, [rdi + 8]
     mov rdi, rax
-    call range_obj_mp_subscript
+    call range_obj_mp_subscript ; err: its 0 is this builtin's own answer
     leave
     ret
 .rdg_bad:
-    RAISE exc_TypeError_type, "__getitem__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__getitem__() takes exactly one argument"
+    leave
+    ret
 END_FUNC range_dunder_getitem
 
 DEF_FUNC range_dunder_reversed
@@ -1605,7 +1633,9 @@ DEF_FUNC range_dunder_reversed
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .rdr_bad:
-    RAISE exc_TypeError_type, "__reversed__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__reversed__() takes no arguments"
+    leave
+    ret
 END_FUNC range_dunder_reversed
 
 ;; ============================================================================
@@ -1734,6 +1764,7 @@ END_FUNC range_len_value
 ;; r[i] over objects.  The index is an OWNED reference this consumes.  A
 ;; negative one counts from the end, which needs the length -- itself an
 ;; object, because a wide range has no int64 one.
+;; Fails: 0
 ;; ============================================================================
 RWI_SELF  equ 8
 RWI_I     equ 16
@@ -1817,7 +1848,9 @@ DEF_FUNC_LOCAL range_wide_item, RWI_FRAME
     DECREF_V rdi, rcx
     mov rdi, [rbp - RWI_LEN]
     DECREF_V rdi, rcx
-    RAISE exc_IndexError_type, "range object index out of range"
+    SET_EXC exc_IndexError_type, "range object index out of range"
+    leave
+    ret
 
 .rwi_fail:
     mov rdi, [rbp - RWI_I]
@@ -2033,7 +2066,7 @@ ROB_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL range_obj_bool, ROB_FRAME
     cmp qword [rdi + PyRangeObject.wide], 0
     jne .rob_wide
-    call range_obj_sq_length
+    call range_obj_sq_length  ; err: a narrow range, whose length is arithmetic
     test rax, rax
     setne al
     movzx eax, al
@@ -2179,6 +2212,7 @@ END_FUNC range_clamp_bound
 ;; r[a:b:c] where r's bounds do not fit an int64.  CPython's compute_slice,
 ;; over objects: resolve the slice against the length, then map each position
 ;; back through start + i*step.
+;; Fails: 0
 ;; ============================================================================
 RWS_SELF  equ 8
 RWS_SLICE equ 16
@@ -2212,8 +2246,7 @@ DEF_FUNC_LOCAL range_wide_slice, RWS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index_object
     call obj_as_index_object
-    test rax, rax
-    jz .rws_fail
+    ERR_NULL .rws_fail
     mov [rbp - RWS_STEP], rax
     xor ecx, ecx
     V_PACK_I64 rcx, rdx
@@ -2371,7 +2404,9 @@ DEF_FUNC_LOCAL range_wide_slice, RWS_FRAME
     XDECREF_V rdi, rcx
     mov rdi, [rbp - RWS_STEP]
     XDECREF_V rdi, rcx
-    RAISE exc_ValueError_type, "slice step cannot be zero"
+    SET_EXC exc_ValueError_type, "slice step cannot be zero"
+    leave
+    ret
 
 .rws_fail:
     mov rdi, [rbp - RWS_LEN]

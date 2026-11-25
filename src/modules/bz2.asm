@@ -48,11 +48,11 @@ extern ap_free
 extern ap_memcpy
 extern ap_memset
 extern obj_as_index
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_BufferError_type
-extern raise_exception
+extern set_exception
 extern bool_true
 extern bool_false
 
@@ -144,18 +144,25 @@ END_FUNC bc_handle_at
 
 ;; ============================================================================
 ;; bc_arg_int(rdi = args, rsi = index) -> rax = the int
-;;
-;; Does not return when the argument is not an index.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE bc_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    jmp obj_as_index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index           ; err: its -1 and its exception are this one's
+    add rsp, 8
+    ret
 END_FUNC bc_arg_int
 
 ;; ============================================================================
 ;; bc_buffer(rdi = a Value) -> rax = data pointer, rdx = length, rax = 0 when
 ;;   it is neither bytes nor bytearray
+;; Fails: 0?
+;;
+;; Two zeroes: with nothing pending the caller words the TypeError, because it
+;; knows which argument this was; with the BufferError pending -- a memoryview
+;; that is not contiguous -- the caller only propagates.
 ;;
 ;; A str is refused rather than encoded, as it is for zlib: guessing an
 ;; encoding would be worse than the error.
@@ -188,7 +195,12 @@ DEF_FUNC_BARE bc_buffer
 .bb_strided:
     ; CPython refuses this where the buffer is asked for, and says so in
     ; those words rather than blaming the argument's type.
-    RAISE exc_BufferError_type, "memoryview: underlying buffer is not C-contiguous"
+    sub rsp, 8                  ; a bare function: realign for the call
+    SET_EXC exc_BufferError_type, "memoryview: underlying buffer is not C-contiguous"
+    add rsp, 8
+    xor eax, eax
+    xor edx, edx
+    ret
 .bb_bytearray:
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov rax, [rdi + PyByteArrayObject.ob_bytes]
@@ -204,14 +216,15 @@ DEF_FUNC_BARE bc_buffer
 END_FUNC bc_buffer
 
 ;; ============================================================================
-;; bc_raise_bz(rdi = the libbzip2 return code) -> does not return
+;; bc_set_bz(rdi = the libbzip2 return code) -> rax = 0, with the error
+;;   pending
 ;;
 ;; The sentence CPython's _bz2module.c uses for that code, raised as a
 ;; ValueError because a module written in assembly cannot raise a class
 ;; defined in Python.  lib/_bz2.py maps the sentence back to the class CPython
 ;; raises; the mapping is by exact text, and both halves say so.
 ;; ============================================================================
-DEF_FUNC bc_raise_bz
+DEF_FUNC bc_set_bz
     cmp edi, -3
     je .brz_mem
     cmp edi, -4
@@ -224,24 +237,29 @@ DEF_FUNC bc_raise_bz
     je .brz_seq
     cmp edi, -2
     je .brz_param
-    RAISE exc_ValueError_type, "Unknown I/O error"
+    FAIL exc_ValueError_type, "Unknown I/O error", .brz_out
 .brz_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .brz_out
 .brz_data:
-    RAISE exc_ValueError_type, "Invalid data stream"
+    FAIL exc_ValueError_type, "Invalid data stream", .brz_out
 .brz_eof:
-    RAISE exc_ValueError_type, "Compressed file ended before the end-of-stream marker was reached"
+    FAIL exc_ValueError_type, "Compressed file ended before the end-of-stream marker was reached", .brz_out
 .brz_seq:
-    RAISE exc_ValueError_type, "Internal error - calls to libbzip2 in wrong order"
+    FAIL exc_ValueError_type, "Internal error - calls to libbzip2 in wrong order", .brz_out
 .brz_param:
-    RAISE exc_ValueError_type, "Internal error - invalid parameters"
-END_FUNC bc_raise_bz
+    SET_EXC exc_ValueError_type, "Internal error - invalid parameters"
+.brz_out:
+    xor eax, eax
+    leave
+    ret
+END_FUNC bc_set_bz
 
 ;; ============================================================================
-;; bc_slot(rdi = BHandle*) -> rax = the handle index, edx = TAG_SMALLINT
+;; bc_slot(rdi = BHandle*) -> rax = the handle index, as a Value
+;; Fails: 0
 ;;
-;; Files the stream in the table, reusing a slot a free gave back.  Does not
-;; return when the table cannot grow.
+;; Files the stream in the table, reusing a slot a free gave back.  When the
+;; table cannot grow the stream is still the caller's to end and free.
 ;; ============================================================================
 BS_H     equ 8
 BS_CAP   equ 16
@@ -291,13 +309,17 @@ DEF_FUNC_LOCAL bc_slot, BS_FRAME
     mov [rdx + rcx*8], rbx
     mov rdi, rcx
     call int_from_i64
+    V_PACK rax, rdx
     pop rbx
     leave
     ret
 
 .bs_oom:
+    SET_EXC exc_ValueError_type, "Out of memory"
+    xor eax, eax
     pop rbx
-    RAISE exc_ValueError_type, "Out of memory"
+    leave
+    ret
 END_FUNC bc_slot
 
 ;; ============================================================================
@@ -318,10 +340,12 @@ DEF_FUNC bc_stream_new, BN_FRAME
     sub rsp, 8
     xor esi, esi
     call bc_arg_int
+    ERR_M1 .bn_fail             ; leave drops what was pushed
     mov [rbp - BN_MODE], rax
     mov rdi, [rsp + 8]
     mov esi, 1
     call bc_arg_int
+    ERR_M1 .bn_fail
     mov [rbp - BN_LEVEL], rax
     add rsp, 8
     pop rdi
@@ -359,18 +383,37 @@ DEF_FUNC bc_stream_new, BN_FRAME
 
     mov rdi, [rbp - BN_H]
     call bc_slot
+    ERR_NULL .bn_no_slot
     leave
-    V_PACK rax, rdx
     ret
 
+.bn_no_slot:
+    ; The stream was opened and nothing will ever name it: end it, so the
+    ; codec's own block buffer goes back, then free the handle.
+    mov rax, [rbp - BN_H]
+    lea rdi, [rax + BHandle.bs]
+    cmp qword [rax + BHandle.mode], BC_COMPRESS
+    jne .bn_end_decompress
+    call BZ2_bzCompressEnd wrt ..plt
+    jmp .bn_free
+.bn_end_decompress:
+    call BZ2_bzDecompressEnd wrt ..plt
+.bn_free:
+    mov rdi, [rbp - BN_H]
+    call ap_free
+    jmp .bn_fail
 .bn_failed:
     mov rdi, [rbp - BN_H]
     call ap_free
-    RAISE exc_ValueError_type, "Internal error - invalid parameters"
+    FAIL exc_ValueError_type, "Internal error - invalid parameters", .bn_fail
 .bn_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .bn_fail
 .bn_nargs:
-    RAISE exc_TypeError_type, "_bz2core: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_bz2core: wrong number of arguments"
+.bn_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bc_stream_new
 
 ;; ============================================================================
@@ -416,6 +459,7 @@ DEF_FUNC bc_stream_feed, BF_FRAME
 
     xor esi, esi
     call bc_arg_int
+    ERR_M1 .bf_fail
     mov rdi, rax
     call bc_handle_at
     test rax, rax
@@ -427,21 +471,23 @@ DEF_FUNC bc_stream_feed, BF_FRAME
     mov rdi, [rbp - BF_ARGS]
     mov esi, 2
     call bc_arg_int
+    ERR_M1 .bf_fail
     mov [rbp - BF_ACTION], rax
     mov rdi, [rbp - BF_ARGS]
     mov esi, 3
     call bc_arg_int
+    ERR_M1 .bf_fail
     mov [rbp - BF_MAX], rax
 
     ; --- the input: the handle's leftover, then what was handed in ---------
     mov rdi, [rbp - BF_ARGS]
     mov rdi, [rdi + 8]
     call bc_buffer
+    ERR_PENDING .bf_fail        ; a memoryview that is not contiguous
     test rax, rax
     jnz .bf_have_buf
-    mov rdx, [rbp - BF_ARGS]
-    cmp qword [rdx + 8], 0      ; an empty bytes is a pointer, so 0 is a type
-    jmp .bf_type                ; error however it got here
+    jmp .bf_type                ; an empty bytes is a pointer, so 0 is a type
+                                ; error however it got here
 .bf_have_buf:
     mov r10, rax                ; the caller's data, borrowed
     mov r11, rdx                ; its length
@@ -757,25 +803,35 @@ DEF_FUNC bc_stream_feed, BF_FRAME
     ret
 
 .bf_bzerror:
-    call bc_release_buffers
     mov edi, [rbp - BF_CODE]
-    leave
-    jmp bc_raise_bz
+    call bc_set_bz
+    jmp .bf_fail
 .bf_mem:
-    call bc_release_buffers
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .bf_fail
 .bf_type:
     lea rdi, [rel bc_e_notbytes]
     mov rsi, [rbp - BF_ARGS]
     mov rsi, [rsi + 8]
-    leave
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .bf_fail
 .bf_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .bf_fail
 .bf_ended:
-    RAISE exc_ValueError_type, "Internal error - calls to libbzip2 in wrong order"
+    FAIL exc_ValueError_type, "Internal error - calls to libbzip2 in wrong order", .bf_fail
 .bf_nargs:
-    RAISE exc_TypeError_type, "_bz2core: wrong number of arguments"
+    ; Before the two buffer slots are initialised, so not through the release.
+    FAIL exc_TypeError_type, "_bz2core: wrong number of arguments", .bf_fail_bare
+.bf_fail:
+    ; The one error exit: the exception is pending, and the input copy and
+    ; the output buffer -- whichever exist -- are this call's to free.
+    call bc_release_buffers
+.bf_fail_bare:
+    xor eax, eax
+    mov rsp, r12
+    pop r12
+    pop rbx
+    leave
+    ret
 
 ;; The two malloc'd buffers this call owns, released on every way out.  A
 ;; local label rather than a function, because it reads the caller's frame.
@@ -818,6 +874,7 @@ DEF_FUNC bc_stream_state, BT_FRAME
     jne .bt_nargs
     xor esi, esi
     call bc_arg_int
+    ERR_M1 .bt_fail
     mov rdi, rax
     call bc_handle_at
     test rax, rax
@@ -858,7 +915,7 @@ DEF_FUNC bc_stream_state, BT_FRAME
     mov rsi, [rcx + BHandle.unused_len]
     call bc_bytes_or_empty
     test rax, rax
-    jz .bt_mem
+    jz .bt_mem_tuple
     mov rdx, [rbp - BT_TUP]
     mov rdx, [rdx + PyTupleObject.ob_item]
     mov [rdx + 16], rax
@@ -877,12 +934,19 @@ DEF_FUNC bc_stream_state, BT_FRAME
     V_PACK rax, rdx
     ret
 
+.bt_mem_tuple:
+    mov rdi, [rbp - BT_TUP]     ; two of its three slots are filled; the
+    call obj_decref             ; third is the zero tuple_new left there
 .bt_mem:
-    RAISE exc_ValueError_type, "Out of memory"
+    FAIL exc_ValueError_type, "Out of memory", .bt_fail
 .bt_bad_handle:
-    RAISE exc_ValueError_type, "invalid stream handle"
+    FAIL exc_ValueError_type, "invalid stream handle", .bt_fail
 .bt_nargs:
-    RAISE exc_TypeError_type, "_bz2core: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_bz2core: wrong number of arguments"
+.bt_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bc_stream_state
 
 ;; ============================================================================
@@ -914,6 +978,7 @@ DEF_FUNC bc_stream_free, BR_FRAME
     jne .br_nargs
     xor esi, esi
     call bc_arg_int
+    ERR_M1 .br_fail
     mov [rbp - BR_IDX], rax
     mov rdi, rax
     call bc_handle_at
@@ -959,7 +1024,11 @@ DEF_FUNC bc_stream_free, BR_FRAME
     V_PACK rax, rdx
     ret
 .br_nargs:
-    RAISE exc_TypeError_type, "_bz2core: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_bz2core: wrong number of arguments"
+.br_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bc_stream_free
 
 ;; ============================================================================

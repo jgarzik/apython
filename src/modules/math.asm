@@ -41,11 +41,10 @@ extern builtin_func_new
 extern obj_decref
 extern obj_incref
 extern obj_dealloc
-extern raise_exception
-extern raise_type_error_counted
+extern set_type_error_counted
 extern value_type
 extern type_name_message
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OverflowError_type
@@ -141,17 +140,18 @@ extern get_iterator
 extern call_iternext
 extern ap_realloc
 extern ap_free
-extern eval_exception_unwind
 extern frexp
 
 section .text
 
 ;; ============================================================================
-;; math_to_double(rdi = a Value) -> xmm0 = the double, eax = 1, or eax = 0
+;; math_to_double(rdi = a Value) -> xmm0 = the double, rax = 1, or rax = 0
+;; Fails: -1
 ;;
-;; Non-raising, so a caller holding owned references can clean up.  The
-;; protocol is CPython's: a real number directly, else __float__, else
-;; __index__.
+;; 0 is "not a number", and the caller words that, because it knows the
+;; function and the argument.  -1 is an exception already pending: an int too
+;; large for a double, or a __float__ or __index__ that raised.  The protocol
+;; is CPython's: a real number directly, else __float__, else __index__.
 ;; ============================================================================
 MTD_VAL   equ 8
 MTD_RES   equ 16
@@ -188,7 +188,16 @@ DEF_FUNC math_to_double, MTD_FRAME
     ret
 
 .mtd_overflow:
-    RAISE exc_OverflowError_type, "int too large to convert to float"
+    SET_EXC exc_OverflowError_type, "int too large to convert to float"
+.mtd_fail:
+    mov rax, -1
+    leave
+    ret
+.mtd_slot_no:
+    ; The slot's 0 is "declined" and "it raised" both.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .mtd_fail
+    jmp .mtd_no
 
 .mtd_slow:
     ; Not a number itself.  __float__ first, then __index__, which is the
@@ -214,7 +223,7 @@ DEF_FUNC math_to_double, MTD_FRAME
     mov edx, TAG_PTR
     call rcx
     test rax, rax
-    jz .mtd_no
+    jz .mtd_slot_no
     mov [rbp - MTD_VAL], rax    ; the RESULT now, and it is ours to release
     mov rdi, rax
     call dunder_operand_is_real
@@ -245,7 +254,9 @@ END_FUNC math_to_double
 
 ;; ============================================================================
 ;; math_arg1_double(rdi = args, rsi = nargs, rdx = the function's name)
-;;   -> xmm0 = the double.  Raises for the wrong count or a non-number.
+;;   -> xmm0 = the double, rax = 1.  The wrong count and a non-number are
+;;   refused here.
+;; Fails: -1
 ;; ============================================================================
 MA1_NAME  equ 8
 MA1_VAL   equ 16
@@ -259,6 +270,7 @@ DEF_FUNC math_arg1_double, MA1_FRAME
     mov rdi, [rdi]
     mov [rbp - MA1_VAL], rdi
     call math_to_double
+    ERR_M1 .ma1_fail
     test eax, eax
     jz .ma1_type
     leave
@@ -266,15 +278,20 @@ DEF_FUNC math_arg1_double, MA1_FRAME
 .ma1_type:
     mov rsi, [rbp - MA1_VAL]
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .ma1_fail
 .ma1_args:
     mov rdi, [rbp - MA1_NAME]
     mov rsi, [rbp - MA1_N]
-    call math_raise_arity
+    call math_set_arity
+.ma1_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC math_arg1_double
 
 ;; ============================================================================
-;; math_raise_arity(rdi = the name, rsi = nargs) -- does not return
+;; math_set_arity(rdi = the name, rsi = nargs) -> rax = 0, TypeError pending
 ;;
 ;; CPython's two wordings, which differ by arity and are what a program
 ;; matching on the message would be matching on:
@@ -285,7 +302,7 @@ MRA_NAME  equ 8
 MRA_N     equ 16
 MRA_BUF   equ 160
 MRA_FRAME equ 160           ; + 0 pushes = 160, 16-aligned
-DEF_FUNC_LOCAL math_raise_arity, MRA_FRAME
+DEF_FUNC_LOCAL math_set_arity, MRA_FRAME
     mov [rbp - MRA_NAME], rdi
     mov [rbp - MRA_N], rsi
     lea rdi, [rbp - MRA_BUF]
@@ -307,13 +324,16 @@ DEF_FUNC_LOCAL math_raise_arity, MRA_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - MRA_BUF]
-    call raise_exception
-END_FUNC math_raise_arity
+    call set_exception
+    leave
+    ret
+END_FUNC math_set_arity
 
 ;; ============================================================================
-;; math_raise_arity2(rdi = the name, rsi = nargs) -- the two-argument wording
+;; math_set_arity2(rdi = the name, rsi = nargs) -> rax = 0; the two-argument
+;;   wording
 ;; ============================================================================
-DEF_FUNC_LOCAL math_raise_arity2, MRA_FRAME
+DEF_FUNC_LOCAL math_set_arity2, MRA_FRAME
     mov [rbp - MRA_NAME], rdi
     mov [rbp - MRA_N], rsi
     lea rdi, [rbp - MRA_BUF]
@@ -328,12 +348,15 @@ DEF_FUNC_LOCAL math_raise_arity2, MRA_FRAME
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - MRA_BUF]
-    call raise_exception
-END_FUNC math_raise_arity2
+    call set_exception
+    leave
+    ret
+END_FUNC math_set_arity2
 
 ;; ============================================================================
 ;; math_ret_1(xmm0 = the result, xmm1 = the argument, edi = can_overflow)
-;;   -> rax = a float Value.  Raises for a domain or range error.
+;;   -> rax = a float Value; a domain or range error is the failure
+;; Fails: 0
 ;; ============================================================================
 MR1_R     equ 8
 MR1_X     equ 16
@@ -376,13 +399,18 @@ DEF_FUNC math_ret_1, MR1_FRAME
     ret
 
 .mr1_domain:
-    RAISE exc_ValueError_type, "math domain error"
+    SET_EXC exc_ValueError_type, "math domain error"
+    leave
+    ret
 .mr1_range:
-    RAISE exc_OverflowError_type, "math range error"
+    SET_EXC exc_OverflowError_type, "math range error"
+    leave
+    ret
 END_FUNC math_ret_1
 
 ;; ============================================================================
 ;; math_ret_2(xmm0 = result, xmm1 = x, xmm2 = y) -> rax = a float Value
+;; Fails: 0
 ;;
 ;; The two-argument rule: an infinite result from two finite arguments is
 ;; ALWAYS an overflow -- there is no can_overflow flag in CPython's math_2.
@@ -427,9 +455,13 @@ DEF_FUNC math_ret_2, MR2_FRAME
     ret
 
 .mr2_domain:
-    RAISE exc_ValueError_type, "math domain error"
+    SET_EXC exc_ValueError_type, "math domain error"
+    leave
+    ret
 .mr2_range:
-    RAISE exc_OverflowError_type, "math range error"
+    SET_EXC exc_OverflowError_type, "math range error"
+    leave
+    ret
 END_FUNC math_ret_2
 
 ;; ============================================================================
@@ -446,12 +478,17 @@ MU_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
 DEF_FUNC math_%1, MU_FRAME
     lea rdx, [rel mm_n_%1]
     call math_arg1_double
+    ERR_M1 %%fail
     movsd [rbp - MU_X], xmm0
     and rsp, -16                ; glibc's float paths use aligned SSE
     call %2 wrt ..plt
     movsd xmm1, [rbp - MU_X]
     mov edi, %3
-    call math_ret_1
+    call math_ret_1             ; err: its 0 is this one's
+    leave
+    ret
+%%fail:
+    xor eax, eax
     leave
     ret
 END_FUNC math_%1
@@ -475,12 +512,14 @@ DEF_FUNC math_%1, MB_FRAME
     push rdi
     mov rdi, [rdi]
     call math_to_double
+    ERR_M1 %%fail               ; leave drops what was pushed
     test eax, eax
     jz %%type0
     movsd [rbp - MB_X], xmm0
     mov rdi, [rsp]
     mov rdi, [rdi + 8]
     call math_to_double
+    ERR_M1 %%fail               ; leave drops what was pushed
     test eax, eax
     jz %%type1
     add rsp, 8
@@ -491,7 +530,7 @@ DEF_FUNC math_%1, MB_FRAME
     call %2 wrt ..plt
     movsd xmm1, [rbp - MB_X]
     movsd xmm2, [rbp - MB_Y]
-    call math_ret_2
+    call math_ret_2             ; err: its 0 is this one's
     leave
     ret
 %%type0:
@@ -503,11 +542,16 @@ DEF_FUNC math_%1, MB_FRAME
     mov rsi, [rsi + 8]
 %%type:
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp %%fail
 %%args:
     mov rdi, [rbp - MB_NAME]
     mov rsi, [rbp - MB_N]
-    call math_raise_arity2
+    call math_set_arity2
+%%fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_%1
 %endmacro
 
@@ -619,6 +663,7 @@ DEF_FUNC math_%1, MRD_FRAME
 %%coerce:
     mov rdi, [rbp - MRD_VAL]
     call math_to_double
+    ERR_M1 %%fail
     test eax, eax
     jz %%type
     jmp %%do
@@ -640,10 +685,15 @@ DEF_FUNC math_%1, MRD_FRAME
 %%type:
     mov rsi, [rbp - MRD_VAL]
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp %%fail
 %%args:
     lea rdi, [rel mm_n_%1]
-    call math_raise_arity
+    call math_set_arity
+%%fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_%1
 %endmacro
 
@@ -700,7 +750,7 @@ DEF_FUNC math_trunc, MTR_FRAME
     jz .mtr_type
     mov rdi, [rbp - MTR_VAL]
     lea rsi, [rel mm_d_trunc]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0 goes to the caller as it stands
     leave
     ret
 
@@ -712,17 +762,21 @@ DEF_FUNC math_trunc, MTR_FRAME
     call float_from_f64
     V_PACK rax, rdx
     mov rdi, rax
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     leave
     ret
 
 .mtr_type:
     mov rsi, [rbp - MTR_VAL]
     CSTRING rdi, `type \x01 doesn't define __trunc__ method`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .mtr_args:
     lea rdi, [rel mm_n_trunc]
-    call math_raise_arity
+    call math_set_arity
+    leave
+    ret
 END_FUNC math_trunc
 
 ;; ============================================================================
@@ -739,6 +793,7 @@ MMF_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC math_modf, MMF_FRAME
     lea rdx, [rel mm_n_modf]
     call math_arg1_double
+    ERR_M1 .mmf_fail
     movsd [rbp - MMF_X], xmm0
 
     movapd xmm1, xmm0
@@ -788,6 +843,10 @@ DEF_FUNC math_modf, MMF_FRAME
     leave
     V_PACK rax, rdx
     ret
+.mmf_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_modf
 
 ;; ============================================================================
@@ -798,11 +857,16 @@ END_FUNC math_modf
 DEF_FUNC math_%1, MU_FRAME
     lea rdx, [rel mm_n_%1]
     call math_arg1_double
+    ERR_M1 %%fail
     movsd [rbp - MU_X], xmm0
     mulsd xmm0, [rel %2]
     movsd xmm1, [rbp - MU_X]
     xor edi, edi
-    call math_ret_1
+    call math_ret_1             ; err: its 0 is this one's
+    leave
+    ret
+%%fail:
+    xor eax, eax
     leave
     ret
 END_FUNC math_%1
@@ -961,7 +1025,9 @@ DEF_FUNC math_%1, MIV_FRAME
     call int_dealloc
     pop rsi
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 END_FUNC math_%1
 %endmacro
 
@@ -1014,14 +1080,20 @@ DEF_FUNC math_isqrt, MIS_FRAME
     mov rdi, [rbp - MIS_N]
     mov rsi, [rbp - MIS_OWN]
     call math_drop_temp
-    RAISE exc_ValueError_type, "isqrt() argument must be nonnegative"
+    SET_EXC exc_ValueError_type, "isqrt() argument must be nonnegative"
+    leave
+    ret
 .mis_type:
     mov rsi, [rbp - MIS_RES]
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .mis_args:
     lea rdi, [rel mm_n_isqrt]
-    call math_raise_arity
+    call math_set_arity
+    leave
+    ret
 END_FUNC math_isqrt
 
 ;; ============================================================================
@@ -1078,19 +1150,27 @@ DEF_FUNC math_factorial, MFA_FRAME
     mov rdi, [rbp - MFA_N]
     mov rsi, [rbp - MFA_OWN]
     call math_drop_temp
-    RAISE exc_ValueError_type, "factorial() not defined for negative values"
+    SET_EXC exc_ValueError_type, "factorial() not defined for negative values"
+    leave
+    ret
 .mfa_toobig:
     mov rdi, [rbp - MFA_N]
     mov rsi, [rbp - MFA_OWN]
     call math_drop_temp
-    RAISE exc_OverflowError_type, "factorial() argument should not exceed 20000000000000000"
+    SET_EXC exc_OverflowError_type, "factorial() argument should not exceed 20000000000000000"
+    leave
+    ret
 .mfa_type:
     mov rsi, [rbp - MFA_ARG]
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .mfa_args:
     lea rdi, [rel mm_n_factorial]
-    call math_raise_arity
+    call math_set_arity
+    leave
+    ret
 END_FUNC math_factorial
 
 ;; ============================================================================
@@ -1179,7 +1259,9 @@ DEF_FUNC math_comb, MCB_FRAME
     mov rdi, [rbp - MCB_K]
     mov rsi, [rbp - MCB_OWNK]
     call math_drop_temp
-    RAISE exc_ValueError_type, "n must be a non-negative integer"
+    SET_EXC exc_ValueError_type, "n must be a non-negative integer"
+    leave
+    ret
 .mcb_neg_k:
     mov rdi, [rbp - MCB_N]
     mov rsi, [rbp - MCB_OWNN]
@@ -1187,7 +1269,9 @@ DEF_FUNC math_comb, MCB_FRAME
     mov rdi, [rbp - MCB_K]
     mov rsi, [rbp - MCB_OWNK]
     call math_drop_temp
-    RAISE exc_ValueError_type, "k must be a non-negative integer"
+    SET_EXC exc_ValueError_type, "k must be a non-negative integer"
+    leave
+    ret
 .mcb_type_n:
     pop rsi
     mov rsi, [rsi]
@@ -1200,10 +1284,14 @@ DEF_FUNC math_comb, MCB_FRAME
     mov rsi, [rsi + 8]
 .mcb_type:
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .mcb_args:
     lea rdi, [rel mm_n_comb]
-    call math_raise_arity2
+    call math_set_arity2
+    leave
+    ret
 END_FUNC math_comb
 
 ;; ============================================================================
@@ -1333,10 +1421,14 @@ DEF_FUNC math_perm, MPM_FRAME
 
 .mpm_neg_n:
     call .mpm_release
-    RAISE exc_ValueError_type, "n must be a non-negative integer"
+    SET_EXC exc_ValueError_type, "n must be a non-negative integer"
+    leave
+    ret
 .mpm_neg_k:
     call .mpm_release
-    RAISE exc_ValueError_type, "k must be a non-negative integer"
+    SET_EXC exc_ValueError_type, "k must be a non-negative integer"
+    leave
+    ret
 .mpm_type_n:
     pop rsi
     pop rsi
@@ -1351,10 +1443,14 @@ DEF_FUNC math_perm, MPM_FRAME
     mov rsi, [rsi + 8]
 .mpm_type:
     CSTRING rdi, `'\x01' object cannot be interpreted as an integer`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .mpm_args:
     lea rdi, [rel mm_n_perm]
-    call math_raise_arity2
+    call math_set_arity2
+    leave
+    ret
 END_FUNC math_perm
 
 ;; ============================================================================
@@ -1375,6 +1471,7 @@ DEF_FUNC math_ulp, MUL_FRAME
     ; so the message read uninitialised stack as a Value.
     mov [rbp - MUL_OBJ], rdi
     call math_to_double
+    ERR_M1 .mul_fail
     test eax, eax
     jz .mul_type
     ; A NaN is its own ulp, and so is an infinity.
@@ -1418,20 +1515,26 @@ DEF_FUNC math_ulp, MUL_FRAME
 .mul_type:
     mov rsi, [rbp - MUL_OBJ]
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mul_fail
 .mul_args:
     lea rdi, [rel mm_n_ulp]
-    call math_raise_arity
+    call math_set_arity
+.mul_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_ulp
 
 ;; ============================================================================
 ;; math_bind_kw(rdi = args, rsi = nargs, rdx = a NULL-terminated table of
 ;;              keyword names, rcx = an array of out slots, one per name)
 ;;   -> rax = the positional count
+;; Fails: -1
 ;;
 ;; math's three keyword-taking functions -- prod(start=), isclose(rel_tol=,
 ;; abs_tol=) -- all bind the same way, and nothing else in this module took a
-;; keyword at all.  An unknown one raises.
+;; keyword at all.  An unknown one is the failure.
 ;;
 ;; math_bind_kw_named is the same with r8 = the function's name as a C string,
 ;; so an unknown keyword is worded as CPython words it:
@@ -1454,6 +1557,7 @@ END_FUNC math_bind_kw
 
 ;; math_bind_kw_named(rdi, rsi, rdx, rcx as math_bind_kw; r8 = the name)
 ;;   -> rax = the positional count
+;; Fails: -1
 global math_bind_kw_named
 DEF_FUNC math_bind_kw_named, MBK_FRAME
     mov [rbp - MBK_FN], r8
@@ -1510,7 +1614,7 @@ DEF_FUNC math_bind_kw_named, MBK_FRAME
 .mbk_unknown:
     cmp qword [rbp - MBK_FN], 0
     jne .mbk_named
-    RAISE exc_TypeError_type, "invalid keyword argument"
+    FAIL exc_TypeError_type, "invalid keyword argument", .mbk_fail
 .mbk_named:
     extern rbt_append_cstr
     mov [rbp - MBK_KW], r8          ; the offending name, for the message
@@ -1532,7 +1636,11 @@ DEF_FUNC math_bind_kw_named, MBK_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - MBK_BUF]
-    call raise_exception
+    call set_exception
+.mbk_fail:
+    mov rax, -1
+    leave
+    ret
 .mbk_done:
     mov rax, [rbp - MBK_NPOS]
     leave
@@ -1561,6 +1669,7 @@ DEF_FUNC math_prod, MPR_FRAME
     lea rdx, [rel mm_prod_kwnames]
     lea rcx, [rbp - MPR_KWOUT]
     call math_bind_kw
+    ERR_M1 .mpr_ret0
     mov r12, rax                    ; the positional count
     cmp r12, 1
     jne .mpr_args
@@ -1580,7 +1689,7 @@ DEF_FUNC math_prod, MPR_FRAME
     V_TEST_PTR rdi, rax
     ja .mpr_not_iterable
     mov esi, TAG_PTR
-    call get_iterator_opt
+    call get_iterator_opt       ; err: .mpr_not_iterable asks whether it raised
     test rax, rax
     jz .mpr_not_iterable
     mov [rbp - MPR_ITER], rax
@@ -1630,9 +1739,13 @@ DEF_FUNC math_prod, MPR_FRAME
 .mpr_not_iterable:
     mov rdi, [rbp - MPR_ACC]
     XDECREF_V rdi, rcx
+    ; An __iter__ that raised has said why already.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .mpr_ret0
     mov rsi, [rbx]
     CSTRING rdi, `'\x01' object is not iterable`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mpr_ret0
 .mpr_args:
     ; CPython's two wordings: the positional rule up to two, then the total.
     mov rsi, r12
@@ -1640,11 +1753,18 @@ DEF_FUNC math_prod, MPR_FRAME
     jg .mpr_too_many
     CSTRING rdi, "prod() takes exactly 1 positional argument ("
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+    jmp .mpr_ret0
 .mpr_too_many:
     CSTRING rdi, "prod() takes at most 2 arguments ("
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+.mpr_ret0:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC math_prod
 
 ;; ============================================================================
@@ -1665,6 +1785,7 @@ DEF_FUNC math_isclose, MIC_FRAME
     push rdi
     sub rsp, 8
     call math_bind_kw
+    ERR_M1 .mic_fail            ; leave drops what was pushed
     add rsp, 8
     pop rdi
     cmp rax, 2
@@ -1674,12 +1795,14 @@ DEF_FUNC math_isclose, MIC_FRAME
     sub rsp, 8
     mov rdi, [rdi]
     call math_to_double
+    ERR_M1 .mic_fail
     test eax, eax
     jz .mic_type
     movsd [rbp - MIC_A], xmm0
     mov rdi, [rsp + 8]
     mov rdi, [rdi + 8]
     call math_to_double
+    ERR_M1 .mic_fail
     test eax, eax
     jz .mic_type
     add rsp, 16
@@ -1694,6 +1817,7 @@ DEF_FUNC math_isclose, MIC_FRAME
     jz .mic_default_rel
     mov [rbp - MIC_REL], rdi    ; the object, for the message if it is not one
     call math_to_double
+    ERR_M1 .mic_fail
     test eax, eax
     jz .mic_type_tol
     jmp .mic_have_rel
@@ -1707,6 +1831,7 @@ DEF_FUNC math_isclose, MIC_FRAME
     jz .mic_default_abs
     mov [rbp - MIC_ABS], rdi
     call math_to_double
+    ERR_M1 .mic_fail
     test eax, eax
     jz .mic_type_tol
     jmp .mic_have_abs
@@ -1765,17 +1890,21 @@ DEF_FUNC math_isclose, MIC_FRAME
     leave
     ret
 .mic_type:
-    add rsp, 16
-    RAISE exc_TypeError_type, "must be real number"
+    FAIL exc_TypeError_type, "must be real number", .mic_fail
 .mic_type_tol:
     ; rdi still holds the tolerance that would not convert.
     mov rsi, rdi
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mic_fail
 .mic_negative_tol:
-    RAISE exc_ValueError_type, "tolerances must be non-negative"
+    FAIL exc_ValueError_type, "tolerances must be non-negative", .mic_fail
 .mic_args:
-    RAISE exc_TypeError_type, "isclose() takes exactly 2 positional arguments"
+    SET_EXC exc_TypeError_type, "isclose() takes exactly 2 positional arguments"
+.mic_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_isclose
 
 ;; ============================================================================
@@ -1806,7 +1935,7 @@ DEF_FUNC math_dist, MDS_FRAME
     mov rsi, rdi
     mov edx, 1
     lea rdi, [rel tuple_type]
-    call tuple_type_call        ; materialise p; raises for a non-iterable
+    call tuple_type_call        ; materialise p; raises for a non-iterable -- err: the 0 is tested just below
     test rax, rax
     jz .mds_failed_args
     mov [rbp - MDS_P], rax
@@ -1814,7 +1943,7 @@ DEF_FUNC math_dist, MDS_FRAME
     add rsi, 8                  ; &args[1]
     mov edx, 1
     lea rdi, [rel tuple_type]
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     add rsp, 16
     test rax, rax
     jz .mds_failed
@@ -1845,6 +1974,7 @@ DEF_FUNC math_dist, MDS_FRAME
     mov rax, [rbx + PyTupleObject.ob_item]
     mov rdi, [rax + rcx*8]
     call math_to_double
+    ERR_M1 .mds_failed
     test eax, eax
     jz .mds_type
     movsd [rbp - MDS_FRAME], xmm0   ; scratch below the named slots
@@ -1852,6 +1982,7 @@ DEF_FUNC math_dist, MDS_FRAME
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rdi, [rax + rcx*8]
     call math_to_double
+    ERR_M1 .mds_failed
     test eax, eax
     jz .mds_type
     movsd xmm1, xmm0
@@ -1868,7 +1999,7 @@ DEF_FUNC math_dist, MDS_FRAME
 .mds_have_diffs:
     mov rdi, [rbp - MDS_BUF]
     mov rsi, [rbp - MDS_N]
-    call math_hypot
+    call math_hypot             ; err: its 0 is this one's, after the release
     push rax
     call .mds_release
     pop rax
@@ -1918,20 +2049,16 @@ DEF_FUNC math_dist, MDS_FRAME
     leave
     ret
 .mds_type:
-    call .mds_release
-    pop r12
-    pop rbx
-    RAISE exc_TypeError_type, "must be real number"
+    FAIL exc_TypeError_type, "must be real number", .mds_failed
 .mds_len_mismatch:
-    call .mds_release
-    pop r12
-    pop rbx
-    RAISE exc_ValueError_type, "both points must have the same number of dimensions"
+    FAIL exc_ValueError_type, "both points must have the same number of dimensions", .mds_failed
 .mds_args:
+    lea rdi, [rel mm_n_dist]
+    call math_set_arity2
     pop r12
     pop rbx
-    lea rdi, [rel mm_n_dist]
-    call math_raise_arity2
+    leave
+    ret
 END_FUNC math_dist
 
 section .rodata
@@ -1959,8 +2086,9 @@ MLG_ARGS  equ 24
 MLG_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 ;; ============================================================================
 ;; math_log_oversized(rdi = a Value, esi = 0 log, 1 log2, 2 log10)
-;;   -> eax = 1 and xmm0 = the answer, or eax = 0 meaning "not an int that
+;;   -> rax = 1 and xmm0 = the answer, or rax = 0 meaning "not an int that
 ;;      overflows a double, take the ordinary path"
+;; Fails: -1
 ;;
 ;; math.log(10**400) is 921.034..., not an error: CPython's loghelper splits
 ;; the integer into a mantissa and an exponent with frexp and computes
@@ -2044,7 +2172,10 @@ DEF_FUNC_LOCAL math_log_oversized, MLO_FRAME
     mov rdi, [rbp - MLO_VAL]
     mov rsi, [rbp - MLO_OWN]
     call math_drop_temp
-    RAISE exc_ValueError_type, "math domain error"
+    SET_EXC exc_ValueError_type, "math domain error"
+    mov rax, -1
+    leave
+    ret
 END_FUNC math_log_oversized
 
 ;; log2 and log10 wrap the generated one-argument forms so an oversized int
@@ -2058,10 +2189,12 @@ DEF_FUNC_BARE math_%1_big
     sub rsp, 8
     mov rdi, [rdi]
     mov esi, %2
-    call math_log_oversized
+    call math_log_oversized     ; err: asked below, once the stack is back
     add rsp, 8
     pop rsi
     pop rdi
+    cmp rax, -1
+    je %%fail
     test eax, eax
     jz math_%1
     sub rsp, 8
@@ -2069,15 +2202,19 @@ DEF_FUNC_BARE math_%1_big
     add rsp, 8
     V_PACK rax, rdx
     ret
+%%fail:
+    xor eax, eax
+    ret
 END_FUNC math_%1_big
 %endmacro
 
 MATH_LOG_WRAP log2,  1
 MATH_LOG_WRAP log10, 2
 
-;; mlg_natural_log(rdi = a Value) -> eax = 1 and xmm0 = its natural log, or
-;; eax = 0 when the argument is not a real number at all.  A domain error it
-;; raises itself; the caller words the type error, which names the operand.
+;; mlg_natural_log(rdi = a Value) -> rax = 1 and xmm0 = its natural log, or
+;; rax = 0 when the argument is not a real number at all.  A domain error is
+;; its own to record; the caller words the type error, which names the operand.
+;; Fails: -1
 MNL_VAL   equ 8
 MNL_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 
@@ -2085,10 +2222,12 @@ DEF_FUNC_LOCAL mlg_natural_log, MNL_FRAME
     mov [rbp - MNL_VAL], rdi
     xor esi, esi
     call math_log_oversized
+    ERR_M1 .mnl_fail
     test eax, eax
     jnz .mnl_out
     mov rdi, [rbp - MNL_VAL]
     call math_to_double
+    ERR_M1 .mnl_fail
     test eax, eax
     jz .mnl_no
     ; A NaN propagates; anything else must be strictly positive.
@@ -2108,7 +2247,11 @@ DEF_FUNC_LOCAL mlg_natural_log, MNL_FRAME
     leave
     ret
 .mnl_domain:
-    RAISE exc_ValueError_type, "math domain error"
+    SET_EXC exc_ValueError_type, "math domain error"
+.mnl_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC mlg_natural_log
 
 DEF_FUNC math_log, MLG_FRAME
@@ -2124,6 +2267,7 @@ DEF_FUNC math_log, MLG_FRAME
     push rdi
     mov rdi, [rdi]
     call mlg_natural_log
+    ERR_M1 .mlg_fail            ; leave drops what was pushed
     test eax, eax
     jz .mlg_type0
     movsd [rbp - MLG_X], xmm0
@@ -2131,6 +2275,7 @@ DEF_FUNC math_log, MLG_FRAME
     mov rdi, [rsp]
     mov rdi, [rdi + 8]
     call mlg_natural_log
+    ERR_M1 .mlg_fail            ; leave drops what was pushed
     test eax, eax
     jz .mlg_type1
     add rsp, 8
@@ -2151,7 +2296,7 @@ DEF_FUNC math_log, MLG_FRAME
     ret
 
 .mlg_zerodiv:
-    RAISE exc_ZeroDivisionError_type, "float division by zero"
+    FAIL exc_ZeroDivisionError_type, "float division by zero", .mlg_fail
 
 
 .mlg_one:
@@ -2159,6 +2304,7 @@ DEF_FUNC math_log, MLG_FRAME
     mov rdi, [rdi]
     xor esi, esi
     call math_log_oversized
+    ERR_M1 .mlg_fail
     test eax, eax
     jz .mlg_one_plain
     call float_from_f64
@@ -2170,12 +2316,13 @@ DEF_FUNC math_log, MLG_FRAME
     mov esi, 1
     lea rdx, [rel mm_n_log]
     call math_arg1_double
+    ERR_M1 .mlg_fail
     movsd [rbp - MLG_X], xmm0
     and rsp, -16
     call log wrt ..plt
     movsd xmm1, [rbp - MLG_X]
     xor edi, edi
-    call math_ret_1
+    call math_ret_1             ; err: its 0 is this one's
     leave
     ret
 
@@ -2188,10 +2335,15 @@ DEF_FUNC math_log, MLG_FRAME
     mov rsi, [rsi + 8]
 .mlg_type:
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mlg_fail
 .mlg_args:
     lea rdi, [rel mm_n_log]
-    call math_raise_arity
+    call math_set_arity
+.mlg_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_log
 
 ;; ============================================================================
@@ -2212,6 +2364,7 @@ DEF_FUNC math_ldexp, MLD_FRAME
     push rdi
     mov rdi, [rdi]
     call math_to_double
+    ERR_M1 .mld_fail            ; leave drops what was pushed
     test eax, eax
     jz .mld_type
     movsd [rbp - MLD_X], xmm0
@@ -2257,22 +2410,27 @@ DEF_FUNC math_ldexp, MLD_FRAME
     call ldexp wrt ..plt
     movsd xmm1, [rbp - MLD_X]
     mov edi, 1                  ; ldexp can legitimately overflow
-    call math_ret_1
+    call math_ret_1             ; err: its 0 is this one's
     leave
     ret
 
 .mld_overflow:
-    RAISE exc_OverflowError_type, "math range error"
+    FAIL exc_OverflowError_type, "math range error", .mld_fail
 .mld_exp_type:
-    RAISE exc_TypeError_type, "Expected an int as second argument to ldexp."
+    FAIL exc_TypeError_type, "Expected an int as second argument to ldexp.", .mld_fail
 .mld_type:
     pop rsi
     mov rsi, [rsi]
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .mld_fail
 .mld_args:
     lea rdi, [rel mm_n_ldexp]
-    call math_raise_arity2
+    call math_set_arity2
+.mld_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_ldexp
 
 ;; ============================================================================
@@ -2286,6 +2444,7 @@ MFR_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC math_frexp, MFR_FRAME
     lea rdx, [rel mm_n_frexp]
     call math_arg1_double
+    ERR_M1 .mfr_fail
     movsd [rbp - MFR_M], xmm0
     mov dword [rbp - MFR_E], 0
 
@@ -2326,6 +2485,10 @@ DEF_FUNC math_frexp, MFR_FRAME
     leave
     V_PACK rax, rdx
     ret
+.mfr_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_frexp
 
 ;; ============================================================================
@@ -2354,8 +2517,7 @@ DEF_FUNC math_fsum, FSM_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rsi           ; get_iterator wants (payload, tag)
     call get_iterator
-    test rax, rax
-    jz .fsm_propagate
+    ERR_NULL .fsm_propagate
     mov [rbp - FSM_ITER], rax
 
     mov qword [rbp - FSM_N], 0
@@ -2375,6 +2537,7 @@ DEF_FUNC math_fsum, FSM_FRAME
     mov rdi, rax
     call math_to_double
     pop rdi
+    ERR_M1 .fsm_item_raised
     test eax, eax
     jz .fsm_type_item           ; the item is still ours, for the message
     movsd [rbp - FSM_X], xmm0
@@ -2498,7 +2661,9 @@ DEF_FUNC math_fsum, FSM_FRAME
     call ap_free
     mov rdi, [rbp - FSM_ITER]
     call obj_decref
-    RAISE exc_OverflowError_type, "intermediate overflow in fsum"
+    SET_EXC exc_OverflowError_type, "intermediate overflow in fsum"
+    leave
+    ret
 .fsm_type_item:
     ; CPython names the type, and the item is the last thing that knows it:
     ; the message is composed before the item is released.
@@ -2516,22 +2681,31 @@ DEF_FUNC math_fsum, FSM_FRAME
     call obj_decref
     lea rdi, [rel exc_TypeError_type]
     mov rsi, [rbp - FSM_HI]
-    call raise_exception
+    call set_exception
+    leave
+    ret
+.fsm_item_raised:
+    DECREF_V rdi, rcx           ; the item whose __float__ raised
 .fsm_drop_propagate:
     mov rdi, [rbp - FSM_P]
     call ap_free
     mov rdi, [rbp - FSM_ITER]
     call obj_decref
 .fsm_propagate:
-    PUBLISH_SP
-    jmp eval_exception_unwind
+    xor eax, eax
+    leave
+    ret
 .fsm_args:
     lea rdi, [rel mm_n_fsum]
-    call math_raise_arity
+    call math_set_arity
+    leave
+    ret
 END_FUNC math_fsum
 
 ;; ============================================================================
-;; math_hypot(*coords) / math_dist(p, q) -- the Euclidean norm.
+;; math_hypot(rdi = coords, rsi = how many) -> rax = the Euclidean norm, as a
+;;   Value; also what math_dist hands its differences to
+;; Fails: 0
 ;;
 ;; Scaled: the sum of squares is formed after dividing by the largest
 ;; magnitude, so hypot(1e200, 1e200) does not overflow on the way to its
@@ -2556,12 +2730,14 @@ DEF_FUNC math_hypot, MHY_FRAME
     push rdi
     mov rdi, [rdi]
     call math_to_double
+    ERR_M1 .mhy_fail            ; leave drops what was pushed
     test eax, eax
     jz .mhy_type0
     movsd [rbp - MHY_MAX], xmm0
     mov rdi, [rsp]
     mov rdi, [rdi + 8]
     call math_to_double
+    ERR_M1 .mhy_fail            ; leave drops what was pushed
     test eax, eax
     jz .mhy_type1
     add rsp, 8
@@ -2587,6 +2763,7 @@ DEF_FUNC math_hypot, MHY_FRAME
     mov rdi, [rax + rcx*8]
     inc qword [rbp - MHY_I]
     call math_to_double
+    ERR_M1 .mhy_fail            ; leave drops what was pushed
     test eax, eax
     jz .mhy_type_i
     andpd xmm0, [rel mm_absmask]
@@ -2619,6 +2796,7 @@ DEF_FUNC math_hypot, MHY_FRAME
     mov rdi, [rax + rcx*8]
     inc qword [rbp - MHY_I]
     call math_to_double
+    ERR_M1 .mhy_fail
     divsd xmm0, [rbp - MHY_MAX]
     mulsd xmm0, xmm0
     addsd xmm0, [rbp - MHY_SUM]
@@ -2664,7 +2842,11 @@ DEF_FUNC math_hypot, MHY_FRAME
     mov rsi, [rsi + 8]
 .mhy_type:
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+.mhy_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC math_hypot
 
 ;; ============================================================================
@@ -2881,7 +3063,7 @@ DEF_FUNC math_sumprod, MSP_FRAME
     V_TEST_PTR rdi, rax
     ja .msp_p_not_iter
     mov esi, TAG_PTR
-    call get_iterator_opt
+    call get_iterator_opt       ; err: .msp_p_not_iter asks whether it raised
     test rax, rax
     jz .msp_p_not_iter
     mov [rbp - MSP_IP], rax
@@ -2890,7 +3072,7 @@ DEF_FUNC math_sumprod, MSP_FRAME
     V_TEST_PTR rdi, rax
     ja .msp_q_not_iter
     mov esi, TAG_PTR
-    call get_iterator_opt
+    call get_iterator_opt       ; err: .msp_q_not_iter asks whether it raised
     test rax, rax
     jz .msp_q_not_iter
     mov [rbp - MSP_IQ], rax
@@ -3091,16 +3273,22 @@ DEF_FUNC math_sumprod, MSP_FRAME
     mov rsi, [rbp - MSP_ARGS]
     mov rsi, [rsi + 8]
     CSTRING rdi, `'\x01' object is not iterable`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .msp_p_not_iter:
     EXC_RAISED_SINCE [rbp - MSP_EXC], rcx, .msp_fail
     mov rsi, [rbp - MSP_ARGS]
     mov rsi, [rsi]
     CSTRING rdi, `'\x01' object is not iterable`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .msp_args:
     lea rdi, [rel mm_n_sumprod]
-    call math_raise_arity2
+    call math_set_arity2
+    leave
+    ret
 END_FUNC math_sumprod
 
 ;; ============================================================================
@@ -3112,6 +3300,7 @@ END_FUNC math_sumprod
 DEF_FUNC math_is%1
     lea rdx, [rel mm_n_is%1]
     call math_arg1_double
+    ERR_M1 %%fail
     movapd xmm1, xmm0
     andpd xmm1, [rel mm_absmask]
 %ifidn %1, nan
@@ -3136,6 +3325,10 @@ DEF_FUNC math_is%1
     RET_BOOL_RAX
     leave
     V_PACK rax, rdx
+    ret
+%%fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC math_is%1
 %endmacro

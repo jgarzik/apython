@@ -13,6 +13,9 @@
 
 
 ; External functions
+extern dict_get
+extern dict_set
+extern dict_set_str
 extern int_type
 extern bool_type
 extern dict_type
@@ -31,14 +34,12 @@ extern list_new
 extern list_append
 extern tuple_new
 extern dict_new
-extern dict_get
-extern dict_set
 extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
 extern int_to_i64
-extern raise_exception
+extern set_exception
 extern rbt_append_cstr
 extern str_byte_to_cp
 extern exc_TypeError_type
@@ -80,7 +81,8 @@ END_FUNC str_method_istitle
 ;; ============================================================================
 ;; str_require_str(rdi = an argument, a Value; rsi = a message whose \x01 is
 ;;                 where the argument's type name goes)
-;;   -> rax = the argument, as a str object; does not return otherwise
+;;   -> rax = the argument, as a str object
+;; Fails: 0
 ;;
 ;; The separator of partition and rpartition was read as a PyStrObject
 ;; without asking: `"abc".partition(0)` read a small integer's Value as a
@@ -111,13 +113,16 @@ DEF_FUNC str_require_str, SRS_FRAME
 .srs_bad:
     mov rsi, [rbp - SRS_ARG]
     mov rdi, [rbp - SRS_MSG]
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 END_FUNC str_require_str
 
 ;; ============================================================================
 ;; str_method_partition(args, nargs) -> 3-tuple (before, sep, after)
 ;; args[0]=self, args[1]=sep
+;; Fails: 0
 ;; ============================================================================
 PT_SELF   equ 8
 PT_SEP    equ 16
@@ -132,6 +137,7 @@ DEF_FUNC str_method_partition, PT_FRAME
     mov rdi, [rdi + 8]      ; sep
     CSTRING rsi, `must be str, not \x01`
     call str_require_str
+    ERR_NULL .part_fail
     mov r12, rax
     cmp qword [r12 + PyStrObject.ob_size], 0
     je .part_empty_sep
@@ -233,12 +239,20 @@ DEF_FUNC str_method_partition, PT_FRAME
     ret
 .part_empty_sep:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "empty separator"
+    SET_EXC exc_ValueError_type, "empty separator"
+.part_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_partition
 
 ;; ============================================================================
 ;; str_method_rpartition(args, nargs) -> 3-tuple (before, sep, after)
 ;; Like partition but searches from right
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_method_rpartition, PT_FRAME
     push rbx
@@ -250,6 +264,7 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     mov rdi, [rdi + 8]      ; sep
     CSTRING rsi, `must be str, not \x01`
     call str_require_str
+    ERR_NULL .rpart_fail
     mov r12, rax
     cmp qword [r12 + PyStrObject.ob_size], 0
     je .rpart_empty_sep
@@ -363,12 +378,20 @@ DEF_FUNC str_method_rpartition, PT_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .rpart_empty_sep:
-    RAISE exc_ValueError_type, "empty separator"
+    SET_EXC exc_ValueError_type, "empty separator"
+.rpart_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_rpartition
 
 ;; ============================================================================
 ;; str_method_expandtabs(args, nargs) -> new string
 ;; args[0]=self, args[1]=tabsize (optional, default 8)
+;; Fails: 0
 ;; ============================================================================
 ET_TAB    equ 8
 ET_BUF    equ 16
@@ -392,6 +415,7 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     mov esi, 1              ; a tabsize is a C int in CPython, and it says so
     extern str_pad_width    ; when handed one that will not fit; obj_as_index
     call str_pad_width      ; alone truncated, so 2**70 tabs became none
+    ERR_M1 .et_fail
     mov r13, rax
 .et_have_tab:
     mov [rbp - ET_TAB], r13
@@ -512,6 +536,14 @@ DEF_FUNC str_method_expandtabs, ET_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.et_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC str_method_expandtabs
 
@@ -642,7 +674,7 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     mov rdi, r13
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r8
@@ -679,7 +711,7 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     mov rdi, r13
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r8
@@ -702,7 +734,7 @@ DEF_FUNC str_method_splitlines, SL_FRAME
     mov rdi, r13
     mov rsi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 
@@ -868,6 +900,7 @@ DEF_FUNC_BARE trn_encode_cp
 END_FUNC trn_encode_cp
 
 ;; ============================================================================
+;; Fails: 0
 TRN_SELF  equ 8
 TRN_TAB   equ 16
 TRN_LIST  equ 24            ; the pieces, joined at the end
@@ -891,7 +924,7 @@ extern type_is_subtype
 extern dict_type
 extern dunder_call_2
 extern obj_dealloc
-extern raise_type_error_with_name
+extern set_type_error_with_name
 
 DEF_FUNC str_method_translate, TRN_FRAME
     push rbx
@@ -995,6 +1028,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     jz .trn_have_lookup
     mov rdi, rax
     call rdx
+    ERR_M1 .trn_fail_out        ; the table's __len__ raised; no list exists yet
     mov [rbp - TRN_LEN], rax
 
 .trn_have_lookup:
@@ -1031,7 +1065,8 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rcx, [rbp - TRN_SUB]
     test rcx, rcx
     jnz .trn_call_sub
-    call dict_get                   ; a miss is a NULL Value, never a raise
+    call dict_get               ; a miss is a NULL Value
+    ERR_PENDING .trn_fail           ; a colliding key's __eq__ raised
     test rax, rax
     jz .trn_keep
     ; dict_get hands back a BORROWED reference where mp_subscript hands back
@@ -1066,7 +1101,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     V_UNPACK rsi, rcx
     extern dunder_getitem
     lea rdx, [rel dunder_getitem]
-    call dunder_call_2          ; -> a Value, already packed
+    call dunder_call_2          ; -> a Value, already packed  ; err: 0, absent or raised, is tested below
     test rax, rax
     jz .trn_sub_null
     jmp .trn_have_value
@@ -1085,7 +1120,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     extern exc_isinstance
     mov rdi, [gs:ThreadState.current_exception]
     lea rsi, [rel exc_LookupError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .trn_fail                    ; not a lookup miss: let it out
     mov rdi, [gs:ThreadState.current_exception]
@@ -1120,7 +1155,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
 .trn_append_r12:
     mov rdi, [rbp - TRN_LIST]
     mov rsi, r12
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, r12
     DECREF_V rdi, rcx
     jmp .trn_next
@@ -1131,6 +1166,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rdi, r12
     V_UNPACK rdi, rdx
     call obj_as_index           ; not V_TO_I64: it may be a heap int
+    ERR_M1 .trn_value_fail
     test rax, rax
     jl .trn_range
     cmp rax, 0x10ffff
@@ -1144,7 +1180,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rbx, rax
     mov rdi, [rbp - TRN_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref
     mov rdi, r12
@@ -1166,7 +1202,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rbx, rax
     mov rdi, [rbp - TRN_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref
 
@@ -1186,7 +1222,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov [rsp + 8], rax
     mov rdi, rsp
     mov esi, 2
-    call str_method_join
+    call str_method_join        ; err: its 0 is translate's own, after the releases
     add rsp, 16
     mov r12, rax
     mov rdi, rbx
@@ -1201,20 +1237,15 @@ DEF_FUNC str_method_translate, TRN_FRAME
     ret
 
 .trn_range:
-    ; The mapped value and the list of pieces are both ours, and RAISE
-    ; abandons the C stack -- .trn_bad_value two lines down releases them and
-    ; this one did not.
-    mov rdi, r12
-    DECREF_V rdi, rcx
-    mov rdi, [rbp - TRN_LIST]
-    call obj_decref
-    RAISE exc_ValueError_type, "character mapping must be in range(0x110000)"
+    SET_EXC exc_ValueError_type, "character mapping must be in range(0x110000)"
+    jmp .trn_value_fail
 .trn_bad_value:
+    SET_EXC exc_TypeError_type, "character mapping must return integer, None or str"
+.trn_value_fail:
+    ; The mapped value and the list of pieces are both ours; .trn_fail
+    ; releases the list.
     mov rdi, r12
     DECREF_V rdi, rcx
-    mov rdi, [rbp - TRN_LIST]
-    call obj_decref
-    RAISE exc_TypeError_type, "character mapping must return integer, None or str"
 
 .trn_fail:
     mov rdi, [rbp - TRN_LIST]
@@ -1232,10 +1263,12 @@ DEF_FUNC str_method_translate, TRN_FRAME
 .trn_not_subscriptable:
     mov rsi, [rbp - TRN_TAB]
     CSTRING rdi, `'\x01' object is not subscriptable`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .trn_fail_out
 
 .trn_argerr:
-    RAISE exc_TypeError_type, "translate() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "translate() takes exactly one argument"
+    jmp .trn_fail_out
 END_FUNC str_method_translate
 
 ;; ============================================================================
@@ -1243,6 +1276,7 @@ END_FUNC str_method_translate
 ;; 2-arg form: maketrans(x, y) where x and y are strings of equal length
 ;; Returns dict mapping ord(x[i]) -> ord(y[i])
 ;; Note: called as staticmethod, so no 'self' arg.
+;; Fails: 0
 ;; ============================================================================
 SMT_FROM  equ 8
 SMT_TO    equ 16
@@ -1349,7 +1383,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     V_PACK_I64 rdx, rcx             ; dict_set takes Values
     V_PACK_I64 rsi, r8
     mov rdi, rbx
-    call dict_set
+    call dict_set_str               ; our own table, keyed by ordinals
     jmp .smt_loop
 
 .smt_done:
@@ -1376,7 +1410,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     V_PACK_I64 rsi, r8
     mov rdi, rbx
     LOAD_NONE rdx
-    call dict_set
+    call dict_set_str
     jmp .smt_del_loop
 
 .smt_finish:
@@ -1465,7 +1499,8 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rsi, rdi
     mov rdx, [rbp - SMT_TO]
     mov rdi, r12
-    call dict_set
+    call dict_set               ; the key may be an int SUBCLASS, whose
+    ERR_M1 .smt_fail_table          ; __hash__ is Python
 .smt_dict_next:
     inc r13
     jmp .smt_dict_loop
@@ -1480,28 +1515,46 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     ret
 
 .smt_key_bad:
-    RAISE exc_TypeError_type, "keys in translate table must be strings or integers"
+    SET_EXC exc_TypeError_type, "keys in translate table must be strings or integers"
+    jmp .smt_fail_table
 .smt_key_len:
-    RAISE exc_ValueError_type, "string keys in translate table must be of length 1"
+    SET_EXC exc_ValueError_type, "string keys in translate table must be of length 1"
+.smt_fail_table:
+    mov rdi, r12                    ; the table being built
+    call obj_decref
+    jmp .smt_fail
 .smt_one_not_dict:
-    RAISE exc_TypeError_type, "if you give only one argument to maketrans it must be a dict"
+    SET_EXC exc_TypeError_type, "if you give only one argument to maketrans it must be a dict"
+    jmp .smt_fail
 .smt_no_args:
-    RAISE exc_TypeError_type, "maketrans expected at least 1 argument, got 0"
+    SET_EXC exc_TypeError_type, "maketrans expected at least 1 argument, got 0"
+    jmp .smt_fail
 .smt_first_not_str:
-    RAISE exc_TypeError_type, "first maketrans argument must be a string if there is a second argument"
+    SET_EXC exc_TypeError_type, "first maketrans argument must be a string if there is a second argument"
+    jmp .smt_fail
 .smt_arg_not_str:
     ; esi = which one, 2 or 3
     mov rdi, [rbp - SMT_ARGS]
     mov rdi, [rdi + rsi*8 - 8]
-    call smt_raise_not_str
+    call smt_set_not_str
+    jmp .smt_fail
 .smt_error:
-    RAISE exc_TypeError_type, "maketrans requires 2 or 3 string arguments"
+    SET_EXC exc_TypeError_type, "maketrans requires 2 or 3 string arguments"
+    jmp .smt_fail
 .smt_too_many:
     mov rsi, [rbp - SMT_NARGS]
-    call smt_raise_too_many
+    call smt_set_too_many
+    jmp .smt_fail
 
 .smt_len_error:
-    RAISE exc_ValueError_type, "the first two maketrans arguments must have equal length"
+    SET_EXC exc_ValueError_type, "the first two maketrans arguments must have equal length"
+.smt_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_staticmethod_maketrans
 
 ;; smt_is_str(rdi = a Value) -> eax = 1 when it is a str
@@ -1524,13 +1577,14 @@ DEF_FUNC_BARE smt_is_str
     ret
 END_FUNC smt_is_str
 
-;; smt_raise_not_str(rdi = the offending argument, esi = which one) -- no return
+;; smt_set_not_str(rdi = the offending argument, esi = which one)
+;;   -> rax = 0, always, with the TypeError pending
 ;; "maketrans() argument 2 must be str, not int", CPython's wording.
 SRN_ARG   equ 8
 SRN_WHICH equ 16
 SRN_BUF   equ 176
 SRN_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL smt_raise_not_str, SRN_FRAME
+DEF_FUNC_LOCAL smt_set_not_str, SRN_FRAME
     mov [rbp - SRN_ARG], rdi
     mov [rbp - SRN_WHICH], rsi
     lea rdi, [rbp - SRN_BUF]
@@ -1559,16 +1613,18 @@ DEF_FUNC_LOCAL smt_raise_not_str, SRN_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - SRN_BUF]
-    extern raise_exception
-    call raise_exception
-END_FUNC smt_raise_not_str
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC smt_set_not_str
 
-;; smt_raise_too_many(rsi = the count) -- no return
+;; smt_set_too_many(rsi = the count) -> rax = 0, always, with the TypeError pending
 ;; "maketrans expected at most 3 arguments, got 4"
 STM_BUF   equ 176
 STM_N     equ 184
 STM_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-DEF_FUNC_LOCAL smt_raise_too_many, STM_FRAME
+DEF_FUNC_LOCAL smt_set_too_many, STM_FRAME
     mov [rbp - STM_N], rsi
     lea rdi, [rbp - STM_BUF]
     CSTRING rsi, "maketrans expected at most 3 arguments, got "
@@ -1578,11 +1634,15 @@ DEF_FUNC_LOCAL smt_raise_too_many, STM_FRAME
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - STM_BUF]
-    call raise_exception
-END_FUNC smt_raise_too_many
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC smt_set_too_many
 
 ;; args[0]=self, args[1]=prefix
 ;; If self starts with prefix, return self[len(prefix):], else return self.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_method_removeprefix
     push rbx
@@ -1648,14 +1708,22 @@ DEF_FUNC str_method_removeprefix
 .rp_type_error:
     mov rsi, rax                ; still the argument: neither check touches it
     CSTRING rdi, `removeprefix() argument must be str, not \x02`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.rp_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_removeprefix
 
 ;; ============================================================================
 ;; str_method_removesuffix(args, nargs) -> new string
 ;; args[0]=self, args[1]=suffix
 ;; If self ends with suffix, return self[:len(self)-len(suffix)], else return self.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC str_method_removesuffix
     push rbx
@@ -1727,14 +1795,22 @@ DEF_FUNC str_method_removesuffix
 .rs_type_error:
     mov rsi, rax                ; still the argument: neither check touches it
     CSTRING rdi, `removesuffix() argument must be str, not \x02`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.rs_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_removesuffix
 
 ;; ============================================================================
 ;; str_method_encode(args, nargs) -> bytes
 ;; args[0]=self, args[1]=encoding (optional, default 'utf-8')
 ;; For now, supports 'utf-8' and 'ascii' — both just copy raw bytes.
+;; Fails: 0
 ;; ============================================================================
 SE_SELF  equ 8
 SE_LEN   equ 16
@@ -1808,12 +1884,12 @@ DEF_FUNC str_method_encode, SE_FRAME
     cmp rsi, rcx
     je .se_bad_errtype_none     ; the clinic says "None", not "NoneType"
     CSTRING rdi, `encode() argument 'errors' must be str, not \x01`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
-    ud2
+    call set_type_error_with_name
+    jmp .se_fail
 .se_bad_errtype_none:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
           "encode() argument 'errors' must be str, not None"
+    jmp .se_fail
 .se_errs_ok:
     mov [rbp - SE_ENC], rax
     mov rdi, rax
@@ -2117,22 +2193,30 @@ DEF_FUNC str_method_encode, SE_FRAME
     lea rcx, [rel none_singleton]
     cmp rsi, rcx
     je .se_bad_enc_none
-    extern raise_type_error_with_name
     CSTRING rdi, `encode() argument 'encoding' must be str, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .se_fail
 .se_bad_enc_none:
-    RAISE exc_TypeError_type, \
+    SET_EXC exc_TypeError_type, \
           "encode() argument 'encoding' must be str, not None"
+    jmp .se_fail
 .se_too_many:
-    RAISE exc_TypeError_type, "encode() takes at most 2 arguments"
+    SET_EXC exc_TypeError_type, "encode() takes at most 2 arguments"
+    jmp .se_fail
 
 .se_not_encodable:
     extern exc_UnicodeEncodeError_type
-    RAISE exc_UnicodeEncodeError_type, "character not in range for this encoding"
+    SET_EXC exc_UnicodeEncodeError_type, "character not in range for this encoding"
+.se_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_method_encode
 
 ;; ============================================================================
-;; str_raise_encode_error(rdi = the code point, rsi = its code-point position,
+;; str_set_encode_error(rdi = the code point, rsi = its code-point position,
 ;;                        rdx = the codec's name, ecx = the range limit)
 ;;
 ;; "'latin-1' codec can't encode character 'ሴ' in position 1: ordinal not
@@ -2151,7 +2235,7 @@ SRE_POS   equ 16
 SRE_NAME  equ 24
 SRE_LIMIT equ 32
 SRE_FRAME equ 56            ; + 1 push = 64, 16-aligned
-DEF_FUNC_LOCAL str_raise_encode_error, SRE_FRAME
+DEF_FUNC_LOCAL str_set_encode_error, SRE_FRAME
     push rbx
     mov [rbp - SRE_CP], rdi
     mov [rbp - SRE_POS], rsi
@@ -2236,9 +2320,12 @@ DEF_FUNC_LOCAL str_raise_encode_error, SRE_FRAME
     extern exc_UnicodeEncodeError_type
     lea rdi, [rel exc_UnicodeEncodeError_type]
     lea rsi, [rel se_msgbuf]
-    call raise_exception
-    ud2
-END_FUNC str_raise_encode_error
+    call set_exception
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC str_set_encode_error
 
 ;; ============================================================================
 ;; se_report_unencodable(rdi = the str, rsi = the byte offset of the lead
@@ -2248,6 +2335,7 @@ END_FUNC str_raise_encode_error
 ;; characters and words the strict message from it: one character is
 ;; "character 'ሴ' in position 1", several are "characters in position
 ;; 0-3".  Positions are counted in characters, not bytes.
+;; Fails: 0
 ;; ============================================================================
 SRU_STR   equ 8
 SRU_OFF   equ 16
@@ -2296,8 +2384,10 @@ DEF_FUNC_LOCAL se_report_unencodable, SRU_FRAME
     mov rsi, rbx
     mov rdx, [rbp - SRU_NAME]
     mov rcx, [rbp - SRU_LIMIT]
-    call str_raise_encode_error ; does not return
-    ud2
+    call str_set_encode_error   ; err: its 0 is this function's own
+    pop rbx
+    leave
+    ret
 
 .sru_range:
     mov rdi, rbx                ; the first position
@@ -2306,8 +2396,10 @@ DEF_FUNC_LOCAL se_report_unencodable, SRU_FRAME
     dec rsi                     ; the last
     mov rdx, [rbp - SRU_NAME]
     mov rcx, [rbp - SRU_LIMIT]
-    call str_raise_encode_range ; does not return
-    ud2
+    call str_set_encode_range   ; err: its 0 is this function's own
+    pop rbx
+    leave
+    ret
 END_FUNC se_report_unencodable
 
 ;; ============================================================================
@@ -2379,7 +2471,7 @@ DEF_FUNC_LOCAL se_decode_at
 END_FUNC se_decode_at
 
 ;; ============================================================================
-;; str_raise_encode_range(rdi = first position, rsi = last position,
+;; str_set_encode_range(rdi = first position, rsi = last position,
 ;;                        rdx = the codec's name, rcx = the range limit)
 ;;
 ;; "'ascii' codec can't encode characters in position 0-3: ordinal not in
@@ -2390,7 +2482,7 @@ SRR_LAST  equ 16
 SRR_NAME  equ 24
 SRR_LIMIT equ 32
 SRR_FRAME equ 48            ; + 0 pushes = 48
-DEF_FUNC_LOCAL str_raise_encode_range, SRR_FRAME
+DEF_FUNC_LOCAL str_set_encode_range, SRR_FRAME
     mov [rbp - SRR_FIRST], rdi
     mov [rbp - SRR_LAST], rsi
     mov [rbp - SRR_NAME], rdx
@@ -2426,9 +2518,11 @@ DEF_FUNC_LOCAL str_raise_encode_range, SRR_FRAME
 
     lea rdi, [rel exc_UnicodeEncodeError_type]
     lea rsi, [rel se_msgbuf]
-    call raise_exception
-    ud2
-END_FUNC str_raise_encode_range
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC str_set_encode_range
 
 ;; see_append_u64(rdi = dest, rsi = the value) -> rax = the new NUL
 DEF_FUNC_LOCAL see_append_u64

@@ -20,6 +20,9 @@
 
 section .text
 
+extern dict_get_mro
+extern dict_get
+extern dict_set
 extern eval_dispatch
 extern fatal_error
 extern async_gen_wrap_value
@@ -255,10 +258,8 @@ IS_FRAME    equ 96      ; sub rsp, 96 (after push rbp + push rbx = 112 total)
 %%none:
 %endmacro
 
-extern dict_get
 extern module_type
 extern exc_ImportError_type
-extern dict_set
 extern str_from_cstr_heap
 extern obj_decref
 
@@ -372,6 +373,7 @@ extern obj_decref
     mov rdi, [rbp - IS_MODDICT]
     mov rsi, rax                      ; key = "__all__"
     call dict_get                     ; → (rax=value, rdx=tag) or (0, 0)
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; Save result before DECREF of key
     push rax
@@ -421,6 +423,7 @@ extern obj_decref
     jz .is_all_not_seq_ptr
     mov rdi, rbx
     call rax
+    ERR_M1_JUMP
     mov [rbp - IS_LIMIT], rax
     mov qword [rbp - IS_IDX], 0
     jmp .is_all_loop
@@ -450,6 +453,7 @@ extern obj_decref
     mov rdi, [rbp - IS_MODDICT]
     xor edx, edx
     call dict_get                     ; → (rax=value, rdx=value_tag) or (0, 0)
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .is_all_absent                 ; the module does not define it
@@ -468,6 +472,7 @@ extern obj_decref
     mov rcx, r10                      ; value tag
     V_PACK rdx, rcx
     call dict_set
+    ERR_M1_JUMP
 
 .is_all_next:
     inc qword [rbp - IS_IDX]
@@ -490,6 +495,7 @@ extern obj_decref
     mov rdi, rbx                      ; the __all__ object
     mov rsi, [rbp - IS_IDX]
     call rax
+    ERR_NULL_JUMP
     V_UNPACK rax, rdx
     mov rsi, rax                      ; an owned one-character str; the locals
                                       ; dict takes its own reference, and the
@@ -507,13 +513,14 @@ extern obj_decref
     mov [rbp - IS_SUBNAME], rsi
     mov rdi, [rbp - IS_MOD]
     extern import_submodule_attr
-    call import_submodule_attr
+    call import_submodule_attr  ; err: 0 goes to .is_all_really_absent, which hands on a pending exception first
     test rax, rax
     jz .is_all_really_absent
     mov rdx, rax
     mov rdi, [rbp - IS_LOCALS]
     mov rsi, [rbp - IS_SUBNAME]
     call dict_set
+    ERR_M1_JUMP
     jmp .is_all_next
 
 .is_all_really_absent:
@@ -617,6 +624,7 @@ extern obj_decref
     mov rdi, [rbp - IS_LOCALS]
     mov rsi, [rbx + DictEntry.key]
     call dict_set
+    ERR_M1_JUMP
     pop rdi
     pop rdi
     DECREF_V rdi, rcx                 ; dict_set took its own reference
@@ -628,6 +636,7 @@ extern obj_decref
     ; rsi = key Value (already set), value comes straight from the entry
     mov rdx, [rbx + DictEntry.value]
     call dict_set
+    ERR_M1_JUMP
 
 .is_dict_next:
     inc qword [rbp - IS_IDX]
@@ -733,6 +742,7 @@ extern obj_decref
     push rax                    ; twice: keep rsp 16-byte aligned
     mov rdi, rax                ; a pointer is its own Value
     call rcx                    ; nb_positive returns a Value, or NULL
+    ERR_PENDING_JUMP
     test rax, rax
     jz .ci1_pos_declined        ; a slot may decline; storing the NULL put a
     mov [r13 - 8], rax          ; raw 0 on the value stack for later to find
@@ -850,7 +860,7 @@ DEF_FUNC_LOCAL intrinsic_display, ID_FRAME
     mov rsi, rsp
     mov edx, 1
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .id_raised, below
     add rsp, 16
     mov [rbp - ID_VAL], rax     ; the hook's result, or 0
     ; A Value: sys.displayhook is whatever a program put there, and obj_decref
@@ -898,6 +908,7 @@ DEF_FUNC_BARE op_get_len
     ; is reached before the push and must not unwind it.
     sub rsp, 8
     call rax
+    ERR_M1_JUMP
     add rsp, 8
     jmp .gl_got_len
 
@@ -913,6 +924,7 @@ DEF_FUNC_BARE op_get_len
     jz .gl_error
     sub rsp, 8                  ; the same pad, for the same reason
     call rax
+    ERR_M1_JUMP
     add rsp, 8
 
 .gl_got_len:
@@ -933,7 +945,6 @@ END_FUNC op_get_len
 ;; Opcode 85: SETUP_ANNOTATIONS
 ;; ============================================================================
 extern dict_new
-extern dict_set
 
 ; A handler is entered 16-byte ALIGNED, so `push rbp` plus two saves leaves rsp
 ; 8 out at every call below.  The third push is the slot that puts it back --
@@ -976,6 +987,7 @@ DEF_FUNC op_setup_annotations
     mov rdi, rbx
     mov rsi, r13
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax
     jnz .sa_have
 
@@ -985,6 +997,7 @@ DEF_FUNC op_setup_annotations
     mov rsi, r13
     mov rdx, r12
     call dict_set
+    ERR_M1_JUMP
     mov rdi, r12
     call obj_decref             ; dict_set took its own reference
     jmp .sa_have
@@ -997,7 +1010,7 @@ DEF_FUNC op_setup_annotations
     mov rdi, rbx
     mov rsi, r13
     extern mapping_getitem_opt
-    call mapping_getitem_opt
+    call mapping_getitem_opt    ; err: 0, absent or raised, goes to .sa_map_missing
     test rax, rax
     jz .sa_map_missing
     mov rdi, rax
@@ -1009,9 +1022,19 @@ DEF_FUNC op_setup_annotations
     ; and lets anything else through; clearing whatever it was keeps an
     ; exception from a mapping's __getitem__ out of an opcode that has nothing
     ; to do with it.
+    ;
+    ; Only a KeyError, now that a builtin __getitem__ returns its refusal: the
+    ; TypeError a str or a list answers a name with is not a miss.
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
     jz .sa_map_make
+    extern exc_isinstance
+    extern exc_KeyError_type
+    lea rsi, [rel exc_KeyError_type]
+    call exc_isinstance     ; err: a static type is never refused
+    test eax, eax
+    jz .sa_map_raised
+    mov rdi, [gs:ThreadState.current_exception]
     mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .sa_map_make:
@@ -1026,6 +1049,8 @@ DEF_FUNC op_setup_annotations
     mov rsi, r13
     mov rdx, r12
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
 .sa_map_free:
     mov rdi, r12
     call obj_decref
@@ -1040,6 +1065,13 @@ DEF_FUNC op_setup_annotations
     pop rbx
     pop rbp
     DISPATCH
+
+.sa_map_raised:
+    ; Not a miss: the key is still ours, and the unwinder resets everything
+    ; this handler pushed.
+    mov rdi, r13
+    call obj_decref
+    jmp eval_exception_unwind
 END_FUNC op_setup_annotations
 
 ;; ============================================================================
@@ -1064,7 +1096,6 @@ END_FUNC op_load_locals
 ;; Opcode 175: LOAD_FROM_DICT_OR_GLOBALS
 ;; Used in class body comprehensions.
 ;; ============================================================================
-extern dict_get
 
 DEF_FUNC_BARE op_load_from_dict_or_globals
     ; ecx = name index (payload array: 8-byte stride)
@@ -1082,6 +1113,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
@@ -1089,6 +1121,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp + 8]         ; name
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
@@ -1100,6 +1133,7 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
     ; Try builtins
     mov rdi, [r12 + PyFrame.builtins]
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found_no_pop
 
@@ -1186,6 +1220,7 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
 
     ; Try dict first (the name is a string, so it is already a Value)
     call dict_get
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .lfdod_found
@@ -1357,6 +1392,7 @@ DEF_FUNC op_match_keys, MK_FRAME
     ; Look up in subject
     mov rdi, [rbp - MK_SUBJ]
     call dict_get
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .mk_fail
@@ -1498,7 +1534,7 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rsi, rax                    ; rsi = "__match_args__" str obj
     pop rdi                         ; restore dict
     push rsi                        ; save string for DECREF
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rsi                         ; rsi = string to DECREF
     push rdx                        ; save dict_get tag
@@ -1592,6 +1628,9 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
+    GETATTR_HOOK_SKIP .mc_ga_pos
+    ERR_PENDING_JUMP
+.mc_ga_pos:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .mc_fail                     ; attr not found
@@ -1630,6 +1669,9 @@ DEF_FUNC op_match_class, MC_FRAME
     test rax, rax
     jz .mc_fail
     call rax
+    GETATTR_HOOK_SKIP .mc_ga_kw
+    ERR_PENDING_JUMP
+.mc_ga_kw:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jz .mc_fail                     ; attr not found
@@ -1676,6 +1718,11 @@ DEF_FUNC op_match_class, MC_FRAME
     DISPATCH
 
 .mc_fail:
+    ; A subject whose __getattr__ said "absent" by raising AttributeError does
+    ; not match, and that AttributeError goes no further: left pending, it
+    ; outlived the match statement and was reported at the end of the program.
+    extern attr_miss_swallow
+    call attr_miss_swallow
     ; DECREF partial result tuple if allocated (tuple_new zeros items,
     ; tuple_dealloc skips NULLs, so partial is safe)
     mov rdi, [rbp - MC_RESULT]
@@ -1985,7 +2032,7 @@ DEF_FUNC_LOCAL typing_call, TYC_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov rbx, rax
     pop rdi
     extern obj_decref
@@ -2007,6 +2054,7 @@ DEF_FUNC_LOCAL typing_call, TYC_FRAME
     mov rsi, rax
     extern dict_get
     call dict_get
+    ERR_DICT_GET_JUMP
     mov [rbp - TYC_FN], rax
     pop rdi
     call obj_decref

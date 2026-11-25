@@ -368,6 +368,14 @@ DEF_FUNC op_call, CL_FRAME
     mov rcx, [gs:ThreadState.current_exception]
     test rcx, rcx
     jnz .propagate_exc
+    ; NULL, and nothing pending: the callee failed without saying how.  That
+    ; is a bug in the callee, and pushing the NULL -- which is what this did --
+    ; hands it to whichever instruction dereferences it first.  CPython's
+    ; _Py_CheckFunctionResult says the same thing in the same words.
+    extern exc_SystemError_type
+    extern set_exception
+    SET_EXC exc_SystemError_type, "NULL result without error in call"
+    jmp .propagate_exc
 
 .push_result:
     ; Push the return Value (rax already loaded)
@@ -596,7 +604,7 @@ DEF_FUNC op_call_function_ex
     lea rdi, [rel tuple_type]
     lea rsi, [rbp - CFX_ARGS]
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     test rax, rax
     jz .cfex_args_raised
     mov rdi, [rbp - CFX_ARGS]       ; the original iterable, still owned
@@ -924,6 +932,9 @@ DEF_FUNC op_call_function_ex
     mov rcx, [gs:ThreadState.current_exception]
     test rcx, rcx
     jnz .cfex_propagate_exc
+    ; As in op_call: a NULL with nothing pending is not a result.
+    SET_EXC exc_SystemError_type, "NULL result without error in call"
+    jmp .cfex_propagate_exc
 
 .cfex_push_result:
     VPUSH_VAL rax, rdx
@@ -1017,6 +1028,9 @@ DEF_FUNC op_before_with
     mov rdi, rbx
     mov rsi, r12
     call rax
+    GETATTR_HOOK_SKIP .bw_exit_ga_ok
+    ERR_PENDING_JUMP
+.bw_exit_ga_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .bw_no_exit_decref_name
@@ -1059,6 +1073,9 @@ DEF_FUNC op_before_with
     mov rdi, rbx
     mov rsi, r12
     call rax
+    GETATTR_HOOK_SKIP .bw_enter_ga_ok
+    ERR_PENDING_JUMP
+.bw_enter_ga_ok:
     V_UNPACK rax, rdx
     test edx, edx
     jz .bw_no_enter_decref_name

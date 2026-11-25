@@ -29,7 +29,9 @@
 %include "threadstate.inc"
 
 ASM_INIT
-
+extern dict_get
+extern dict_set
+extern dict_set_str
 extern ap_malloc
 extern obj_decref
 extern obj_dealloc
@@ -37,14 +39,12 @@ extern obj_incref
 extern type_type
 extern dict_new
 extern frame_fast_to_locals
-extern dict_set
 extern str_from_cstr_heap
 extern ap_strcmp
 extern int_from_i64
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
 extern exc_ValueError_type
 extern exc_TypeError_type
 extern exc_AttributeError_type
@@ -349,7 +349,7 @@ DEF_FUNC frameobj_detach, 8            ; 1 push, so rsp is 16-aligned
     ; and reads it back after the frame is gone, which is exactly this
     ; moment.
     mov rdi, rbx
-    call frameobj_refresh_locals
+    call frameobj_refresh_locals    ; err: a frame being detached has nobody to tell; what is pending stays
 
 .fdt_drop:
     mov qword [rbx + PyFrameObject.f_frame], 0
@@ -367,6 +367,7 @@ END_FUNC frameobj_detach
 ;; ============================================================================
 ;; frameobj_refresh_locals(rdi = a PyFrameObject*) -> rax = the dict, borrowed,
 ;;   or 0
+;; Fails: 0?
 ;;
 ;; A frame using a locals DICT already has the real thing in f_locals and
 ;; needs nothing.  A frame using fast locals does not have a dict at all, so
@@ -412,10 +413,16 @@ DEF_FUNC frameobj_refresh_locals, FRL_FRAME
     cmp rdi, [rbx + PyFrameObject.f_globals]
     je .frl_adopt
     mov rsi, [rbp - FRL_FRESH]
-    call frameobj_merge_dict
+    call frameobj_merge_dict    ; err: tested once the fresh dict is released
+    mov rbx, rax
     mov rdi, [rbp - FRL_FRESH]
     call obj_decref
-    jmp .frl_asis
+    test rbx, rbx
+    jz .frl_asis
+    xor eax, eax                ; f_locals could not be brought up to date
+    pop rbx
+    leave
+    ret
 
 .frl_adopt:
     mov rdi, [rbx + PyFrameObject.f_locals]
@@ -462,10 +469,16 @@ DEF_FUNC_LOCAL frameobj_merge_dict, 48
     mov rdx, [rcx + DictEntry.value]
     mov rdi, [rbp - FMD_DST]
     call dict_set
+    ERR_M1 .fmd_fail
 .fmd_next:
     inc qword [rbp - FMD_I]
     jmp .fmd_loop
 .fmd_done:
+    xor eax, eax
+    leave
+    ret
+.fmd_fail:                      ; the destination held a key that would not compare
+    mov rax, -1
     leave
     ret
 END_FUNC frameobj_merge_dict
@@ -528,8 +541,9 @@ DEF_FUNC frameobj_setattr, 48
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
     lea rsi, [rel fsa_buf]
-    leave
-    jmp raise_exception
+    extern set_exception
+    call set_exception
+    jmp .fsa_fail
 
 .fsa_trace:
     ; None is a delete, as it is in CPython: bdb assigns None to turn local
@@ -561,6 +575,7 @@ DEF_FUNC frameobj_setattr, 48
 .fsa_lines:
     mov rdi, [rbp - FSA_VAL]
     call frameobj_flag_value
+    ERR_M1 .fsa_fail
     mov rcx, [rbp - FSA_SELF]
     mov [rcx + PyFrameObject.f_trace_lines], rax
     jmp .fsa_ok
@@ -568,6 +583,7 @@ DEF_FUNC frameobj_setattr, 48
 .fsa_opcodes:
     mov rdi, [rbp - FSA_VAL]
     call frameobj_flag_value
+    ERR_M1 .fsa_fail
     mov rcx, [rbp - FSA_SELF]
     mov [rcx + PyFrameObject.f_trace_opcodes], rax
     jmp .fsa_ok
@@ -577,7 +593,11 @@ DEF_FUNC frameobj_setattr, 48
     ; line means re-deriving the block stack for the destination, which this
     ; interpreter does not have the machinery to do; refusing is CPython's
     ; own answer for a jump it cannot make.
-    RAISE exc_ValueError_type, "f_lineno can only be set in a trace function"
+    SET_EXC exc_ValueError_type, "f_lineno can only be set in a trace function"
+.fsa_fail:
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
+    leave
+    ret
 
 .fsa_ok:
     xor eax, eax
@@ -594,19 +614,17 @@ section .text
 
 ;; ============================================================================
 ;; frameobj_flag_value(rdi = a Value, or 0) -> rax = 0 or 1
+;; Fails: -1
 ;;
-;; The truth of one of the two trace flags.  A delete, and an error from
-;; __bool__, both read as false: the flags are advisory and a debugger that
-;; sets one to a broken object should not take the frame down with it.
+;; The truth of one of the two trace flags.  A delete reads as false.  A
+;; __bool__ that raises is the assignment's failure, as CPython's is; reading
+;; it as false left the exception pending behind a store that had succeeded.
 ;; ============================================================================
 DEF_FUNC_LOCAL frameobj_flag_value
     test rdi, rdi
     jz .ffv_false               ; a delete reads as false
     extern obj_is_true
-    call obj_is_true
-    test eax, eax
-    jle .ffv_false              ; an error reads as false; the flag is advisory
-    mov eax, 1
+    call obj_is_true            ; err: its answer is this function's, -1 included
     leave
     ret
 .ffv_false:
@@ -760,6 +778,7 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .sgf_null
     ; CPython treats a negative depth as zero rather than refusing it.
     test rax, rax
     js .sgf_have_depth
@@ -797,8 +816,10 @@ DEF_FUNC sys_getframe_func, SGF_FRAME
     ret
 
 .sgf_too_deep:
+    SET_EXC exc_ValueError_type, "call stack is not deep enough"
     pop rbx
-    RAISE exc_ValueError_type, "call stack is not deep enough"
+    leave
+    ret
 END_FUNC sys_getframe_func
 
 ;; ============================================================================
@@ -852,7 +873,7 @@ DEF_FUNC sys_current_frames_func, SCF_FRAME
     mov rsi, [rbp - SCF_KEY]
     mov rdx, [rbp - SCF_VIEW]
     extern dict_set
-    call dict_set               ; takes its own references
+    call dict_set_str               ; takes its own references
     mov rax, [rbp - SCF_KEY]
     DECREF_V rax, rcx
     mov rdi, [rbp - SCF_VIEW]
@@ -891,6 +912,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     mov rdi, [rdi]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .sgm_fail
     pop rcx
     mov rcx, rax
 .sgm_have_depth:
@@ -918,7 +940,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     sub rsp, 8
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get       ; err: tested at .sgm_miss, once the key is released
     add rsp, 8
     pop rcx
     push rax
@@ -928,7 +950,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     add rsp, 8
     pop rax
     test rax, rax
-    jz .sgm_none
+    jz .sgm_miss
     INCREF_V rax, rdx
     pop rbx
     leave
@@ -940,6 +962,19 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.sgm_fail:                      ; the depth was refused, and that is pending
+    add rsp, 8                  ; the rcx pushed around obj_as_index
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.sgm_miss:                      ; no __name__, or the globals could not be searched
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .sgm_none
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC sys_getframemodulename_func
 
@@ -1069,6 +1104,7 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
 .fog_locals:
     mov rdi, [rbp - FOG_SELF]
     call frameobj_refresh_locals
+    ERR_PENDING .fog_locals_raised
     test rax, rax
     jz .fog_locals_none
     INCREF rax
@@ -1082,6 +1118,10 @@ DEF_FUNC frameobj_getattr, FOG_FRAME
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
+    ret
+.fog_locals_raised:
+    xor eax, eax
+    leave
     ret
 
 .fog_lineno:
@@ -1162,6 +1202,7 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
     mov rdi, rcx
     extern gen_close
     call gen_close
+    ERR_NULL .fmc_failed        ; a finally block raised: that is the answer
     mov rax, [rbp - FMC_SELF]
     mov qword [rax + PyFrameObject.f_frame], 0
 .fmc_detached:
@@ -1198,13 +1239,19 @@ DEF_FUNC frameobj_method_clear, FMC_FRAME
 
 .fmc_executing:
     extern exc_RuntimeError_type
-    RAISE exc_RuntimeError_type, "cannot clear an executing frame"
+    SET_EXC exc_RuntimeError_type, "cannot clear an executing frame"
+.fmc_failed:
+    xor eax, eax
+    leave
+    ret
 .fmc_arity:
     dec rsi                     ; the count CPython reports excludes self
     CSTRING rdi, "clear() takes no arguments ("
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC frameobj_method_clear
 
 DEF_FUNC frameobj_repr

@@ -19,7 +19,6 @@ extern dict_set
 extern module_new
 extern builtin_func_new
 extern none_singleton
-extern raise_exception
 extern exc_TypeError_type
 extern list_type
 extern tuple_type
@@ -61,9 +60,10 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov [rbp - SC_ARGS], rdi
     mov [rbp - SC_NARGS], rsi
 
-    ; Validate nargs >= 6
+    ; Exactly six.  "At least six" let a longer call through.
     cmp rsi, 6
     jb .compile_error_args
+    ja .compile_too_many
 
     ; Extract args (one Value per slot)
     ; args[0] = pattern string
@@ -165,8 +165,9 @@ DEF_FUNC sre_compile_func, SC_FRAME
     call ap_free
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel sm_code_type_err]
-    call raise_exception
-    RET_NULL
+    extern set_exception
+    call set_exception
+    jmp .compile_fail
 .code_done:
 
     ; Allocate SRE_PatternObject
@@ -242,7 +243,25 @@ DEF_FUNC sre_compile_func, SC_FRAME
     ret
 
 .compile_error_args:
-    RAISE exc_TypeError_type, "_sre.compile() requires 6 arguments"
+    FAIL exc_TypeError_type, "_sre.compile() requires 6 arguments", .compile_fail
+
+.compile_too_many:
+    ; Nothing is held yet, so this one returns: the count is in the message,
+    ; as CPython's is.
+    CSTRING rdi, "compile() takes at most 6 arguments ("
+    mov rsi, [rbp - SC_NARGS]
+    CSTRING rdx, " given)"
+    extern set_type_error_counted
+    call set_type_error_counted ; rax = 0
+.compile_fail:
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_compile_func
 
 ;; ============================================================================
@@ -274,7 +293,9 @@ DEF_FUNC sre_ascii_iscased_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .aic_error:
-    RAISE exc_TypeError_type, "ascii_iscased() takes 1 argument"
+    SET_EXC exc_TypeError_type, "ascii_iscased() takes 1 argument"
+    leave
+    ret
 END_FUNC sre_ascii_iscased_func
 
 ;; ============================================================================
@@ -295,7 +316,9 @@ DEF_FUNC sre_ascii_tolower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .atl_error:
-    RAISE exc_TypeError_type, "ascii_tolower() takes 1 argument"
+    SET_EXC exc_TypeError_type, "ascii_tolower() takes 1 argument"
+    leave
+    ret
 END_FUNC sre_ascii_tolower_func
 
 ;; ============================================================================
@@ -342,7 +365,9 @@ DEF_FUNC sre_unicode_iscased_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .uic_error:
-    RAISE exc_TypeError_type, "unicode_iscased() takes 1 argument"
+    SET_EXC exc_TypeError_type, "unicode_iscased() takes 1 argument"
+    leave
+    ret
 END_FUNC sre_unicode_iscased_func
 
 ;; ============================================================================
@@ -373,7 +398,9 @@ DEF_FUNC sre_unicode_tolower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .utl_error:
-    RAISE exc_TypeError_type, "unicode_tolower() takes 1 argument"
+    SET_EXC exc_TypeError_type, "unicode_tolower() takes 1 argument"
+    leave
+    ret
 END_FUNC sre_unicode_tolower_func
 
 ;; ============================================================================
@@ -426,7 +453,9 @@ DEF_FUNC sre_getlower_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .gl_error:
-    RAISE exc_TypeError_type, "getlower() takes 2 arguments"
+    SET_EXC exc_TypeError_type, "getlower() takes 2 arguments"
+    leave
+    ret
 END_FUNC sre_getlower_func
 
 ;; ============================================================================
@@ -446,7 +475,9 @@ DEF_FUNC sre_template_func
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .tmpl_error:
-    RAISE exc_TypeError_type, "template() requires 2 arguments"
+    SET_EXC exc_TypeError_type, "template() requires 2 arguments"
+    leave
+    ret
 END_FUNC sre_template_func
 
 ;; ============================================================================

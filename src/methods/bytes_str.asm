@@ -34,7 +34,7 @@ extern list_append
 extern bool_true
 extern bool_false
 extern none_singleton
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_MemoryError_type
@@ -43,11 +43,11 @@ section .text
 
 ;; ============================================================================
 ;; bs_arg_i64(rdi = a Value) -> rax = the integer it denotes
-;; Raises TypeError through obj_as_index when it is not an index.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_LOCAL bs_arg_i64
     V_UNPACK rdi, rdx
-    call obj_as_index
+    call obj_as_index           ; err: its -1 and exception are this function's own
     leave
     ret
 END_FUNC bs_arg_i64
@@ -83,6 +83,7 @@ END_FUNC bs_arg_i64
 ;; The output is the input's length in every mode -- there is no bytes
 ;; equivalent of str's SS-for-eszett, so copy-then-transform-in-place is safe
 ;; here in a way it would not be for str.
+;; Fails: 0
 ;; ============================================================================
 BCS_ARGS  equ 8
 BCS_DATA  equ 16
@@ -177,9 +178,15 @@ DEF_FUNC bytes_case_impl, BCS_FRAME
     ret
 
 .bcs_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bcs_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_case_impl
 
 DEF_FUNC_BARE bytes_method_upper
@@ -219,6 +226,7 @@ END_FUNC bytes_method_title
 ;;
 ;; The first four are false on an empty bytes and isascii is true on one --
 ;; that asymmetry is CPython's, not an oversight here.
+;; Fails: 0
 ;; ============================================================================
 BPR_ARGS  equ 8
 BPR_DATA  equ 16
@@ -389,7 +397,10 @@ DEF_FUNC bytes_pred_impl, BPR_FRAME
     V_PACK rax, rdx
     ret
 .bpr_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_pred_impl
 
 DEF_FUNC_BARE bytes_method_isalpha
@@ -444,6 +455,7 @@ END_FUNC bytes_method_istitle
 ;; center's split is CPython's exactly -- left = marg/2 + (marg & width & 1) --
 ;; which is what puts the odd byte of b'ab'.center(5) on the right and the odd
 ;; byte of b'abc'.center(6) on the left.
+;; Fails: 0
 ;; ============================================================================
 BJU_ARGS  equ 8
 BJU_DATA  equ 16
@@ -482,6 +494,7 @@ DEF_FUNC bytes_just_impl, BJU_FRAME
     mov rdi, [rbp - BJU_ARGS]
     mov rdi, [rdi + 8]
     call bs_arg_i64
+    ERR_M1 .bju_fail
     mov [rbp - BJU_WIDTH], rax
 
     sub rax, [rbp - BJU_LEN]
@@ -546,7 +559,10 @@ DEF_FUNC bytes_just_impl, BJU_FRAME
     ret
 
 .bju_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bju_fill_bad:
     ; CPython names the method and the type it was handed: "center() argument
     ; 2 must be a byte string of length 1, not int".  Both halves were
@@ -567,8 +583,11 @@ DEF_FUNC bytes_just_impl, BJU_FRAME
     lea rcx, [rel none_singleton]
     cmp rsi, rcx
     je .bju_fill_none           ; the clinic says "None", not "NoneType"
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .bju_fill_none:
     ; The same three messages with the type name already in them; the
     ; composer would have written NoneType.
@@ -582,13 +601,24 @@ DEF_FUNC bytes_just_impl, BJU_FRAME
     lea rsi, [rel bju_msg_center_none]
 .bju_fill_none_raise:
     lea rdi, [rel exc_TypeError_type]
-    extern raise_exception
-    call raise_exception
-    ud2
+    call set_exception
+    xor eax, eax
+    leave
+    ret
 .bju_args:
-    RAISE exc_TypeError_type, "takes at least 1 argument"
+    SET_EXC exc_TypeError_type, "takes at least 1 argument"
+    xor eax, eax
+    leave
+    ret
 .bju_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
+.bju_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_just_impl
 
 section .rodata
@@ -621,6 +651,7 @@ END_FUNC bytes_method_center
 ;;
 ;; Zeroes on the left, except that a leading '+' or '-' stays in front of
 ;; them: b'-5'.zfill(4) is b'-005', not b'00-5'.
+;; Fails: 0
 ;; ============================================================================
 BZF_ARGS  equ 8
 BZF_DATA  equ 16
@@ -638,6 +669,7 @@ DEF_FUNC bytes_method_zfill, BZF_FRAME
     mov rdi, [rbp - BZF_ARGS]
     mov rdi, [rdi + 8]
     call bs_arg_i64
+    ERR_M1 .bzf_fail
     mov [rbp - BZF_WIDTH], rax
 
     sub rax, [rbp - BZF_LEN]
@@ -690,11 +722,24 @@ DEF_FUNC bytes_method_zfill, BZF_FRAME
     ret
 
 .bzf_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bzf_args:
-    RAISE exc_TypeError_type, "zfill() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "zfill() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 .bzf_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
+.bzf_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_method_zfill
 
 
@@ -704,6 +749,7 @@ END_FUNC bytes_method_zfill
 ;; Two walks over the subject: the first sizes the result, the second fills
 ;; it.  A tab advances to the next multiple of tabsize *from the last line
 ;; break*, which is why the column is tracked rather than the index.
+;; Fails: 0
 ;; ============================================================================
 BET_ARGS  equ 8
 BET_DATA  equ 16
@@ -730,7 +776,8 @@ DEF_FUNC bytes_method_expandtabs, BET_FRAME
     mov esi, 1                  ; a tabsize is a C int in CPython, and it
     extern str_pad_width        ; says so when handed one that will not fit;
     call str_pad_width          ; bs_arg_i64 truncated, so 2**31 tabs became
-    mov [rbp - BET_TABS], rax   ; the low half of one
+    ERR_M1 .bet_fail            ; the low half of one
+    mov [rbp - BET_TABS], rax
 .bet_have_tabs:
 
     ; Walk one: the size.
@@ -831,11 +878,24 @@ DEF_FUNC bytes_method_expandtabs, BET_FRAME
     ret
 
 .bet_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bet_args:
-    RAISE exc_TypeError_type, "expandtabs() takes at most 1 argument"
+    SET_EXC exc_TypeError_type, "expandtabs() takes at most 1 argument"
+    xor eax, eax
+    leave
+    ret
 .bet_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
+.bet_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_method_expandtabs
 
 
@@ -845,6 +905,7 @@ END_FUNC bytes_method_expandtabs
 ;; A bytes knows three line breaks and no more: \n, \r and \r\n.  str's \v,
 ;; \f, \x1c-\x1e and \x85 are Unicode line breaks, and a bytes has no encoding
 ;; that would make them so.
+;; Fails: 0
 ;; ============================================================================
 BSL_KEEP  equ 8
 BSL_NEXT  equ 16
@@ -871,7 +932,7 @@ DEF_FUNC bytes_method_splitlines, BSL_FRAME
     jl .bsl_have_keep
     mov rdi, [r15 + 8]
     call obj_is_true
-    movsx rax, eax
+    ERR_M1 .bsl_fail
     mov [rbp - BSL_KEEP], rax
 .bsl_have_keep:
 
@@ -929,11 +990,11 @@ DEF_FUNC bytes_method_splitlines, BSL_FRAME
     lea rdi, [rbx + r13]
     call bytes_from_data
     test rax, rax
-    jz .bsl_oom
+    jz .bsl_oom_list
     mov r15, rax
     mov rdi, r14
     mov rsi, rax
-    call list_append            ; takes its own reference
+    call list_append            ; takes its own reference -- err: a list built here is not being sorted
     mov rdi, r15
     call obj_decref
     mov r13, [rbp - BSL_NEXT]
@@ -952,11 +1013,25 @@ DEF_FUNC bytes_method_splitlines, BSL_FRAME
     ret
 
 .bsl_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .bsl_fail
 .bsl_args:
-    RAISE exc_TypeError_type, "splitlines() takes at most 1 argument"
+    SET_EXC exc_TypeError_type, "splitlines() takes at most 1 argument"
+    jmp .bsl_fail
+.bsl_oom_list:
+    mov rdi, r14                ; the lines so far
+    call obj_decref
 .bsl_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+.bsl_fail:
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_method_splitlines
 
 
@@ -968,6 +1043,7 @@ END_FUNC bytes_method_splitlines
 ;; applied before the mapping, as CPython's is.  This is the method
 ;; re._compiler reaches for -- _mk_bitmap ends in bits.translate(_BITS_TRANS)
 ;; -- so a bytearray without it cannot compile a character class.
+;; Fails: 0
 ;; ============================================================================
 BTR_ARGS  equ 8
 BTR_DATA  equ 16
@@ -1075,21 +1151,39 @@ DEF_FUNC bytes_method_translate, BTR_FRAME
     ret
 
 .btr_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .btr_table_type:
     ; The type it actually got: this named 'str' whatever was passed.
     mov rsi, [rbp - BTR_TABLE]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .btr_table_len:
-    RAISE exc_ValueError_type, "translation table must be 256 characters long"
+    SET_EXC exc_ValueError_type, "translation table must be 256 characters long"
+    xor eax, eax
+    leave
+    ret
 .btr_del_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .btr_args:
-    RAISE exc_TypeError_type, "translate() takes at least 1 argument"
+    SET_EXC exc_TypeError_type, "translate() takes at least 1 argument"
+    xor eax, eax
+    leave
+    ret
 .btr_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_method_translate
 
 
@@ -1098,6 +1192,7 @@ END_FUNC bytes_method_translate
 ;;
 ;; A staticmethod, so args[0] is the first argument and not a type.  Both
 ;; types answer with a bytes, bytearray included -- CPython's does too.
+;; Fails: 0
 ;; ============================================================================
 BMT_FROM  equ 8
 BMT_FLEN  equ 16
@@ -1167,17 +1262,29 @@ DEF_FUNC bytes_staticmethod_maketrans, BMT_FRAME
     ret
 
 .bmt_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bmt_len:
-    RAISE exc_ValueError_type, "maketrans arguments must have same length"
+    SET_EXC exc_ValueError_type, "maketrans arguments must have same length"
+    xor eax, eax
+    leave
+    ret
 .bmt_args:
     mov rsi, [rbp - BMT_NARGS]
     CSTRING rdi, "maketrans expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    xor eax, eax
+    leave
+    ret
 .bmt_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_staticmethod_maketrans
 
 
@@ -1188,6 +1295,7 @@ END_FUNC bytes_staticmethod_maketrans
 ;; removeprefix and removesuffix.  Both always answer with a new object, even
 ;; when nothing was removed: CPython's may return self for a bytes, but a
 ;; bytearray must not alias, and one shape for both is worth the copy.
+;; Fails: 0
 ;; ============================================================================
 BRA_ARGS  equ 8
 BRA_DATA  equ 16
@@ -1260,16 +1368,28 @@ DEF_FUNC bytes_affix_impl, BRA_FRAME
     ret
 
 .bra_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bra_affix_type:
     mov rsi, [rbp - BRA_AFFIX]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .bra_args:
-    RAISE exc_TypeError_type, "takes exactly one argument"
+    SET_EXC exc_TypeError_type, "takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 .bra_oom:
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_affix_impl
 
 DEF_FUNC_BARE bytes_method_removeprefix

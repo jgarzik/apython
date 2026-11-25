@@ -12,12 +12,11 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern raise_exception
+extern set_exception
 extern none_singleton
 extern obj_incref
 extern dict_new
-extern dict_get
-extern dict_set
+extern dict_get_mro
 extern str_from_cstr
 extern str_from_cstr_heap
 extern type_getattr
@@ -30,7 +29,6 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern func_type
 extern type_type
-extern eval_exception_unwind
 extern sub_list_for_type
 extern object_method_getattribute
 extern dunder_get
@@ -81,8 +79,7 @@ extern property_type
 ;; the reference it was just given.  The caller is what decides "once": the
 ;; FINALIZED bit in the object's GC head.
 ;; ============================================================================
-OCF_EXC   equ 8
-OCF_OWNED equ 16          ; whether the reference below is ours to drop
+OCF_EXC   equ 8           ; the fetched exception: the global's reference
 OCF_FRAME equ 24          ; + 1 push = 32
 DEF_FUNC obj_call_finalizer, OCF_FRAME
     push rbx
@@ -94,34 +91,24 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
     extern dunder_call_1
-    ; Snapshot what was pending, and hold a reference to it: if __del__ raises,
-    ; installing its exception releases the global's reference to this one, and
-    ; the saved pointer would be dangling by the time it is put back.
-    DUNDER_EXC_SAVE [rbp - OCF_EXC]
-    mov qword [rbp - OCF_OWNED], 0
-    mov rdi, [rbp - OCF_EXC]
-    test rdi, rdi
-    jz .del_nothing_pending
-    ; ...but only when the global's own reference is real.  The unwinder can
-    ; reach here with current_exception pointing at an object whose refcount
-    ; is already zero, and taking and dropping a reference on that one frees
-    ; an exception that is still being carried.
+    ; FETCH what was pending, as CPython's PyErr_Fetch does: the slot takes
+    ; over the global's reference and the global is cleared, so __del__ runs
+    ; with nothing pending.  It used to be a snapshot, with the exception left
+    ; in place -- and then every "-1 (or 0) AND an exception pending" answer
+    ; a callee gave inside __del__ read as a failure whenever the finalizer
+    ; was running under an unwind.  `with lock:` in a __del__ did exactly
+    ; that: acquire's timeout of -1 was taken for a refused argument, the
+    ; in-flight exception was raised a second time from inside __del__, and
+    ; the lock was never released.
     ;
-    ; No path produces that state today: the case bugs.md used to carry does
-    ; not reproduce, valgrind is clean over the async suite, and a watch here
-    ; gets no hits across the corpus.  The check stays anyway.  It is two
-    ; instructions, and the invariant behind it is genuinely fragile --
-    ; raise_exception_obj takes over its caller's reference rather than
-    ; adding one, so the global's is often the only reference there is, and
-    ; this function runs while the unwinder is releasing the value stack.
-    cmp qword [rdi + PyObject.ob_refcnt], 0
-    jle .del_nothing_pending
-    call obj_incref
-    mov qword [rbp - OCF_OWNED], 1
-.del_nothing_pending:
+    ; Moving the reference also retires the refcount juggling that was here:
+    ; nothing __del__ does can release an exception the global no longer
+    ; names.
+    DUNDER_EXC_SAVE [rbp - OCF_EXC]
+    mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rbx
     lea rsi, [rel dunder_del]
-    call dunder_call_1
+    call dunder_call_1          ; err: a destructor reports its own error, below
     V_UNPACK rax, rdx           ; returns a Value
     ; Ignore return value — DECREF if non-NULL
     test edx, edx
@@ -135,33 +122,17 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     ; the unwinder dropping the value stack, that the handler receives the
     ; wrong exception object.  CPython reports it and puts back what was there.
     ;
-    ; "Did it raise?" is EXC_RAISED_SINCE's three-way question and not a bare
-    ; inequality.  current_exception is also the exception being HANDLED, and a
-    ; __del__ that raises and catches internally leaves the global at 0: a
-    ; change, but not a raise.  DUNDER_RAISED read that as one, and this arm
-    ; then zeroed the global -- destroying the exception the interpreter was
-    ; carrying, so that a __del__ running during an unwind made the enclosing
-    ; except block never run.
-    EXC_RAISED_SINCE [rbp - OCF_EXC], rax, .del_report
+    ; "Did it raise?" is now simply "is anything pending": the global was
+    ; cleared on the way in.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .del_report
 
 .del_restore:
-    ; Whatever __del__ left behind, the pending exception goes back to what it
-    ; was.  The reference taken above is what the global gets; anything else
-    ; sitting there is released.
-    mov rax, [rbp - OCF_EXC]
-    cmp [gs:ThreadState.current_exception], rax
-    je .del_drop_saved
+    ; Whatever __del__ left behind is released, and the fetched reference
+    ; moves back into the global.
     mov rdi, [gs:ThreadState.current_exception]
-    mov [gs:ThreadState.current_exception], rax    ; the saved reference moves in here
-    test rdi, rdi
-    jz .del_cleared
-    call obj_decref
-    jmp .del_cleared
-.del_drop_saved:
-    ; Unchanged, so the global still owns its own; drop the extra one.
-    cmp qword [rbp - OCF_OWNED], 0
-    je .del_cleared
-    mov rdi, rax
+    mov rax, [rbp - OCF_EXC]
+    mov [gs:ThreadState.current_exception], rax
     test rdi, rdi
     jz .del_cleared
     call obj_decref
@@ -506,6 +477,7 @@ END_FUNC base_slot
 IR_EXC   equ 8
 IR_ASSTR equ 16            ; 1 when str() sent us here, so a non-str answer is
                            ; reported as __str__ and not as __repr__
+IR_BAD   equ 24            ; what __repr__ answered instead of a str, owned
 IR_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 ;; ============================================================================
@@ -607,7 +579,7 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
 .ir_call_dunder:
     mov rdi, rbx
     lea rsi, [rel dunder_repr]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .ir_dunder_none
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .ir_dunder_none
@@ -628,14 +600,19 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
     ; str() with no __str__ of its own is object.__str__, which is repr -- and
     ; CPython checks the result at the str() level, so it says __str__ there.
+    mov [rbp - IR_BAD], rsi
     cmp qword [rbp - IR_ASSTR], 0
     jne .ir_not_a_string_from_str
     CSTRING rdi, `__repr__ returned non-string (type \x01)`
-    jmp raise_type_error_with_name
+    jmp .ir_refuse
 .ir_not_a_string_from_str:
     CSTRING rdi, `__str__ returned non-string (type \x01)`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+.ir_refuse:
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - IR_BAD]     ; and the thing itself goes back: the jump
+    DECREF_V rdi, rcx           ; this used to be left it referenced for ever
+    jmp .failed
 
 .ir_dunder_none:
     DUNDER_RAISED [rbp - IR_EXC], .failed   ; __repr__ ran and raised
@@ -788,6 +765,7 @@ END_FUNC instance_repr_default
 ;; rdi = instance
 ;; ============================================================================
 IS_EXC   equ 8
+IS_BAD   equ 16            ; what __str__ answered instead of a str, owned
 IS_FRAME equ 24            ; + 1 push = 32, 16-aligned
 
 ;; The same guard instance_repr carries, and for the same loop: the two reach
@@ -840,7 +818,7 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
 .is_call_dunder:
     mov rdi, rbx
     lea rsi, [rel dunder_str]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .is_dunder_none
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .is_dunder_none
@@ -862,9 +840,12 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
 .is_not_a_string:
     mov rsi, rax
     VALUE_FOR_TYPE rsi, rdx     ; the payload, back to something that names a type
+    mov [rbp - IS_BAD], rsi
     CSTRING rdi, `__str__ returned non-string (type \x01)`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+    call set_type_error_with_name
+    mov rdi, [rbp - IS_BAD]
+    DECREF_V rdi, rcx
+    jmp .failed
 
 .is_dunder_none:
     DUNDER_RAISED [rbp - IS_EXC], .failed   ; __str__ ran and raised
@@ -930,6 +911,7 @@ END_FUNC instance_str_inner
 ;; Returns: new instance
 ;; ============================================================================
 ; Local frame offsets for .normal_type_call (rbp-relative, after 5 pushes + sub rsp, 24)
+TC_SAVED    equ 40              ; the five registers .normal_type_call pushes
 TC_NEW_FUNC equ 48              ; saved __new__ func pointer
 TC_NEW_TAG  equ 56              ; saved __new__ result tag
 ; The keywords this call was made with.  __new__ consumes kw_names_pending, so
@@ -1007,18 +989,21 @@ TC_NO_SELF  equ 96
 %%refuse:
     mov rsi, rbx
     CSTRING rdi, `\x01() takes no arguments`
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename     ; does not return
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .tc_drop_instance       ; r14 is the instance, and it goes no further
 %%ok:
 %endmacro
 
 ;; ============================================================================
-;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, or 0
+;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, 0, or
+;;   -1 when two of them are unrelated
 ;;
 ;; args[1] is the bases tuple.  A base whose metatype is `type` -- or the
 ;; user_type_metatype that stands in for it here -- contributes nothing; of the
-;; rest the most derived wins, which is CPython's rule minus the conflict
-;; diagnosis.  0 means an ordinary type() call.
+;; rest the most derived wins, which is CPython's rule.  0 means an ordinary
+;; type() call.  -1 is a metaclass conflict, the caller's to report: nothing
+;; is pending.
 ;; ============================================================================
 TWM_ARGS  equ 8
 TWM_WIN   equ 16
@@ -1055,6 +1040,12 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     test rcx, rcx
     jz .twm_next
     mov rcx, [rcx + PyObject.ob_type]
+    ; A base that is not a class at all has no metatype to elect: its type
+    ; is str or NoneType, and electing that CALLED it -- `type("X", ("a",),
+    ; {})` answered "decoding str is not supported".  It contributes nothing
+    ; here and the plain path refuses it by name.
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .twm_next
     lea rdx, [rel type_type]
     cmp rcx, rdx
     je .twm_next
@@ -1076,15 +1067,24 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     jz .twm_take
     cmp rdx, rcx
     je .twm_next
-    ; Keep whichever is the subclass of the other; a genuine conflict just
-    ; leaves the one already found.
+    ; Keep whichever is the subclass of the other.  When neither is, there
+    ; is no winner: that used to leave the one already found, so
+    ; `type("N", (A1, A2), {})` built a class where the class statement, and
+    ; CPython, refuse.
     mov rdi, rcx
     mov rsi, rdx
     extern type_is_subtype
     call type_is_subtype
     mov rcx, [rbp - TWM_ITEM]
     test eax, eax
-    jz .twm_next
+    jnz .twm_take
+    mov rdi, [rbp - TWM_WIN]
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jnz .twm_next
+    mov qword [rbp - TWM_WIN], -1
+    jmp .twm_done
 .twm_take:
     mov [rbp - TWM_WIN], rcx
 .twm_next:
@@ -1098,6 +1098,14 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
 END_FUNC tc_winner_metatype
 
 
+;; type_call(rdi = type, rsi = Value *args, rdx = nargs)
+;;   -> rax = the new instance, a Value, or 0 with the exception pending.
+;; Described in full above the frame constants and helpers it uses.  A __new__
+;; or an __init__ that fails -- by raising, or by RETURNING 0 with the
+;; exception set, which is what a builtin one does -- is absorbed here: the
+;; half-built instance is released and 0 goes to the caller.  So is every
+;; refusal made before an instance exists.
+;; Fails: 0
 DEF_FUNC type_call
     ; Special case: type(x) with 1 arg when calling type itself
     ; Returns x.__class__ (the type of x)
@@ -1111,7 +1119,9 @@ DEF_FUNC type_call
     ; type() and type(a, b) are neither form.  Falling through to tp_new
     ; reported it as `type.__new__() takes at least 3 arguments`, which
     ; names a method the caller did not write.
-    RAISE exc_TypeError_type, "type() takes 1 or 3 arguments"
+    SET_EXC exc_TypeError_type, "type() takes 1 or 3 arguments"
+    leave
+    ret
 .type_one_arg:
     ; type(x) → return type of x
     mov rax, [rsi]          ; args[0] payload
@@ -1168,8 +1178,10 @@ DEF_FUNC type_call
     pop rsi
     test rax, rax
     jz .tta_plain
+    cmp rax, -1
+    je .tta_conflict
     mov rdi, rax
-    call type_call              ; the metatype's own tp_call, keywords and all
+    call type_call              ; err: the metatype's own tp_call; its 0 is ours
     leave
     ret
 
@@ -1180,7 +1192,9 @@ DEF_FUNC type_call
     ; block and wrote type fields into it, so the result printed as
     ; <class ''> and the process aborted with a double free.
     push rbx
+    push r12
     mov rbx, rsi                        ; args
+    mov r12, rdx                        ; how many, class keywords included
 
     mov rdi, [rbx]                      ; name
     V_TEST_PTR rdi, rax
@@ -1200,8 +1214,21 @@ DEF_FUNC type_call
     jne .type_three_bad_bases
     mov rcx, [rsi + PyTupleObject.ob_size]
     test rcx, rcx
-    jnz .type_three_have_base
-    xor esi, esi
+    jz .type_three_have_base
+.type_three_check_bases:
+    ; Every base has to BE a class.  Nothing looked, so `type("X", (5,), {})`
+    ; handed an int to type_from_parts, which read tp_basicsize off it -- a
+    ; segfault from one line of Python.  CPython reaches its metaclass
+    ; calculation first and words the refusal from there.
+    mov rax, [rsi + PyTupleObject.ob_item]
+    mov rax, [rax + rcx*8 - 8]
+    V_TEST_PTR rax, rdx
+    ja .type_three_bad_base
+    mov rax, [rax + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .type_three_bad_base
+    dec rcx
+    jnz .type_three_check_bases
 .type_three_have_base:
 
     mov rdx, [rbx + 16]                 ; namespace dict
@@ -1212,25 +1239,40 @@ DEF_FUNC type_call
     cmp rax, rcx
     jne .type_three_bad_ns
 
-    ; type_from_parts takes ownership of a reference to the namespace, which
-    ; becomes tp_dict, and keeps the name alive through tp_name.
-    inc qword [rdx + PyObject.ob_refcnt]
-    mov rdi, [rbx]
-    inc qword [rdi + PyObject.ob_refcnt]
-    extern type_from_parts
-    call type_from_parts
-    mov edx, TAG_PTR
+    ; The rest is type.__new__'s as well: the class keywords, which follow
+    ; the three in the array, and the call of type_from_parts.  A class is a
+    ; pointer and a pointer is its own Value.
+    mov rdi, rbx
+    mov rsi, r12
+    xor edx, edx                        ; the default metatype
+    extern type_new_impl
+    call type_new_impl                  ; err: its 0 is ours
+    pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
+    ret
+
+.tta_conflict:
+    ; Two bases whose metatypes are unrelated.  The scan used to keep
+    ; whichever it met first and build the class with it.
+    SET_EXC exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases"
+    leave                               ; set_exception answered 0
     ret
 
 .type_three_bad_name:
-    RAISE exc_TypeError_type, "type() argument 1 must be str"
+    FAIL exc_TypeError_type, "type() argument 1 must be str", .type_three_fail
 .type_three_bad_bases:
-    RAISE exc_TypeError_type, "type() argument 2 must be a tuple of at most one base"
+    FAIL exc_TypeError_type, "type() argument 2 must be a tuple of at most one base", .type_three_fail
+.type_three_bad_base:
+    FAIL exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases", .type_three_fail
 .type_three_bad_ns:
-    RAISE exc_TypeError_type, "type() argument 3 must be dict"
+    SET_EXC exc_TypeError_type, "type() argument 3 must be dict"
+.type_three_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .type_bool:
     extern bool_type
@@ -1302,8 +1344,9 @@ DEF_FUNC type_call
     jne .normal_type_call
     mov rsi, rdi                        ; the type, whose name fills the \x01
     CSTRING rdi, `cannot create '\x01' instances`
-    extern raise_type_error_with_typename
-    jmp raise_type_error_with_typename  ; does not return
+    call set_type_error_with_typename   ; rax = 0
+    leave
+    ret
 
 .normal_type_call:
     push rbx
@@ -1338,7 +1381,7 @@ DEF_FUNC type_call
     TC_NAME rcx, tc_abstract_name_obj, tc_abstract_name
     pop rdi
     mov rsi, rcx
-    call dict_get
+    call dict_get_mro           ; a type's namespace: "not here" on a failure
     test rax, rax
     jz .tc_not_abstract
     V_TEST_PTR rax, rcx
@@ -1348,7 +1391,8 @@ DEF_FUNC type_call
     mov rdi, rbx
     mov rsi, rax
     extern type_abstract_error
-    call type_abstract_error    ; does not return
+    call type_abstract_error    ; rax = 0, the TypeError pending
+    jmp .tc_fail
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -1467,6 +1511,7 @@ DEF_FUNC type_call
     mov rsi, r12
     mov rdx, r13
     call tuple_sub_fill
+    ERR_M1 .tc_drop_instance    ; r14 is the instance it could not fill
     jmp .lookup_init
 
 .new_found:
@@ -1641,7 +1686,7 @@ DEF_FUNC type_call
     mov rdi, rbx
     xor esi, esi                        ; the receiver check is type_call's own
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     test eax, eax
     jz .init_have_callable              ; not a descriptor: call it as written
     mov rdi, rbx
@@ -1670,7 +1715,7 @@ DEF_FUNC type_call
     mov rdx, [r14 + PyObject.ob_type]   ; arg2 = its type
     lea rcx, [rel dunder_get]           ; the dunder's name
     mov r8d, TAG_PTR                    ; arg2 is always a heap pointer
-    call dunder_call_3
+    call dunder_call_3          ; err: 0, absent or raised, goes to .init_bind_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .init_bind_raised
@@ -1790,17 +1835,12 @@ DEF_FUNC type_call
     TC_RELEASE_BOUND_INIT
     CSTRING rdi, `__init__() should return None, not '\x01'`
     mov rsi, r15
-    extern raise_type_error_with_name
-    ; The argument carve is still on the stack.  The raise does not return and
-    ; eval_exception_unwind reloads rsp from eval_base_rsp, so there is nothing
-    ; to unwind here.
-    ;
-    ; And PyFrame.disp_sp is NOT republished: r13 is the argument count in this
-    ; function, not the value stack, and handing the unwinder that made it
-    ; zero words from an arbitrary address.  The caller published the right
-    ; one before it got here, which is why the other raises in this function
-    ; do not touch it either.
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    DECREF_V r15, rcx           ; what __init__ did return
+    ; ...and then exactly as if it had raised: the argument carve comes off
+    ; the stack and the instance is released.  This used to jump into the
+    ; unwinder from here, and the instance was never released at all.
 
 .init_raised:
     ; What __init__ returned was never looked at, so a raise inside it
@@ -1814,6 +1854,7 @@ DEF_FUNC type_call
     shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
     TC_RELEASE_BOUND_INIT
+.tc_drop_instance:
     mov rax, r14
     mov rsi, [rbp - TC_NEW_TAG]
     DECREF_VAL rax, rsi         ; the half-built instance goes no further
@@ -1882,7 +1923,7 @@ DEF_FUNC type_call
     mov rdi, [rbp - TC_NEW_FUNC]
     mov rsi, r15
     lea rdx, [r13 + 1]
-    call obj_call_n
+    call obj_call_n             ; err: r14 is tested once the stack is back
     mov r14, rax
     ; The stack goes back before anything branches, so every exit below is the
     ; ordinary one.
@@ -1947,10 +1988,23 @@ DEF_FUNC type_call
     mov rsi, r15
     lea rdx, [r13 + 1]
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    ; DECREF return value (should be None)
-    mov rsi, rdx
-    DECREF_VAL rax, rsi
+    ; A NULL is __init__ having raised.  This used to release "the result"
+    ; either way and hand back the instance, so `E()` for an exception class
+    ; whose __init__ raises answered an E -- with the real exception left
+    ; pending for whatever ran next.
+    mov r15, rax                ; the args array is done with
+    lea rax, [r13 + 2]
+    and rax, -2
+    shl rax, 3
+    add rsp, rax
+    test r15, r15
+    jz .exc_sub_init_raised
+    DECREF_V r15, rcx           ; __init__'s None
+    jmp .exc_sub_no_init
+.exc_sub_init_raised:
+    mov rdi, r14
+    call obj_decref             ; the half-built exception goes no further
+    jmp .exc_sub_new_failed
 .exc_sub_init_cleanup:
     lea rax, [r13 + 2]          ; nargs + 1 slots...
     and rax, -2                 ; ...rounded up to a pair, so rsp stays
@@ -2004,29 +2058,33 @@ DEF_FUNC type_call
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
+.init_not_callable:
+    ; The argument carve is on the stack and r14 is the instance: the exit a
+    ; raising __init__ takes undoes the first and releases the second.
+    SET_EXC exc_TypeError_type, "__init__ is not callable"
+    jmp .init_raised
+
+.new_not_callable:
+    ; No instance yet; .tc_fail cuts the argument carve away with the locals.
+    SET_EXC exc_TypeError_type, "__new__ is not callable"
+
 .int_sub_error:
-    add rsp, 24
+.tc_fail:
+    ; A construction refused before there is an instance to release, reached
+    ; at more than one stack depth -- so rsp is cut back to the five saved
+    ; registers rather than adjusted by what each site thinks it carved.
+    ; .int_sub_error used to `add rsp, 24` over 56 bytes of locals and pop the
+    ; five callee-saved registers out of the middle of them; nothing noticed
+    ; because every caller was an opcode that unwinds and reloads its own.
+    xor eax, eax
+    lea rsp, [rbp - TC_SAVED]
     pop r15
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; tp_call returns one Value
     ret
-
-.init_not_callable:
-    RAISE exc_TypeError_type, "__init__ is not callable"
-    ; does not return
-
-.new_not_callable:
-    ; Restore stack from args allocation, then error
-    lea rax, [r13 + 2]          ; nargs + 1 slots...
-    and rax, -2                 ; ...rounded up to a pair, so rsp stays
-    shl rax, 3                  ; 16-aligned for the tp_call below
-    add rsp, rax
-    RAISE exc_TypeError_type, "__new__ is not callable"
-    ; does not return
 END_FUNC type_call
 
 
@@ -2157,6 +2215,24 @@ DEF_FUNC user_type_dealloc, 16           ; 2 pushes, so rsp is 16-aligned
     jz .utd_no_mro
     call obj_decref
 .utd_no_mro:
+
+    ; The method tables slot_ensure_table allocated for this class.  Only
+    ; those: a table inherited by pointer is a base's, or static.
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OWNS_NUMBER
+    jz .utd_no_number
+    mov rdi, [rbx + PyTypeObject.tp_as_number]
+    call ap_free
+.utd_no_number:
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OWNS_SEQUENCE
+    jz .utd_no_sequence
+    mov rdi, [rbx + PyTypeObject.tp_as_sequence]
+    call ap_free
+.utd_no_sequence:
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OWNS_MAPPING
+    jz .utd_no_mapping
+    mov rdi, [rbx + PyTypeObject.tp_as_mapping]
+    call ap_free
+.utd_no_mapping:
 
     ; Free the type object itself (gc_alloc'd)
     mov rdi, rbx

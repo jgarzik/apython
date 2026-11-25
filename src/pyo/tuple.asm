@@ -17,7 +17,6 @@ extern obj_dealloc
 extern obj_hash
 extern int_to_i64
 extern fatal_error
-extern raise_exception
 extern exc_IndexError_type
 extern obj_incref
 extern slice_type
@@ -27,7 +26,6 @@ extern type_type
 extern gc_untrack
 extern obj_is_true
 extern int_type
-extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
 extern obj_as_index_seq
@@ -137,6 +135,7 @@ END_FUNC tuple_new
 ;; ============================================================================
 ;; tuple_getitem(PyTupleObject *tuple, int64_t index) -> (rax=payload, rdx=tag)
 ;; sq_item: Return fat tuple element with bounds check and INCREF_VAL
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_BARE tuple_getitem
     ; Handle negative index
@@ -154,13 +153,17 @@ DEF_FUNC_BARE tuple_getitem
     INCREF_V rax, rdx
     ret
 .index_error:
-    RAISE exc_IndexError_type, "tuple index out of range"
+    sub rsp, 8                  ; no frame here; the call wants rsp aligned
+    SET_EXC exc_IndexError_type, "tuple index out of range"
+    add rsp, 8
+    ret                         ; rax = 0
 END_FUNC tuple_getitem
 
 ;; ============================================================================
 ;; tuple_subscript(PyTupleObject *tuple, PyObject *key) -> rax = Value
 ;; mp_subscript: index with int or slice key (for BINARY_SUBSCR)
 ;; Returns (rax=payload, edx=tag) fat value
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC tuple_subscript
     V_UNPACK rsi, rdx           ; key Value -> (payload, tag)
@@ -182,9 +185,16 @@ DEF_FUNC tuple_subscript
     mov rdi, rsi               ; key
     lea rsi, [rel ts_index_msg] ; ...and the refusal names the container
     call obj_as_index_seq          ; int, bool, int subclass or __index__
+    ERR_M1 .ts_fail
     mov rsi, rax               ; index
     mov rdi, rbx
-    call tuple_getitem         ; already returns a Value
+    call tuple_getitem         ; already returns a Value -- err: its 0 is this slot's own
+    pop rbx
+    leave
+    ret
+
+.ts_fail:
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -192,7 +202,7 @@ DEF_FUNC tuple_subscript
 .ts_slice:
     mov rdi, rbx
     ; rsi = slice
-    call tuple_getslice
+    call tuple_getslice         ; err: its 0 is this slot's own answer
     pop rbx
     leave
     V_PACK rax, rdx             ; return one Value
@@ -331,6 +341,7 @@ DEF_FUNC tuple_hash
     ; TAG_PTR or other: call obj_hash on payload
     V_PACK rdi, rsi
     call obj_hash               ; rax = hash of item
+    ERR_M1 .cached              ; an unhashable item: -1 goes out, and is not cached
     jmp .hash_combine
 .hash_smallint:
     mov rax, rdi                ; hash = payload value
@@ -366,6 +377,7 @@ END_FUNC tuple_hash
 ;; ============================================================================
 ;; tuple_getslice(PyTupleObject *tuple, PySliceObject *slice) -> PyTupleObject*
 ;; Creates a new tuple from a slice of the original. Fat 16-byte slots.
+;; Fails: 0
 ;; ============================================================================
 TGS_NEW   equ 48            ; the tuple being built
 TGS_LEN   equ 56            ; its length
@@ -384,6 +396,7 @@ DEF_FUNC tuple_getslice
     mov rdi, r12
     mov rsi, [rbx + PyTupleObject.ob_size]
     call slice_indices
+    ERR_M1 .tgs_fail
     mov r13, rax               ; start
     mov r14, rdx               ; stop
     mov r15, rcx               ; step
@@ -486,11 +499,23 @@ DEF_FUNC tuple_getslice
     mov edx, TAG_PTR
     leave
     ret
+
+.tgs_fail:
+    RET_NULL
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC tuple_getslice
 
 ;; ============================================================================
 ;; tuple_contains(rdi=self, rsi=value Value) -> int (0 or 1)
 ;; Linear scan with identity then __eq__.
+;; Fails: -1
 ;; ============================================================================
 TCN_IDX   equ 8
 TCN_FRAME equ 24            ; + 3 pushes = 48, 16-aligned
@@ -542,14 +567,19 @@ DEF_FUNC tuple_contains, TCN_FRAME
     ret
 
 .tc_error:
-    ; sq_contains has no error channel, and the exception is already pending.
+    ; sq_contains answers -1 with the exception pending.
+    mov rax, -1
+    pop r13
+    pop r12
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC tuple_contains
 
 ;; ============================================================================
 ;; tuple_concat(PyTupleObject *a, PyObject *b) -> PyTupleObject*
 ;; Concatenate two tuples with fat 16-byte slots.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC tuple_concat
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -628,13 +658,21 @@ DEF_FUNC tuple_concat
     VALUE_FOR_TYPE rdi, rsi
     mov rsi, rdi
     CSTRING rdi, `can only concatenate tuple (not "\x01") to tuple`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC tuple_concat
 
 ;; ============================================================================
 ;; tuple_repeat(PyTupleObject *tuple, PyObject *count) -> PyTupleObject*
 ;; Repeat a tuple with fat 16-byte slots.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC tuple_repeat
     V_UNPACK rdi, rdx           ; left  Value -> (payload, tag)
@@ -668,6 +706,7 @@ DEF_FUNC tuple_repeat
     jz .trep_decline
     extern seq_repeat_count
     call seq_repeat_count    ; __index__ counts, and one too big to be an
+    ERR_M1 .trep_decline
     mov r12, rax             ; index is refused rather than truncated
 
     test r12, r12
@@ -743,7 +782,8 @@ DEF_FUNC tuple_repeat
     ; Too large to allocate is a MemoryError in CPython; only a count that
     ; does not fit an index is an OverflowError.  list and bytes have said so
     ; since they were written; tuple sent both cases to the one label.
-    RAISE exc_MemoryError_type, ""
+    extern set_exception
+    SET_EXC exc_MemoryError_type, ""
 .trep_decline:
     xor eax, eax
     xor edx, edx
@@ -754,13 +794,14 @@ DEF_FUNC tuple_repeat
     leave
     ret
 .trep_overflow:
-    RAISE exc_OverflowError_type, "too many items for tuple repetition"
+    FAIL exc_OverflowError_type, "too many items for tuple repetition", .trep_decline
 END_FUNC tuple_repeat
 
 ;; ============================================================================
 ;; tuple_richcompare(left, right, op, left_tag, right_tag) -> (rax, edx)
 ;; Compare two tuples. Returns bool fat value.
 ;; Supports EQ, NE, LT, LE, GT, GE (lexicographic for ordering).
+;; Fails: 0?
 ;; ============================================================================
 TRC_LEFT     equ 8
 TRC_RIGHT    equ 16
@@ -781,7 +822,9 @@ DEF_FUNC tuple_richcompare
     ret
 .trc_too_deep:
     C_RECURSION_LEAVE
-    RAISE exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+    SET_EXC exc_RecursionError_type, "maximum recursion depth exceeded in comparison"
+    leave
+    ret                         ; rax = 0, with it pending
 END_FUNC tuple_richcompare
 
 DEF_FUNC_LOCAL tuple_richcompare_inner, TRC_FRAME
@@ -944,6 +987,7 @@ END_FUNC tuple_richcompare_inner
 ;; ============================================================================
 ;; tuple_type_call(PyTypeObject *type, PyObject **args, int64_t nargs)
 ;; Constructor: tuple() or tuple(iterable)
+;; Fails: 0
 ;; ============================================================================
 TTC_LIST    equ 8       ; temp list
 TTC_ITER    equ 16      ; iterator
@@ -952,7 +996,7 @@ TTC_EXC     equ 24      ; current_exception on entry, to tell "raised" from
 TTC_FRAME   equ 32          ; + 4 pushes = 64, 16-aligned
 
 DEF_FUNC tuple_type_call, TTC_FRAME
-    NO_KEYWORDS "tuple() takes no keyword arguments"
+    NO_KEYWORDS_RET "tuple() takes no keyword arguments", .ttc_fail_bare
     push rbx
     push r12
     push r13
@@ -1009,6 +1053,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     V_UNPACK rdi, rsi
     extern get_iterator
     call get_iterator
+    ERR_NULL .ttc_exc_cleanup
     mov [rbp - TTC_ITER], rax
 
     ; Iterate and append to list
@@ -1027,7 +1072,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ; edx = tag
     extern list_append
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rsi                 ; item tag
     pop rdi                 ; item payload
     DECREF_VAL rdi, rsi
@@ -1101,6 +1146,7 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ; DECREF the temp list, return NULL
     mov rdi, rbx
     call obj_decref
+.ttc_fail:
     RET_NULL
     pop r14
     pop r13
@@ -1125,8 +1171,14 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     mov rsi, r13
     CSTRING rdi, "tuple expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .ttc_fail
+
+.ttc_fail_bare:                 ; refused before anything was saved
+    RET_NULL
+    leave
+    ret
 END_FUNC tuple_type_call
 
 section .data

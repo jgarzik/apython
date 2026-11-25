@@ -14,6 +14,8 @@
 
 section .text
 
+extern dict_get
+extern dict_set
 extern get_iterator_opt
 extern raise_unpack_count
 extern eval_dispatch
@@ -31,10 +33,8 @@ extern list_new_filled
 extern ap_memcpy
 extern list_append
 extern dict_new
-extern dict_set
 extern slice_new
 extern none_singleton
-extern dict_get
 extern str_from_cstr_heap
 extern range_iter_type
 extern list_iter_type
@@ -236,7 +236,7 @@ DEF_FUNC_BARE op_binary_subscr
     mov rsi, [rsp]            ; key = other
     lea rdx, [rel dunder_getitem]
     mov ecx, [rsp + 16]      ; key tag = other_tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .subscr_done`
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .subscr_done
@@ -510,6 +510,7 @@ DEF_FUNC_BARE op_store_subscr
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
+    ERR_NULL_JUMP
     V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32               ; pop the args array
     ; rax = result (discard — __setitem__ returns None)
@@ -694,6 +695,7 @@ DEF_FUNC op_build_map, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     mov rsi, [r13 + rax]      ; key
     mov rdx, [r13 + rax + 8]  ; value
     call dict_set
+    ERR_M1_JUMP
     add rsp, 8
     pop rdx
     inc rdx
@@ -777,6 +779,7 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     shl rax, 3                ; index * 8
     mov rdx, [r13 + rax]      ; value
     call dict_set
+    ERR_M1_JUMP
     inc qword [rbp - CKM_I]
     jmp .bckm_fill
 
@@ -840,7 +843,7 @@ DEF_FUNC_BARE op_get_iter
     extern dunder_iter
     lea rsi, [rel dunder_iter]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .have_iter_result`
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jnz .have_iter_result
@@ -851,6 +854,7 @@ DEF_FUNC_BARE op_get_iter
 .have_iter:
     ; Call tp_iter(obj) -> iterator
     call rax
+    ERR_NULL_JUMP
 .have_iter_result:
     push rax                   ; save iterator on machine stack
 
@@ -938,7 +942,7 @@ DEF_FUNC_BARE op_for_iter
     extern dunder_next
     lea rsi, [rel dunder_next]
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, falls through `jnz .check_next_result`
     test rax, rax
     jnz .check_next_result     ; got a value
     jmp .next_null
@@ -1047,6 +1051,7 @@ DEF_FUNC_BARE op_list_append
     mov rdx, r8                ; item tag for list_append
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1_JUMP
     ; list_append does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
     pop rsi                    ; value tag
@@ -1135,6 +1140,7 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     mov rdi, [rbp - LE_LIST]
     extern list_extend_from_array
     call list_extend_from_array
+    ERR_M1_JUMP
     jmp .extend_done
 
 .extend_generic:
@@ -1144,6 +1150,7 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     mov rdi, [rbp - LE_ITERABLE]         ; iterable
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_CURSOR], rax          ; save iterator (reusing locals slot)
@@ -1169,6 +1176,7 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     ; edx = tag (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1_JUMP
     ; DECREF item (list_append INCREFs)
     pop rsi                    ; tag
     pop rdi                    ; payload
@@ -1302,6 +1310,8 @@ DEF_FUNC_BARE op_contains_op
     push rcx                        ; the invert flag
     sub rsp, 8                      ; one push is odd; rsp must be 16-aligned
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     add rsp, 8
     pop rcx
     ; r15 is free by the register convention and callee-saved, so it carries
@@ -1357,6 +1367,8 @@ DEF_FUNC_BARE op_contains_op
     ; the saved words itself.
     sub rsp, 8
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
     add rsp, 8
     push rax                   ; save result on machine stack
 
@@ -1400,7 +1412,7 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, [rsp+8]          ; value = other
     lea rdx, [rel dunder_contains]
     mov rcx, [rsp+24]         ; value tag = other_tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .contains_check_blocked
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx             ; TAG_NULL = not found
     jz .contains_check_blocked
@@ -1414,6 +1426,7 @@ DEF_FUNC_BARE op_contains_op
     extern obj_richcompare_bool
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov ecx, eax              ; save truthiness
     pop rdi                    ; payload
     pop rsi                    ; tag
@@ -1463,6 +1476,7 @@ DEF_FUNC_BARE op_contains_op
     test rax, rax
     jz .contains_getitem_fallback
     call rax                     ; tp_iter(container) → iterator
+    ERR_PENDING_JUMP
     test rax, rax
     jz .contains_getitem_fallback
     mov rcx, [gs:ThreadState.current_exception]
@@ -1627,7 +1641,7 @@ DEF_FUNC_BARE op_contains_op
     extern dunder_getitem
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_SMALLINT           ; index is SmallInt
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .contains_gi_null_result
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .contains_gi_null_result
@@ -1687,6 +1701,7 @@ DEF_FUNC_BARE op_contains_op
     V_PACK rdi, rcx             ; left  -> Value
     V_PACK rsi, r8              ; right -> Value
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; tp_richcompare returns a Value
     push rax
     push rdx
@@ -1694,6 +1709,7 @@ DEF_FUNC_BARE op_contains_op
     mov rsi, rdx
     V_PACK rdi, rsi
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov r8d, eax
     pop rsi
     pop rdi
@@ -1900,6 +1916,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     test rax, rax
     jz .bslc_try_dunder
     call rax               ; rsi is a slice pointer, already a Value
+    ERR_NULL_JUMP
     V_UNPACK rax, rdx      ; mp_subscript returns a Value
 
 .bslc_have_result:
@@ -1933,7 +1950,7 @@ DEF_FUNC op_binary_slice, BSLC_FRAME
     mov rsi, [rbp - BSLC_SLICE]
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_PTR
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .bslc_not_subscriptable
     V_UNPACK rax, rdx
     test edx, edx
     jz .bslc_not_subscriptable
@@ -1991,6 +2008,8 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     test rax, rax
     jz .sslc_try_dunder
     call rax
+    movsxd rax, eax
+    ERR_M1_JUMP
 
 .sslc_stored:
 
@@ -2027,6 +2046,7 @@ DEF_FUNC op_store_slice, SSLC_FRAME
     extern dunder_call_3
     lea rcx, [rel dunder_setitem]
     call dunder_call_3
+    ERR_PENDING_JUMP
     jmp .sslc_stored
 
 .sslc_no_ass:
@@ -2063,6 +2083,7 @@ DEF_FUNC op_map_add, 8    ; + 4 pushes at the call; a handler is entered ALIGNED
     V_PACK rsi, r8            ; dict_set takes Values
     V_PACK rdx, rcx
     call dict_set
+    ERR_M1_JUMP
 
     ; DECREF key and value (tag-aware, dict_set INCREF'd them)
     mov rdi, [rsp + MA_VAL]
@@ -2159,6 +2180,7 @@ DEF_FUNC op_dict_update
     push rbx
     mov rdi, [rbp - DU_DICT]
     call dict_set
+    ERR_M1_JUMP
     pop rbx
     push rbx
     mov rdi, [rbp - DU_KEYV]
@@ -2238,8 +2260,7 @@ DEF_FUNC op_dict_update
     call dict_method_update
     mov [gs:ThreadState.kw_names_pending], rbx
     add rsp, 16
-    test rax, rax
-    jz .du_propagate
+    ERR_NULL .du_propagate
     DECREF_V rax, rcx           ; update() answers None
     ; And the SOURCE, whose reference came off the stack with the pop.  The
     ; dense walk above releases it at .du_done and this arm did not, so every
@@ -2298,7 +2319,6 @@ END_FUNC op_dict_update
 ;; DICT_MERGE (164): like DICT_UPDATE but raises TypeError on duplicate keys
 ;; Used for f(**a, **b) — duplicate keys across ** spreads are errors.
 ;; ============================================================================
-extern dict_get
 
 DM_SOURCE   equ 24
 DM_DICT     equ 32
@@ -2390,6 +2410,7 @@ DEF_FUNC op_dict_merge
     push rbx
     mov rdi, [rbp - DM_DICT]          ; target dict
     call dict_get
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .dm_dup_error          ; key already exists in target
 
@@ -2400,6 +2421,7 @@ DEF_FUNC op_dict_merge
     push rbx
     mov rdi, [rbp - DM_DICT]
     call dict_set
+    ERR_M1_JUMP
     pop rbx
     push rbx
     mov rdi, [rbp - DM_KEYV]
@@ -2469,6 +2491,7 @@ DEF_FUNC op_dict_merge
     mov rsi, rsp
     mov edx, 1
     call dict_type_call
+    ERR_NULL_JUMP
     add rsp, 16
     test rax, rax
     jz .dm_propagate
@@ -2609,6 +2632,7 @@ DEF_FUNC op_build_set, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     shl rax, 3                ; index * 8
     mov rsi, [r13 + rax]     ; item
     call set_add               ; set_add does INCREF
+    ERR_M1_JUMP
     inc qword [rbp - BSE_I]
     jmp .build_set_fill
 
@@ -2658,6 +2682,7 @@ DEF_FUNC_BARE op_set_add
     mov rdx, r8
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add
+    ERR_M1_JUMP
     ; set_add does INCREF, so DECREF to compensate
     pop rdi                    ; value payload
     pop rsi                    ; value tag
@@ -2746,6 +2771,7 @@ DEF_FUNC op_set_update
     mov rdi, rsi
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING_JUMP
     test rax, rax
     jz .su_type_error
     mov [rbp - SU_CAP], rax          ; save iterator
@@ -2767,6 +2793,7 @@ DEF_FUNC op_set_update
     mov rsi, rax               ; item
     V_PACK rsi, rdx            ; set_add takes a key Value
     call set_add               ; set_add does INCREF
+    ERR_M1_JUMP
     mov rdi, [rbp - SU_ITEM]
     mov rsi, [rbp - SU_ITAG]
     DECREF_VAL rdi, rsi        ; DECREF to compensate (set_add INCREF'd)
@@ -2833,6 +2860,7 @@ DEF_FUNC op_set_update
     push rbx
     mov rdi, [rbp - SU_SOURCE]
     call set_add
+    ERR_M1_JUMP
     pop rbx
 
 .su_set_next:

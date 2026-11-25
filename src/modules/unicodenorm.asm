@@ -53,7 +53,6 @@ extern obj_incref
 extern obj_decref
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_exception
 extern set_exception
 
 extern udn_index
@@ -975,6 +974,7 @@ END_FUNC ucd32_normalize
 
 ;; ============================================================================
 ;; udn_normalize_body(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 ;;
 ;; The shared body.  The two names above are bare thunks that JUMP here, so
 ;; this function's own prologue is the only one and the call's alignment is
@@ -1055,13 +1055,13 @@ DEF_FUNC udn_normalize_body
     leave
     ret
 .bad_name:
-    RAISE exc_ValueError_type, "invalid normalization form"
+    FAIL exc_ValueError_type, "invalid normalization form", .propagate
 .bad_form:
-    RAISE exc_TypeError_type, "normalize() argument 1 must be str"
+    FAIL exc_TypeError_type, "normalize() argument 1 must be str", .propagate
 .bad_str:
-    RAISE exc_TypeError_type, "normalize() argument 2 must be str"
+    FAIL exc_TypeError_type, "normalize() argument 2 must be str", .propagate
 .arity:
-    RAISE exc_TypeError_type, "normalize() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "normalize() takes exactly 2 arguments", .propagate
 END_FUNC udn_normalize_body
 
 ;; ============================================================================
@@ -1099,6 +1099,7 @@ END_FUNC ucd32_is_normalized
 ;; ============================================================================
 ;; udn_is_normalized_body(rdi = args, rsi = nargs, rax = the normalize thunk
 ;;   for this database) -> rax = a Value
+;; Fails: 0
 ;;
 ;; The shared body, as normalize and decomposition each have one.
 ;; ============================================================================
@@ -1158,7 +1159,7 @@ DEF_FUNC udn_is_normalized_body, INZ_FRAME
     leave
     ret
 .inz_arity:
-    RAISE exc_TypeError_type, "is_normalized() takes exactly 2 arguments"
+    FAIL exc_TypeError_type, "is_normalized() takes exactly 2 arguments", .inz_propagate
 END_FUNC unicodedata_is_normalized
 
 ;; ============================================================================
@@ -1240,6 +1241,7 @@ END_FUNC ucd32_decomposition
 
 ;; ============================================================================
 ;; udn_decomposition_body(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 ;;
 ;; The shared body, as normalize has one: the two names above are bare thunks
 ;; that JUMP here and differ only in which database they name.
@@ -1345,13 +1347,16 @@ DEF_FUNC udn_decomposition_body, UDD_FRAME
     ret
 
 .type:
-    pop r12
-    pop rbx
-    RAISE exc_TypeError_type, "decomposition() argument must be a unicode character"
+    SET_EXC exc_TypeError_type, "decomposition() argument must be a unicode character"
+    jmp .fail
 .arity:
+    SET_EXC exc_TypeError_type, "decomposition() takes exactly 1 argument"
+.fail:
+    xor eax, eax
     pop r12
     pop rbx
-    RAISE exc_TypeError_type, "decomposition() takes exactly 1 argument"
+    leave
+    ret
 END_FUNC udn_decomposition_body
 
 ;; ============================================================================

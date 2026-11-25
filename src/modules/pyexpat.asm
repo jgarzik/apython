@@ -8,11 +8,13 @@
 ; `model` submodules and every default.
 ;
 ; The OTHER half is `src/modules/pyexpat_cb.asm`, which is called BY LIBEXPAT.
-; They are separate files because the two sides disagree on the one rule that
-; matters: **`RAISE` is legal here and forbidden there.**  `RAISE` tail-jumps
-; into `eval_exception_unwind`, which does `mov rsp, [gs:ThreadState.eval_base_rsp]` and
-; never returns -- from a trampoline that would abandon every libexpat frame
-; in between.
+; They are separate files because the two sides differ in the one thing that
+; matters: who is underneath.  Neither jumps into `eval_exception_unwind` --
+; that does `mov rsp, [gs:ThreadState.eval_base_rsp]` and never returns, and
+; from a trampoline it would abandon every libexpat frame in between.  This
+; half records its refusal and returns 0 to the interpreter, which looks; the
+; other half returns to libexpat, which does not, so there a failure is also
+; noted on the handle and the parse is stopped.
 ;
 ; Why a shim at all: in 3.12 there is no fallback for pyexpat.  `xml.etree`
 ; has no non-expat builder (`SimpleXMLTreeBuilder` was removed in 3.9),
@@ -32,6 +34,7 @@
 
 ASM_INIT
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -45,7 +48,7 @@ extern ap_malloc
 extern ap_free
 extern ap_memset
 extern obj_as_index
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_MemoryError_type
@@ -180,7 +183,8 @@ px_e_flag:      db "_pyexpatcore: unknown flag", 0
 section .text
 
 ;; ============================================================================
-;; px_handle_at(rdi = handle index) -> rax = PxHandle*, or raises ValueError
+;; px_handle_at(rdi = handle index) -> rax = PxHandle*; ValueError otherwise
+;; Fails: 0
 ;;
 ;; Bounds-checked, because the index came from Python, and magic-checked,
 ;; because a freed slot's memory may have been reused and libexpat
@@ -202,8 +206,9 @@ DEF_FUNC px_handle_at
 .bad:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel px_e_handle]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC px_handle_at
 
 ;; ============================================================================
@@ -274,7 +279,8 @@ DEF_FUNC_LOCAL px_handle_alloc, PA_FRAME
 END_FUNC px_handle_alloc
 
 ;; ============================================================================
-;; px_arg_int(rdi = args, rsi = index) -> rax = the int, or raises
+;; px_arg_int(rdi = args, rsi = index) -> rax = the int
+;; Fails: -1
 ;;
 ;; obj_as_index, not int_to_i64: the latter reads PyIntObject.compact off
 ;; whatever it is handed, so a str argument had its header read as a number.
@@ -282,12 +288,16 @@ END_FUNC px_handle_alloc
 DEF_FUNC_BARE px_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    jmp obj_as_index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index           ; err: its -1 and its exception are this one's
+    add rsp, 8
+    ret
 END_FUNC px_arg_int
 
 ;; ============================================================================
 ;; px_arg_str_or_none(rdi = a Value, rsi = the error message) -> rax = a C
-;;     string, or 0 for None; raises TypeError for anything else
+;;     string, or 0 for None; TypeError for anything else
+;; Fails: 0?
 ;;
 ;; The C string points INTO the str object, so the caller must keep the Value
 ;; alive across the libexpat call that reads it.  Every caller here does: the
@@ -318,8 +328,9 @@ DEF_FUNC_LOCAL px_arg_str_or_none, PAS_FRAME
 .bad:
     lea rdi, [rel exc_TypeError_type]
     mov rsi, [rbp - PAS_MSG]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC px_arg_str_or_none
 
 ;; ============================================================================
@@ -352,6 +363,7 @@ DEF_FUNC px_parser_new, PN_FRAME
     mov rdi, [rdi]
     lea rsi, [rel px_e_encoding]
     call px_arg_str_or_none
+    ERR_PENDING .fail
     mov [rbp - PN_ENC], rax
 
     ; The separator: a one-character str, or None for the non-NS parser.
@@ -359,6 +371,7 @@ DEF_FUNC px_parser_new, PN_FRAME
     mov rdi, [rdi + 8]
     lea rsi, [rel px_e_sep]
     call px_arg_str_or_none
+    ERR_PENDING .fail
     test rax, rax
     jz .no_sep
     ; At most one character, and ASCII: libexpat takes an XML_Char, so a
@@ -477,36 +490,43 @@ DEF_FUNC px_parser_new, PN_FRAME
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel px_e_create]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .oom:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_MemoryError_type]
     lea rsi, [rel px_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_sep:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_sep]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .bad_intern:
     mov rsp, rbx
     pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_intern]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
-    mov rsp, rbx
-    pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception
+.fail:
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC px_parser_new
 
 ;; ============================================================================
@@ -529,8 +549,9 @@ DEF_FUNC px_parser_free, PF_FRAME
     jne .nargs
     xor esi, esi
     call px_arg_int
+    ERR_M1 .fail
     mov [rbp - PF_IDX], rax
-    ; Not px_handle_at: that raises, and this must tolerate a stale index.
+    ; Not px_handle_at: that refuses, and this must tolerate a stale index.
     test rax, rax
     js .done
     cmp rax, [rel px_handle_n]
@@ -595,12 +616,15 @@ DEF_FUNC px_parser_free, PF_FRAME
     leave
     ret
 .nargs:
-    mov rsp, rbx
-    pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception
+.fail:
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC px_parser_free
 
 ;; ============================================================================
@@ -629,8 +653,10 @@ DEF_FUNC px_parser_status, PS_FRAME
     jne .nargs
     xor esi, esi
     call px_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     call px_handle_at
+    ERR_NULL .fail
     mov [rbp - PS_H], rax
 
     mov edi, 5
@@ -679,15 +705,19 @@ DEF_FUNC px_parser_status, PS_FRAME
     pop rbx
     lea rdi, [rel exc_MemoryError_type]
     lea rsi, [rel px_e_oom]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
-    mov rsp, rbx
-    pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception
+.fail:
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC px_parser_status
 
 ;; ============================================================================
@@ -708,6 +738,7 @@ DEF_FUNC px_error_string, ES_FRAME
     jne .nargs
     xor esi, esi
     call px_arg_int
+    ERR_M1 .fail
     mov edi, eax
     call XML_ErrorString wrt ..plt
     test rax, rax
@@ -726,12 +757,15 @@ DEF_FUNC px_error_string, ES_FRAME
     leave
     ret
 .nargs:
-    mov rsp, rbx
-    pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception
+.fail:
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC px_error_string
 
 ;; ============================================================================
@@ -767,7 +801,7 @@ DEF_FUNC pyexpat_module_create, PM_FRAME
     mov rdi, r12
     mov rsi, rbx
     mov rdx, r13
-    call dict_set
+    call dict_set_str
     mov rdi, rbx
     call obj_decref
     mov rdi, r13
@@ -822,13 +856,16 @@ DEF_FUNC px_set_handler, 56
 
     xor esi, esi
     call px_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     call px_handle_at
+    ERR_NULL .fail
     mov [rbp - SH_H], rax
 
     mov rdi, [rbp - SH_ARGS]
     mov esi, 1
     call px_arg_int
+    ERR_M1 .fail
     test rax, rax
     js .bad_index
     cmp rax, PX_H_COUNT
@@ -870,7 +907,9 @@ DEF_FUNC px_set_handler, 56
     cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
     jne .install
     mov rdi, [rbp - SH_H]
-    call px_flush
+    call px_flush               ; it calls the handler, which may raise
+    test eax, eax
+    js .fail
 .install:
     ; A row is two qwords, and x86 has no *16 scale -- only 1, 2, 4 and 8 --
     ; so the index is shifted rather than scaled.
@@ -905,15 +944,19 @@ DEF_FUNC px_set_handler, 56
     pop rbx
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel px_e_index]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
-    mov rsp, rbx
-    pop rbx
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception
+.fail:
+    mov rsp, rbx
+    pop rbx
+    xor eax, eax
+    leave
+    ret
 END_FUNC px_set_handler
 
 ;; ============================================================================
@@ -963,8 +1006,10 @@ DEF_FUNC px_parse, PP_FRAME
 
     xor esi, esi
     call px_arg_int
+    ERR_M1 .pending
     mov rdi, rax
     call px_handle_at
+    ERR_NULL .pending
     mov [rbp - PP_H], rax
     mov qword [rax + PxHandle.raised], 0
 
@@ -1053,6 +1098,8 @@ DEF_FUNC px_parse, PP_FRAME
     mov rdi, [rbp - PP_ARGS]
     mov rdi, [rdi + 16]
     call obj_is_true
+    ; A __bool__ that raised: nothing is fed to a parser with that pending.
+    ERR_M1 .pending
     mov [rbp - PP_FINAL], rax
 
     mov rcx, [rbp - PP_H]
@@ -1087,7 +1134,7 @@ DEF_FUNC px_parse, PP_FRAME
     V_PACK rax, rdx
     ret
 .pending:
-    ; NULL, with the handler's exception intact.  op_call's cleanup sees the 0
+    ; NULL, with the exception intact -- a handler's, or an argument's.  op_call's cleanup sees the 0
     ; and propagates whatever is pending; nothing here inspects it.
     mov rsp, [rbp - PP_SAVED]
     xor eax, eax
@@ -1097,14 +1144,16 @@ DEF_FUNC px_parse, PP_FRAME
     mov rsp, [rbp - PP_SAVED]
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_data]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
     mov rsp, [rbp - PP_SAVED]
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 END_FUNC px_parse
 
 ;; ============================================================================
@@ -1138,13 +1187,16 @@ DEF_FUNC px_set_flag, SF_FRAME
 
     xor esi, esi
     call px_arg_int
+    ERR_M1 .fail
     mov rdi, rax
     call px_handle_at
+    ERR_NULL .fail
     mov [rbp - SF_H], rax
 
     mov rdi, [rbp - SF_ARGS]
     mov esi, 1
     call px_arg_int
+    ERR_M1 .fail
     test rax, rax
     js .bad_flag
     cmp rax, PX_F_COUNT
@@ -1154,6 +1206,7 @@ DEF_FUNC px_set_flag, SF_FRAME
     mov rdi, [rbp - SF_ARGS]
     mov esi, 2
     call px_arg_int
+    ERR_M1 .fail
     mov [rbp - SF_VALUE], rax
 
     mov rcx, [rbp - SF_H]
@@ -1202,12 +1255,16 @@ DEF_FUNC px_set_flag, SF_FRAME
     mov rsp, [rbp - SF_SAVED]
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel px_e_flag]
-    call raise_exception
-    ud2
+    call set_exception          ; it answers 0, which is this one's failure
+    leave
+    ret
 .nargs:
-    mov rsp, [rbp - SF_SAVED]
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel px_e_nargs]
-    call raise_exception
-    ud2
+    call set_exception
+.fail:
+    mov rsp, [rbp - SF_SAVED]
+    xor eax, eax
+    leave
+    ret
 END_FUNC px_set_flag

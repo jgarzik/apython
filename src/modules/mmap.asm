@@ -23,7 +23,6 @@
 %include "object.inc"
 
 ASM_INIT
-
 extern none_singleton
 extern ap_malloc
 extern ap_free
@@ -42,8 +41,8 @@ extern int_from_i64
 extern obj_as_index
 extern exc_TypeError_type
 extern exc_ValueError_type
-extern raise_oserror
-extern raise_exception
+extern set_oserror
+extern set_exception
 extern sys_mmap
 extern sys_munmap
 extern sys_mremap
@@ -58,13 +57,14 @@ extern sys_madvise
 ;; same macro under its own name; it is four instructions and sharing it would
 ;; mean a header for four instructions.
 ;; ============================================================================
-%macro MC_CHECK 1
+%macro MC_CHECK 2               ; %1 = the result, %2 = the error exit
     cmp %1, -4095
     jb %%ok
     mov rdi, %1
     neg rdi
     xor esi, esi
-    call raise_oserror          ; does not return
+    call set_oserror
+    jmp %2
 %%ok:
 %endmacro
 
@@ -110,23 +110,26 @@ END_FUNC mc_handle_at
 
 ;; ============================================================================
 ;; mc_arg_int(rdi = args, rsi = index) -> rax = the int
-;;
-;; Does not return when the argument is not an index.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE mc_arg_int
     mov rdi, [rdi + rsi*8]
     V_UNPACK rdi, rdx
-    jmp obj_as_index
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index           ; err: its -1 is handed on as it is
+    add rsp, 8
+    ret
 END_FUNC mc_arg_int
 
 ;; ============================================================================
 ;; mc_state_arg(rdi = args, rsi = index) -> rax = MHandle*
-;;
-;; Does not return when the handle is not live.
+;; Fails: 0
+;; (an argument that is no index, or a handle that is not live)
 ;; ============================================================================
 MSA_FRAME equ 16                ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL mc_state_arg, MSA_FRAME
     call mc_arg_int
+    ERR_M1 .msa_fail
     mov rdi, rax
     call mc_handle_at
     test rax, rax
@@ -134,7 +137,11 @@ DEF_FUNC_LOCAL mc_state_arg, MSA_FRAME
     leave
     ret
 .msa_bad:
-    RAISE exc_ValueError_type, "mmap closed or invalid"
+    SET_EXC exc_ValueError_type, "mmap closed or invalid"
+.msa_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC mc_state_arg
 
 ;; ============================================================================
@@ -170,7 +177,7 @@ END_FUNC mc_buffer
 ;; mc_slot(rdi = MHandle*) -> rax = the handle index, as a Value
 ;;
 ;; Files the mapping in the table, reusing a slot a close() gave back.
-;; Does not return when there is no memory for the table.
+;; Cannot fail: out of memory is fatal_error inside ap_realloc.
 ;; ============================================================================
 MS_H     equ 8
 MS_CAP   equ 16
@@ -206,8 +213,6 @@ DEF_FUNC_LOCAL mc_slot, MS_FRAME
     shl rsi, 3
     mov rdi, [rel mc_handles]
     call ap_realloc
-    test rax, rax
-    jz .ms_oom
     mov [rel mc_handles], rax
     mov rcx, [rbp - MS_CAP]
     mov [rel mc_handle_cap], rcx
@@ -224,10 +229,6 @@ DEF_FUNC_LOCAL mc_slot, MS_FRAME
     pop rbx
     leave
     ret
-
-.ms_oom:
-    pop rbx
-    RAISE exc_ValueError_type, "out of memory"
 END_FUNC mc_slot
 
 ;; ============================================================================
@@ -240,53 +241,56 @@ END_FUNC mc_slot
 MM_LEN   equ 8
 MM_ADDR  equ 16
 MM_H     equ 24
-MM_FRAME equ 32                 ; + 0 pushes = 32, 16-aligned
+MM_ARGS  equ 32
+MM_FD    equ 40                 ; in the frame, not in registers: an argument
+MM_PROT  equ 48                 ; with __index__ runs Python, and nothing in
+MM_FLAGS equ 56                 ; r8-r10 survives that
+MM_FRAME equ 64                 ; + 0 pushes = 64, 16-aligned
 DEF_FUNC mc_map, MM_FRAME
     cmp rsi, 5
     jne .mm_nargs
-    push rdi
-    sub rsp, 8
+    mov [rbp - MM_ARGS], rdi
 
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .mm_fail
     test rax, rax
     js .mm_badlen
     mov [rbp - MM_LEN], rax
 
-    mov rdi, [rsp + 8]
+    mov rdi, [rbp - MM_ARGS]
     xor esi, esi
     call mc_arg_int
-    mov r8, rax                 ; fd
-    mov rdi, [rsp + 8]
+    ERR_M1 .mm_fail
+    mov [rbp - MM_FD], rax
+    mov rdi, [rbp - MM_ARGS]
     mov esi, 2
     call mc_arg_int
-    mov r9, rax                 ; prot
-    mov rdi, [rsp + 8]
+    ERR_M1 .mm_fail
+    mov [rbp - MM_PROT], rax
+    mov rdi, [rbp - MM_ARGS]
     mov esi, 3
     call mc_arg_int
-    mov r10, rax                ; flags
-    mov rdi, [rsp + 8]
+    ERR_M1 .mm_fail
+    mov [rbp - MM_FLAGS], rax
+    mov rdi, [rbp - MM_ARGS]
     mov esi, 4
     call mc_arg_int
+    ERR_M1 .mm_fail
 
     ; sys_mmap(addr, len, prot, flags, fd, offset)
-    mov r11, rax                ; offset
+    mov r9, rax                 ; offset
     xor edi, edi
     mov rsi, [rbp - MM_LEN]
-    mov rdx, r9
-    mov rcx, r10
-    mov r9, r11
-    ; r8 already holds the fd
+    mov rdx, [rbp - MM_PROT]
+    mov rcx, [rbp - MM_FLAGS]
+    mov r8, [rbp - MM_FD]
     call sys_mmap
-    add rsp, 8
-    pop rdi                     ; the args array, discarded
-    MC_CHECK rax
+    MC_CHECK rax, .mm_fail
     mov [rbp - MM_ADDR], rax
 
     mov edi, MHandle_size
-    call ap_malloc
-    test rax, rax
-    jz .mm_oom
+    call ap_malloc              ; cannot fail: out of memory is fatal_error
     mov [rbp - MM_H], rax
     mov rcx, [rbp - MM_ADDR]
     mov [rax + MHandle.addr], rcx
@@ -299,15 +303,14 @@ DEF_FUNC mc_map, MM_FRAME
     leave
     ret
 
-.mm_oom:
-    mov rdi, [rbp - MM_ADDR]
-    mov rsi, [rbp - MM_LEN]
-    call sys_munmap
-    RAISE exc_ValueError_type, "out of memory"
 .mm_badlen:
-    RAISE exc_ValueError_type, "memory mapped length must be positive"
+    FAIL exc_ValueError_type, "memory mapped length must be positive", .mm_fail
 .mm_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    SET_EXC exc_TypeError_type, "_mmapcore: wrong number of arguments"
+.mm_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC mc_map
 
 ;; ============================================================================
@@ -323,6 +326,7 @@ DEF_FUNC mc_unmap, MU_FRAME
     jne .mu_nargs
     xor esi, esi
     call mc_arg_int
+    ERR_M1 .mu_fail
     mov [rbp - MU_IDX], rax
     mov rdi, rax
     call mc_handle_at
@@ -346,7 +350,11 @@ DEF_FUNC mc_unmap, MU_FRAME
     V_PACK rax, rdx
     ret
 .mu_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mu_fail
+.mu_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC mc_unmap
 
 ;; ============================================================================
@@ -358,13 +366,18 @@ DEF_FUNC mc_size, MZ_FRAME
     jne .mz_nargs
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mz_fail
     mov rdi, [rax + MHandle.length]
     call int_from_i64
     leave
     V_PACK rax, rdx
     ret
 .mz_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mz_fail
+.mz_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC mc_size
 
 ;; ============================================================================
@@ -384,14 +397,17 @@ DEF_FUNC mc_read, MR_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mr_fail
     mov [rbp - MR_H], rax
     mov rdi, rbx
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .mr_fail
     mov [rbp - MR_START], rax
     mov rdi, rbx
     mov esi, 2
     call mc_arg_int
+    ERR_M1 .mr_fail
     mov [rbp - MR_N], rax
 
     mov rcx, [rbp - MR_H]
@@ -413,9 +429,7 @@ DEF_FUNC mc_read, MR_FRAME
     mov [rbp - MR_N], rax
 
     mov rdi, rax
-    call bytes_new
-    test rax, rax
-    jz .mr_oom
+    call bytes_new              ; cannot fail: out of memory is fatal_error
     mov rbx, rax
     mov rdx, [rbp - MR_N]
     test rdx, rdx
@@ -433,12 +447,15 @@ DEF_FUNC mc_read, MR_FRAME
     V_PACK rax, rdx
     ret
 
-.mr_oom:
-    RAISE exc_ValueError_type, "out of memory"
 .mr_range:
-    RAISE exc_ValueError_type, "read out of range"
+    FAIL exc_ValueError_type, "read out of range", .mr_fail
 .mr_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mr_fail
+.mr_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_read
 
 ;; ============================================================================
@@ -459,10 +476,12 @@ DEF_FUNC mc_write, MW_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mw_fail
     mov [rbp - MW_H], rax
     mov rdi, rbx
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .mw_fail
     mov [rbp - MW_START], rax
 
     mov rdi, [rbx + 16]
@@ -500,11 +519,16 @@ DEF_FUNC mc_write, MW_FRAME
     ret
 
 .mw_type:
-    RAISE exc_TypeError_type, "data must be bytes or bytearray"
+    FAIL exc_TypeError_type, "data must be bytes or bytearray", .mw_fail
 .mw_range:
-    RAISE exc_ValueError_type, "data out of range"
+    FAIL exc_ValueError_type, "data out of range", .mw_fail
 .mw_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mw_fail
+.mw_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_write
 
 ;; ============================================================================
@@ -529,6 +553,7 @@ DEF_FUNC mc_find, MF_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mf_fail
     mov [rbp - MF_H], rax
 
     mov rdi, [rbx + 8]
@@ -541,14 +566,17 @@ DEF_FUNC mc_find, MF_FRAME
     mov rdi, rbx
     mov esi, 2
     call mc_arg_int
+    ERR_M1 .mf_fail
     mov [rbp - MF_START], rax
     mov rdi, rbx
     mov esi, 3
     call mc_arg_int
+    ERR_M1 .mf_fail
     mov [rbp - MF_END], rax
     mov rdi, rbx
     mov esi, 4
     call mc_arg_int
+    ERR_M1 .mf_fail
     mov [rbp - MF_REV], rax
 
     ; Clamp the window to the mapping.
@@ -625,9 +653,14 @@ DEF_FUNC mc_find, MF_FRAME
     ret
 
 .mf_type:
-    RAISE exc_TypeError_type, "the pattern must be bytes or bytearray"
+    FAIL exc_TypeError_type, "the pattern must be bytes or bytearray", .mf_fail
 .mf_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mf_fail
+.mf_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_find
 
 ;; ============================================================================
@@ -688,14 +721,17 @@ DEF_FUNC mc_flush, MQ_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mq_fail
     mov [rbp - MQ_H], rax
     mov rdi, rbx
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .mq_fail
     mov [rbp - MQ_OFF], rax
     mov rdi, rbx
     mov esi, 2
     call mc_arg_int
+    ERR_M1 .mq_fail
     mov [rbp - MQ_SIZE], rax
 
     mov rcx, [rbp - MQ_H]
@@ -718,7 +754,7 @@ DEF_FUNC mc_flush, MQ_FRAME
     mov rsi, [rbp - MQ_SIZE]
     mov edx, MS_SYNC
     call sys_msync
-    MC_CHECK rax
+    MC_CHECK rax, .mq_fail
     xor edi, edi
     call int_from_i64
     pop rbx
@@ -727,9 +763,14 @@ DEF_FUNC mc_flush, MQ_FRAME
     ret
 
 .mq_range:
-    RAISE exc_ValueError_type, "flush values out of range"
+    FAIL exc_ValueError_type, "flush values out of range", .mq_fail
 .mq_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mq_fail
+.mq_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_flush
 
 ;; ============================================================================
@@ -750,10 +791,12 @@ DEF_FUNC mc_resize, MX_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mx_fail
     mov [rbp - MX_H], rax
     mov rdi, rbx
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .mx_fail
     test rax, rax
     jle .mx_bad
     mov [rbp - MX_NEW], rax
@@ -765,7 +808,7 @@ DEF_FUNC mc_resize, MX_FRAME
     mov ecx, MREMAP_MAYMOVE
     xor r8d, r8d
     call sys_mremap
-    MC_CHECK rax
+    MC_CHECK rax, .mx_fail
     mov rcx, [rbp - MX_H]
     mov [rcx + MHandle.addr], rax
     mov rdx, [rbp - MX_NEW]
@@ -777,9 +820,14 @@ DEF_FUNC mc_resize, MX_FRAME
     ret
 
 .mx_bad:
-    RAISE exc_ValueError_type, "new size must be positive"
+    FAIL exc_ValueError_type, "new size must be positive", .mx_fail
 .mx_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mx_fail
+.mx_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_resize
 
 ;; ============================================================================
@@ -800,18 +848,22 @@ DEF_FUNC mc_move, MV_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .mv_fail
     mov [rbp - MV_H], rax
     mov rdi, rbx
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .mv_fail
     mov [rbp - MV_DEST], rax
     mov rdi, rbx
     mov esi, 2
     call mc_arg_int
+    ERR_M1 .mv_fail
     mov [rbp - MV_SRC], rax
     mov rdi, rbx
     mov esi, 3
     call mc_arg_int
+    ERR_M1 .mv_fail
     mov [rbp - MV_N], rax
 
     mov r9, [rbp - MV_H]
@@ -865,9 +917,14 @@ DEF_FUNC mc_move, MV_FRAME
     ret
 
 .mv_range:
-    RAISE exc_ValueError_type, "source, destination, or count out of range"
+    FAIL exc_ValueError_type, "source, destination, or count out of range", .mv_fail
 .mv_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .mv_fail
+.mv_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_move
 
 ;; ============================================================================
@@ -888,18 +945,22 @@ DEF_FUNC mc_advise, MA_FRAME
     mov rbx, rdi
     xor esi, esi
     call mc_state_arg
+    ERR_NULL .ma_fail
     mov [rbp - MA_H], rax
     mov rdi, rbx
     mov esi, 1
     call mc_arg_int
+    ERR_M1 .ma_fail
     mov [rbp - MA_OPT], rax
     mov rdi, rbx
     mov esi, 2
     call mc_arg_int
+    ERR_M1 .ma_fail
     mov [rbp - MA_START], rax
     mov rdi, rbx
     mov esi, 3
     call mc_arg_int
+    ERR_M1 .ma_fail
     mov [rbp - MA_LEN], rax
 
     mov rcx, [rbp - MA_H]
@@ -922,7 +983,7 @@ DEF_FUNC mc_advise, MA_FRAME
     mov rsi, [rbp - MA_LEN]
     mov rdx, [rbp - MA_OPT]
     call sys_madvise
-    MC_CHECK rax
+    MC_CHECK rax, .ma_fail
     RET_NONE
     pop rbx
     leave
@@ -930,9 +991,14 @@ DEF_FUNC mc_advise, MA_FRAME
     ret
 
 .ma_range:
-    RAISE exc_ValueError_type, "madvise start or length out of range"
+    FAIL exc_ValueError_type, "madvise start or length out of range", .ma_fail
 .ma_nargs:
-    RAISE exc_TypeError_type, "_mmapcore: wrong number of arguments"
+    FAIL exc_TypeError_type, "_mmapcore: wrong number of arguments", .ma_fail
+.ma_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC mc_advise
 
 ;; ============================================================================

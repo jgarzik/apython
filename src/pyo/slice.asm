@@ -11,6 +11,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern set_exception
 extern int_promote_mpz
 extern ap_malloc
 extern gc_alloc
@@ -26,7 +27,6 @@ extern bool_type
 extern exc_ValueError_type
 extern int_type
 extern type_type
-extern raise_exception
 extern exc_TypeError_type
 extern obj_as_index_clamped_msg
 extern ap_strcmp
@@ -184,7 +184,7 @@ DEF_FUNC slice_richcompare, SLC_FRAME
     mov rsi, [rbp - SLC_T2]
     mov rdx, [rbp - SLC_OP]
     extern tuple_richcompare
-    call tuple_richcompare
+    call tuple_richcompare    ; err: its 0, declined or raised, is this slot's own answer
     mov rbx, rax
     mov rdi, [rbp - SLC_T1]
     call obj_decref
@@ -232,7 +232,7 @@ DEF_FUNC slice_hash
     push rax
     mov rdi, rax
     extern obj_hash
-    call obj_hash
+    call obj_hash               ; err: the tuple's -1, with the exception, is the slice's
     pop rdi
     push rax
     call obj_decref
@@ -271,7 +271,7 @@ DEF_FUNC slice_repr, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, r13
     mov rsi, r12
     extern str_concat
-    call str_concat
+    call str_concat           ; err: the repr of a tuple is a str
     V_UNPACK rax, rdx
 
     push rax
@@ -308,6 +308,7 @@ END_FUNC slice_repr
 ;; ============================================================================
 ;; pyobj_to_i64(PyObject *obj) -> int64 in rax
 ;; Converts SmallInt or GMP int to int64. For None, returns special sentinel.
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC_BARE pyobj_to_i64
     ; rdi = payload, esi = tag
@@ -385,7 +386,10 @@ DEF_FUNC_BARE pyobj_to_i64
     ; bound wants; only the wording is this caller's own.
     mov edx, esi
     lea rsi, [rel slice_index_msg]
-    jmp obj_as_index_clamped_msg
+    sub rsp, 8                  ; a call, so the refusal can be seen
+    call obj_as_index_clamped_msg   ; err: its -1 is this function's own
+    add rsp, 8
+    ret
 END_FUNC pyobj_to_i64
 
 section .rodata
@@ -398,6 +402,11 @@ section .text
 ;;   -> (start, stop, step) in rax, rdx, rcx
 ;; slice_indices_live(PySliceObject *slice, int64 *length)
 ;;   -> the same, reading the length AFTER the bounds are resolved
+;; Fails: -1
+;;
+;; A start of -1 is an answer (a downward walk over nothing), so a failure is
+;; -1 in rax AND an exception pending: a bound that is not an index, a bound
+;; whose __index__ raised, or a step of zero.
 ;;
 ;; Resolves None, handles negatives, clamps to bounds -- CPython's
 ;; PySlice_Unpack followed by PySlice_AdjustIndices, and the order of those
@@ -439,6 +448,7 @@ END_FUNC slice_indices
 ;; ============================================================================
 ;; slice_indices_live(PySliceObject *slice, int64 *length)
 ;;   -> (start, stop, step) in rax, rdx, rcx
+;; Fails: -1
 ;;
 ;; The same body, sharing it from `sli_body`: the only difference is that the
 ;; length is loaded through the pointer once every bound is resolved.  See the
@@ -465,6 +475,7 @@ sli_body:
     je .step_is_none
     V_UNPACK rdi, rsi
     call pyobj_to_i64
+    ERR_M1 .sli_fail
     jmp .have_step
 .step_is_none:
     mov eax, 1
@@ -483,6 +494,7 @@ sli_body:
     je .start_is_none
     V_UNPACK rdi, rsi
     call pyobj_to_i64
+    ERR_M1 .sli_fail
     mov r12, rax
     jmp .have_start
 .start_is_none:
@@ -497,6 +509,7 @@ sli_body:
     je .stop_is_none
     V_UNPACK rdi, rsi
     call pyobj_to_i64
+    ERR_M1 .sli_fail
     mov r13, rax
     jmp .have_stop
 .stop_is_none:
@@ -590,7 +603,16 @@ sli_body:
     leave
     ret
 .step_is_zero:
-    RAISE exc_ValueError_type, "slice step cannot be zero"
+    SET_EXC exc_ValueError_type, "slice step cannot be zero"
+.sli_fail:
+    mov rax, -1
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC slice_indices_live
 
 ;; ============================================================================
@@ -671,6 +693,7 @@ END_FUNC slice_getattr
 ;; subscript operators did -- so `slice(1, 10, 2).indices(20)` was an
 ;; AttributeError.  It is how anything implementing __getitem__ for slices in
 ;; Python resolves one, and _pyio and the ABCs both do that.
+;; Fails: 0
 ;; ============================================================================
 SMI_SELF  equ 8
 SMI_START equ 16
@@ -687,6 +710,7 @@ DEF_FUNC slice_method_indices, SMI_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .smi_failed
     ; obj_as_index reports a non-integer by raising, and comes back 0 on the
     ; paths that do not.  A negative length is CPython's own check.
     test rax, rax
@@ -694,6 +718,7 @@ DEF_FUNC slice_method_indices, SMI_FRAME
     mov rsi, rax
     mov rdi, [rbp - SMI_SELF]
     call slice_indices          ; -> rax = start, rdx = stop, rcx = step
+    ERR_M1 .smi_failed
     mov [rbp - SMI_START], rax
     mov [rbp - SMI_STOP], rdx
     mov [rbp - SMI_STEP], rcx
@@ -722,13 +747,14 @@ DEF_FUNC slice_method_indices, SMI_FRAME
     leave
     ret
 .smi_negative:
-    RAISE exc_ValueError_type, "length should not be negative"
+    FAIL exc_ValueError_type, "length should not be negative", .smi_failed
 .smi_arity:
     dec rsi                     ; self does not count
     lea rdi, [rel smi_arity_msg]
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    call raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .smi_failed
 
 section .rodata
 smi_arity_msg: db "slice.indices() takes exactly one argument (", 0
@@ -754,6 +780,7 @@ DEF_SLICE_GETTER step
 ;; slice_type_call(self, args, nargs) -> (rax, edx) fat value
 ;; slice(stop), slice(start, stop), slice(start, stop, step)
 ;; rdi = self (slice_type), rsi = args (16-byte fat slots), rdx = nargs
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC slice_type_call, 8            ; 1 push, so rsp is 16-aligned
     push rbx
@@ -815,14 +842,17 @@ DEF_FUNC slice_type_call, 8            ; 1 push, so rsp is 16-aligned
     xor esi, esi
     CSTRING rdi, "slice expected at least 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    RET_NULL
+    jmp .stc_done
 
 .stc_error:
     mov rsi, rdx
     CSTRING rdi, "slice expected at most 3 arguments, got "
     xor edx, edx
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    RET_NULL
+    jmp .stc_done
 END_FUNC slice_type_call
 
 ;; ============================================================================
@@ -936,7 +966,7 @@ DEF_FUNC slice_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel slice_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC slice_dunder_new

@@ -19,6 +19,10 @@
 %include "value.inc"
 %include "opcodes.inc"
 
+extern dict_get_mro
+extern dict_get
+extern dict_get_str
+extern dict_set_str
 extern ap_malloc
 extern ap_free
 extern gc_alloc
@@ -29,7 +33,6 @@ extern obj_hash
 extern obj_repr
 extern obj_richcompare_bool
 extern dict_new
-extern dict_get
 extern dict_set
 extern dict_del
 extern dict_type
@@ -61,7 +64,7 @@ extern int_type
 extern float_type
 extern tuple_type
 extern bytes_type
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ReferenceError_type
 extern bool_true
@@ -97,7 +100,7 @@ DEF_FUNC_LOCAL weakref_chain, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rax
     mov rsi, rbx
     add rsi, [rel v_int_bias]   ; a user address always fits an int immediate
-    call dict_get
+    call dict_get_str
     pop rbx
     leave
     ret
@@ -250,7 +253,7 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jz .no_entry
     mov rsi, [rbp - WC_OBJ]
     add rsi, [rel v_int_bias]
-    call dict_del
+    call dict_del             ; err: an int key in a table of ints; its entry was found above
     mov rax, [rel weakref_table]
     mov rax, [rax + PyDictObject.ob_size]
     mov [rel weakref_live], rax
@@ -277,8 +280,13 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jz .cb_loop
 
     ; A callback that raises has no caller to hand the exception to; report
-    ; nothing and put back whatever was being handled, as __del__ does.
+    ; nothing and put back whatever was in flight, as __del__ does.  It is
+    ; FETCHED, not snapshotted: the referent may be dying under an unwind,
+    ; and a callback run with that exception still pending has every "-1 AND
+    ; an exception pending" answer inside it read as a failure -- importlib's
+    ; module-lock callback takes a lock with a timeout of -1.
     DUNDER_EXC_SAVE [rbp - WC_EXC]
+    mov qword [gs:ThreadState.current_exception], 0
     inc qword [rbx + PyObject.ob_refcnt]
     sub rsp, 16
     mov [rsp], rbx
@@ -293,17 +301,15 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     DECREF_VAL rax, rdx
 .cb_no_result:
     dec qword [rbx + PyObject.ob_refcnt]
-    DUNDER_RAISED [rbp - WC_EXC], .cb_raised
-.cb_resume:
-    jmp .cb_loop
-
-.cb_raised:
+    ; Whatever the callback left pending is dropped, and the fetched
+    ; reference moves back.
     mov rdi, [gs:ThreadState.current_exception]
-    mov qword [gs:ThreadState.current_exception], 0
-    call obj_decref
     mov rax, [rbp - WC_EXC]
     mov [gs:ThreadState.current_exception], rax
-    jmp .cb_resume
+    test rdi, rdi
+    jz .cb_loop
+    call obj_decref
+    jmp .cb_loop
 
 .cb_done:
     ; Give back what the hold loop took.  wr_object is zero on all of them by
@@ -460,7 +466,7 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rdi, rax
     mov rsi, [rbp - WM_OBJ]
     add rsi, [rel v_int_bias]
-    call dict_get
+    call dict_get_str
     test rax, rax
     jnz .have_chain
     xor edi, edi
@@ -481,7 +487,7 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rsi, [rbp - WM_OBJ]
     add rsi, [rel v_int_bias]
     mov rdx, [rsp]
-    call dict_set
+    call dict_set_str
     pop rax
     push rax
     mov rdi, rax
@@ -490,7 +496,7 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
 .have_chain:
     mov rdi, rax
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: a chain lives in the side table and is never handed to Python
     ; The chain holds a BORROWED reference.  list_append took one, and it is
     ; given straight back: an owned one meant a ref nobody else held stayed
     ; alive for as long as its referent did, so `r = ref(c, cb); del r; del c`
@@ -613,14 +619,18 @@ DEF_FUNC_LOCAL ref_hash, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, [rbx + PyWeakRefObject.wr_object]
     test rdi, rdi
     jz .dead
-    call obj_hash
+    call obj_hash               ; err: a -1 is stored as "not cached" and handed up
     mov [rbx + PyWeakRefObject.wr_hash], rax
 .cached:
     pop rbx
     leave
     ret
 .dead:
-    RAISE exc_TypeError_type, "weak object has gone away"
+    SET_EXC exc_TypeError_type, "weak object has gone away"
+    mov rax, -1                 ; tp_hash: -1 with the exception pending
+    pop rbx
+    leave
+    ret
 END_FUNC ref_hash
 
 ; Two live references compare as their referents do; a dead one only ever
@@ -688,8 +698,8 @@ END_FUNC ref_richcompare
 ;; ============================================================================
 
 ;; ============================================================================
-;; weakref_check_referent(rdi = the referent Value) -> rax = the object, or 0
-;;                                                     with a TypeError pending
+;; weakref_check_referent(rdi = the referent Value) -> rax = the object
+;; Fails: 0
 ;;
 ;; CPython refuses a weak reference to most builtin types: `weakref.ref([])`
 ;; is a TypeError, not a reference.  That is what a zero tp_weaklistoffset
@@ -735,8 +745,12 @@ DEF_FUNC weakref_check_referent, 8            ; 1 pushes, so rsp is 16-aligned
     xor esi, esi
 .wcr_raise:
     lea rdi, [rel wcr_message]
-    extern raise_type_error_with_typename
-    call raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC weakref_check_referent
 
 section .rodata
@@ -904,9 +918,10 @@ DEF_FUNC ref_construct, WRC_FRAME
     push rdx                    ; nargs, across the check
     push rsi
     mov rdi, [rsi]
-    call weakref_check_referent ; raises, naming the type, when it refuses
+    call weakref_check_referent ; refuses by naming the type
     pop rsi
     pop rdx
+    ERR_NULL .rc_fail
     mov rdi, rax
     xor ecx, ecx
     cmp rdx, 2
@@ -928,17 +943,22 @@ DEF_FUNC ref_construct, WRC_FRAME
     leave
     ret
 .bad_few:
-    RAISE exc_TypeError_type, "__new__ expected at least 1 argument, got 0"
+    FAIL exc_TypeError_type, "__new__ expected at least 1 argument, got 0", .rc_fail
 .bad_kw:
-    RAISE exc_TypeError_type, "ref() takes no keyword arguments"
+    FAIL exc_TypeError_type, "ref() takes no keyword arguments", .rc_fail
 .bad_many:
     ; CPython counts them in the message, and a caller that passed three has
     ; to be told it passed three.
-    extern raise_type_error_counted
+    extern set_type_error_counted
     lea rdi, [rel rc_too_many]
     mov rsi, [rbp - WRC_NARGS]
     xor edx, edx
-    call raise_type_error_counted   ; does not return
+    call set_type_error_counted
+.rc_fail:
+    RET_NULL                    ; tp_new: rax = 0 and edx = 0
+    pop rbx
+    leave
+    ret
 END_FUNC ref_construct
 
 ;; ============================================================================
@@ -954,7 +974,7 @@ DEF_FUNC ref_dunder_new
     mov rdx, rsi                ; nargs
     mov rsi, rdi                ; args
     lea rdi, [rel weakref_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC ref_dunder_new
@@ -999,10 +1019,14 @@ DEF_FUNC ref_dunder_init
     V_PACK rax, rdx
     ret
 .rdi_error:
-    RAISE exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "ref.__init__() takes 1 or 2 arguments"
+    leave
+    ret
 .rdi_kwerror:
     mov qword [gs:ThreadState.kw_names_pending], 0
-    RAISE exc_TypeError_type, "ref() takes no keyword arguments"
+    SET_EXC exc_TypeError_type, "ref() takes no keyword arguments"
+    leave
+    ret
 END_FUNC ref_dunder_init
 
 ;; ============================================================================
@@ -1076,6 +1100,8 @@ END_FUNC ref_clear
 ;; ============================================================================
 ;; proxy objects: the same structure, forwarding attribute access
 ;; ============================================================================
+;; proxy_referent(rdi = the proxy) -> rax = its referent, borrowed
+;; Fails: 0
 DEF_FUNC_LOCAL proxy_referent
     mov rax, [rdi + PyWeakRefObject.wr_object]
     test rax, rax
@@ -1083,13 +1109,16 @@ DEF_FUNC_LOCAL proxy_referent
     leave
     ret
 .dead:
-    RAISE exc_ReferenceError_type, "weakly-referenced object no longer exists"
+    SET_EXC exc_ReferenceError_type, "weakly-referenced object no longer exists"
+    leave
+    ret
 END_FUNC proxy_referent
 
 DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rsi
     call proxy_referent
+    ERR_NULL .none              ; 0 with the ReferenceError pending
     mov rdi, rax
     mov rsi, rbx
     mov rax, [rdi + PyObject.ob_type]
@@ -1106,7 +1135,7 @@ DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
     test rdi, rdi
     jz .none
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jz .none
     INCREF_V rax, rcx
@@ -1128,6 +1157,7 @@ DEF_FUNC proxy_setattr
     mov rbx, rsi
     mov r12, rdx
     call proxy_referent
+    ERR_NULL .fail
     mov rdi, rax
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
@@ -1141,13 +1171,21 @@ DEF_FUNC proxy_setattr
     leave
     ret
 .no_setattr:
-    RAISE exc_TypeError_type, "proxy object does not support attribute assignment"
+    SET_EXC exc_TypeError_type, "proxy object does not support attribute assignment"
+.fail:
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC proxy_setattr
 
 DEF_FUNC proxy_repr
     call proxy_referent
+    ERR_NULL .fail
     mov rdi, rax
     call obj_repr
+.fail:
     leave
     ret
 END_FUNC proxy_repr
@@ -1158,6 +1196,7 @@ DEF_FUNC proxy_call
     mov rbx, rsi
     mov r12, rdx
     call proxy_referent
+    ERR_NULL .fail
     mov rdi, rax
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
@@ -1171,7 +1210,13 @@ DEF_FUNC proxy_call
     leave
     ret
 .not_callable:
-    RAISE exc_TypeError_type, "proxy object is not callable"
+    SET_EXC exc_TypeError_type, "proxy object is not callable"
+.fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC proxy_call
 
 ;; ============================================================================
@@ -1185,8 +1230,9 @@ DEF_FUNC wr_proxy_func
     mov rbx, rdi
     push rsi                    ; nargs, across the check
     mov rdi, [rbx]
-    call weakref_check_referent ; raises, naming the type, when it refuses
+    call weakref_check_referent ; refuses by naming the type
     pop rsi
+    ERR_NULL .fail
     mov rdi, rax
     ; A callable referent gets CallableProxyType, as CPython does.
     mov rax, [rdi + PyObject.ob_type]
@@ -1216,8 +1262,15 @@ DEF_FUNC wr_proxy_func
     V_PACK rax, rdx
     leave
     ret
+.fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 .bad:
-    RAISE exc_TypeError_type, "cannot create weak proxy to this object"
+    SET_EXC exc_TypeError_type, "cannot create weak proxy to this object"
+    leave
+    ret
 END_FUNC wr_proxy_func
 
 DEF_FUNC wr_getweakrefcount_func
@@ -1285,7 +1338,7 @@ DEF_FUNC wr_getweakrefs_func
     push rdx
     push r8
     mov rdi, [rsp + 24]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop r8
     pop rdx
     pop rcx
@@ -1310,22 +1363,42 @@ DEF_FUNC wr_getweakrefs_func
     ret
 END_FUNC wr_getweakrefs_func
 
-; _remove_dead_weakref(dict, key): drop dict[key] if it is a reference whose
-; referent has gone.  WeakValueDictionary calls this from its callback.
-DEF_FUNC wr_remove_dead_func
-    cmp rsi, 2
-    jl .none
+;; ============================================================================
+;; wr_remove_dead_func(args, nargs) -> rax = None
+;; Fails: 0
+;;
+;; _remove_dead_weakref(dict, key): drop dict[key] if it is a reference whose
+;; referent has gone.  WeakValueDictionary calls this from its callback.
+;;
+;; Exactly two arguments, and the first a dict.  It asked only that the first
+;; be a pointer, so None went to dict_get as a table, and a longer call was
+;; taken as a shorter one.
+;; ============================================================================
+WRD_FRAME equ 8             ; + 1 push = 16, 16-aligned
+extern set_type_error_counted
+extern set_type_error_with_name
+DEF_FUNC wr_remove_dead_func, WRD_FRAME
     push rbx
+    cmp rsi, 2
+    jne .wrd_arity
     mov rbx, rdi
     mov rdi, [rbx]
     V_TEST_PTR rdi, rax
-    ja .none_pop
+    ja .wrd_not_dict
+    mov rax, [rdi + PyObject.ob_type]
+    lea rcx, [rel dict_type]
+    cmp rax, rcx
+    je .wrd_dict
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_DICT_SUBCLASS
+    jz .wrd_not_dict
+.wrd_dict:
     mov rsi, [rbx + 8]
     push rdi
     push rsi
-    call dict_get
+    call dict_get       ; err: tested once the two arguments are popped
     pop rsi
     pop rdi
+    ERR_PENDING .wrd_fail
     test rax, rax
     jz .none_pop
     V_TEST_PTR rax, rcx
@@ -1337,12 +1410,26 @@ DEF_FUNC wr_remove_dead_func
     cmp qword [rax + PyWeakRefObject.wr_object], 0
     jne .none_pop
     call dict_del
+    ERR_M1 .wrd_fail
 .none_pop:
-    pop rbx
-.none:
     RET_NONE
+    pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.wrd_not_dict:
+    mov rsi, [rbx]
+    CSTRING rdi, `_remove_dead_weakref() argument 1 must be dict, not \x02`
+    call set_type_error_with_name
+    jmp .wrd_fail
+.wrd_arity:
+    CSTRING rdi, "_remove_dead_weakref expected 2 arguments, got "
+    xor edx, edx                ; rsi is still the count
+    call set_type_error_counted
+.wrd_fail:
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC wr_remove_dead_func
 

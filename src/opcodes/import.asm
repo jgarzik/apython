@@ -3,13 +3,13 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get
 extern eval_dispatch
 extern import_module
 extern obj_decref
 extern raise_exception
 extern exc_ImportError_type
 extern exc_raise_import
-extern dict_get
 extern str_from_cstr_heap
 extern str_type
 extern obj_dealloc
@@ -72,6 +72,7 @@ DEF_FUNC_BARE op_import_name
     mov rsi, [r12 + PyFrame.globals]
     extern import_resolve_relative
     call import_resolve_relative
+    ERR_NULL_JUMP               ; no parent package, or one too many dots
     mov rdx, rax                ; the resolved name, owned
     add rsp, 8
     pop rax
@@ -94,6 +95,7 @@ DEF_FUNC_BARE op_import_name
     mov rsi, [rsp + 8]          ; fromlist
     ; rdx = level (already set)
     call import_module
+    ERR_NULL_JUMP               ; the import failed: its exception is pending
     ; rax = module (new reference)
 
     test r15d, r15d
@@ -181,7 +183,6 @@ END_FUNC import_module_dict
 ;; If attr not found on module, tries importing <pkg_name>.<attr_name>
 ;; as a submodule (CPython submodule fallback).
 ;; ============================================================================
-extern dict_get
 extern dict_set
 extern obj_incref
 extern str_from_cstr_heap
@@ -233,6 +234,9 @@ DEF_FUNC op_import_from, IF2_FRAME
 
     ; Call tp_getattr(module, name_str)
     call rax
+    GETATTR_HOOK_SKIP .if_ga_ok
+    ERR_PENDING_JUMP
+.if_ga_ok:
     V_UNPACK rax, rdx           ; tp_getattr returns a Value
     test edx, edx
     jnz .if_got_attr
@@ -251,6 +255,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
     call dict_get
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
@@ -265,6 +270,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
     call dict_get
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
@@ -296,7 +302,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     mov rdi, [rbp - IF2_MOD]
     mov rsi, [rbp - IF_ATTR]
     extern import_submodule_attr
-    call import_submodule_attr
+    call import_submodule_attr  ; err: 0 goes to .if_error, which hands on a pending exception first
     test rax, rax
     jz .if_error
     mov [rbp - IF2_SUB], rax
@@ -463,6 +469,7 @@ DEF_FUNC_LOCAL ife_str_field, ISF_FRAME
     mov rdi, [rbp - ISF_DICT]
     mov rsi, rax
     call dict_get                   ; a Value; 0 is the miss
+    ERR_DICT_GET_JUMP
     mov rbx, rax
     mov rdi, [rbp - ISF_KEY]
     call obj_decref
@@ -529,6 +536,7 @@ DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
     mov rdi, [rbp - IFI_DICT]
     mov rsi, rax
     call dict_get
+    ERR_DICT_GET_JUMP
     mov [rbp - IFI_SPEC], rax
     mov rdi, [rbp - IFI_KEY]
     call obj_decref
@@ -552,6 +560,7 @@ DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
     jz .ifi_no
     extern obj_is_true
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov [rbp - IFI_KEY], rax
     mov rdi, [rbp - IFI_SPEC]
     DECREF_V rdi, rcx

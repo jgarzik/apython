@@ -9,6 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -55,7 +56,7 @@ DEF_FUNC errno_module_create, EM_FRAME
     mov rdi, [rbp - EM_DICT]
     mov rsi, r12
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     ; DECREF_V, not obj_decref: V_PACK boxes an int outside the immediate
     ; range -- every one of these under INT_STRESS=1 -- and hands back an owned
     ; reference, while an immediate owns nothing.  DECREF_V tells them apart.
@@ -82,7 +83,7 @@ DEF_FUNC errno_module_create, EM_FRAME
     mov rdi, [rbp - EM_CODES]
     mov rsi, rax                    ; the number is the key here
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     mov rax, [rbp - EM_ENT]
     DECREF_V rax, rcx               ; see the note in the loop above
     mov rdi, r12
@@ -97,7 +98,7 @@ DEF_FUNC errno_module_create, EM_FRAME
     mov rdi, [rbp - EM_DICT]
     mov rsi, r12
     mov rdx, [rbp - EM_CODES]
-    call dict_set
+    call dict_set_str
     mov rdi, r12
     call obj_decref
     mov rdi, [rbp - EM_CODES]

@@ -4,6 +4,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern set_exception
 extern get_iterator_opt
 extern list_type
 extern tuple_type
@@ -17,7 +18,6 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern str_type
-extern eval_exception_unwind
 extern obj_richcompare_bool
 extern ap_memcpy
 extern ap_memset
@@ -51,7 +51,8 @@ SET_EMPTY_CAP equ 1
 ;
 ; This is set's parallel of dict_lookup's cached string hash: n-queens hashes
 ; nothing but ints, and the call was most of what `c in cols` cost.
-%macro SET_HASH_VALUE 2         ; %1 = key Value (preserved), %2 = the hash out
+%macro SET_HASH_VALUE 3         ; %1 = key Value (preserved), %2 = the hash out,
+                                ; %3 = where an unhashable key goes
     V_IS_INT %1, %2
     jb %%slow
     mov %2, %1
@@ -63,6 +64,7 @@ SET_EMPTY_CAP equ 1
 %%slow:
     mov rdi, %1
     call obj_hash
+    ERR_M1 %3
     mov %2, rax
 %%done:
 %endmacro
@@ -231,6 +233,7 @@ END_FUNC set_result_type
 ;; header as a hash table, found nothing occupied, and answered {1,2} -- a
 ;; silently wrong answer rather than a crash.  A set argument is handed back
 ;; INCREF'd so the caller can release its operand unconditionally.
+;; Fails: 0
 ;; ============================================================================
 SCO_ARG   equ 8         ; a one-Value args array for set_type_call
 SCO_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -252,7 +255,7 @@ DEF_FUNC set_coerce_operand, SCO_FRAME
     lea rsi, [rbp - SCO_ARG]
     lea rdi, [rel set_type]
     mov edx, 1
-    call set_type_call          ; raises for a non-iterable, NULL if it threw
+    call set_type_call          ; err: its 0 is this function's own answer
     leave
     ret
 END_FUNC set_coerce_operand
@@ -344,6 +347,7 @@ END_FUNC frozenset_hash
 
 ;; ============================================================================
 ;; set_keys_equal(rdi = a Value, rsi = b Value) -> eax = 1 if equal, 0 if not
+;; Fails: -1
 ;;
 ;; Was an identity check plus a string compare, and nothing else: no
 ;; cross-type numeric equality, so 1.0 in {1} was False where the same
@@ -365,16 +369,18 @@ DEF_FUNC_LOCAL set_keys_equal
     ret
 
 .ske_error:
-    ; The caller has no error channel; the exception is already pending.
+    mov rax, -1                 ; with the exception pending
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC set_keys_equal
 
 ;; ============================================================================
 ;; set_find_slot(rdi = the set, rsi = the key Value, rdx = its hash)
 ;;   -> rax = entry ptr, rdx = 1 if the key is there, 0 if the slot is free
+;; Fails: 0
 ;;
-;; Internal helper used by set_add and set_contains.
+;; Internal helper used by set_add, set_contains and set_remove.  It fails
+;; when a key's __eq__ raises, and holds nothing when it does.
 ;;
 ;; A slot freed by set_remove holds a TOMBSTONE: key 0, hash -1.  The probe
 ;; cannot stop there -- the key it is looking for may sit further along the
@@ -488,6 +494,7 @@ DEF_FUNC_LOCAL set_find_slot
     push r8                     ; pad, so the call stays 16-aligned
     mov rsi, r12                ; b = the lookup key
     call set_keys_equal
+    ERR_M1 .sfs_raised
     mov edi, eax                ; save equality result (survives pops)
     pop r8                      ; pad
     pop r8
@@ -540,6 +547,19 @@ DEF_FUNC_LOCAL set_find_slot
     test rdx, rdx
     cmovnz rax, rdx
     xor edx, edx
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.sfs_raised:
+    ; A key's __eq__ raised.  The four words saved around the call are still
+    ; on the stack; nothing here is owned.
+    add rsp, 32
+    RET_NULL
     pop r15
     pop r14
     pop r13
@@ -845,8 +865,10 @@ DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
 END_FUNC set_clone_into
 
 ;; ============================================================================
-;; set_add(set, key, key_tag) -> void
-;; set_add(rdi=set, rsi=key Value) -> int
+;; set_add(rdi = set, rsi = key Value) -> rax = 0
+;; Fails: -1
+;;
+;; It fails when the key cannot be hashed or a key's __eq__ raises.
 ;; ============================================================================
 SAD_TABLE equ 8             ; the entries array the probe started on
 SAD_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
@@ -859,7 +881,7 @@ DEF_FUNC set_add, SAD_FRAME
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
-    SET_HASH_VALUE r12, r13     ; r13 = hash
+    SET_HASH_VALUE r12, r13, .sad_fail      ; r13 = hash
 
 .sad_retry:
     ; Make the room BEFORE probing rather than after inserting.
@@ -891,6 +913,7 @@ DEF_FUNC set_add, SAD_FRAME
     mov rsi, r12                ; the key
     mov rdx, r13                ; hash
     call set_find_slot
+    ERR_NULL .sad_fail
     ; rax = entry ptr, edx = 1 if existing, 0 if empty
 
     ; set_find_slot runs the keys' __eq__, and that is arbitrary Python: it
@@ -927,16 +950,22 @@ DEF_FUNC set_add, SAD_FRAME
     inc qword [rbx + PyDictObject.ob_size]
 
 .done:
+    xor eax, eax
+.sad_out:
     pop r14
     pop r13
     pop r12
     pop rbx
     leave
     ret
+.sad_fail:
+    mov rax, -1                 ; unhashable, or __eq__ raised; nothing was stored
+    jmp .sad_out
 END_FUNC set_add
 
 ;; ============================================================================
 ;; set_contains(rdi = the set, rsi = the key Value) -> eax = 0 or 1
+;; Fails: -1
 ;;
 ;; A SET is unhashable, but `set() in {1, 2}` is False in CPython rather
 ;; than a TypeError: its set_contains retries with a frozenset built from
@@ -977,7 +1006,7 @@ DEF_FUNC set_contains, SCT_FRAME
     lea rsi, [rbp - SCT_KEY]
     lea rdi, [rel frozenset_type]
     mov edx, 1
-    call frozenset_type_call
+    call frozenset_type_call    ; err: tested below, after the pop
     pop rdi
     V_UNPACK rax, rdx
     test rax, rax
@@ -989,7 +1018,7 @@ DEF_FUNC set_contains, SCT_FRAME
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
-    SET_HASH_VALUE r12, r13     ; r13 = hash
+    SET_HASH_VALUE r12, r13, .sct_raised    ; r13 = hash
 
     ; Find slot.  A lookup never resizes: set_add's room-making belongs to
     ; the insert, and a membership test that rehashed the table would move
@@ -998,6 +1027,7 @@ DEF_FUNC set_contains, SCT_FRAME
     mov rsi, r12                ; the key
     mov rdx, r13                ; hash
     call set_find_slot
+    ERR_NULL .sct_raised
     ; rax = entry ptr, edx = 1 if found, 0 if empty slot
 
     mov eax, edx                ; return 1 if found, 0 if not
@@ -1016,8 +1046,15 @@ DEF_FUNC set_contains, SCT_FRAME
     pop rbx
     leave
     ret
+.sct_raised:
+    mov rdi, [rbp - SCT_TMP]
+    test rdi, rdi
+    jz .sct_failed
+    call obj_decref
 .sct_failed:
-    xor eax, eax
+    ; This answered 0, "not there", over the exception a failed frozenset()
+    ; had left pending.
+    mov rax, -1
     pop r14
     pop r13
     pop r12
@@ -1030,6 +1067,7 @@ END_FUNC set_contains
 ;; ============================================================================
 ;; set_richcompare(self, other, op, self_tag, other_tag) -> (rax, edx) fat value
 ;; Compares two sets. Only PY_EQ and PY_NE implemented.
+;; Fails: 0?
 ;; ============================================================================
 SRC_SELF  equ 8
 SRC_OTHER equ 16
@@ -1133,6 +1171,7 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12               ; other set
     call set_contains
+    ERR_M1 .src_raised
     mov rdi, [rbp - SRC_KEY]
     push rax
     push rax                             ; pad
@@ -1175,6 +1214,7 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12
     call set_contains
+    ERR_M1 .src_raised
     mov rdi, [rbp - SRC_KEY]
     push rax
     push rax                             ; pad
@@ -1213,6 +1253,7 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12
     call set_contains
+    ERR_M1 .src_raised
     mov rdi, [rbp - SRC_KEY]
     push rax
     push rax                             ; pad
@@ -1245,7 +1286,7 @@ DEF_FUNC set_richcompare, SRC_FRAME
     push rdi
     push rsi
     mov edx, PY_EQ
-    call set_richcompare
+    call set_richcompare        ; err: a 0 goes out through .src_not_impl below
     pop rsi
     pop rdi
     ; Negate: if bool_true → return bool_false, vice versa
@@ -1276,6 +1317,10 @@ DEF_FUNC set_richcompare, SRC_FRAME
     leave
     ret
 
+.src_raised:
+    ; A key's __eq__ raised part way through a walk; the key is still held.
+    mov rdi, [rbp - SRC_KEY]
+    DECREF_V rdi, rcx
 .src_not_impl:
     RET_NULL
     pop r13
@@ -1296,6 +1341,9 @@ END_FUNC set_contains_sq
 ;; ============================================================================
 ;; set_remove(set, key) -> int (0=ok, -1=not found)
 ;; Remove a key from the set
+;; Fails: -1
+;; -1 alone is "not there"; -1 with an exception pending is an unhashable
+;; key or an __eq__ that raised.
 ;;
 ;; The probe is set_find_slot's, and now it is ONLY set_find_slot's.  This
 ;; used to carry an independent second copy of the whole loop -- its own
@@ -1315,12 +1363,13 @@ DEF_FUNC set_remove
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
 
-    SET_HASH_VALUE r12, r13     ; r13 = hash
+    SET_HASH_VALUE r12, r13, .sr_not_found  ; r13 = hash
 
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
     call set_find_slot          ; rax = entry, edx = 1 if the key is there
+    ERR_NULL .sr_not_found      ; -1, with the exception pending
     test edx, edx
     jz .sr_not_found
 
@@ -1337,7 +1386,7 @@ DEF_FUNC set_remove
     jmp .sr_done
 
 .sr_not_found:
-    mov eax, -1
+    mov rax, -1
 
 .sr_done:
     pop r14
@@ -1411,14 +1460,14 @@ END_FUNC set_dealloc
 ;; set_type_call(self, args, nargs) -> new set
 ;; Constructor: set() or set(iterable)
 ;; self = set_type, args = arg array, nargs = count
+;; Fails: 0
 ;; ============================================================================
-extern raise_exception
 extern exc_TypeError_type
 
 STC_EXC   equ 16            ; current_exception before the iteration started
 STC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC set_type_call, STC_FRAME
-    NO_KEYWORDS "set() takes no keyword arguments"
+    NO_KEYWORDS_RET "set() takes no keyword arguments", .stc_fail_bare
     push rbx
     push r12
 
@@ -1483,6 +1532,7 @@ DEF_FUNC set_type_call, STC_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING .stc_iter_raised
     test rax, rax
     jz .stc_not_iterable_decref_set
     mov r12, rax            ; r12 = iterator
@@ -1507,6 +1557,7 @@ DEF_FUNC set_type_call, STC_FRAME
     push rdx                ; alignment padding (3 pushes = odd, matches ABI)
     V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
+    ERR_M1 .stc_add_raised
     add rsp, 8              ; drop alignment padding
     pop rsi                 ; key tag
     pop rdi                 ; key payload
@@ -1537,6 +1588,13 @@ DEF_FUNC set_type_call, STC_FRAME
     leave
     ret
 
+.stc_add_raised:
+    add rsp, 8                  ; the pad
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi         ; the element
+    mov rdi, r12
+    call obj_decref             ; the iterator
 .stc_iter_raised:
     mov rdi, rbx                ; the partly built set
     call obj_decref
@@ -1555,15 +1613,26 @@ DEF_FUNC set_type_call, STC_FRAME
 .stc_not_iterable:
     mov rsi, r12                ; args[0]: the iterator never replaced it
     CSTRING rdi, `'\x01' object is not iterable`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+.stc_fail:
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .stc_error:
     mov rsi, rdx
     CSTRING rdi, "set expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .stc_fail
+.stc_fail_bare:                 ; refused before anything was saved
+    RET_NULL
+    leave
+    ret
 END_FUNC set_type_call
 
 ; set_repr is in src/repr.asm
@@ -1621,6 +1690,7 @@ END_FUNC set_tp_iter
 ;; Return next key, or NULL if exhausted.
 ;; Scans entries for next non-empty slot.
 ;; rdi = iterator
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC_BARE set_iter_next
     mov rax, [rdi + PyDictIterObject.it_dict]      ; set
@@ -1672,7 +1742,11 @@ DEF_FUNC_BARE set_iter_next
 
 .si_mutation_error:
     extern exc_RuntimeError_type
-    RAISE exc_RuntimeError_type, "Set changed size during iteration"
+    sub rsp, 8                  ; no frame here; the call wants rsp aligned
+    SET_EXC exc_RuntimeError_type, "Set changed size during iteration"
+    add rsp, 8
+    RET_NULL
+    ret
 END_FUNC set_iter_next
 
 ;; ============================================================================
@@ -1708,12 +1782,13 @@ END_FUNC set_iter_self
 ;; frozenset_type_call(self, args, nargs) -> frozenset
 ;; Same as set_type_call but creates frozenset (reuses set_new, sets ob_type)
 ;; rdi = self (frozenset_type), rsi = args (16-byte fat slots), rdx = nargs
+;; Fails: 0
 ;; ============================================================================
 global frozenset_type_call
 FTC_EXC   equ 16            ; current_exception before the iteration started
 FTC_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
 DEF_FUNC frozenset_type_call, FTC_FRAME
-    NO_KEYWORDS "frozenset() takes no keyword arguments"
+    NO_KEYWORDS_RET "frozenset() takes no keyword arguments", .ftc_fail_bare
     push rbx
     push r12
 
@@ -1785,6 +1860,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING .ftc_iter_raised
     test rax, rax
     jz .ftc_not_iterable_decref
     mov r12, rax
@@ -1806,6 +1882,7 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     push rdx
     V_PACK rsi, rdx         ; set_add takes a key Value
     call set_add
+    ERR_M1 .ftc_add_raised
     add rsp, 8
     pop rsi
     pop rdi
@@ -1840,6 +1917,13 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
     leave
     ret
 
+.ftc_add_raised:
+    add rsp, 8                  ; the pad
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi         ; the element
+    mov rdi, r12
+    call obj_decref             ; the iterator
 .ftc_iter_raised:
     mov rdi, rbx                ; the partly built set
     call obj_decref
@@ -1856,13 +1940,23 @@ DEF_FUNC frozenset_type_call, FTC_FRAME
 .ftc_not_iterable:
     mov rsi, r12                ; args[0]: the iterator never replaced it
     CSTRING rdi, `'\x01' object is not iterable`
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+.ftc_fail:
+    RET_NULL
+    pop r12
+    pop rbx
+    leave
+    ret
 .ftc_error:
     mov rsi, rdx
     CSTRING rdi, "frozenset expected at most 1 argument, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    jmp .ftc_fail
+.ftc_fail_bare:                 ; refused before anything was saved
+    RET_NULL
+    leave
+    ret
 END_FUNC frozenset_type_call
 
 
@@ -1914,7 +2008,7 @@ DEF_FUNC set_nb_or, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_union
+    call set_method_union  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_or
@@ -1926,7 +2020,7 @@ DEF_FUNC set_nb_and, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_intersection
+    call set_method_intersection  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_and
@@ -2061,7 +2155,7 @@ DEF_FUNC set_nb_sub, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_difference
+    call set_method_difference  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_sub
@@ -2073,7 +2167,7 @@ DEF_FUNC set_nb_xor, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_symmetric_difference
+    call set_method_symmetric_difference  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_xor

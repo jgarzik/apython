@@ -2041,17 +2041,21 @@ DEF_FUNC error_unimplemented_opcode, 32             ; space for decimal digits
 END_FUNC error_unimplemented_opcode
 
 ;; ============================================================================
-;; list_sorting_error - raise ValueError when list is mutated during sort
-;; Called when ob_item == NULL (list is being sorted)
-;; Does not return - jumps to exception unwinder
+;; set_list_sorting_error() -> rax = 0, always, with the ValueError pending
+;;
+;; What a list method says when ob_item == NULL: the list is being sorted,
+;; and the sort holds its array.
 ;; ============================================================================
-DEF_FUNC_BARE list_sorting_error
+DEF_FUNC set_list_sorting_error
     extern exc_ValueError_type
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel list_modified_msg]
-    extern raise_exception
-    jmp raise_exception        ; tail call, doesn't return
-END_FUNC list_sorting_error
+    extern set_exception
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC set_list_sorting_error
 
 section .rodata
 err_prefix: db "Error: "

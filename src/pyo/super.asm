@@ -24,6 +24,7 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_mro
 extern type_type
 extern type_is_subtype
 extern type_mro_next
@@ -250,6 +251,7 @@ DEF_FUNC super_check, SC_FRAME
     mov rdi, [rbp - SC_OBJ]
     extern obj_declared_class
     call obj_declared_class
+    ERR_PENDING .sc_fail
     test rax, rax
     jz .sc_bad
     mov [rbp - SC_DECL], rax
@@ -269,6 +271,7 @@ DEF_FUNC super_check, SC_FRAME
 
 .sc_bad:
     SET_EXC exc_TypeError_type, "super(type, obj): obj must be an instance or subtype of type"
+.sc_fail:
     xor eax, eax
     xor edx, edx
     leave
@@ -305,7 +308,7 @@ DEF_FUNC super_find, SF_FRAME
 
     push rax
     mov rsi, [rbp - SF_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     pop rcx
     test edx, edx               ; the tag, not the payload: a hit may be int 0
@@ -461,7 +464,7 @@ DEF_FUNC super_lookup, SL_FRAME
     cmp rsi, [rbp - SL_OBJTYPE]
     je .sl_plain
     mov rdi, rax
-    call property_descr_get     ; -> (rax, rdx), owned
+    call property_descr_get     ; -> (rax, rdx), owned  ; err: (0, 0) is the caller's, as it stands
     mov [rbp - SL_BIND], rax
     mov [rbp - SL_TYPE], rdx    ; SL_TYPE is spent; reuse it for the tag
     mov rdi, [rbp - SL_ATTR]
@@ -941,7 +944,7 @@ DEF_FUNC super_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel super_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC super_dunder_new

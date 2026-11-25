@@ -4,6 +4,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_str
+extern dict_set
+extern dict_set_str
 extern ap_malloc
 extern ap_strlen
 extern obj_decref
@@ -22,7 +25,6 @@ extern bool_true
 extern bool_false
 extern dict_new
 extern str_intern
-extern dict_set
 extern dict_get
 extern list_new
 extern list_append
@@ -35,7 +37,7 @@ extern dunder_call_1
 extern fileobj_new
 extern builtin_func_new
 extern fatal_error
-extern raise_exception
+extern set_exception
 
 ;; SYS_ADD_FUNC impl, name -- the module dict is in r15 here, not r12, so
 ;; MODULE_ADD_FUNC does not fit; this is the same four steps.
@@ -322,7 +324,7 @@ DEF_FUNC_LOCAL sm_add_str, SAS_FRAME
     mov rdi, [rbp - SAS_DICT]
     mov rsi, [rbp - SAS_KEY]
     mov rdx, rax
-    call dict_set                       ; takes its own reference to both
+    call dict_set_str                       ; takes its own reference to both
     mov rdi, rbx
     call obj_decref
     mov rdi, [rbp - SAS_KEY]
@@ -354,7 +356,7 @@ DEF_FUNC_LOCAL sm_add_owned, SAO_FRAME
     mov rdi, [rbp - SAO_DICT]
     mov rsi, rax
     mov rdx, [rbp - SAO_VAL]
-    call dict_set                       ; takes its own reference to both
+    call dict_set_str                       ; takes its own reference to both
     mov rdi, [rbp - SAO_VAL]
     call obj_decref
     mov rdi, [rbp - SAO_KEY]
@@ -393,7 +395,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, r14
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -413,7 +415,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r12
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 .path_no_placeholder:
@@ -425,7 +427,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r12            ; DECREF sys.path (dict_set INCREF'd)
@@ -456,7 +458,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r13
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 
@@ -473,7 +475,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, r13
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, r13            ; DECREF sys.argv (dict_set INCREF'd)
@@ -507,7 +509,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r13
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop rbx
@@ -534,7 +536,7 @@ DEF_FUNC sys_module_init, 40
     mov rdx, [rsp + 8]        ; value payload
     mov ecx, [rsp + 16]       ; value tag (from int_from_i64)
     V_PACK rdx, rcx           ; dict_set takes Values
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref            ; DECREF key string
     pop rdi                    ; value payload (SmallInt, no DECREF)
@@ -550,7 +552,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -566,7 +568,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -630,7 +632,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -689,7 +691,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -711,7 +713,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     ; the same object under its __ name, as CPython does
@@ -722,7 +724,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 16]         ; the file object, still on the stack below
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref
@@ -741,7 +743,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     ; the same object under its __ name, as CPython does
@@ -752,7 +754,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 16]         ; the file object, still on the stack below
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref
@@ -770,7 +772,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -787,7 +789,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -803,7 +805,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -848,7 +850,7 @@ DEF_FUNC sys_module_init, 40
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get
+    call dict_get_str
     V_UNPACK rax, rdx
     pop rdi
     push rax
@@ -870,7 +872,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - SMI_TMP]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, [rbp - SMI_TMP]
@@ -886,7 +888,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - SMI_TMP]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, [rbp - SMI_TMP]
@@ -954,7 +956,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - SMI_TMP]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, [rbp - SMI_TMP]
@@ -970,7 +972,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1020,7 +1022,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1060,7 +1062,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1084,7 +1086,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1126,7 +1128,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1166,7 +1168,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -1183,7 +1185,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1204,7 +1206,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1224,7 +1226,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1238,6 +1240,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC_ALIAS sys_excepthook_func, sm_excepthook, sm_dunder_excepthook
     SYS_ADD_FUNC_ALIAS sys_displayhook_func, sm_displayhook, sm_dunder_displayhook
     SYS_ADD_FUNC sys_getrefcount_func, sm_getrefcount
+    SYS_ADD_FUNC sys_getallocatedblocks_func, sm_getallocatedblocks
     SYS_ADD_FUNC sys_is_finalizing_func, sm_is_finalizing
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
@@ -1352,7 +1355,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1369,7 +1372,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1386,7 +1389,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1478,7 +1481,7 @@ DEF_FUNC sys_module_init, 40
     mov rdi, r14                ; sys.modules dict
     mov rsi, rax
     mov rdx, [rel sys_module_obj]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1510,6 +1513,7 @@ END_FUNC sys_module_init
 ;;
 ;; The default argument is reached only when there is no __sizeof__ at all,
 ;; which is what CPython uses it for too.
+;; Fails: 0
 ;; ============================================================================
 SGS_ARGS  equ 8
 SGS_NARGS equ 16
@@ -1529,6 +1533,7 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     jz .sgs_immediate
     CSTRING rsi, "__sizeof__"
     call dunder_call_1
+    ERR_PENDING .sgs_raised
     test rax, rax
     jz .sgs_no_sizeof
     ; CPython adds the collector's header when the object is tracked, and
@@ -1571,12 +1576,35 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     V_PACK rax, rdx
     ret
 
+.sgs_raised:
+    ; __sizeof__ ran and raised.  That is the answer -- except that CPython
+    ; hands back the default over a TypeError, and over nothing else.  This
+    ; arm used to share the one below, which answered the default over any
+    ; exception by zeroing the word without releasing it, and with no
+    ; default replaced whatever was raised with "has no __sizeof__".
+    cmp qword [rbp - SGS_NARGS], 2
+    jl .sgs_fail
+    mov rax, [gs:ThreadState.current_exception]
+    mov rdi, [rax + PyObject.ob_type]
+    lea rsi, [rel exc_TypeError_type]
+    extern type_is_subtype
+    call type_is_subtype
+    test eax, eax
+    jz .sgs_fail
+    mov rdi, [gs:ThreadState.current_exception]
+    mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+    jmp .sgs_default
+.sgs_fail:
+    xor eax, eax
+    leave
+    ret
+
 .sgs_no_sizeof:
-    ; Absent, not callable, or it raised.  A default was given, or this is
-    ; the TypeError CPython gives.
+    ; Absent.  A default was given, or this is the TypeError CPython gives.
     cmp qword [rbp - SGS_NARGS], 2
     jl .sgs_no_default
-    mov qword [gs:ThreadState.current_exception], 0
+.sgs_default:
     mov rdi, [rbp - SGS_ARGS]
     mov rax, [rdi + 8]
     INCREF_V rax, rdx
@@ -1584,9 +1612,13 @@ DEF_FUNC sys_getsizeof_func, SGS_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .sgs_no_default:
-    RAISE exc_TypeError_type, "getsizeof() argument has no __sizeof__"
+    SET_EXC exc_TypeError_type, "getsizeof() argument has no __sizeof__"
+    leave
+    ret
 .sgs_args:
-    RAISE exc_TypeError_type, "getsizeof() takes at least 1 argument"
+    SET_EXC exc_TypeError_type, "getsizeof() takes at least 1 argument"
+    leave
+    ret
 END_FUNC sys_getsizeof_func
 
 ;; ============================================================================
@@ -1630,7 +1662,7 @@ DEF_FUNC sys_breakpointhook_func
     push rdi
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     pop rdi
     push rax
     call obj_decref
@@ -1658,10 +1690,10 @@ DEF_FUNC sys_breakpointhook_func
     push rdi
     xor esi, esi
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: .sbh_raised, below
     pop rdi
     push rax
-    call obj_decref
+    DECREF_V rdi, rcx           ; a Value: pdb.set_trace may be anything
     pop rax
     test rax, rax
     jz .sbh_raised
@@ -1675,7 +1707,9 @@ DEF_FUNC sys_breakpointhook_func
 .sbh_none:
     ; No pdb, or it would not import.  Answer None rather than raising: a
     ; breakpoint() in a program with no debugger available should not stop it.
+    mov rdi, [gs:ThreadState.current_exception]
     mov qword [gs:ThreadState.current_exception], 0
+    XDECREF_V rdi, rcx          ; the import's own exception, dropped not leaked
     lea rax, [rel none_singleton]
     INCREF rax
     mov edx, TAG_PTR
@@ -1697,6 +1731,8 @@ DEF_FUNC sys_getrecursionlimit_func
     ret
 END_FUNC sys_getrecursionlimit_func
 
+;; sys_setrecursionlimit_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC sys_setrecursionlimit_func
     cmp rsi, 1
     jne .srl_error
@@ -1720,15 +1756,20 @@ DEF_FUNC sys_setrecursionlimit_func
     V_PACK rax, rdx
     ret
 .srl_error:
-    RAISE exc_TypeError_type, "setrecursionlimit() argument must be an int"
+    SET_EXC exc_TypeError_type, "setrecursionlimit() argument must be an int"
+    leave
+    ret
 .srl_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "recursion limit must be greater or equal than 1"
+    SET_EXC exc_ValueError_type, "recursion limit must be greater or equal than 1"
+    leave
+    ret
 END_FUNC sys_setrecursionlimit_func
 
 ;; ============================================================================
 ;; sys_exit_func(PyObject **args, int64_t nargs) -> PyObject*
-;; sys.exit([code]) — exit the process
+;; sys.exit([code]) — raises SystemExit: always 0, with it pending
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_exit_func
     ; sys.exit raises SystemExit; it does not call the exit syscall.  Calling
@@ -1751,9 +1792,11 @@ DEF_FUNC sys_exit_func
     extern exc_new
     call exc_new
     mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj
-    ud2
+    extern exc_install
+    call exc_install            ; takes the reference
+    xor eax, eax
+    leave
+    ret
 END_FUNC sys_exit_func
 
 ;; ============================================================================
@@ -1771,6 +1814,7 @@ END_FUNC sys_getdefaultencoding_func
 ;; ============================================================================
 ;; sys_get_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
 ;; Returns the current int max str digits limit
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_get_int_max_str_digits_func
     test rsi, rsi
@@ -1782,21 +1826,53 @@ DEF_FUNC sys_get_int_max_str_digits_func
     ret
 .get_imsd_error:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_int_max_str_digits() takes no arguments"
+    leave
+    ret
 END_FUNC sys_get_int_max_str_digits_func
 
 ;; ============================================================================
 ;; sys_set_int_max_str_digits_func(PyObject **args, int64_t nargs) -> rax = Value
-;; Sets the int max str digits limit. 0 = unlimited, otherwise >= 640
+;; Fails: 0
+;;
+;; set_int_max_str_digits(maxdigits): 0 is unlimited, otherwise at least 640.
+;;
+;; The argument is an INDEX.  It went straight to int_to_i64, which reads
+;; PyIntObject.compact off whatever it is handed, so `set_int_max_str_digits(
+;; 1.5)` dereferenced a double's bits and `([])` read a list's header as a
+;; number.  And it may be given by name, which is how CPython's own tests
+;; call it: the keyword used to be taken for the argument whatever it was
+;; called, and its name left in kw_names_pending for the next call to find.
 ;; ============================================================================
-DEF_FUNC sys_set_int_max_str_digits_func
+SIM_ARGS  equ 8
+SIM_N     equ 16
+SIM_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+extern set_type_error_counted
+DEF_FUNC sys_set_int_max_str_digits_func, SIM_FRAME
+    mov [rbp - SIM_ARGS], rdi
+    mov [rbp - SIM_N], rsi
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
     cmp rsi, 1
-    jne .set_imsd_error
+    jg .set_imsd_too_many
+    jl .set_imsd_missing
+    test rax, rax
+    jz .set_imsd_have           ; one positional argument
+    ; One argument, by keyword: it has to be `maxdigits`.
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov rax, [rax]
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "maxdigits"
+    call ap_strcmp
+    test eax, eax
+    jnz .set_imsd_missing
 
+.set_imsd_have:
+    mov rdi, [rbp - SIM_ARGS]
     mov rdi, [rdi]            ; args[0]
-
     V_UNPACK rdi, rdx
-    call int_to_i64
+    call obj_as_index
+    ERR_M1 .set_imsd_fail
     ; rax = new limit
     test rax, rax
     jz .set_imsd_ok         ; 0 = unlimited
@@ -1812,10 +1888,23 @@ DEF_FUNC sys_set_int_max_str_digits_func
 
 .set_imsd_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "set_int_max_str_digits: value must be 0 or >= 640"
+    FAIL exc_ValueError_type, \
+        "maxdigits must be 0 or larger than 640", .set_imsd_fail
 
-.set_imsd_error:
-    RAISE exc_TypeError_type, "set_int_max_str_digits() takes exactly 1 argument"
+.set_imsd_missing:
+    FAIL exc_TypeError_type, \
+        "set_int_max_str_digits() missing required argument 'maxdigits' (pos 1)", \
+        .set_imsd_fail
+
+.set_imsd_too_many:
+    CSTRING rdi, "set_int_max_str_digits() takes at most 1 argument ("
+    mov rsi, [rbp - SIM_N]
+    CSTRING rdx, " given)"
+    call set_type_error_counted
+.set_imsd_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC sys_set_int_max_str_digits_func
 
 ;; ============================================================================
@@ -1828,6 +1917,7 @@ END_FUNC sys_set_int_max_str_digits_func
 ;; every IsolatedAsyncioTestCase in the standard library dying before its
 ;; first await, which is the whole of test_unittest and test_inspect and most
 ;; of test_os.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_get_coroutine_origin_tracking_depth_func
     test rsi, rsi
@@ -1839,8 +1929,9 @@ DEF_FUNC sys_get_coroutine_origin_tracking_depth_func
     ret
 .get_codt_error:
     extern exc_TypeError_type
-    RAISE exc_TypeError_type, \
-          "get_coroutine_origin_tracking_depth() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_coroutine_origin_tracking_depth() takes no arguments"
+    leave
+    ret
 END_FUNC sys_get_coroutine_origin_tracking_depth_func
 
 ;; ============================================================================
@@ -1852,6 +1943,7 @@ END_FUNC sys_get_coroutine_origin_tracking_depth_func
 ;; whatever it is handed, so a float or a list was a dereference of the number
 ;; and `set_coroutine_origin_tracking_depth("hello")` stored a str's ob_size.
 ;; asyncio's _set_coroutine_origin_tracking forwards whatever it is given.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
     cmp rsi, 1
@@ -1861,6 +1953,7 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index           ; names the type for anything else
+    ERR_M1 .idx_fail
     test rax, rax
     js .set_codt_value_error
 
@@ -1872,11 +1965,18 @@ DEF_FUNC sys_set_coroutine_origin_tracking_depth_func
 
 .set_codt_value_error:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "depth must be >= 0"
+    SET_EXC exc_ValueError_type, "depth must be >= 0"
+    leave
+    ret
 
 .set_codt_error:
-    RAISE exc_TypeError_type, \
-          "set_coroutine_origin_tracking_depth() takes exactly 1 argument"
+    SET_EXC exc_TypeError_type, "set_coroutine_origin_tracking_depth() takes exactly 1 argument"
+    leave
+    ret
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC sys_set_coroutine_origin_tracking_depth_func
 
 ;; ============================================================================
@@ -2000,6 +2100,8 @@ DEF_FUNC sys_getfsencoding_func
     ret
 END_FUNC sys_getfsencoding_func
 
+;; sys_intern_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC sys_intern_func
     cmp rsi, 1
     jne .si_error               ; exactly one argument, as CPython requires
@@ -2028,11 +2130,15 @@ DEF_FUNC sys_intern_func
 .si_not_str:
     mov rsi, rbx
     pop rbx
-    extern raise_type_error_with_name
+    extern set_type_error_with_name
     CSTRING rdi, `intern() argument must be str, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 .si_error:
-    RAISE exc_TypeError_type, "sys.intern() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "sys.intern() takes exactly one argument"
+    leave
+    ret
 END_FUNC sys_intern_func
 
 section .rodata
@@ -2150,6 +2256,7 @@ sm_finalizer:    db "finalizer", 0
 sm_displayhook:  db "displayhook", 0
 sm_dunder_displayhook: db "__displayhook__", 0
 sm_getrefcount:  db "getrefcount", 0
+sm_getallocatedblocks: db "getallocatedblocks", 0
 sm_is_finalizing: db "is_finalizing", 0
 sm_underscore:   db "_", 0
 sm_dunder_stdout: db "__stdout__", 0
@@ -2261,6 +2368,7 @@ section .text
 ;; object and has no count.  CPython's nearest thing is an immortal object,
 ;; and 3.12 reports 4294967295 for one; `sys.getrefcount(5)` answers that
 ;; there and answers it here.
+;; Fails: 0
 ;; ============================================================================
 SGR_IMMORTAL equ 4294967295
 DEF_FUNC sys_getrefcount_func
@@ -2281,8 +2389,34 @@ DEF_FUNC sys_getrefcount_func
     leave
     ret
 .sgr_args:
-    RAISE exc_TypeError_type, "getrefcount() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "getrefcount() takes exactly one argument"
+    leave
+    ret
 END_FUNC sys_getrefcount_func
+
+;; ============================================================================
+;; sys_getallocatedblocks_func(args, nargs) -> Value: live allocator blocks
+;;
+;; CPython's sys.getallocatedblocks(): how many blocks the allocator has out.
+;; The absolute number means little; that it does not CLIMB across repeats of
+;; one operation is what tests/raise_probe.py measures.
+;; Fails: 0
+;; ============================================================================
+DEF_FUNC sys_getallocatedblocks_func
+    test rsi, rsi
+    jnz .sgab_args
+    extern ap_live_blocks
+    extern set_exception
+    call ap_live_blocks
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+.sgab_args:
+    SET_EXC exc_TypeError_type, "sys.getallocatedblocks() takes no arguments (1 given)"
+    xor eax, eax
+    leave
+    ret
+END_FUNC sys_getallocatedblocks_func
 
 ;; ============================================================================
 ;; sys_is_finalizing_func(args, nargs) -> Value: True during teardown
@@ -2295,6 +2429,7 @@ END_FUNC sys_getrefcount_func
 ;;
 ;; main's teardown sets the flag before the shutdown collection, which is
 ;; where those finalizers run, and nothing clears it: there is no way back.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC sys_is_finalizing_func
     test rsi, rsi
@@ -2313,7 +2448,9 @@ DEF_FUNC sys_is_finalizing_func
     leave
     ret
 .sif_args:
-    RAISE exc_TypeError_type, "is_finalizing() takes no arguments"
+    SET_EXC exc_TypeError_type, "is_finalizing() takes no arguments"
+    leave
+    ret
 END_FUNC sys_is_finalizing_func
 
 ;; ============================================================================
@@ -2323,6 +2460,7 @@ END_FUNC sys_is_finalizing_func
 ;; loop restores the pair by splatting it back -- `set_asyncgen_hooks(*old)` --
 ;; while reading .firstiter and .finalizer by name elsewhere.  NULL storage
 ;; reads as None, which is what "no hook" looks like from Python.
+;; Fails: 0
 ;; ============================================================================
 GAH_OBJ   equ 8
 GAH_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -2372,7 +2510,7 @@ DEF_FUNC sys_get_asyncgen_hooks_func, GAH_FRAME
     V_PACK rax, rdx
     ret
 .gah_args:
-    RAISE exc_TypeError_type, "get_asyncgen_hooks() takes no arguments"
+    SET_EXC exc_TypeError_type, "get_asyncgen_hooks() takes no arguments"
 .gah_nomem:
     xor eax, eax
     pop rbx
@@ -2387,6 +2525,7 @@ END_FUNC sys_get_asyncgen_hooks_func
 ;; loop uses the keyword form to install and the positional splat to restore.
 ;; An argument left out leaves that half alone, as CPython's does; None clears
 ;; it; anything else must be callable.
+;; Fails: 0
 ;; ============================================================================
 SAH_ARGS  equ 8
 SAH_NARGS equ 16
@@ -2418,7 +2557,7 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
     mov esi, ecx                ; 0 = firstiter, 1 = finalizer
     push rcx
     push rdx
-    call sah_store
+    call sah_store              ; err: .sah_bad, once the pops are done
     pop rdx
     pop rcx
     test eax, eax
@@ -2465,7 +2604,7 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
     mov rdi, [rdx + rax*8]
     push rcx
     push rsi
-    call sah_store
+    call sah_store              ; err: .sah_bad, once the pops are done
     pop rsi
     pop rcx
     test eax, eax
@@ -2482,22 +2621,24 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
     V_PACK rax, rdx
     ret
 
+.sah_too_many:
+    FAIL exc_TypeError_type, "set_asyncgen_hooks() takes at most 2 arguments", .sah_bad
+.sah_bad_keyword:
+    SET_EXC exc_TypeError_type, \
+        "set_asyncgen_hooks() got an unexpected keyword argument"
 .sah_bad:
-    ; Unreachable: sah_store raises rather than returning 0.  Kept so the
-    ; caller reads as a checked call.
+    ; The error exit, with the pushes of whichever loop it left still out.
+    lea rsp, [rbp - SAH_FRAME - 8]
+    xor eax, eax
     pop rbx
     leave
     ret
-.sah_too_many:
-    RAISE exc_TypeError_type, "set_asyncgen_hooks() takes at most 2 arguments"
-.sah_bad_keyword:
-    RAISE exc_TypeError_type, \
-        "set_asyncgen_hooks() got an unexpected keyword argument"
 END_FUNC sys_set_asyncgen_hooks_func
 
 ;; ============================================================================
 ;; sah_store(rdi = Value, esi = 0 for firstiter / 1 for finalizer)
 ;;   -> eax = 1 stored, 0 with a TypeError recorded
+;; Fails: 0
 ;;
 ;; None clears the hook; anything else has to be callable, which is the one
 ;; thing CPython checks here.  The hook is held for the life of the setting,
@@ -2554,8 +2695,9 @@ DEF_FUNC_LOCAL sah_store, SAHS_FRAME
 .sahs_bad_final:
     CSTRING rdi, `callable finalizer expected, got \x01`
 .sahs_raise:
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name  ; does not return
+    call set_type_error_with_name   ; answers the 0 this function fails with
+    leave
+    ret
 END_FUNC sah_store
 
 ;; ============================================================================
@@ -2570,6 +2712,7 @@ END_FUNC sah_store
 ;;
 ;; builtins._ is set AFTER the print, as CPython sets it: a repr that raises
 ;; must not leave the name bound to a value the user never saw.
+;; Fails: 0
 ;; ============================================================================
 SDH_VAL   equ 8
 SDH_REPR  equ 16
@@ -2599,12 +2742,18 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     lea rdi, [rbp - SDH_REPR]
     mov esi, 1
     extern builtin_print
-    call builtin_print
-    mov rax, [rbp - SDH_KW]
-    mov [gs:ThreadState.kw_names_pending], rax
+    call builtin_print          ; err: tested below, once the frame is tidy
+    mov rcx, [rbp - SDH_KW]
+    mov [gs:ThreadState.kw_names_pending], rcx
 
+    push rax
+    push rax                    ; pad
     mov rdi, [rbp - SDH_REPR]
     call obj_decref
+    pop rax
+    pop rax
+    test rax, rax
+    jz .sdh_failed              ; the write raised
 
     ; builtins._ = value
     lea rdi, [rel sm_underscore]
@@ -2615,10 +2764,13 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     mov rdi, [rel builtins_dict_global]
     mov rsi, rax
     mov rdx, [rbp - SDH_VAL]
-    call dict_set
+    call dict_set       ; err: tested once the name is released
+    mov [rbp - SDH_VAL], rax    ; dict_set's answer, across the release
     pop rdi
     pop rdi
     call obj_decref
+    cmp qword [rbp - SDH_VAL], 0
+    jne .sdh_failed             ; builtins is an ordinary dict, and refused `_`
 
 .sdh_none:
     RET_NONE
@@ -2632,9 +2784,13 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     ret
 
 .sdh_args:
-    RAISE exc_TypeError_type, "displayhook() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "displayhook() takes exactly one argument"
+    leave
+    ret
 END_FUNC sys_displayhook_func
 
+;; sys_excepthook_func(rdi = args, rsi = nargs) -> rax = a Value
+;; Fails: 0
 DEF_FUNC sys_excepthook_func
     cmp rsi, 3
     jl .seh_args
@@ -2685,9 +2841,13 @@ DEF_FUNC sys_excepthook_func
     V_PACK rax, rdx
     ret
 .seh_bad:
-    RAISE exc_TypeError_type, "excepthook(): Exception expected for value"
+    SET_EXC exc_TypeError_type, "excepthook(): Exception expected for value"
+    leave
+    ret
 .seh_args:
-    RAISE exc_TypeError_type, "excepthook() takes exactly 3 arguments"
+    SET_EXC exc_TypeError_type, "excepthook() takes exactly 3 arguments"
+    leave
+    ret
 END_FUNC sys_excepthook_func
 
 ;; ============================================================================

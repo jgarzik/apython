@@ -325,7 +325,7 @@ DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov rdx, [rbp - BSF_RNAME]
     mov ecx, [rbp - BSF_LTAG]
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .bsf_none_or_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .bsf_none_or_raised
@@ -469,7 +469,7 @@ DEF_FUNC_LOCAL cmp_subclass_first, CSF_FRAME
     mov rsi, [rbp - CSF_LEFT]
     mov ecx, [rbp - CSF_LTAG]
     extern dunder_call_2
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .csf_none_or_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .csf_none_or_raised
@@ -976,6 +976,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     test edx, edx               ; NotImplemented, as above
     jz .binop_try_dunder
@@ -1020,6 +1021,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     test edx, edx               ; NotImplemented, as above
     jz .binop_try_dunder
@@ -1219,6 +1221,7 @@ DEF_FUNC_BARE op_binary_op
     push r9
     push r8
     call rax
+    ERR_PENDING_JUMP
     pop r8
     pop r9
     V_UNPACK rax, rdx           ; the nb_ slot returns a Value
@@ -1333,6 +1336,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_concat returns a Value
     ; A NULL Value is NotImplemented here too, exactly as it is for the nb_
     ; slots.  Untested, a declining sq_concat or sq_repeat pushed NULL onto
@@ -1353,6 +1357,7 @@ DEF_FUNC_BARE op_binary_op
     V_PACK rdi, rdx
     V_PACK rsi, rcx
     call rax
+    ERR_PENDING_JUMP
     V_UNPACK rax, rdx           ; sq_repeat returns a Value
     test edx, edx               ; NotImplemented, as above
     jz .binop_try_dunder
@@ -1454,6 +1459,7 @@ DEF_FUNC_BARE op_binary_op
     push r9
     push r8
     call rax
+    ERR_PENDING_JUMP
     pop r8
     pop r9
     V_UNPACK rax, rdx
@@ -1550,7 +1556,7 @@ DEF_FUNC_BARE op_binary_op
     mov rdi, [rsp + 8 + BO_LEFT]
     mov rsi, [rsp + 8 + BO_RIGHT]
     mov rcx, [rsp + 8 + BO_RTAG]
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .binop_idunder_null
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
@@ -1575,7 +1581,7 @@ DEF_FUNC_BARE op_binary_op
     mov rdi, [rsp + 8 + BO_LEFT]
     mov rsi, [rsp + 8 + BO_RIGHT]
     mov rcx, [rsp + 8 + BO_RTAG]   ; other_tag = right's tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .binop_ldunder_null
     V_UNPACK rax, rdx           ; returns a Value
     pop r9
     test edx, edx
@@ -1610,7 +1616,7 @@ DEF_FUNC_BARE op_binary_op
     mov rdi, [rsp + BO_RIGHT]
     mov rsi, [rsp + BO_LEFT]
     mov rcx, [rsp + BO_LTAG]       ; other_tag = left's tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, goes to .binop_rdunder_null
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
     jz .binop_rdunder_null
@@ -2128,7 +2134,7 @@ DEF_FUNC_BARE op_compare_op
     ; rdi = left (still set from above)
     ; rsi = right (still set)
     mov ecx, [rsp + 16]            ; right_tag from stack
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .cmp_have_dunder_result`
     V_UNPACK rax, rdx           ; returns a Value
     pop rcx
 
@@ -2177,7 +2183,7 @@ DEF_FUNC_BARE op_compare_op
     mov rdx, [rax + PY_EQ*8]   ; rdx = "__eq__" name
     push rcx
     mov ecx, [rsp + 8 + BO_RTAG]  ; right_tag (+8 for push rcx)
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .cmp_ne_from_eq_have`
     V_UNPACK rax, rdx           ; returns a Value
     pop rcx
     test edx, edx
@@ -2364,7 +2370,7 @@ DEF_FUNC_BARE op_compare_op
                                    ; dunder_call_2 dispatches into Python
     mov rsi, [rsp + 16 + BO_LEFT]  ; other = left payload
     mov ecx, [rsp + 16 + BO_LTAG]  ; other_tag = left's tag
-    call dunder_call_2
+    call dunder_call_2          ; err: 0, absent or raised, falls through `jnz .cmp_right_dunder_have`
     V_UNPACK rax, rdx           ; returns a Value
     add rsp, 8
     pop rcx
@@ -2580,6 +2586,7 @@ DEF_FUNC_BARE op_unary_negative
     mov rdx, r8                ; tag
     V_PACK rdi, rdx
     call rax                   ; rax = result Value
+    ERR_NULL_JUMP
 
     ; DECREF old operand (tag-aware)
     push rax                   ; save result Value
@@ -2636,6 +2643,7 @@ DEF_FUNC_BARE op_unary_invert
     V_PACK rdi, rdx
     xor esi, esi
     call rax                   ; rax = result Value
+    ERR_NULL_JUMP
     push rax
     push rax                   ; alignment
     mov rdi, [rsp + 16]
@@ -2679,6 +2687,7 @@ DEF_FUNC_BARE op_unary_not
     sub rsp, 8                  ; the second of the two
     push rdi                    ; the operand, for the release below
     call obj_is_true
+    ERR_M1_JUMP                 ; __bool__ or __len__ raised
     mov rdi, [rsp]
     mov [rsp], rax              ; park the answer where it was
     DECREF_V rdi, rsi

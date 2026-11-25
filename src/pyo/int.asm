@@ -12,6 +12,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern set_exception
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -57,7 +58,6 @@ extern __gmpz_fdiv_q_2exp
 extern __gmpz_pow_ui
 extern __gmpz_get_d
 
-extern raise_exception
 extern strlen
 extern exc_ValueError_type
 extern exc_ZeroDivisionError_type
@@ -791,6 +791,7 @@ END_FUNC int_mul
 
 ;; ============================================================================
 ;; int_floordiv(PyObject *a, PyObject *b) -> rax = Value
+;; Fails: 0?
 ;; ============================================================================
 FD_RTAG   equ 32            ; the right operand's tag, across a conversion call
 FD_NEW    equ 40            ; the result object, across the GMP calls
@@ -857,7 +858,9 @@ DEF_FUNC_BARE int_floordiv
 .zdiv_error:
     push rbp
     mov rbp, rsp
-    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
+    SET_EXC exc_ZeroDivisionError_type, "integer division or modulo by zero"
+    pop rbp
+    ret                         ; rax = 0, with it pending
 
 .gmp_path:
     push rbp
@@ -944,11 +947,18 @@ DEF_FUNC_BARE int_floordiv
     mov rdi, r12
     call int_dealloc
 .gmp_zdiv_nb:
-    RAISE exc_ZeroDivisionError_type, "integer division or modulo by zero"
+    SET_EXC exc_ZeroDivisionError_type, "integer division or modulo by zero"
+    add rsp, FD_LOCALS
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret                         ; rax = 0, with it pending
 END_FUNC int_floordiv
 
 ;; ============================================================================
 ;; int_mod(PyObject *a, PyObject *b) -> rax = Value
+;; Fails: 0?
 ;; ============================================================================
 MD_RTAG   equ 32            ; the right operand's tag, across a conversion call
 MD_NEW    equ 40            ; the result object, across the GMP calls
@@ -997,7 +1007,9 @@ DEF_FUNC_BARE int_mod
 .mod_zdiv_error:
     push rbp
     mov rbp, rsp
-    RAISE exc_ZeroDivisionError_type, "integer modulo by zero"
+    SET_EXC exc_ZeroDivisionError_type, "integer modulo by zero"
+    pop rbp
+    ret                         ; rax = 0, with it pending
 
 .gmp_path:
     push rbp
@@ -1083,7 +1095,13 @@ DEF_FUNC_BARE int_mod
     mov rdi, r12
     call int_dealloc
 .gmp_mod_zdiv_nb:
-    RAISE exc_ZeroDivisionError_type, "integer modulo by zero"
+    SET_EXC exc_ZeroDivisionError_type, "integer modulo by zero"
+    add rsp, MD_LOCALS
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret                         ; rax = 0, with it pending
 END_FUNC int_mod
 
 ;; ============================================================================
@@ -1964,6 +1982,7 @@ END_FUNC int_shrink
 
 ;; ============================================================================
 ;; Left shift: int_lshift(PyObject *a, PyObject *b) -> rax = Value
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC int_lshift
     ; The check runs before the callee-saved pushes, so the decline path is a
@@ -2096,15 +2115,25 @@ DEF_FUNC int_lshift
     ret
 
 .neg_shift:
-    RAISE exc_ValueError_type, "negative shift count"
+    SET_EXC exc_ValueError_type, "negative shift count"
+    jmp .lsh_fail
 .shift_too_wide:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "too many digits in integer"
+    SET_EXC exc_OverflowError_type, "too many digits in integer"
+.lsh_fail:
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 END_FUNC int_lshift
 
 ;; ============================================================================
 ;; Right shift: int_rshift(PyObject *a, PyObject *b) -> rax = Value
+;; Fails: 0?
 ;; ============================================================================
 RS_NEW   equ 8              ; the result object, across the two GMP calls
 RS_MPZ   equ 16             ; the shift count's mpz, across __gmpz_fits_slong_p
@@ -2212,7 +2241,14 @@ DEF_FUNC int_rshift, RS_FRAME
     ret
 
 .neg_shift:
-    RAISE exc_ValueError_type, "negative shift count"
+    SET_EXC exc_ValueError_type, "negative shift count"
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .rshift_all_out:
     ; A shift wider than any integer: the sign is all that survives.  The
     ; count itself may be negative, and that is still a ValueError.
@@ -2230,6 +2266,7 @@ END_FUNC int_rshift
 ;; ============================================================================
 ;; Power: int_power(PyObject *a, PyObject *b) -> rax = Value
 ;; For small positive exponents, use GMP mpz_pow_ui
+;; Fails: 0?
 ;; ============================================================================
 IPW_ETAG  equ 8             ; the exponent's tag, across the GMP calls
 IPW_BASED equ 16            ; the base as a double, likewise
@@ -2417,7 +2454,9 @@ DEF_FUNC int_power, IPW_FRAME
     pop r12
     pop rbx
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, "integer result too large to represent"
+    SET_EXC exc_MemoryError_type, "integer result too large to represent"
+    leave
+    ret                         ; rax = 0, with it pending
 
 .neg_exp:
     ; int ** negative -> float.  This used to compute 1.0 / base**|exp| with
@@ -2657,6 +2696,7 @@ END_FUNC int_abs
 ;; ============================================================================
 ;; int_float(rdi = operand Value) -> rax = a float Value
 ;; nb_float: what float(n) and n.__float__() both want.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC int_float
     V_UNPACK rdi, rsi
@@ -2678,7 +2718,9 @@ DEF_FUNC int_float
     leave
     ret
 .if_overflow:
-    RAISE exc_OverflowError_type, "int too large to convert to float"
+    SET_EXC exc_OverflowError_type, "int too large to convert to float"
+    leave
+    ret
 END_FUNC int_float
 
 

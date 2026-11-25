@@ -150,7 +150,7 @@ DEF_FUNC exc_is_syntax, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
     lea rsi, [rel exc_SyntaxError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .no
     mov rax, [rbx + PyExceptionObject.exc_args]
@@ -397,7 +397,7 @@ DEF_FUNC exc_str, ES_FRAME
     ; traceback.asm renders tp_name + ": " + obj_str(exc).
     mov rdi, rbx
     lea rsi, [rel exc_OSError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .es_check_syntax
     mov rdi, rbx
@@ -517,7 +517,7 @@ DEF_FUNC exc_str, ES_FRAME
     ; argument-less exception gives.
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .es_empty_str
     CSTRING rdi, "None"
@@ -569,12 +569,12 @@ DEF_FUNC unicode_error_str, UES_FRAME
     ; Which of the two, and therefore which verb?
     mov rdi, rbx
     lea rsi, [rel exc_UnicodeDecodeError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jnz .ues_decode
     mov rdi, rbx
     lea rsi, [rel exc_UnicodeEncodeError_type]
-    call exc_isinstance
+    call exc_isinstance     ; err: a static type is never refused
     test eax, eax
     jz .ues_no
     xor r9d, r9d                ; encode

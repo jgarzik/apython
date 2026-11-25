@@ -1193,8 +1193,121 @@ def check_const_value(files):
     return bad
 
 
+def _raise_map():
+    import raisemap
+    funcs, byfile, noret, may = raisemap.load()
+    return raisemap, funcs, byfile
+
+
+# What may record an exception inside src/compiler/: the builtin entry points
+# (compile, exec, eval) and the driver that turns a recorded comp_error into
+# a pending SyntaxError once every buffer is freed.  A pass does neither.
+COMPILER_MAY_SET = ('src/compiler/compile.asm', 'src/compiler/comperr.asm')
+COMPILER_SETTERS = frozenset(('SET_EXC', 'FAIL', 'set_exception',
+                              'exc_install', 'NO_KEYWORDS_RET',
+                              'NO_KEYWORDS_TP_INIT_RET'))
+WALL_TOKEN = re.compile(r'[A-Za-z_][\w]*')
+WALL_PUBLISH = frozenset(('PUBLISH_SP', 'PUBLISH_IP'))
+
+
+def check_raise_wall(files):
+    """Only an opcode handler jumps into the unwinder.  A wall, not a ratchet.
+
+    A jump-style raise abandons every native frame under it.  Inside a
+    handler (src/opcodes/, src/eval.asm) that is the design: it IS the eval
+    loop, and the unwinder releases what it left on the value stack.
+    Anywhere else it leaks what those frames held and denies the caller the
+    error, so everything that is CALLED records the exception and returns.
+    The conversion finished; this keeps it finished.
+
+    Outside the handler files, no line of code may NAME -- as a call, a
+    branch target, an extern, an address taken, anything --
+
+      - a function that never returns because it ends in the unwinder
+        (raise_exception, raise_exception_obj, eval_exception_unwind, and
+        whatever raisemap.py infers is built on them);
+      - a macro whose body does, wherever it is defined: RAISE, NO_KEYWORDS,
+        NO_KEYWORDS_TP_INIT, and any macro in an .asm or .inc that expands to
+        one of those or to a branch into the unwinder;
+      - an ERR_*_JUMP, which is a handler's way of passing a callee's
+        returned error on;
+      - PUBLISH_SP or PUBLISH_IP, which tell the unwinder what a HANDLER has
+        left on the value stack and are a lie from anywhere else.
+
+    Every line is read, inside a function or not and inside a %macro body or
+    not: a DEF_FUNC a macro stamps out is invisible to raisemap's function
+    map, and five RAISEs survived in exactly that shape (ucd32.asm) until
+    this looked.  Comments and quoted text are not code.
+
+    src/compiler/ is held to more: a pass cannot record an exception either
+    -- `./apython foo.py` compiles before any frame exists, and the buffers
+    a pass holds are freed by the driver -- so SET_EXC, FAIL, set_exception
+    and exc_install appear only in compile.asm and comperr.asm.  A pass
+    reports through comp_error.
+    """
+    import raisemap
+    funcs, byfile, noret, may = raisemap.load()
+    macros = raisemap.jumping_macros(noret, WALL_PUBLISH)
+    bad = []
+    for path in files:
+        if raisemap.is_handler_file(path):
+            continue
+        in_compiler = (path.startswith('src/compiler/')
+                       and path not in COMPILER_MAY_SET)
+        for n, raw in enumerate(open(path, errors='replace'), 1):
+            code = raisemap.strip(raw)
+            if not code.strip():
+                continue
+            if re.match(r'^\s*%macro\s', code):
+                continue            # the macro's NAME is not a use of it
+            for tok in WALL_TOKEN.findall(code):
+                if tok in noret:
+                    bad.append((path, n,
+                                "`%s` outside a handler" % tok,
+                                "it ends in the unwinder: call its set_*"
+                                " twin and go to the function's error exit"))
+                elif tok in WALL_PUBLISH:
+                    bad.append((path, n,
+                                "`%s` outside a handler" % tok,
+                                "only a handler knows what it has left on"
+                                " the value stack; return the error and let"
+                                " the handler publish"))
+                elif tok in macros:
+                    bad.append((path, n,
+                                "`%s` outside a handler" % tok,
+                                "the macro jumps into the unwinder: use"
+                                " FAIL / SET_EXC / NO_KEYWORDS_RET, or check"
+                                " a callee with ERR_NULL / ERR_M1 /"
+                                " ERR_PENDING, and return the function's"
+                                " `Fails:` value"))
+                elif in_compiler and tok in COMPILER_SETTERS:
+                    bad.append((path, n,
+                                "`%s` in a compiler pass" % tok,
+                                "a pass records its error with comp_error"
+                                " and returns 0; only compile.asm and"
+                                " comperr.asm make one pending"))
+    return bad
+
+
+def check_must_check(files):
+    """A function that returns its errors must have them looked at.
+
+    A missed check is not a crash: the caller carries on with a 0 it takes
+    for an answer, and every gate stays green over it.  So the docblock's
+    `Fails:` line is binding on every caller.
+    """
+    raisemap, funcs, byfile = _raise_map()
+    return [(path, n,
+             "`call %s` in %s is not checked" % (callee, caller),
+             "%s returns its errors (`Fails:` in its docblock): follow the"
+             " call with ERR_NULL / ERR_PENDING / ERR_M1, or say `err:` in a"
+             " comment on the call line and why" % callee)
+            for path, n, caller, callee in raisemap.unchecked_calls(funcs, byfile)]
+
+
 def main():
     os.chdir(ROOT)
+    sys.path.insert(0, os.path.join(ROOT, 'src', 'compiler'))
     if '--record-docblocks' in sys.argv:
         record_docblocks(all_asm())
         return 0
@@ -1236,6 +1349,8 @@ def main():
                 + check_const_value(everything)
                 + check_slot_table(everything)
                 + check_unwind_balance(everything)
+                + check_raise_wall(everything)
+                + check_must_check(everything)
                 + check_handler_alignment(everything)
                 + check_tailjumps(scoped)
                 + check_callee_saved(scoped) + check_saved_writes(scoped))

@@ -30,15 +30,14 @@ extern obj_incref
 extern obj_dealloc
 extern none_singleton
 extern type_type
-extern raise_exception
-extern raise_exception_obj
+extern set_exception
+extern exc_install
 extern exc_new
 extern exc_TypeError_type
 extern exc_StopIteration_type
 extern exc_RuntimeError_type
 extern exc_GeneratorExit_type
 extern exc_StopAsyncIteration_type
-extern eval_exception_unwind
 extern builtin_func_new
 extern type_is_subtype
 extern type_is_exc_subclass
@@ -78,7 +77,10 @@ section .text
 ;;
 ;; rdi = AsyncGenASend wrapper
 ;; Returns: a Value in rax, or 0 for exhaustion.  tp_iternext's contract is one
-;; Value; every producer packs and every consumer unpacks exactly once.
+;; Value; every producer packs and every consumer unpacks exactly once.  0 with
+;; an exception pending is a failure -- the body raised, the generator is
+;; finished (StopAsyncIteration), or the awaitable was reused.
+;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC ags_iternext
     push rbx
@@ -190,7 +192,7 @@ DEF_FUNC ags_iternext
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
     RET_NULL
     pop r12
     pop rbx
@@ -209,9 +211,8 @@ DEF_FUNC ags_iternext
 ;;
 ;; The exception is pending and already owns its reference.  Do the same
 ;; bookkeeping the exhausted arm does -- the generator is finished either way
-;; -- and unwind with it, which is how that arm reaches END_ASYNC_FOR too.
+;; -- and answer 0 over it, which is how that arm reaches END_ASYNC_FOR too.
 .agsi_body_raised:
-    extern eval_exception_unwind
     add rsp, 8                  ; the scratch pushed before eval_frame
     mov qword [r12 + PyGenObject.gi_running], 0
     mov rdi, [r12 + PyGenObject.gi_frame]
@@ -221,11 +222,11 @@ DEF_FUNC ags_iternext
     call frame_free
 .agsi_body_raised_closed:
     mov dword [rbx + AsyncGenASend.ags_state], 2
+    xor eax, eax
     pop r12
     pop rbx
     leave
-    PUBLISH_SP
-    jmp eval_exception_unwind
+    ret
 
 .agsi_yielded:
     pop rdx                    ; result tag
@@ -288,7 +289,7 @@ DEF_FUNC ags_iternext
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
     RET_NULL
     pop r12
     pop rbx
@@ -300,7 +301,7 @@ DEF_FUNC ags_iternext
     ; exhaustion -- an asend is one step of one iteration, and driving the
     ; same one twice is a bug in the caller, not the end of the generator.
     ; `async for` never reuses one: GET_ANEXT builds a fresh wrapper per turn.
-    RAISE exc_RuntimeError_type, "cannot reuse already awaited __anext__()/asend()"
+    FAIL exc_RuntimeError_type, "cannot reuse already awaited __anext__()/asend()", .agsi_error
 
 .agsi_closed_unused:
     lea rdi, [rel exc_StopAsyncIteration_type]
@@ -308,7 +309,7 @@ DEF_FUNC ags_iternext
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
     RET_NULL
     pop r12
     pop rbx
@@ -426,6 +427,7 @@ END_FUNC ags_dealloc
 ;; set, which is what SEND reads.  A generator that awaits inside its own
 ;; except or finally passes that outward instead, and ags_started is what
 ;; makes the next drive resume it rather than throw again.
+;; Fails: 0?
 ;; ============================================================================
 AGT_EXC   equ 8             ; the exception, across gen_throw
 AGT_FRAME equ 16            ; + 2 pushes = 32, 16-aligned
@@ -503,14 +505,15 @@ DEF_FUNC agt_iternext, AGT_FRAME
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
     jmp .agt_null
 
 .agt_close:
-    ; aclose().  gen_close runs the finally blocks and answers None; it
-    ; leaves through the unwinder itself if one of them raises.
+    ; aclose().  gen_close runs the finally blocks and answers None, or 0
+    ; with the exception pending if one of them raises -- which is stored as
+    ; no result at all, and .agt_null's 0 is then the failure.
     mov rdi, r12
-    call gen_close
+    call gen_close              ; err: a 0 is this drive's own, through .agt_null
     V_PACK rax, rdx
     mov [rbx + AsyncGenASend.gi_return_value], rax
     mov dword [rbx + AsyncGenASend.ags_state], 2
@@ -538,7 +541,7 @@ DEF_FUNC agt_iternext, AGT_FRAME
     jmp ags_iternext
 
 .agt_reuse:
-    RAISE exc_RuntimeError_type, "cannot reuse already awaited aclose()/athrow()"
+    FAIL exc_RuntimeError_type, "cannot reuse already awaited aclose()/athrow()", .agt_null
 END_FUNC agt_iternext
 
 ;; ============================================================================
@@ -587,18 +590,24 @@ END_FUNC async_gen_athrow_new
 ;;
 ;; agen.aclose().  Answers the awaitable above rather than doing the work,
 ;; which is what makes `await` on it legal.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL _agen_aclose_impl
     cmp rsi, 1
     jne .arity
     mov rdi, [rdi]
     call _agen_check_receiver
+    ERR_NULL .fail
+    mov rdi, rax
     xor esi, esi                ; no exception: this is a close
     call async_gen_athrow_new
+.fail:
     leave
     ret
 .arity:
-    RAISE exc_TypeError_type, "aclose() takes no arguments"
+    SET_EXC exc_TypeError_type, "aclose() takes no arguments"
+    leave
+    ret
 END_FUNC _agen_aclose_impl
 
 ;; ============================================================================
@@ -606,6 +615,7 @@ END_FUNC _agen_aclose_impl
 ;;
 ;; agen.athrow(exc), the other half of aclose above: the same awaitable,
 ;; carrying the exception rather than the GeneratorExit aclose implies.
+;; Fails: 0
 ;; ============================================================================
 AAT_EXC   equ 8             ; the exception throw_args_exc settled on
 AAT_OWNED equ 16            ; non-zero when AAT_EXC is a reference of ours
@@ -618,6 +628,7 @@ DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
     mov [rbp - AAT_EXC], rdi            ; args, likewise
     mov rdi, [rdi]
     call _agen_check_receiver
+    ERR_NULL .out
     mov rdi, [rbp - AAT_EXC]
     mov rsi, [rbp - AAT_RECV]
     mov [rbp - AAT_RECV], rax
@@ -626,6 +637,7 @@ DEF_FUNC_LOCAL _agen_athrow_impl, AAT_FRAME
     lea rdx, [rel aat_name]
     lea rcx, [rel aat_deprecated]
     call throw_args_exc
+    ERR_NULL .out
     mov [rbp - AAT_EXC], rax
     mov [rbp - AAT_OWNED], rdx
     mov rdi, [rbp - AAT_RECV]
@@ -658,7 +670,8 @@ END_FUNC _agen_athrow_impl
 ;; normalized the way PyErr_NormalizeException does.  A class with no value
 ;; is answered as the class; the thrower instantiates it.
 ;;
-;; Does not return on failure: every refusal raises.
+;; Every refusal answers rax = 0 with the exception pending.
+;; Fails: 0
 ;; ============================================================================
 TA_ARGS  equ 8
 TA_N     equ 16
@@ -779,8 +792,7 @@ DEF_FUNC throw_args_exc, TA_FRAME
     mov edx, 1
 .build:
     call type_call
-    test rax, rax
-    jz .raised
+    ERR_NULL .raised
     mov edx, 1                  ; ours: the caller drops it
     leave
     ret
@@ -793,20 +805,22 @@ DEF_FUNC throw_args_exc, TA_FRAME
 
 .raised:
     ; The warning filter or the type refused; its exception is the caller's.
+    xor eax, eax
     leave
-    jmp eval_exception_unwind
+    ret
 
 .separate_value:
-    RAISE exc_TypeError_type, "instance exception may not have a separate value"
+    FAIL exc_TypeError_type, "instance exception may not have a separate value", .raised
 
 .bad_tb:
-    RAISE exc_TypeError_type, "throw() third argument must be a traceback object"
+    FAIL exc_TypeError_type, "throw() third argument must be a traceback object", .raised
 
 .not_an_exception:
     mov rsi, [rbp - TA_EXC]
     CSTRING rdi, `exceptions must be classes or instances deriving from BaseException, not \x01`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name      ; does not return
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .raised
 
 .arity:
     ; _PyArg_CheckPositional's wording, which names the count it got.
@@ -829,7 +843,8 @@ DEF_FUNC throw_args_exc, TA_FRAME
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel aat_buf]
-    call raise_exception        ; does not return
+    call set_exception
+    jmp .raised
 END_FUNC throw_args_exc
 
 section .rodata
@@ -840,10 +855,9 @@ aat_buf: resb 96
 section .text
 
 ;; ============================================================================
-;; _agen_check_receiver(rdi = the candidate) -> rax = it, unchanged
-;;
-;; Raises rather than returning when it is not an async generator, so every
-;; caller can ignore the failing case.
+;; _agen_check_receiver(rdi = the candidate) -> rax = it, unchanged, or 0
+;;   with a TypeError pending when it is not an async generator
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL _agen_check_receiver
     V_TEST_PTR rdi, rcx
@@ -858,7 +872,9 @@ DEF_FUNC_LOCAL _agen_check_receiver
     leave
     ret
 .bad:
-    RAISE exc_TypeError_type, "descriptor requires an async_generator object"
+    SET_EXC exc_TypeError_type, "descriptor requires an async_generator object"
+    leave
+    ret
 END_FUNC _agen_check_receiver
 
 ;; ============================================================================
@@ -910,6 +926,7 @@ END_FUNC _get_agen_athrow_builtin
 ;;
 ;; send() wants its argument and __next__() refuses one, so the arity check
 ;; cannot be shared even though everything after it is.
+;; Fails: 0
 ;; ============================================================================
 AGSS_SELF  equ 8
 AGSS_VAL   equ 16           ; the item, held across exc_new so it can be freed
@@ -921,13 +938,16 @@ DEF_FUNC_BARE _ags_send_impl
     jne .send_arity
     jmp ags_send_core
 .send_arity:
-    RAISE exc_TypeError_type, "send() takes exactly one argument"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "send() takes exactly one argument"
+    jmp set_exception           ; no frame here: its 0 is this call's answer
 END_FUNC _ags_send_impl
 
 ;; ============================================================================
 ;; _ags_next_impl(rdi = args, rsi = nargs) -> rax = Value
 ;;
 ;; asend.__next__(), which is send(None) under the name a for-loop uses.
+;; Fails: 0
 ;; ============================================================================
 global _ags_next_impl
 DEF_FUNC_BARE _ags_next_impl
@@ -935,7 +955,9 @@ DEF_FUNC_BARE _ags_next_impl
     jne .next_arity
     jmp ags_send_core
 .next_arity:
-    RAISE exc_TypeError_type, "__next__() takes no arguments"
+    lea rdi, [rel exc_TypeError_type]
+    CSTRING rsi, "__next__() takes no arguments"
+    jmp set_exception           ; no frame here: its 0 is this call's answer
 END_FUNC _ags_next_impl
 
 ;; ============================================================================
@@ -944,6 +966,8 @@ END_FUNC _ags_next_impl
 ;; Everything send() and __next__() share, past the arity check that is all
 ;; that separates them.  Drives the awaitable through its own tp_iternext:
 ;; the aclose/athrow object shares this method and has a different one.
+;; The item arrives as a StopIteration carrying it, set and returned as 0.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     mov rax, [rdi]              ; self
@@ -973,7 +997,7 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     je .agss_go
     cmp dword [rax + AsyncGenASend.ags_started], 0
     jne .agss_store             ; already thrown: this is an ordinary resume
-    RAISE exc_RuntimeError_type, "can't send non-None value to a just-started coroutine"
+    FAIL exc_RuntimeError_type, "can't send non-None value to a just-started coroutine", .agss_propagate
 
 .agss_asend:
     ; The sent value.  ags_iternext resumes with None; anything else is
@@ -1047,19 +1071,19 @@ DEF_FUNC_LOCAL ags_send_core, AGSS_FRAME
     XDECREF_V rdi, rcx
     add rsp, 8
     pop rdi
-    call raise_exception_obj
+    call exc_install
 
 .agss_propagate:
-    extern eval_exception_unwind
+    xor eax, eax
     leave
-    jmp eval_exception_unwind
+    ret
 
 .agss_out:
     leave
     ret                         ; ags_iternext already answers one Value
 
 .agss_receiver:
-    RAISE exc_TypeError_type, "send() requires an async_generator_asend"
+    FAIL exc_TypeError_type, "send() requires an async_generator_asend", .agss_propagate
 END_FUNC ags_send_core
 
 ;; ============================================================================
@@ -1078,6 +1102,7 @@ END_FUNC ags_send_core
 ;; send() converts it: the generator's own yield is a wrapped box and is
 ;; unwrapped, an exhausted generator becomes StopIteration, and anything the
 ;; generator did not handle propagates.
+;; Fails: 0
 ;; ============================================================================
 AGTT_SELF  equ 8
 AGTT_GEN   equ 16
@@ -1151,7 +1176,7 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
 .agtt_ignored_exit:
     mov rdi, rsi
     DECREF_V rdi, rcx
-    RAISE exc_RuntimeError_type, "async generator ignored GeneratorExit"
+    FAIL exc_RuntimeError_type, "async generator ignored GeneratorExit", .agtt_propagate
 
 .agtt_finished:
     mov rcx, [rbp - AGTT_SELF]
@@ -1205,24 +1230,23 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
     xor edx, edx
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
-    ; does not return
+    call exc_install
 
 .agtt_propagate:
     xor eax, eax
     leave
-    jmp eval_exception_unwind
+    ret
 
 .agtt_out:
     leave
     ret
 
 .agtt_reuse:
-    RAISE exc_RuntimeError_type, "cannot reuse already awaited aclose()/athrow()"
+    FAIL exc_RuntimeError_type, "cannot reuse already awaited aclose()/athrow()", .agtt_propagate
 .agtt_arity:
-    RAISE exc_TypeError_type, "throw() takes exactly one argument"
+    FAIL exc_TypeError_type, "throw() takes exactly one argument", .agtt_propagate
 .agtt_receiver:
-    RAISE exc_TypeError_type, "throw() requires an async generator awaitable"
+    FAIL exc_TypeError_type, "throw() requires an async generator awaitable", .agtt_propagate
 END_FUNC _agt_throw_impl
 
 ;; ============================================================================
@@ -1231,6 +1255,7 @@ END_FUNC _agt_throw_impl
 ;; asend.close().  CPython's does nothing but mark the awaitable closed --
 ;; the generator behind it is not touched, because closing THAT is aclose()'s
 ;; job and this object is one step of one iteration.
+;; Fails: 0
 ;; ============================================================================
 global _ags_close_impl
 DEF_FUNC _ags_close_impl
@@ -1255,9 +1280,13 @@ DEF_FUNC _ags_close_impl
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .agsc_receiver:
-    RAISE exc_TypeError_type, "close() requires an async_generator_asend"
+    SET_EXC exc_TypeError_type, "close() requires an async_generator_asend"
+    leave
+    ret
 .agsc_arity:
-    RAISE exc_TypeError_type, "close() takes no arguments"
+    SET_EXC exc_TypeError_type, "close() takes no arguments"
+    leave
+    ret
 END_FUNC _ags_close_impl
 
 ;; _agen_asend_impl(rdi = args, rsi = nargs) -> rax = Value (AsyncGenASend*)
@@ -1269,6 +1298,7 @@ END_FUNC _ags_close_impl
 ;; the wrapped yield, so `await agen.asend(v)` awaited an
 ;; async_generator_wrapped_value and the value never reached the generator
 ;; at all.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC_LOCAL _agen_asend_impl
     cmp rsi, 2
@@ -1303,9 +1333,13 @@ DEF_FUNC_LOCAL _agen_asend_impl
     ret
 
 .receiver:
-    RAISE exc_TypeError_type, "asend() requires an async_generator"
+    SET_EXC exc_TypeError_type, "asend() requires an async_generator"
+    leave
+    ret
 .arity:
-    RAISE exc_TypeError_type, "asend() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "asend() takes exactly one argument"
+    leave
+    ret
 END_FUNC _agen_asend_impl
 
 ;; ============================================================================

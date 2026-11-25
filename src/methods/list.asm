@@ -31,15 +31,14 @@ extern none_singleton
 extern bool_true
 extern bool_false
 extern int_from_i64
-extern eval_exception_unwind
 extern obj_richcompare_bool
 extern int_to_i64
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_IndexError_type
 extern int_type
-extern list_sorting_error
+extern set_list_sorting_error
 extern list_reverse_values
 extern obj_dealloc
 
@@ -56,28 +55,34 @@ section .text
 ;; ============================================================================
 ;; list_method_append(args, nargs) -> None
 ;; args[0]=self, args[1]=item
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_append
 
     mov rax, [rdi]          ; self (list)
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rax + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lma_sorting
     mov rsi, [rdi + 8]     ; item payload
     V_UNPACK rsi, rdx       ; args[1]
     mov rdi, rax
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: the sorting sentinel was tested just above
 
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.lma_sorting:
+    call set_list_sorting_error
+    leave
     ret
 END_FUNC list_method_append
 
 ;; ============================================================================
 ;; list_method_pop(args, nargs) -> removed item
 ;; args[0]=self, optionally args[1]=index (default: last)
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     push rbx
@@ -88,7 +93,7 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     mov rbx, [rax]          ; self (list)
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .pop_sorting
     mov r12, rsi            ; nargs
 
     ; Get index
@@ -103,6 +108,7 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, [rax + 8]    ; args[1]
     V_UNPACK rdi, rdx       ; args[1]
     call obj_as_index       ; an index, so __index__ counts and a str does not
+    ERR_M1 .pop_fail
     mov r13, rax
 
     ; Handle negative index
@@ -149,12 +155,23 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .pop_error:
-    RAISE exc_IndexError_type, "pop index out of range"
+    SET_EXC exc_IndexError_type, "pop index out of range"
+    jmp .pop_fail
+.pop_sorting:
+    call set_list_sorting_error
+.pop_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_method_pop
 
 ;; ============================================================================
 ;; list_method_insert(args, nargs) -> None
 ;; args[0]=self, args[1]=index, args[2]=item
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_insert
     push rbx
@@ -166,13 +183,14 @@ DEF_FUNC list_method_insert
     mov rbx, [rax]          ; self = args[0]
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .ins_sorting
     push rax
 
     ; Get index
     mov rdi, [rax + 8]     ; args[1] payload (16B stride)
     V_UNPACK rdi, rdx       ; args[1]
     call obj_as_index       ; an index, so __index__ counts and a str does not
+    ERR_M1 .ins_fail_pop
     mov r12, rax            ; index
 
     pop rax
@@ -238,20 +256,33 @@ DEF_FUNC list_method_insert
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ins_sorting:
+    call set_list_sorting_error
+    jmp .ins_fail
+.ins_fail_pop:
+    add rsp, 8                  ; the argument pointer, parked across the conversion
+.ins_fail:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_method_insert
 
 ;; ============================================================================
 ;; list_method_reverse(args, nargs) -> None
 ;; args[0]=self, reverse in place
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_reverse
-    ; No push: the body uses rax, rcx, rdi, rsi, r8 and r10, and the one exit
-    ; that is not the `ret` below is a tail jump into list_sorting_error,
-    ; which never returns.  rbx was saved and never read.
+    ; No push: the body uses rax, rcx, rdi, rsi, r8 and r10.  rbx was saved
+    ; and never read.
     mov rax, [rdi]          ; self
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rax + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .rev_sorting
     mov rsi, [rax + PyListObject.ob_size]
     mov rdi, [rax + PyListObject.ob_item]
     call list_reverse_values
@@ -259,6 +290,10 @@ DEF_FUNC list_method_reverse
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.rev_sorting:
+    call set_list_sorting_error
+    leave
     ret
 END_FUNC list_method_reverse
 
@@ -300,6 +335,7 @@ LS_EXC     equ 72     ; current_exception on entry
 LS_NK      equ 80     ; keys computed so far; the error path DECREFs them
 ;; The MergeState sits at the top of the frame, so that adding a scalar slot
 ;; above cannot silently overlap it.
+;; Fails: 0
 LS_MS      equ 88 + MS_SIZE
 LS_FRAME   equ LS_MS  ; + 5 pushes = 16-aligned
 extern list_timsort
@@ -401,14 +437,16 @@ DEF_FUNC list_method_sort, LS_FRAME
     push r11
     push rdi
     mov rdi, [rdi + r11]
-    call obj_is_true
-    mov r10d, eax
+    call obj_is_true            ; err: tested as r10 below, once the registers are back
+    mov r10, rax
     pop rdi
     pop r11
     pop r9
     pop r8
     pop rcx
     pop rax
+    cmp r10, -1                 ; never an answer: __bool__ raised
+    je .ls_kw_raised
     mov [rbp - LS_REV], r10
     jmp .ls_kw_next
 
@@ -499,8 +537,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov edx, 1                     ; nargs = 1
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .ls_failed
+    ERR_NULL .ls_failed
     mov rcx, [rbp - LS_KEYS]
     mov [rcx + r15*8], rax
     inc r15
@@ -607,8 +644,8 @@ DEF_FUNC list_method_sort, LS_FRAME
     call ap_free
     test r13d, r13d
     jz .ls_error_return          ; there is already an exception to report
-    RAISE exc_ValueError_type, "list modified during sort"
-    ; raise_exception does not return
+    SET_EXC exc_ValueError_type, "list modified during sort"
+    jmp .ls_error_have
 
 .ls_trivial:
     ; n < 2 and nothing to sort -- but the KEY still runs, once per element.
@@ -630,8 +667,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov edx, 1
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .ls_error_return
+    ERR_NULL .ls_error_return
     XDECREF_V rax, rcx             ; only whether it could be computed
 .ls_trivial_done:
     RET_NONE
@@ -648,7 +684,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     ; Something raised -- a key, a comparison, or a __lt__ that mutated the
     ; list.  The array is already back where it belongs.
     EXC_RAISED_SINCE [rbp - LS_EXC], rax, .ls_error_have
-    RAISE exc_ValueError_type, "sort failed"
+    SET_EXC exc_ValueError_type, "sort failed"
 .ls_error_have:
     RET_NULL
     pop r15
@@ -659,8 +695,13 @@ DEF_FUNC list_method_sort, LS_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ls_kw_raised:
+    add rsp, 16                 ; the args and nargs parked across the keywords
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    jmp .ls_error_have
 .ls_too_many:
-    RAISE exc_TypeError_type, "sort() takes no positional arguments"
+    SET_EXC exc_TypeError_type, "sort() takes no positional arguments"
+    jmp .ls_error_have
 END_FUNC list_method_sort
 
 ;; ============================================================================
@@ -680,6 +721,7 @@ END_FUNC ls_reverse_array
 ;; list_method_index(args, nargs) -> SmallInt index
 ;; args[0]=self, args[1]=value, optional args[2]=start, args[3]=stop
 ;; Linear scan with identity check then __eq__ protocol
+;; Fails: 0
 ;; ============================================================================
 LI_LIST   equ 8
 LI_VPAY   equ 16   ; value payload
@@ -715,6 +757,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rdi, [rax + 16]      ; args[2] payload
     V_UNPACK rdi, rdx       ; args[2]
     call obj_as_slice_index
+    ERR_M1 .index_error
     ; Handle negative start
     test rax, rax
     jns .li_start_pos
@@ -733,6 +776,7 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rdi, [rax + 24]      ; args[3] payload
     V_UNPACK rdi, rdx       ; args[3]
     call obj_as_slice_index
+    ERR_M1 .index_error
     ; Handle negative stop
     test rax, rax
     jns .li_stop_pos
@@ -790,21 +834,26 @@ DEF_FUNC list_method_index, LI_FRAME
     ret
 
 .index_error:
+    xor eax, eax
+    pop r12
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .index_not_found:
     ; CPython names the value it could not find, through its repr.
     mov rsi, [rbp - LI_VPAY]
     CSTRING rdx, " is not in list"
     CSTRING rdi, ""
-    extern raise_value_error_with_repr2
-    jmp raise_value_error_with_repr2
+    extern set_value_error_with_repr2
+    call set_value_error_with_repr2
+    jmp .index_error
 END_FUNC list_method_index
 
 ;; ============================================================================
 ;; list_method_count(args, nargs) -> SmallInt
 ;; args[0]=self, args[1]=value
+;; Fails: 0
 ;; ============================================================================
 LC_IDX    equ 8
 LC_FRAME  equ 16            ; + 4 pushes = 48, 16-aligned
@@ -857,8 +906,13 @@ DEF_FUNC list_method_count, LC_FRAME
     ret
 
 .count_error:
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC list_method_count
 
 ;; ============================================================================
@@ -925,8 +979,13 @@ DEF_FUNC list_dunder_setitem
     mov rdx, [rdi + 16]     ; args[2] = value (already a Value)
     mov rdi, rax
     call list_ass_subscript
+    ERR_M1 .ldsi_fail
     lea rax, [rel none_singleton]
     inc qword [rax + PyObject.ob_refcnt]
+    leave
+    ret
+.ldsi_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC list_dunder_setitem
@@ -941,10 +1000,15 @@ DEF_FUNC list_dunder_delitem
     xor edx, edx            ; a NULL value Value means "delete"
     mov rdi, rax
     call list_ass_subscript
+    ERR_M1 .lddi_fail
     extern none_singleton
     RET_NONE
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.lddi_fail:
+    xor eax, eax
+    leave
     ret
 END_FUNC list_dunder_delitem
 
@@ -958,6 +1022,7 @@ DEF_FUNC list_dunder_contains
     mov rsi, [rdi + 8]     ; item payload
     mov rdi, rax
     call list_contains
+    ERR_M1 .ldc_fail
     ; eax = 0 or 1 → return bool
     test eax, eax
     jz .ldc_false
@@ -972,6 +1037,10 @@ DEF_FUNC list_dunder_contains
     INCREF rax
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+.ldc_fail:
+    xor eax, eax                ; an element's __eq__ raised
+    leave
     ret
 END_FUNC list_dunder_contains
 
@@ -1016,6 +1085,7 @@ END_FUNC list_dunder_iadd
 ;; super().__new__(cls, seq) inside a subclass's own __new__ found nothing.
 ;; It is registered as a staticmethod, as CPython does: __new__ takes the
 ;; class explicitly and must not be bound to anything.
+;; Fails: 0
 ;; ============================================================================
 extern instance_new
 extern builtin_sub_init_base
@@ -1054,6 +1124,7 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [r12 + 8]          ; the arguments after cls
     lea rdx, [r13 - 1]
     call tuple_sub_fill
+    ERR_M1 .cdn_fill_failed
     pop rax
     jmp .cdn_done
 
@@ -1075,6 +1146,7 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [r12 + 8]          ; the arguments after cls
     lea rdx, [r13 - 1]
     call set_sub_fill
+    ERR_M1 .cdn_fill_failed
 .cdn_not_frozen:
     pop rax
 
@@ -1088,7 +1160,18 @@ DEF_FUNC container_dunder_new, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .cdn_error:
-    RAISE exc_TypeError_type, "__new__() takes a class argument"
+    SET_EXC exc_TypeError_type, "__new__() takes a class argument"
+    jmp .cdn_fail
+.cdn_fill_failed:
+    pop rdi                     ; the instance, which nothing else holds
+    call obj_decref
+.cdn_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC container_dunder_new
 
 ;; ============================================================================
@@ -1104,6 +1187,7 @@ END_FUNC container_dunder_new
 ;; The keyword VALUES sit in the argument array after the positional ones, so
 ;; where they are ignored the count comes down by as many; otherwise the first
 ;; of them would be read as the iterable.
+;; Fails: 0
 ;; ============================================================================
 LDI_ARGS  equ 8
 LDI_NARGS equ 16
@@ -1162,6 +1246,9 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     mov rdi, rbx            ; args ptr (already has self + iterable)
     mov esi, 2                      ; nargs = 2
     call list_method_extend
+    ; An iterable that raised part-way is the answer; this used to hand back
+    ; None over it and leave the exception for whatever ran next.
+    ERR_NULL .ldi_fail
 
 .ldi_done:
     RET_NONE
@@ -1171,12 +1258,19 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .ldi_no_keywords:
-    RAISE exc_TypeError_type, "list() takes no keyword arguments"
+    SET_EXC exc_TypeError_type, "list() takes no keyword arguments"
+.ldi_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_dunder_init
 
 ;; ============================================================================
 ;; list_method_clear(args, nargs) -> None
 ;; args[0]=self
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_clear, 8        ; rsp 16-aligned at the call the macros below expand to
     push rbx
@@ -1186,7 +1280,7 @@ DEF_FUNC list_method_clear, 8        ; rsp 16-aligned at the call the macros bel
     mov rbx, [rdi]          ; self
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lcl_sorting
     mov rdi, rbx
     call list_clear                 ; detaches before it releases
 
@@ -1197,11 +1291,19 @@ DEF_FUNC list_method_clear, 8        ; rsp 16-aligned at the call the macros bel
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.lcl_sorting:
+    call set_list_sorting_error
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC list_method_clear
 
 ;; ============================================================================
 ;; list_method_extend(args, nargs) -> None
 ;; args[0]=self, args[1]=iterable (list, tuple, or generic iterable)
+;; Fails: 0
 ;; ============================================================================
 LE_SELF   equ 8
 LE_ITER   equ 16
@@ -1215,7 +1317,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rbx, [rdi]           ; self
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .extend_sorting
     mov r12, [rdi + 8]      ; iterable payload
     V_UNPACK r12, r13       ; args[1]
     mov [rbp - LE_SELF], rbx
@@ -1253,6 +1355,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rdi, [rbp - LE_SELF]
     extern list_extend_from_array
     call list_extend_from_array
+    ERR_M1 .extend_iter_raised
     jmp .extend_done
 
 .extend_generic:
@@ -1263,6 +1366,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rdi, r12
     mov esi, TAG_PTR
     call get_iterator_opt
+    ERR_PENDING .extend_iter_raised     ; __iter__ raised; nothing is held yet
     test rax, rax
     jz .extend_type_error
     mov [rbp - LE_ITER], rax
@@ -1288,6 +1392,7 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; edx = tag (already set)
     V_PACK rsi, rdx         ; list_append takes a Value
     call list_append
+    ERR_M1 .extend_append_failed
     ; DECREF item (list_append INCREFs internally)
     pop rsi                     ; tag
     pop rdi                     ; payload
@@ -1305,6 +1410,14 @@ DEF_FUNC list_method_extend, LE_FRAME
     EXC_RAISED_SINCE [rbp - LE_EXC], rcx, .extend_iter_raised
     jmp .extend_done            ; nothing pending: an ordinary exhaustion
 
+.extend_append_failed:
+    ; Another thread began sorting this list while the iterator ran.  The
+    ; item and the iterator are still ours.
+    pop rsi
+    pop rdi
+    DECREF_VAL rdi, rsi
+    mov rdi, [rbp - LE_ITER]
+    call obj_decref
 .extend_iter_raised:
     xor eax, eax                ; a NULL Value, with the exception pending
     xor edx, edx
@@ -1341,14 +1454,19 @@ DEF_FUNC list_method_extend, LE_FRAME
     mov rsi, [r12 + PyObject.ob_type]
 .lme_have_type:
     CSTRING rdi, `'\x01' object is not iterable`
-    extern raise_type_error_with_typename
-    jmp raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .extend_iter_raised
+.extend_sorting:
+    call set_list_sorting_error
+    jmp .extend_iter_raised
 END_FUNC list_method_extend
 
 ;; ============================================================================
 ;; list_method_remove(args, nargs) -> None
 ;; args[0]=self, args[1]=value
 ;; Removes first occurrence of value. Raises ValueError if not found.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     push rbx
@@ -1360,7 +1478,7 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     mov rbx, [rdi]          ; self (list)
     ; Check if list is being sorted (ob_item == NULL)
     cmp qword [rbx + PyListObject.ob_item], 0
-    je list_sorting_error
+    je .lremove_sorting
     mov r12, [rdi + 8]      ; the value Value
     xor r14d, r14d          ; index = 0
 
@@ -1390,8 +1508,14 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     jmp .lremove_loop
 
 .lremove_error:
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .lremove_found:
     ; r14 = index of found item
@@ -1429,7 +1553,11 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .lremove_not_found:
-    RAISE exc_ValueError_type, "list.remove(x): x not in list"
+    SET_EXC exc_ValueError_type, "list.remove(x): x not in list"
+    jmp .lremove_error
+.lremove_sorting:
+    call set_list_sorting_error
+    jmp .lremove_error
 END_FUNC list_method_remove
 
 ;; ============================================================================

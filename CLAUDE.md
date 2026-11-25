@@ -42,7 +42,10 @@ its `Lib/` (default `~/tmp/repo/cpython/Lib`).  It compares against
 when a new one crashes.  Raise the floor with
 `bash tests/stdlib_probe.sh --record` in the commit that earns it.
 `make check` runs every `tests/test_*.py`, then `tests/pyc_probe.sh`,
-`tests/arity_probe.sh`, `tests/typefuzz_probe.sh`, `tests/reentry_probe.sh`
+`tests/arity_probe.sh`, `tests/typefuzz_probe.sh`, `tests/raise_probe.sh`
+(every builtin made to fail, with the live-block count read around each
+failure; a two-way ratchet against `tests/raise_leak_floor.txt`),
+`tests/reentry_probe.sh`
 (every container operation with Python changing the container in the middle
 of it; nothing may crash, and `--valgrind` runs the same corpus under
 valgrind) and `tests/syntax_probe.sh`.  A test listed in `tests/known_failures.txt` is
@@ -202,6 +205,88 @@ references across such a call; `tests/reentry_probe.sh` is the gate, and
 `tests/test_thread_stress.py` runs eight threads at a ten-microsecond switch
 interval.
 
+## Errors return
+
+Only an opcode handler may jump into the unwinder (`RAISE`,
+`raise_exception`, `jmp eval_exception_unwind`): it *is* the eval loop, and
+the unwinder releases its operands.  Everything that is **called** records
+the exception and returns through the same epilogue its success path uses --
+so what it holds is released, and a caller written in assembly can act on the
+error.  A jump from anywhere else abandons every native frame between it and
+the eval loop, and leaks whatever they held.
+
+A function's docblock says which return value means "failed", and that line
+binds every caller:
+
+| Docblock | Means | Caller writes |
+|---|---|---|
+| `;; Fails: 0` | 0 is never an answer | `ERR_NULL .fail` |
+| `;; Fails: 0?` | 0 is an answer; 0 *and* an exception pending | `ERR_PENDING .fail` |
+| `;; Fails: -1` | -1 is an answer; -1 *and* an exception pending | `ERR_M1 .fail` |
+
+`FAIL type, "message", .fail` records the exception and goes to the
+function's error exit.  `lint.py` holds every `call` of a function carrying a
+`Fails:` line to one of those checks within three instructions, or to the
+words `err:` in a comment on the call line saying why none is needed.  A
+missed check is not a crash -- the caller carries on with a 0 it takes for an
+answer -- which is why it is a lint error and not a convention.
+
+Lint cannot see an INDIRECT call, so for a function installed in a type
+slot the slot's kind is the contract, and every `call reg` of that kind
+already checks for it:
+
+| Slot | A failure is |
+|---|---|
+| `tp_call` (so every builtin function and method), `tp_new` (with `edx = 0` too), `tp_repr`, `tp_str`, `tp_iter`, the unary number slots, `nb_index` / `nb_int` / `nb_float`, `mp_subscript`, `sq_item` | 0 |
+| `tp_getattr`, `tp_richcompare`, the binary number slots, `sq_concat` / `sq_repeat`, `tp_iternext` | 0 **and** an exception pending -- 0 alone is absent, NotImplemented or exhausted |
+| `tp_hash`, `sq_length`, `mp_length` | -1 in all of rax, and an exception pending |
+| `nb_bool`, `sq_contains`, `tp_setattr`, `mp_ass_subscript`, `sq_ass_item`, a getset setter | -1 and an exception pending (callers sign-extend eax) |
+| `tp_as_buffer`, `tp_dealloc`, `tp_traverse`, `tp_clear` | nothing: they cannot fail |
+
+A dict lookup has four entries, and the one a caller uses is its claim about
+the key and the dict (`src/pyo/dict.asm`):
+
+| Entry | For | A failure is |
+|---|---|---|
+| `dict_get` / `dict_set` / `dict_get_index` | any dict Python can reach -- an instance `__dict__`, module globals, kwargs, `sys.modules`, an argument -- whatever the key | `Fails: 0?` / `-1` / `-1`, checked |
+| `dict_get_str` / `dict_set_str` | an exact `str` or int-immediate key into a dict the runtime owns at that moment: one it just built, a module's table before it is published, a registry | impossible; `EXC_STRICT` traps if it happens |
+| `dict_get_mro` | a TYPE's namespace on the way along an MRO | "not here", cleared -- `_PyType_Lookup` does the same |
+| `dict_get_quiet` | a read that is a C field in CPython (OSError's errno) | "absent", cleared |
+
+A `str` key is not enough for `_str`: a dict Python can reach may hold a
+foreign key with the same hash, and looking the name up runs its `__eq__`.
+After `dict_get` on a path where a miss is the ordinary answer -- attribute
+and global lookup -- or where an exception may already be pending, check
+with `ERR_DICT_GET` / `ERR_DICT_IDX`: they read the failure from `rdx` (-2),
+where `ERR_PENDING` loads the thread state on every miss.
+
+`op_call` turns a 0 that arrives with nothing pending into SystemError, so a
+callee never returns 0 without setting one.  `type_call` releases the
+instance it was building when `__new__` or `__init__` answers 0.
+
+Lint holds the line: outside `src/opcodes/` and `src/eval.asm` no line of
+code may name a function that ends in the unwinder, a macro that expands to
+one (`RAISE`, `NO_KEYWORDS`, an `ERR_*_JUMP`), or `PUBLISH_SP`; and a pass in
+`src/compiler/` may not record an exception at all, only `comp_error`.  The
+`ERR_*_JUMP` macros are a handler's way of passing on an error its callee
+returned.  `python3 src/compiler/raisemap.py` maps where the handlers jump,
+and `tests/raise_probe.sh` measures what returning buys: every builtin made
+to fail, with `sys.getallocatedblocks()` read around each failure, ratcheted
+against `tests/raise_leak_floor.txt`.
+
+A destructor cannot fail: `tp_dealloc` and anything it calls swallows an
+error (CPython prints it as unraisable) rather than returning it.
+
+`ERR_PENDING` and `ERR_M1` ask "is an exception pending?", so **ordinary code
+runs with none**.  Anything that runs Python or calls through a slot while
+one is in flight -- a finalizer, a weakref callback, a trace hook, a report
+being printed -- takes it out first and puts it back after (`exc_fetch` /
+`exc_restore`, src/eval.asm), and nothing may hand back a value over an
+exception it left set.  `make EXC_STRICT=1` traps (`ud2`) at the first
+instruction that ends, or the first frame entered from C, with one still
+pending; run `tests/run_tests.sh` and `tests/raise_probe.sh` under it after
+touching anything that sets, clears or swallows an exception.
+
 **Critical rule:** Never hold live values in caller-saved regs (rax, rcx, rdx, rsi, rdi, r8-r11) across `call` or `DECREF`/`DECREF_REG`. Use push/pop or callee-saved regs instead. `DECREF_REG` calls `obj_dealloc` which clobbers all caller-saved regs.
 
 ## Value Representation (NaN boxing)
@@ -325,7 +410,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   class's attributes, `type_getattr` included.  Split off when `class.asm`
   reached the 100k cap a second time.  `instance_alloc.asm` is
   where an instance comes from, including the constructors a subclass of a
-  builtin needs; `method.asm` is the bound method; `str_mod.asm` is the `%`
+  builtin needs; `method.asm` is the bound method; `descriptors.asm` is
+  staticmethod, classmethod, property and the getset and member descriptors
+  as DESCRIPTORS -- the constructors, `__get__` / `__set__` / `__delete__`
+  and the type objects -- while `descr_attr.asm` is what the three wrappers
+  answer by name: property's `fget` / `fset` / `fdel` and its `getter()` /
+  `setter()` / `deleter()` copies, `__func__` and the names forwarded to it,
+  and `__isabstractmethod__`.  Split off when `descriptors.asm` reached the
+  100k cap; `str_mod.asm` is the `%`
   operator, for str and for bytes both -- the conversion is only known there,
   so the argument is converted there.  `asyncgen.asm` is the three objects an
   async generator hands out -- the asend and athrow awaitables and the box each
@@ -349,6 +441,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `src/modules/impcore.asm` is `_impcore`, whose `create_builtin` is where
   BuiltinImporter ends up.  Bytecode is cached under the `apython-312` tag
   only, and `make` precompiles `stdlib/` and `lib/` with apython itself
+- `src/import_find.asm` — WHERE the assembly finder looks: which file under
+  a `sys.path` entry answers a name (a package directory, a cached `.pyc`
+  under either tag, a sourceless `.pyc`, the source), when a `.pyc` is stale,
+  the PEP 420 portions and the namespace module made from them.  Split off
+  when `import.asm` reached the 100k cap; what stayed decides WHAT to import
 - `src/modules/io.asm` — the `_iocore` module: the four `_IOBase` types the rest
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves
@@ -465,7 +562,14 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `obj_declared_class`, the "what does this object say it is" step they share.
   CPython asks the real type first and `__class__` only when that says no, and
   so does this
-- `src/buildclass.asm` — `type.__new__`, `type_from_parts`, `__build_class__`
+- `src/buildclass.asm` — `type_from_parts`, the type constructor.
+  `buildclass_stmt.asm` is the `class` statement in front of it
+  -- `__build_class__`, the bases through `__mro_entries__`, the metaclass and
+  `__prepare__` -- `buildclass_type.asm` is `type`'s own methods, `type.__new__`
+  among them, and `buildclass_ns.asm` is what the constructor does to the
+  new class's namespace: `__set_name__`, the `__eq__`-without-`__hash__`
+  rule, the implicit classmethods and private-name mangling.  All three were
+  split off when `buildclass.asm` reached the 100k cap
 - `src/slots.asm` — Installs slot wrappers on a heaptype from the dunders it defines
 - `src/mro.asm` — C3 linearization, `type_mro_next`, `type_is_subtype`
 - `src/format.asm` — The format-spec mini-language (`format()`, f-strings, `%`)

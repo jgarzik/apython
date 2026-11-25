@@ -557,7 +557,7 @@ DEF_FUNC comp_emit_warnings, CEW_FRAME
     lea rsi, [rbp - CEW_ARGS]
     mov edx, 4
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .cew_raised, below
     push rax
     mov rdi, [rbp - CEW_ARGS]
     extern obj_decref
@@ -736,7 +736,7 @@ DEF_FUNC comp_flush_warnings, CFW_FRAME
     mov rdi, [rbp - CFW_FN]
     lea rsi, [rbp - CFW_ARGS]
     mov edx, 4
-    call obj_call_n
+    call obj_call_n             ; err: .cfw_drop, below
     push rax
     mov rdi, [rbp - CFW_ARGS]
     call obj_decref
@@ -781,7 +781,7 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - CLW_MOD], rax
     mov rdi, [rbp - CLW_TMP]
     call obj_decref
@@ -796,7 +796,7 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
     mov rdi, [rbp - CLW_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get           ; err: a 0 goes to .clw_none, which clears what is pending
     mov [rbp - CLW_MOD], rax
     mov rdi, [rbp - CLW_TMP]
     call obj_decref

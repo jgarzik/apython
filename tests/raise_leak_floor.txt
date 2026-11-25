@@ -1,0 +1,21 @@
+# Failure paths that leak or crash, found by
+# tests/raise_probe.sh.  The set may only shrink: a new
+# one fails the gate, and so does one that is fixed --
+# re-record with
+#   bash tests/raise_probe.sh --record
+# in the commit that fixes it.
+cb | dict | c.keys() & other.keys() | eq | nth=1
+cb | dict | c.keys() & other.keys() | eq | nth=3
+func | math.gcd('s',)
+func | math.gcd(1.5,)
+func | math.gcd(<class 'object'>,)
+func | math.gcd(None,)
+func | math.gcd([],)
+func | math.gcd(b'b',)
+func | time.strptime(-1,)
+func | time.strptime(1.5,)
+func | time.strptime(<class 'object'>,)
+func | time.strptime(None,)
+func | time.strptime([],)
+func | time.strptime(b'b',)
+meth | list.index(<class 'object'>,)

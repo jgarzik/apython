@@ -1362,6 +1362,19 @@ TYPE_FLAG_DESCRIPTOR     equ 0x1000000
 ; ABCMeta or EnumType pays nothing for the check either.
 TYPE_FLAG_HEAP_DATA_DESCR equ 0x2000000
 
+; The type OWNS the method table that tp_as_number / tp_as_sequence /
+; tp_as_mapping points at: slot_ensure_table allocated it for this type, as a
+; fresh table or as its own copy of an ancestor's.  A pointer inherited as it
+; stands -- a builtin base's static table, or a heap base's -- is not the
+; type's to free, and the pointer alone cannot say which it is.
+; user_type_dealloc frees the ones these name; nothing did, so every class
+; with a builtin base or a numeric, sequence or mapping dunder left its
+; tables behind when it died.  Never inherited: type_from_parts copies only
+; the family bits.
+TYPE_FLAG_OWNS_NUMBER   equ 0x4000000
+TYPE_FLAG_OWNS_SEQUENCE equ 0x8000000
+TYPE_FLAG_OWNS_MAPPING  equ 0x10000000
+
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 25.  It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of

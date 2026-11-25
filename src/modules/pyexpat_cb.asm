@@ -43,6 +43,9 @@
 
 ASM_INIT
 
+extern dict_get
+extern dict_set
+extern dict_set_str
 extern obj_call_n
 extern obj_decref
 extern obj_dealloc
@@ -50,8 +53,6 @@ extern obj_incref
 extern str_from_cstr_heap
 extern str_new_heap
 extern dict_new
-extern dict_set
-extern dict_get
 extern none_singleton
 extern set_exception
 extern exc_TypeError_type
@@ -284,7 +285,7 @@ DEF_FUNC px_call, 56
     mov rdi, rax
     mov rsi, [rbp - PC_ARGS]
     mov rdx, [rbp - PC_NARGS]
-    call obj_call_n
+    call obj_call_n             ; err: .raised, below
 
     mov rcx, [rbp - PC_H]
     mov qword [rcx + PxHandle.in_callback], 0
@@ -414,6 +415,7 @@ DEF_FUNC px_intern, 40
     mov rdi, rbx
     mov rsi, rax
     call dict_get           ; a Value; 0 is the miss
+    ERR_PENDING .pi_raised
     test rax, rax
     jz .insert
     ; A hit: hand back the stored one and drop the copy just built.
@@ -439,6 +441,7 @@ DEF_FUNC px_intern, 40
     mov rsi, [rbp - PI_STR]
     mov rdx, rsi            ; interned as its own key AND value
     call dict_set
+    ERR_M1 .pi_raised
 .no_table:
     mov rax, [rbp - PI_STR]
     pop rbx
@@ -451,6 +454,13 @@ DEF_FUNC px_intern, 40
     leave
     ret
 .fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.pi_raised:                     ; parser.intern is an ordinary dict, and can refuse
+    mov rdi, [rbp - PI_STR]
+    call obj_decref
     xor eax, eax
     pop rbx
     leave
@@ -611,7 +621,7 @@ DEF_FUNC px_cb_start_element, 120
     mov rdx, rax
     push rax
     sub rsp, 8
-    call dict_set
+    call dict_set_str
     add rsp, 8
     pop rdi
     call obj_decref             ; dict_set took its own reference; the value

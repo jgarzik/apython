@@ -39,10 +39,8 @@ extern type_is_subtype
 ; --- singletons and the exception plumbing ---
 extern bool_true
 extern bool_false
-extern eval_exception_unwind
 extern exc_TypeError_type
-extern raise_exception
-extern raise_type_error_counted
+extern set_exception
 
 section .text
 
@@ -67,6 +65,12 @@ ISI_FRAME equ 16            ; + 2 pushes = 32
 ;;
 ;; Returns 0 for anything that is not a heap object, has no __class__, or
 ;; whose __class__ is the type it already has.
+;; Fails: 0?
+;; A __class__ that RAISES is not a __class__ that is missing: CPython
+;; propagates it out of isinstance(), and this used to unwind with it from
+;; inside whoever asked.  obj_getattr_opt has already taken down the one
+;; AttributeError that only means "absent", so a 0 with nothing pending is
+;; always "nothing declared".
 ;; ============================================================================
 extern obj_getattr_opt
 extern dunder_name_obj
@@ -89,7 +93,7 @@ DEF_FUNC obj_declared_class, ODC_FRAME
     mov rdi, [rbp - ODC_OBJ]
     call obj_getattr_opt
     test rax, rax
-    jz .odc_lookup_failed
+    jz .odc_none                ; absent -- or it raised, and that is pending
 
     ; __class__ is whatever the property returned, and that need not be an
     ; object at all.  `class B: __class__ = property(lambda s: 42)` handed an
@@ -122,27 +126,11 @@ DEF_FUNC obj_declared_class, ODC_FRAME
     xor eax, eax
     leave
     ret
-
-.odc_lookup_failed:
-    ; A __class__ that RAISES is not a __class__ that is missing.  CPython
-    ; propagates anything but an AttributeError out of isinstance(); this
-    ; answered False with the exception still pending, and it surfaced at the
-    ; end of the program as an unraisable naming a frame long gone.
-    ;
-    ; attr_error_pending is the tree's own flag for "the AttributeError below
-    ; is the ordinary answer to a lookup", which is exactly the one CPython
-    ; swallows here.
-    cmp qword [gs:ThreadState.current_exception], 0
-    je .odc_none
-    cmp qword [gs:ThreadState.attr_error_pending], 0
-    jne .odc_none
-    extern eval_exception_unwind
-    leave
-    jmp eval_exception_unwind
 END_FUNC obj_declared_class
 
 ;; ============================================================================
 ;; builtin_isinstance(rdi = args, rsi = nargs) -> rax = Value, True or False
+;; Fails: 0
 ;;
 ;; The frame constants are above, beside the header that describes what this
 ;; answers; only obj_declared_class stands between the two, because this needs
@@ -251,6 +239,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     CSTRING rdx, "__instancecheck__"
     extern type_custom_check
     call type_custom_check
+    ERR_M1 .isinstance_fail     ; the hook raised, or its answer's __bool__ did
     pop rdx
     pop rcx
     cmp eax, -1
@@ -284,6 +273,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     push rcx
     mov rdi, [rbp - ISI_OBJ]
     call obj_declared_class
+    ERR_PENDING .isinstance_fail
     pop rcx
     pop rcx
     mov [rbp - ISI_DECL], rax
@@ -324,6 +314,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     mov rdi, rsp
     mov esi, 2
     call builtin_isinstance
+    ERR_NULL .isinstance_fail   ; an element that was refused, or whose hook raised
     add rsp, 16
     V_UNPACK rax, rdx
     lea rcx, [rel bool_true]
@@ -368,21 +359,34 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
     ret
 
 .isinstance_generic:
-    RAISE exc_TypeError_type, \
-          "isinstance() argument 2 cannot be a parameterized generic"
+    FAIL exc_TypeError_type, \
+          "isinstance() argument 2 cannot be a parameterized generic", .isinstance_fail
 
 .isinstance_type_error:
-    RAISE exc_TypeError_type, "isinstance() arg 2 must be a type, a tuple of types, or a union"
+    FAIL exc_TypeError_type, "isinstance() arg 2 must be a type, a tuple of types, or a union", .isinstance_fail
 
 .isinstance_error:
     CSTRING rdi, "isinstance expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    ; fall through
+.isinstance_fail:
+    ; Reached from inside the tuple loop and the declared-class call, with
+    ; their pushes still on the stack: rsp goes back to the two saved
+    ; registers before anything is popped.
+    lea rsp, [rbp - ISI_FRAME - 16]
+    call .isi_release_declared
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_isinstance
 
 ;; ============================================================================
 ;; builtin_issubclass(PyObject **args, int64_t nargs) -> rax = Value
+;; Fails: 0
 ;; issubclass(cls, parent) -> True/False
 ;; Walks the full tp_base chain for inheritance.
 ;; Supports tuple second arg: issubclass(cls, (type1, type2, ...))
@@ -467,6 +471,7 @@ DEF_FUNC builtin_issubclass, ISC_FRAME
     mov rsi, rdx                ; the candidate subclass
     CSTRING rdx, "__subclasscheck__"
     call type_custom_check
+    ERR_M1 .issubclass_fail
     pop rdx
     pop rcx
     cmp eax, -1
@@ -504,6 +509,7 @@ DEF_FUNC builtin_issubclass, ISC_FRAME
     mov rdi, rsp
     mov esi, 2
     call builtin_issubclass
+    ERR_NULL .issubclass_fail
     add rsp, 16
     V_UNPACK rax, rdx
     lea rcx, [rel bool_true]
@@ -537,19 +543,28 @@ DEF_FUNC builtin_issubclass, ISC_FRAME
     ret
 
 .issubclass_arg1_error:
-    RAISE exc_TypeError_type, "issubclass() arg 1 must be a class"
+    FAIL exc_TypeError_type, "issubclass() arg 1 must be a class", .issubclass_fail
 
 .issubclass_arg2_error:
-    RAISE exc_TypeError_type, "issubclass() arg 2 must be a class, a tuple of classes, or a union"
+    FAIL exc_TypeError_type, "issubclass() arg 2 must be a class, a tuple of classes, or a union", .issubclass_fail
 .issubclass_generic:
-    RAISE exc_TypeError_type, \
-          "issubclass() argument 2 cannot be a parameterized generic"
+    FAIL exc_TypeError_type, \
+          "issubclass() argument 2 cannot be a parameterized generic", .issubclass_fail
 
 .issubclass_error:
     CSTRING rdi, "issubclass expected 2 arguments, got "
     xor edx, edx
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    ; fall through
+.issubclass_fail:
+    ; As isinstance's: the tuple loop arrives with its pushes outstanding.
+    lea rsp, [rbp - ISC_FRAME - 24]
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC builtin_issubclass
 
 

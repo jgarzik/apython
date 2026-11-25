@@ -22,8 +22,7 @@ extern str_from_cstr
 extern obj_dealloc
 extern type_type
 extern ap_strcmp
-extern raise_exception
-extern raise_exception_obj
+extern set_exception
 extern exc_new
 extern exc_TypeError_type
 extern exc_StopIteration_type
@@ -375,8 +374,7 @@ DEF_FUNC_LOCAL async_gen_init_hooks, AGIH_FRAME
     extern obj_call_n
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .agih_done               ; the hook raised; the exception stays pending
+    ERR_NULL .agih_done
     DECREF_V rax, rcx
 .agih_done:
     leave
@@ -526,18 +524,14 @@ DEF_FUNC gen_dealloc, GD_FRAME
     je .gd_just_free
 
     inc qword [rbx + PyObject.ob_refcnt]
-    ; The pending exception is held in a register across the cleanup, and
-    ; DUNDER_EXC_SAVE only borrows.  raise_exception_obj takes over its
-    ; caller's reference rather than adding one, so the global's is often the
-    ; only one there is -- and gen_dealloc_close runs arbitrary Python, which
-    ; can free anything nothing else holds.  Take a reference for the
-    ; register's own copy; .gd_close_done gives it back to the global.
+    ; The pending exception is TAKEN OUT for the cleanup: the global is
+    ; cleared, so its reference is the register's now, and .gd_close_done
+    ; puts the same one back.  This used to take a second reference as well,
+    ; from when the global was left set across the close -- and once the
+    ; global was cleared here that second one was never given back, so every
+    ; generator collected while an exception was in flight leaked the
+    ; exception, its arguments and its traceback.
     DUNDER_EXC_SAVE r12
-    test r12, r12
-    jz .gd_no_pending
-    mov rdi, r12
-    call obj_incref
-.gd_no_pending:
     mov qword [gs:ThreadState.current_exception], 0
 
     ; An async generator with a finalizer is HANDED OVER rather than closed.
@@ -561,8 +555,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     extern obj_call_n
     call obj_call_n
     add rsp, 16
-    test rax, rax
-    jz .gd_handed              ; it raised; reported below, as a close would be
+    ERR_NULL .gd_handed
     DECREF_V rax, rcx
 .gd_handed:
     ; Once.  The hook owns whatever it kept, and a second pass through this
@@ -589,7 +582,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     pop rdi
     call obj_decref
 .gd_close_done:
-    ; Hand the reference taken above back to the global.
+    ; Put back the exception taken out above, reference and all.
     mov [gs:ThreadState.current_exception], r12
     dec qword [rbx + PyObject.ob_refcnt]
     jnz .gd_resurrected         ; someone kept it: free nothing
@@ -916,10 +909,10 @@ DEF_FUNC_LOCAL gt_throw_by_name, GTBN_FRAME
     mov rdi, [rbp - GTBN_IT]
     lea rsi, [rbp - GTBN_EXC]       ; the one-Value argument array
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .gtbn_raised, below
     mov [rbp - GTBN_TMP], rax
     mov rdi, [rbp - GTBN_IT]
-    call obj_decref                 ; the bound method
+    DECREF_V rdi, rcx               ; the bound method, or whatever `throw` is
     mov rax, [rbp - GTBN_TMP]
     test rax, rax
     jz .gtbn_raised
@@ -1250,8 +1243,9 @@ DEF_FUNC gen_throw, GT_FRAME
     call exc_new
     mov rdi, rax
 .gt_exh_raise:
-    call raise_exception_obj
-    RET_NULL
+    extern exc_install
+    call exc_install            ; pending; the (0, 0) below is how a caller
+    RET_NULL                    ; is told the throw came straight back out
     pop r13
     pop r12
     pop rbx
@@ -1372,10 +1366,10 @@ DEF_FUNC gen_close_iter, GCI_FRAME
     xor esi, esi
     xor edx, edx
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: .gci_raised, after the release
     mov [rbp - GCI_NAME], rax   ; whatever it answered, or 0 with a raise
     mov rdi, [rbp - GCI_IT]
-    call obj_decref             ; the bound method
+    DECREF_V rdi, rcx           ; the bound method, or whatever `close` is
     mov rdi, [rbp - GCI_NAME]
     test rdi, rdi
     jz .gci_raised              ; it raised; leave that pending
@@ -1408,8 +1402,9 @@ END_FUNC gen_close_iter
 ;; ============================================================================
 ;; gen_close(PyGenObject *gen) -> rax = None, as a Value
 ;;
-;; The Python-facing close(): an exception out of the cleanup propagates the
-;; only way this interpreter can propagate, by jumping into the unwinder.
+;; The Python-facing close(): an exception out of the cleanup is left pending
+;; and the answer is 0.
+;; Fails: 0
 ;; ============================================================================
 GCW_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC gen_close, GCW_FRAME
@@ -1424,11 +1419,9 @@ DEF_FUNC gen_close, GCW_FRAME
     leave
     ret
 .gcw_propagate:
-    ; As in _gen_throw_impl's .gti_propagate below: PyFrame.disp_sp is not
-    ; republished, because r13 here is whatever the caller left in it and a
-    ; bound method leaves nargs.  eval_dispatch published the right one.
+    RET_NULL
     leave
-    jmp eval_exception_unwind
+    ret
 END_FUNC gen_close
 
 ;; ============================================================================
@@ -1944,6 +1937,9 @@ END_FUNC async_gen_getattr
 ;; ============================================================================
 
 ;; _gen_send_impl(args, nargs) — gen.send(value)
+;; Exhaustion is a StopIteration carrying the return value, set and returned
+;; like any other failure.
+;; Fails: 0
 global _gen_send_impl
 DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
@@ -1983,12 +1979,13 @@ DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
 .gsi_have_val:
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
 
 .gsi_propagate:
-    extern eval_exception_unwind
+    xor eax, eax
+    pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .gsi_ret:
     pop rbx
@@ -1997,15 +1994,17 @@ DEF_FUNC _gen_send_impl, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .gsi_error:
-    RAISE exc_TypeError_type, "send() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "send() takes exactly one argument"
+    jmp .gsi_propagate
 END_FUNC _gen_send_impl
 
 
 ;; _gen_close_impl(args, nargs) — gen.close()
+;; Fails: 0
 global _gen_close_impl
 DEF_FUNC _gen_close_impl
     mov rdi, [rdi]             ; gen = args[0]
-    call gen_close
+    call gen_close              ; err: its 0 is this method's own
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
@@ -2014,6 +2013,7 @@ END_FUNC _gen_close_impl
 ;; _gen_throw_impl(args, nargs) — gen.throw(typ[, val[, tb]]), and
 ;; coroutine.throw(), which is the same method.  throw_args_exc in asyncgen.asm
 ;; settles the arguments, for agen.athrow() as well.
+;; Fails: 0
 GTI_EXC   equ 8             ; what throw_args_exc answered
 GTI_OWNED equ 16            ; non-zero when GTI_EXC is a reference of ours
 GTI_FRAME equ 24            ; + 1 push = 32, 16-aligned
@@ -2028,6 +2028,7 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
     lea rcx, [rel gti_deprecated]
     extern throw_args_exc
     call throw_args_exc
+    ERR_NULL .gti_propagate
     mov [rbp - GTI_EXC], rax
     mov [rbp - GTI_OWNED], rdx
     mov rdi, rbx
@@ -2070,7 +2071,8 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
 .gti_have_val:
     call exc_new
     mov rdi, rax
-    call raise_exception_obj
+    call exc_install
+    jmp .gti_propagate
 
 .gti_ret:
     pop rbx
@@ -2079,25 +2081,12 @@ DEF_FUNC _gen_throw_impl, GTI_FRAME
     ret
 
 .gti_propagate:
-    ; The generator did not handle it, so the exception leaves throw().
-    ;
-    ; PyFrame.disp_sp is NOT republished here.  r13 is the value stack only
-    ; when this is reached straight from the eval loop, which is what
-    ; LOAD_ATTR's method fast path does; through a bound method it is
-    ; method_call's copy of nargs, and publishing that sent the unwinder
-    ; walking from address 1.  `t = gen.throw` and then `t(ValueError())`
-    ; inside a try/except was a SIGSEGV in eval_exception_unwind itself --
-    ; and `addCleanup(coro.close)` is the same shape, which is how
-    ; test_asyncio found it.
-    ;
-    ; The right value is already published: eval_dispatch writes all three of
-    ; eval_saved_r12 and the frame's disp_ip/disp_sp for the frame whose opcode is running, and that
-    ; is the frame this exception is leaving into.  src/pyo/class.asm's
-    ; .init_raised carries the same note for the same reason.
-    extern eval_exception_unwind
+    ; The generator did not handle it, so the exception leaves throw(): it
+    ; is pending, and the 0 says so.
+    xor eax, eax
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 END_FUNC _gen_throw_impl
 
@@ -2491,6 +2480,7 @@ section .text
 ;; aiter()/anext() and `async for` all ask for them.  This type had a getattr
 ;; of its own and no tp_dict at all, so `hasattr(g, "__aiter__")` was False
 ;; and aiter(g) refused a genuine async generator.
+;; Fails: 0
 ;; ============================================================================
 global async_gen_dunder_aiter
 DEF_FUNC async_gen_dunder_aiter
@@ -2506,12 +2496,15 @@ DEF_FUNC async_gen_dunder_aiter
     V_PACK rax, rdx
     ret
 .agda_error:
-    RAISE exc_TypeError_type, "__aiter__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__aiter__() takes exactly one argument"
+    leave
+    ret
 END_FUNC async_gen_dunder_aiter
 
 ;; ============================================================================
 ;; async_gen_dunder_anext(rdi = args Value[], rsi = nargs)
 ;;   -> the awaitable the next value comes from, as tp_iternext gives it
+;; Fails: 0
 ;; ============================================================================
 global async_gen_dunder_anext
 DEF_FUNC async_gen_dunder_anext
@@ -2523,7 +2516,9 @@ DEF_FUNC async_gen_dunder_anext
     V_PACK rax, rdx
     ret
 .agdn_error:
-    RAISE exc_TypeError_type, "__anext__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__anext__() takes exactly one argument"
+    leave
+    ret
 END_FUNC async_gen_dunder_anext
 
 ;; ============================================================================

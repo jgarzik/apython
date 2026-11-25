@@ -40,12 +40,9 @@ extern none_singleton
 extern str_from_cstr
 extern type_type
 extern ap_strcmp
-extern raise_exception
-extern raise_exception_obj
 extern exc_new
 extern exc_RuntimeError_type
 extern exc_CancelledError_type
-extern eval_exception_unwind
 extern builtin_func_new
 extern getenv
 
@@ -1197,12 +1194,16 @@ DEF_FUNC_BARE task_iternext
     ; block -- which is exactly where `try: await t` puts it -- that leaks
     ; the handled exception's reference and loses the chain.  It was
     ; unreachable until task_step started recording the exception, and is
-    ; live now.  raise_exception_obj does both, and takes over the reference
-    ; INCREF just added.
+    ; live now.  exc_install does both, and takes over the reference
+    ; INCREF just added.  0 with it pending is tp_iternext's "it raised".
     INCREF rax
     mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj    ; does not return
+    extern exc_install
+    sub rsp, 8                  ; a bare function: align the call
+    call exc_install
+    add rsp, 8
+    RET_NULL
+    ret
 END_FUNC task_iternext
 
 ;; ============================================================================
@@ -1228,6 +1229,7 @@ DEF_FUNC _task_done_impl
 END_FUNC _task_done_impl
 
 ;; task.result() -> value
+;; Fails: 0
 DEF_FUNC _task_result_impl
     mov rax, [rdi]
     cmp dword [rax + AsyncTask.done], 0
@@ -1245,12 +1247,17 @@ DEF_FUNC _task_result_impl
     ret
 
 .tr_not_done:
-    RAISE exc_RuntimeError_type, "Result is not ready"
+    SET_EXC exc_RuntimeError_type, "Result is not ready"
+    leave
+    ret
 
 .tr_exception:
     mov rdi, rcx
-    INCREF rdi                 ; borrowed from AsyncTask; raise takes ownership
-    call raise_exception_obj
+    INCREF rdi                 ; borrowed from AsyncTask; exc_install takes ownership
+    call exc_install
+    xor eax, eax
+    leave
+    ret
 END_FUNC _task_result_impl
 
 ;; task.cancel() -> True

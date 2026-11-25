@@ -32,7 +32,7 @@ extern int_fits_i64
 extern float_format_spec
 extern ap_memcpy
 extern obj_decref
-extern raise_exception
+extern set_exception
 extern exc_ValueError_type
 extern str_type
 extern int_type
@@ -84,6 +84,7 @@ section .text
 
 ;; ============================================================================
 ;; format_apply_spec_printf(rdi = value Value, rsi = spec str) -> Value
+;; Fails: 0
 ;;
 ;; format_apply_spec, with printf's reading of a precision on an integer
 ;; conversion.  `'%.3d' % 5` is '005' and `'%#.4x' % 255` is '0x00ff'; the
@@ -102,6 +103,7 @@ END_FUNC format_apply_spec_printf
 
 ;; ============================================================================
 ;; format_apply_spec(rdi = value Value, rsi = spec str) -> Value (a str)
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC format_apply_spec, FS_FRAME
     push rbx
@@ -417,8 +419,19 @@ DEF_FUNC format_apply_spec, FS_FRAME
     ; this function neither owns nor releases: one boxed int leaked per
     ; format() of such a subclass instance.  Note whether it boxed, and give
     ; the box back once the body has been rendered.
+    ;
+    ; "It is a pointer now" does not say it boxed.  A value past int64 comes
+    ; out of int_unwrap as the GMP int the instance WRAPS, borrowed, and
+    ; V_PACK hands a pointer straight through -- so releasing it took a
+    ; reference from the instance on every format(), and the second one
+    ; freed its value.  Only a SmallInt can have been boxed; the tag is
+    ; parked in FS_OWNED across the pack, which clobbers its register.
+    mov [rbp - FS_OWNED], rdx
     V_PACK rdi, rdx
     mov [rbp - FS_VALUE], rdi
+    cmp qword [rbp - FS_OWNED], TAG_SMALLINT
+    mov qword [rbp - FS_OWNED], 0       ; mov leaves the flags alone
+    jne .fs_family_done         ; the wrapped GMP int: not ours
     V_TEST_PTR rdi, rax
     ja .fs_family_done          ; still an immediate: nothing was allocated
     mov [rbp - FS_OWNED], rdi
@@ -536,15 +549,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
     extern exc_ValueError_type
     lea rdi, [rel exc_ValueError_type]
     mov rsi, rsp
-    extern raise_exception
-    call raise_exception
-    ud2
+    extern set_exception
+    call set_exception
+    jmp .fs_fail
 
 .fs_unsupported:
     mov rsi, [rbp - FS_VALUE]
     CSTRING rdi, `unsupported format string passed to \x01.__format__`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .fs_fail
 
 .fs_typed:
     ; complex is checked before the 's' arm: format(1+2j, 's') is a ValueError
@@ -680,15 +693,15 @@ DEF_FUNC format_apply_spec, FS_FRAME
 
 .fs_int_precision:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, \
-          "Precision not allowed in integer format specifier"
+    FAIL exc_ValueError_type, \
+          "Precision not allowed in integer format specifier", .fs_fail
 
 .fs_z_on_int:
-    RAISE exc_ValueError_type, \
-          "Negative zero coercion (z) not allowed in integer format specifier"
+    FAIL exc_ValueError_type, \
+          "Negative zero coercion (z) not allowed in integer format specifier", .fs_fail
 .fs_z_on_str:
-    RAISE exc_ValueError_type, \
-          "Negative zero coercion (z) not allowed in string format specifier"
+    FAIL exc_ValueError_type, \
+          "Negative zero coercion (z) not allowed in string format specifier", .fs_fail
 
 .fs_str_code:
     cmp qword [rbp - FS_ZCOERCE], 0
@@ -720,13 +733,13 @@ DEF_FUNC format_apply_spec, FS_FRAME
     jmp .fs_body_str
 
 .fs_sign_on_str:
-    RAISE exc_ValueError_type, "Sign not allowed in string format specifier"
+    FAIL exc_ValueError_type, "Sign not allowed in string format specifier", .fs_fail
 .fs_alt_on_str:
-    RAISE exc_ValueError_type, \
-          "Alternate form (#) not allowed in string format specifier"
+    FAIL exc_ValueError_type, \
+          "Alternate form (#) not allowed in string format specifier", .fs_fail
 .fs_equals_on_str:
-    RAISE exc_ValueError_type, \
-          "'=' alignment not allowed in string format specifier"
+    FAIL exc_ValueError_type, \
+          "'=' alignment not allowed in string format specifier", .fs_fail
 
 .fs_bad_group:
     ; "Cannot specify ',' with 'x'." -- the type letter goes in.
@@ -751,7 +764,8 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov byte [rax + 3], 0
     lea rdi, [rel exc_ValueError_type]
     mov rsi, rsp
-    call raise_exception
+    call set_exception
+    jmp .fs_fail
 
 .fs_body_char:
     ; `c` is the character the number names, and CPython refuses every flag
@@ -773,6 +787,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .fs_fail
     test rax, rax
     jl .fs_char_range
     cmp rax, 0x110000
@@ -791,20 +806,24 @@ DEF_FUNC format_apply_spec, FS_FRAME
 .fs_char_sign:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "Sign not allowed with integer format specifier 'c'"
-    call raise_exception
+    call set_exception
+    jmp .fs_fail
 .fs_char_alt:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "Alternate form (#) not allowed with integer format specifier 'c'"
-    call raise_exception
+    call set_exception
+    jmp .fs_fail
 .fs_char_prec:
     lea rdi, [rel exc_ValueError_type]
     CSTRING rsi, "Precision not allowed in integer format specifier"
-    call raise_exception
+    call set_exception
+    jmp .fs_fail
 .fs_char_range:
     extern exc_OverflowError_type
     lea rdi, [rel exc_OverflowError_type]
     CSTRING rsi, "%c arg not in range(0x110000)"
-    call raise_exception
+    call set_exception
+    jmp .fs_fail
 
 .fs_body_str:
     mov rdi, [rbp - FS_VALUE]
@@ -842,6 +861,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
 
 .fs_body_int:
     call format_int_body
+    ERR_NULL .fs_fail
     mov [rbp - FS_BODY], rax
     call fs_apply_grouping
     call fs_printf_precision
@@ -868,16 +888,16 @@ DEF_FUNC format_apply_spec, FS_FRAME
     jmp .fs_pad
 
 .fs_too_many_digits:
-    RAISE exc_ValueError_type, "Too many decimal digits in format string"
+    FAIL exc_ValueError_type, "Too many decimal digits in format string", .fs_fail
 .fs_prec_too_big:
-    RAISE exc_ValueError_type, "precision too big"
+    FAIL exc_ValueError_type, "precision too big", .fs_fail
 .fs_width_too_big:
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, ""
+    FAIL exc_MemoryError_type, "", .fs_fail
 .fs_complex_zero_pad:
-    RAISE exc_ValueError_type, "Zero padding is not allowed in complex format specifier"
+    FAIL exc_ValueError_type, "Zero padding is not allowed in complex format specifier", .fs_fail
 .fs_complex_equals_align:
-    RAISE exc_ValueError_type, "'=' alignment flag is not allowed in complex format specifier"
+    FAIL exc_ValueError_type, "'=' alignment flag is not allowed in complex format specifier", .fs_fail
 
     ; ---- pad to width ------------------------------------------------------
 .fs_pad:
@@ -1036,6 +1056,17 @@ DEF_FUNC format_apply_spec, FS_FRAME
     V_PACK rax, rdx
     ret
 
+.fs_fail:
+    ; The error exit for everything this function refuses itself.  Several
+    ; sites build their message in space carved below the saved registers,
+    ; so rsp goes back first; and the int-subclass arm may have left its box
+    ; in FS_OWNED, which only .fs_body_int released.
+    lea rsp, [rbp - FS_FRAME - 40]
+    mov rdi, [rbp - FS_OWNED]
+    test rdi, rdi
+    jz .fs_failed
+    mov qword [rbp - FS_OWNED], 0
+    call obj_decref
 .fs_failed:
     RET_NULL
     pop r15
@@ -1096,8 +1127,8 @@ DEF_FUNC format_apply_spec, FS_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_ValueError_type]
     mov rsi, rsp
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .fs_fail
 
 ;; rdi = destination, rsi = count.  Writes the fill character.
 .fs_fill_run:
@@ -1132,6 +1163,7 @@ END_FUNC format_apply_spec
 
 ;; ============================================================================
 ;; format_int_body -> rax = str, the digits with sign, prefix and grouping
+;; Fails: 0
 ;;
 ;; Reads the parsed spec out of the caller's frame, so it is a local helper of
 ;; format_apply_spec rather than a general entry point.  FS_SIGNCH is set to
@@ -1173,6 +1205,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     test eax, eax
     jz .fib_wide
     call obj_as_index
+    ERR_M1 .fib_fail
     mov r12, rax                        ; the value
 
     ; base and digit set from the type letter
@@ -1334,6 +1367,10 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
     mov rdi, rcx
     call ap_free
     pop rax
+    jmp .fib_no_heap
+.fib_fail:
+    ; Both refusals come before a heap digit buffer exists.
+    xor eax, eax
 .fib_no_heap:
     pop r15
     pop r14
@@ -1429,8 +1466,7 @@ DEF_FUNC_LOCAL format_int_body, FIB_FRAME
 
 .fib_wide_error:
     extern exc_OverflowError_type
-    RAISE exc_OverflowError_type, "%c arg not in range(0x110000)"
-    ud2
+    FAIL exc_OverflowError_type, "%c arg not in range(0x110000)", .fib_fail
 END_FUNC format_int_body
 
 ;; ============================================================================
@@ -2550,7 +2586,6 @@ extern obj_as_index
 extern dunder_lookup
 extern dunder_call_1
 extern type_is_subtype
-extern raise_type_error_with_name
 
 FPC_VAL   equ 8
 FPC_CONV  equ 16
@@ -2560,7 +2595,8 @@ FPC_FRAME equ 32            ; + 0 pushes = 32
 ;; fmt_percent_coerce(rdi = the argument Value, esi = the conversion character)
 ;;   -> rax = a Value the conversion can use, edx = 1 when it is a NEW
 ;;      reference the caller must release with DECREF_V
-;; Raises TypeError when the argument cannot be used at all.
+;; Fails: 0
+;; The TypeError is for an argument that cannot be used at all.
 ;; ============================================================================
 global fmt_percent_coerce
 DEF_FUNC fmt_percent_coerce, FPC_FRAME
@@ -2610,7 +2646,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     test eax, eax
     jz .fpc_int_dunder
     mov rdi, [rbp - FPC_VAL]
-    call float_int
+    call float_int            ; err: the 0 is this function's own answer
     mov edx, 1
     leave
     ret
@@ -2636,6 +2672,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     mov rdi, [rbp - FPC_VAL]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .fpc_fail
     mov rdi, rax
     call int_from_i64
     V_PACK rax, rdx
@@ -2652,7 +2689,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     test eax, eax
     jz .fpc_float_dunder
     mov rdi, [rbp - FPC_VAL]
-    call int_float
+    call int_float            ; err: its 0 is this function's own answer
     mov edx, 1
     leave
     ret
@@ -2670,7 +2707,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     jz .fpc_float_bad
     mov rdi, [rbp - FPC_VAL]
     lea rsi, [rel fpc_name_float]
-    call dunder_call_1
+    call dunder_call_1          ; err: 0 goes to the caller as it stands
     mov edx, 1
     leave
     ret
@@ -2742,12 +2779,18 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
 .fpc_bad_raise:
     lea rdi, [rel fpc_msgbuf]
     mov rsi, [rbp - FPC_VAL]
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .fpc_fail
 
 .fpc_float_bad:
     lea rdi, [rel fpc_msg_notreal]
     mov rsi, [rbp - FPC_VAL]
-    call raise_type_error_with_name
+    call set_type_error_with_name
+.fpc_fail:
+    xor eax, eax
+    xor edx, edx
+    leave
+    ret
 
 section .rodata
 align 8
@@ -2766,14 +2809,14 @@ END_FUNC fmt_percent_coerce
 
 ;; ============================================================================
 ;; format_require_str(rdi = the payload __format__ answered, rsi = its tag)
-;;   -> returns when it is a str or a str subclass; raises and does not
-;;      return otherwise
+;;   -> rax = 0 when it is a str or a str subclass
+;; Fails: -1
 ;;
 ;; CPython's "__format__ must return a str, not int".  Nothing checked, so a
 ;; __format__ answering an int reached the f-string machinery, which read a
 ;; string out of it.
 ;; ============================================================================
-extern raise_type_error_with_name
+extern set_type_error_with_name
 extern str_type
 global format_require_str
 DEF_FUNC_BARE format_require_str
@@ -2786,13 +2829,18 @@ DEF_FUNC_BARE format_require_str
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jz .frs_bad
 .frs_ok:
+    xor eax, eax
     ret
 .frs_bad:
     mov rdx, rsi
     mov rsi, rdi
     VALUE_FOR_TYPE rsi, rdx     ; a payload, back to something that names a type
     CSTRING rdi, `__format__ must return a str, not \x01`
-    jmp raise_type_error_with_name
+    sub rsp, 8                  ; bare: realign for the call
+    call set_type_error_with_name
+    add rsp, 8
+    mov rax, -1
+    ret
 END_FUNC format_require_str
 
 ;; ============================================================================

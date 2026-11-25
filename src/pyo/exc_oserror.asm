@@ -16,6 +16,7 @@
 %include "object.inc"
 
 ; --- objects ---
+extern dict_get_quiet
 extern obj_decref
 extern obj_repr
 extern obj_str
@@ -33,7 +34,6 @@ extern obj_dealloc
 extern exc_new
 extern exc_setattr
 extern exc_OSError_type
-extern raise_exception_obj
 extern none_singleton
 
 ; --- the subclasses the errno table maps to ---
@@ -197,7 +197,7 @@ DEF_FUNC_LOCAL oserror_field, 8            ; 1 pushes, so rsp is 16-aligned
     push rax
     mov rdi, [rbx - OSS_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_quiet
     mov rcx, rax
     pop rdi
     push rcx
@@ -430,7 +430,7 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov rsi, rax
     mov rdx, [r12]
     mov ecx, TAG_PTR
-    call exc_setattr
+    call exc_setattr            ; err: none of the five is a field name
     pop rdi
     call obj_decref             ; exc_setattr's dict_set took its own ref
     add rbx, 8
@@ -447,25 +447,25 @@ DEF_FUNC oserror_new, ONW_FRAME
 END_FUNC oserror_new
 
 ;; ============================================================================
-;; raise_oserror(rdi = errno (positive), rsi = filename PyStrObject* or NULL)
-;;   -> does not return: the OSError is raised
+;; set_oserror(rdi = errno (positive), rsi = filename PyStrObject* or NULL)
+;;   -> rax = 0, with the OSError pending; its body is further down
 ;;
-;; Builds OSError(errno, strerror(errno), filename) and raises it, so the
+;; Builds OSError(errno, strerror(errno), filename) and makes it pending, so the
 ;; subclass remapping and the "[Errno N] ...: 'file'" rendering both apply.
 ;; strerror comes from libc, whose text is byte-identical to CPython's -- it is
 ;; the same call CPython makes.
 ;;
-;; The sibling of raise_key_error: a raise that needs richer args than the
-;; two-argument RAISE macro can build.
+;; The sibling of set_key_error: an exception that needs richer args than
+;; the two-argument SET_EXC macro can build.
 ;; ============================================================================
 RO_ARGS  equ 40             ; five Values: errno, strerror, filename,
                             ; winerror, filename2 -- CPython's full form
 RO_FRAME equ 48             ; + 0 pushes = 48
-;; raise_oserror_owned(rdi = errno, rsi = the caller's path Value,
-;;                     rdx = a resolved path the caller owns, or 0)
-;;   -> does not return: the OSError is raised
+;; set_oserror_owned(rdi = errno, rsi = the caller's path Value,
+;;                   rdx = a resolved path the caller owns, or 0)
+;;   -> rax = 0, always, with the OSError pending
 ;;
-;; The same raise, naming the resolved path when there is one and releasing
+;; The same error, naming the resolved path when there is one and releasing
 ;; it afterwards.  posix resolves os.PathLike arguments into a new string, and
 ;; the message has to name that rather than the object that produced it --
 ;; which means it cannot be released before the exception is built.
@@ -473,18 +473,18 @@ ROO_OWNED equ 8
 ROO_OWNED2 equ 16           ; the second resolved path, for rename
 ROO_FRAME equ 32            ; + 0 pushes = 32
 
-DEF_FUNC raise_oserror_owned, ROO_FRAME
+global set_oserror_owned
+DEF_FUNC_BARE set_oserror_owned
     xor ecx, ecx                ; no second path
     xor r8d, r8d
-    leave
-    jmp raise_oserror_owned2
-END_FUNC raise_oserror_owned
+    jmp set_oserror_owned2
+END_FUNC set_oserror_owned
 
-;; raise_oserror_owned2(rdi = errno, rsi = the first path Value,
-;;                      rdx = the owned resolved first path or 0,
-;;                      rcx = the second path Value,
-;;                      r8 = the owned resolved second path or 0)
-;;   -> does not return: the OSError is raised
+;; set_oserror_owned2(rdi = errno, rsi = the first path Value,
+;;                    rdx = the owned resolved first path or 0,
+;;                    rcx = the second path Value,
+;;                    r8 = the owned resolved second path or 0)
+;;   -> rax = 0, always, with the OSError pending
 ;;
 ;; The two-path form, for rename and symlink: CPython reports
 ;; "'src' -> 'dst'".  Each path is named by its RESOLVED form when
@@ -492,8 +492,8 @@ END_FUNC raise_oserror_owned
 ;; argument itself otherwise.  Both resolved paths are released after the
 ;; exception is built and before the raise, which is the whole reason this
 ;; and its sibling exist.
-global raise_oserror_owned2
-DEF_FUNC raise_oserror_owned2, ROO_FRAME
+global set_oserror_owned2
+DEF_FUNC set_oserror_owned2, ROO_FRAME
     mov [rbp - ROO_OWNED], rdx
     mov [rbp - ROO_OWNED2], r8
     test rdx, rdx
@@ -505,10 +505,8 @@ DEF_FUNC raise_oserror_owned2, ROO_FRAME
     jz .roo_second_plain
     mov rdx, r8
 .roo_second_plain:
-    ; raise_oserror does not return, so the release has to happen inside the
-    ; build: hand it the pieces and let it call back here.  Simplest is to
-    ; do the build here too.
-    call raise_oserror_build    ; rax = the exception, and it took its own
+    ; The release has to come after the build, which names the paths.
+    call oserror_build    ; rax = the exception, and it took its own
                                 ; reference to both filenames
     push rax
     sub rsp, 8
@@ -524,60 +522,50 @@ DEF_FUNC raise_oserror_owned2, ROO_FRAME
 .roo_no_owned2:
     add rsp, 8
     pop rdi
-    call raise_exception_obj    ; does not return
-END_FUNC raise_oserror_owned2
+    test rdi, rdi
+    jz .roo_out
+    extern exc_install
+    call exc_install            ; adopts the reference
+.roo_out:
+    xor eax, eax
+    leave
+    ret
+END_FUNC set_oserror_owned2
 
 ;; ============================================================================
-;; raise_oserror(rdi = errno, rsi = filename PyStrObject* or NULL)
-;;   -> does not return: the OSError is raised
+;; set_oserror(rdi = errno, rsi = filename PyStrObject* or 0)
+;;   -> rax = 0, always, with the OSError pending
 ;;
-;; The plain form, described in full above the frame constants the three
-;; share.  It sits below its two siblings because they were written against
-;; the same RO_FRAME and the layout block is stated once.
-;; ============================================================================
-DEF_FUNC raise_oserror, RO_FRAME
-    xor edx, edx                    ; no second path
-    call raise_oserror_build
-    mov rdi, rax
-    extern raise_exception_obj
-    call raise_exception_obj        ; does not return
-END_FUNC raise_oserror
-
-;; ============================================================================
-;; set_oserror(rdi = errno, rsi = filename PyStrObject* or 0) -> nothing
-;;
-;; raise_oserror without the unwind: exc_install rather than
-;; raise_exception_obj.  A function whose contract is already "report failure by
-;; RETURNING" cannot use raise_oserror -- that tail-jumps into
-;; eval_exception_unwind and abandons the C stack, so every owned reference
-;; between here and the eval frame leaks.  set_exception in eval.asm exists for
-;; the same reason, for a type-and-message pair rather than an errno.
+;; exc_install, and a return: nothing here jumps into the unwinder, so the
+;; caller releases what it holds on its own way out.  set_exception in
+;; eval.asm is the same thing for a type-and-message pair.
 ;; ============================================================================
 global set_oserror
 DEF_FUNC set_oserror
     xor edx, edx                ; no second path
-    call raise_oserror_build    ; rax = the exception, owned
+    call oserror_build    ; rax = the exception, owned
     test rax, rax
     jz .so_out
     mov rdi, rax
     extern exc_install
     call exc_install            ; adopts the reference
 .so_out:
+    xor eax, eax
     leave
     ret
 END_FUNC set_oserror
 
-;; raise_oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
+;; oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
 ;;                     filename or 0) -> rax = the exception
 ;;
-;; The half of raise_oserror that can return, so a caller with cleanup of its
-;; own can do it between building and raising: a raise abandons the C stack,
-;; and posix has a resolved path to release that the message names.
+;; The half of set_oserror that only builds, so a caller with cleanup of its
+;; own can do it between building and installing: posix has a resolved path
+;; to release that the message names.
 ;;
 ;; The second filename is CPython's five-argument form, (errno, strerror,
 ;; filename, winerror, filename2); OSError.__str__ already renders it as
 ;; "... : 'src' -> 'dst'".  rename reported only its source without it.
-DEF_FUNC raise_oserror_build, RO_FRAME
+DEF_FUNC oserror_build, RO_FRAME
     mov [rbp - RO_ARGS + 16], rsi   ; args[2] = filename, or NULL for now
     mov [rbp - RO_ARGS + 24], rdx   ; args[3] = winerror; overwritten below
     mov [rbp - RO_ARGS + 32], rdx   ; args[4] = filename2, or NULL
@@ -620,7 +608,7 @@ DEF_FUNC raise_oserror_build, RO_FRAME
     pop rax
     leave
     ret
-END_FUNC raise_oserror_build
+END_FUNC oserror_build
 
 section .data
 align 8
@@ -687,7 +675,7 @@ DEF_FUNC_LOCAL oserror_named, ONM_FRAME
     mov [rbp - ONM_KEY], rax
     mov rdi, [rbp - ONM_DICT]
     mov rsi, rax
-    call dict_get                       ; a borrowed Value, or 0 for a miss
+    call dict_get_quiet                       ; a borrowed Value, or 0 for a miss
     mov [rbp - ONM_DICT], rax           ; ONM_DICT is spent; hold the answer
     mov rdi, [rbp - ONM_KEY]
     call obj_decref                     ; str_intern_cstr's own reference
@@ -829,7 +817,7 @@ DEF_FUNC oserror_reduce, ORD_FRAME
     mov [rbp - ORD_ORIG], rax           ; ORD_ORIG is spent; hold the key
     mov rdi, rbx
     mov rsi, rax
-    call dict_del_opt                   ; -1 when it was never there
+    call dict_del_opt                   ; -1 when it was never there -- err: the key is an interned attribute name
     mov rdi, [rbp - ORD_ORIG]
     call obj_decref
     add r12, 8

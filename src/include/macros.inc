@@ -138,6 +138,15 @@
 ; gs-relative store, measured on a Core Ultra 9 285K, issues at half the rate
 ; of a plain one and cost this loop 20% on the core benchmarks.
 %macro DISPATCH 0
+%ifdef EXC_STRICT
+    ; `make EXC_STRICT=1`: an instruction that ends with an exception still
+    ; pending is a bug -- it either lost an error or left a stale one for
+    ; ERR_PENDING / ERR_M1 to misread -- and this is where it stops.
+    cmp qword [gs:ThreadState.current_exception], 0
+    je %%exc_strict_ok
+    ud2
+%%exc_strict_ok:
+%endif
     mov [r12 + PyFrame.disp_ip], rbx  ; save bytecode IP for exception unwind
     mov [r12 + PyFrame.disp_sp], r13  ; save value stack ptr for exception unwind
     movzx eax, byte [rbx]         ; load opcode
@@ -257,8 +266,10 @@
 ; A dunder registered by name is called with whatever the caller passed, and
 ; the slot behind it decodes args[0] without asking -- so str.__getitem__(5, 0)
 ; is a wild pointer, not an error.  Both forms read args[0] out of rdi, hand
-; it to dunder_require_self, and leave rdi untouched; the helper raises and
-; does not return when the receiver is of the wrong type.
+; it to dunder_require_self, and leave rdi untouched.  A receiver of the wrong
+; type is the helper's 0, and the macro RETURNS it from the function it sits
+; in -- (0, 0), the TypeError pending -- which is right only because it is
+; the function's first act: nothing is held and nothing is pushed.
 ;
 ; Both preserve rdi AND rsi.  rsi is the argument count, and every one of
 ; these checks its arity after the receiver, so clobbering it turns a correct
@@ -281,9 +292,11 @@
     CSTRING rcx, %2
 %endif
     extern dunder_require_self
+    extern require_self_refused
     call dunder_require_self
     pop rsi
     pop rdi
+    ERR_NULL require_self_refused       ; nothing is held yet: 0, through `leave`
 %endmacro
 
 %macro REQUIRE_SELF_BARE 1-2 0
@@ -299,10 +312,12 @@
     CSTRING rcx, %2
 %endif
     extern dunder_require_self
+    extern require_self_refused_bare
     call dunder_require_self
     add rsp, 8
     pop rsi
     pop rdi
+    ERR_NULL require_self_refused_bare  ; no frame and nothing held: 0, by `ret`
 %endmacro
 
 ; Raise an exception with a literal message.  436 sites hand-rolled this triple.
@@ -331,10 +346,6 @@
     call raise_exception
 %endmacro
 
-; The same, but it comes back: set_exception records the exception and returns,
-; leaving the unwind to the interpreter frame.  For a helper that holds owned
-; references at the point it fails -- RAISE would abandon the C stack and leak
-; every one of them.  The caller must return its documented error value.
 ; A builtin that takes no keyword arguments at all, refusing them the way
 ; CPython does.  kw_names_pending is CONSUMED either way: a builtin that
 ; leaves it set hands its caller's keywords to whatever call runs next.
@@ -375,10 +386,152 @@
 %%no_kw:
 %endmacro
 
+; The returning forms of the two above: the same tests, FAIL instead of RAISE.
+; %label is the function's error exit, which answers its `Fails:` value.
+;
+;   NO_KEYWORDS_RET "set() takes no keyword arguments", .fail
+;   NO_KEYWORDS_TP_INIT_RET owner_type, "tuple() takes no ...", .fail
+%macro NO_KEYWORDS_RET 2        ; %1 = the whole message, %2 = the error exit
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je %%no_kw
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    FAIL exc_TypeError_type, %1, %2
+%%no_kw:
+%endmacro
+
+%macro NO_KEYWORDS_TP_INIT_RET 3 ; %1 = the owning type, %2 = the whole
+                                ; message, %3 = the error exit
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je %%no_kw
+    lea rcx, [rel %1]
+    cmp rax, rcx
+    je %%refuse
+    mov rdx, [rax + PyTypeObject.tp_init]
+    cmp rdx, [rcx + PyTypeObject.tp_init]
+    jne %%no_kw
+%%refuse:
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    FAIL exc_TypeError_type, %2, %3
+%%no_kw:
+%endmacro
+
+; The same, but it comes back: set_exception records the exception and returns,
+; leaving the unwind to the interpreter frame.  For a helper that holds owned
+; references at the point it fails -- RAISE would abandon the C stack and leak
+; every one of them.  The caller must return its documented error value.
 %macro SET_EXC 2                ; %1 = exception type symbol, %2 = message
     lea rdi, [rel %1]
     CSTRING rsi, %2
     call set_exception
+%endmacro
+
+; ---------------------------------------------------------------------------
+; ERRORS RETURN.  Only an opcode handler may jump into the unwinder: it IS the
+; eval loop, and the unwinder releases its operands.  Everything that is
+; CALLED records the exception and returns, through the same epilogue its
+; success path uses, so what it holds is released and its caller can act.
+; A function's docblock says which value means "failed":
+;
+;   ;; Fails: 0     0 is never an answer            -> ERR_NULL
+;   ;; Fails: 0?    0 is an answer; 0 AND pending   -> ERR_PENDING
+;   ;; Fails: -1    -1 is an answer; -1 AND pending -> ERR_M1
+;
+; lint.py holds every `call` of such a function to one of the checks below
+; within three instructions, or to the words `err:` in a comment on the call
+; saying why none is needed.
+;
+;   FAIL exc_TypeError_type, "message", .fail     record it, go to the exit
+;   call dict_get_item
+;   ERR_NULL .fail                                 propagate through my exit
+;
+; The _JUMP forms are a HANDLER's check: the callee returned its error, and
+; the handler -- which is the eval loop -- passes it to the unwinder.  lint.py
+; refuses them, and every other way into the unwinder, outside src/opcodes/
+; and src/eval.asm.
+; ---------------------------------------------------------------------------
+%macro FAIL 3                   ; %1 = type, %2 = message, %3 = the error exit
+    SET_EXC %1, %2
+    jmp %3
+%endmacro
+
+%macro ERR_NULL 1               ; rax == 0 -> %1
+    test rax, rax
+    jz %1
+%endmacro
+
+%macro ERR_PENDING 1            ; rax == 0 and an exception pending -> %1
+    test rax, rax
+    jnz %%ok
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne %1
+%%ok:
+%endmacro
+
+%macro ERR_M1 1                 ; rax == -1 and an exception pending -> %1
+    cmp rax, -1
+    jne %%ok
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne %1
+%%ok:
+%endmacro
+
+; After dict_get, on a path where a MISS is the common answer -- attribute
+; and global lookup.  dict_get leaves rdx = -2 beside a 0 that is a failure
+; (-1 beside one that is "absent"), so telling them apart is a register
+; compare where ERR_PENDING is a load through gs on every miss.
+%macro ERR_DICT_GET 1           ; rax == 0 and rdx == -2 -> %1
+    test rax, rax
+    jnz %%ok
+    cmp rdx, -2
+    je %1
+%%ok:
+%endmacro
+
+; The same after dict_get_index, whose answer is an index and whose miss is
+; a negative one.
+%macro ERR_DICT_IDX 1           ; rax < 0 and rdx == -2 -> %1
+    test rax, rax
+    jns %%ok
+    cmp rdx, -2
+    je %1
+%%ok:
+%endmacro
+
+%macro ERR_DICT_GET_JUMP 0
+    ERR_DICT_GET eval_exception_unwind
+%endmacro
+
+%macro ERR_DICT_IDX_JUMP 0
+    ERR_DICT_IDX eval_exception_unwind
+%endmacro
+
+%macro ERR_NULL_JUMP 0
+    ERR_NULL eval_exception_unwind
+%endmacro
+
+%macro ERR_PENDING_JUMP 0
+    ERR_PENDING eval_exception_unwind
+%endmacro
+
+%macro ERR_M1_JUMP 0
+    ERR_M1 eval_exception_unwind
+%endmacro
+
+; After a tp_getattr answered: go to %1 unless it answered 0 with something
+; pending that is NOT a __getattr__ hook's own AttributeError.  That one is
+; the protocol saying "absent" (attr_error_pending says which it is), and the
+; miss path of each caller already knows what to do with it; anything else
+; pending is a failure, and the caller follows this with ERR_PENDING.
+;
+;   call rax                        ; tp_getattr
+;   GETATTR_HOOK_SKIP .have
+;   ERR_PENDING_JUMP
+; .have:
+%macro GETATTR_HOOK_SKIP 1
+    test rax, rax
+    jnz %1
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    jne %1
 %endmacro
 
 ; Build a builtin function and store it in a module dict under its own name.
@@ -398,7 +551,8 @@
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    extern dict_set_str
+    call dict_set_str           ; a module's own dict, before it is published
     pop rdi
     call obj_decref
     pop rdi

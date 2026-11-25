@@ -28,6 +28,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern module_new
@@ -43,7 +44,7 @@ extern builtin_func_new
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_KeyError_type
-extern raise_exception
+extern set_exception
 extern int_from_i64
 extern obj_incref
 extern float_from_f64
@@ -191,11 +192,17 @@ DEF_FUNC unicodedata_lookup, UDL_FRAME
     ret
 
 .udl_miss:
-    RAISE exc_KeyError_type, "undefined character name"
+    SET_EXC exc_KeyError_type, "undefined character name"
+    leave                       ; set_exception answered 0
+    ret
 .udl_type:
-    RAISE exc_TypeError_type, "lookup() argument must be str"
+    SET_EXC exc_TypeError_type, "lookup() argument must be str"
+    leave                       ; set_exception answered 0
+    ret
 .udl_arity:
-    RAISE exc_TypeError_type, "lookup() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "lookup() takes exactly one argument"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_lookup
 
 ;; ============================================================================
@@ -248,11 +255,17 @@ DEF_FUNC unicodedata_name, UDN_FRAME
     ret
 
 .udn_no_name:
-    RAISE exc_ValueError_type, "no such name"
+    SET_EXC exc_ValueError_type, "no such name"
+    leave                       ; set_exception answered 0
+    ret
 .udn_type:
-    RAISE exc_TypeError_type, "name() argument 1 must be a unicode character"
+    SET_EXC exc_TypeError_type, "name() argument 1 must be a unicode character"
+    leave                       ; set_exception answered 0
+    ret
 .udn_arity:
-    RAISE exc_TypeError_type, "name() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "name() takes 1 or 2 arguments"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_name
 
 ;; ============================================================================
@@ -300,11 +313,17 @@ DEF_FUNC unicodedata_decimal, UDD_FRAME
     ret
 
 .udd_not_decimal:
-    RAISE exc_ValueError_type, "not a decimal"
+    SET_EXC exc_ValueError_type, "not a decimal"
+    leave                       ; set_exception answered 0
+    ret
 .udd_type:
-    RAISE exc_TypeError_type, "decimal() argument 1 must be a unicode character"
+    SET_EXC exc_TypeError_type, "decimal() argument 1 must be a unicode character"
+    leave                       ; set_exception answered 0
+    ret
 .udd_arity:
-    RAISE exc_TypeError_type, "decimal() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "decimal() takes 1 or 2 arguments"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_decimal
 
 ;; ============================================================================
@@ -398,9 +417,13 @@ DEF_FUNC unicodedata_%1
     leave
     ret
 .udsp_type:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+    leave                       ; set_exception answered 0
+    ret
 .udsp_arity:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_%1
 %endmacro
 
@@ -432,9 +455,13 @@ DEF_FUNC unicodedata_%1
     leave
     ret
 .udip_type:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+    leave                       ; set_exception answered 0
+    ret
 .udip_arity:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_%1
 %endmacro
 
@@ -489,11 +516,17 @@ DEF_FUNC unicodedata_digit, UDG_FRAME
     leave
     ret
 .udg_not_digit:
-    RAISE exc_ValueError_type, "not a digit"
+    SET_EXC exc_ValueError_type, "not a digit"
+    leave                       ; set_exception answered 0
+    ret
 .udg_type:
-    RAISE exc_TypeError_type, "digit() argument 1 must be a unicode character"
+    SET_EXC exc_TypeError_type, "digit() argument 1 must be a unicode character"
+    leave                       ; set_exception answered 0
+    ret
 .udg_arity:
-    RAISE exc_TypeError_type, "digit() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "digit() takes 1 or 2 arguments"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_digit
 
 ;; ============================================================================
@@ -544,11 +577,17 @@ DEF_FUNC unicodedata_numeric, UDNM_FRAME
     leave
     ret
 .udnm_not_numeric:
-    RAISE exc_ValueError_type, "not a numeric character"
+    SET_EXC exc_ValueError_type, "not a numeric character"
+    leave                       ; set_exception answered 0
+    ret
 .udnm_type:
-    RAISE exc_TypeError_type, "numeric() argument 1 must be a unicode character"
+    SET_EXC exc_TypeError_type, "numeric() argument 1 must be a unicode character"
+    leave                       ; set_exception answered 0
+    ret
 .udnm_arity:
-    RAISE exc_TypeError_type, "numeric() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "numeric() takes 1 or 2 arguments"
+    leave                       ; set_exception answered 0
+    ret
 END_FUNC unicodedata_numeric
 
 ;; ============================================================================
@@ -592,7 +631,7 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     mov rsi, rbx
     mov rdx, rax
     push rax
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     mov rdi, rbx
@@ -613,7 +652,7 @@ DEF_FUNC unicodedata_module_create, UMC_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rax
     call obj_decref

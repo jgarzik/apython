@@ -82,7 +82,10 @@ class Random:
                 import time
                 a = int(time.time() * 1000000)
         elif isinstance(a, int):
-            a = abs(a)
+            # int's own, not abs(): a subclass whose __abs__ answers None
+            # left the key empty, and CPython asks the int for the same
+            # reason (bpo-31478).
+            a = int.__abs__(a)
         else:
             a = hash(a) & 0xffffffffffffffff
 

@@ -7,6 +7,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get
+extern dict_set
+extern dict_set_str
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -14,14 +17,12 @@ extern gc_dealloc
 extern ap_free
 extern obj_decref
 extern obj_dealloc
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern obj_incref
 extern str_from_cstr
 extern str_type
 extern dict_new
-extern dict_get
-extern dict_set
 extern type_type
 extern none_singleton
 extern ap_strcmp
@@ -29,7 +30,6 @@ extern str_from_cstr_heap
 extern obj_call_n
 extern exc_AttributeError_type
 extern type_is_subtype
-extern eval_exception_unwind
 extern dir_default
 global module_dunder_dir
 
@@ -125,7 +125,7 @@ DEF_FUNC module_new_of, MNO_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rax
@@ -140,7 +140,7 @@ DEF_FUNC module_new_of, MNO_FRAME
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rax
@@ -270,6 +270,7 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     call dict_get               ; a Value; 0 is the miss, and it never raises
+    ERR_PENDING .mdd_fail
     test rax, rax
     jz .mdd_default
 
@@ -285,7 +286,7 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    call obj_call_n
+    call obj_call_n             ; err: 0 goes to the caller as it stands
     ; Release it before returning.  The result -- or the 0 that says the hook
     ; raised -- goes to a frame slot across the DECREF, because obj_dealloc
     ; clobbers every caller-saved register, rax included.
@@ -299,7 +300,12 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
 
 .mdd_default:
     mov rdi, rbx
-    call dir_default
+    call dir_default          ; err: its 0 is this method's own answer
+    pop rbx
+    leave
+    ret
+.mdd_fail:                      ; the module's dict could not be searched
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -316,9 +322,11 @@ END_FUNC module_dunder_dir
 ;;
 ;; An AttributeError out of the hook is the protocol saying "absent", and
 ;; getattr(m, n, default) and hasattr() have to be able to see that; anything
-;; else is a genuine failure in the middle of a lookup and keeps unwinding.
+;; else is a genuine failure in the middle of a lookup: 0 with it pending and
+;; the flag clear.
 ;; That is the same handshake instance_getattr's .getattr_raised uses, down to
 ;; the attr_error_pending flag raise_no_attribute reads.
+;; Fails: 0?
 ;; ============================================================================
 MG_HOOK   equ 8              ; the module's own __getattr__, owned across the call
 MG_NAME   equ 16             ; the attribute name, as the hook's one argument
@@ -355,6 +363,7 @@ DEF_FUNC module_getattr, MG_FRAME
     jz .not_found
     mov rsi, r12
     call dict_get
+    ERR_DICT_GET .mg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
     ; INCREF if found (dict_get returns borrowed ref)
@@ -387,8 +396,32 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     call dict_get               ; a Value; 0 is the miss, and it never raises
+    ERR_PENDING .mg_really_not_found
     test rax, rax
     jz .mg_really_not_found
+    mov [rbp - MG_HOOK], rax    ; borrowed; nothing below runs Python
+
+    ; There is a hook -- but it answers a MISS, and the dict is only half of
+    ; what can find the name.  CPython's module_getattro runs the generic
+    ; lookup first, so anything the type supplies (`__class__`, `__reduce__`,
+    ; a method of a ModuleType subclass) never reaches the hook.  It used to:
+    ; isinstance() reads __class__ off every object, and ran the user's hook
+    ; on any module that had one.  Answering 0 with nothing pending hands the
+    ; name back to the caller's own walk of the type, exactly as a module
+    ; with no hook does.
+    mov rdi, [rbx + PyObject.ob_type]
+    mov rsi, r12
+    extern type_lookup_cached
+    call type_lookup_cached     ; rax = payload, edx = tag; borrowed
+    test edx, edx
+    jnz .mg_really_not_found
+    mov rdi, rbx
+    mov rsi, r12
+    extern obj_generic_attr
+    call obj_generic_attr       ; __class__, which no dict holds; owned, or 0
+    test rax, rax
+    jnz .mg_generic
+    mov rax, [rbp - MG_HOOK]
 
     ; The hook, called with the attribute name.  obj_call_n returns rather
     ; than unwinding, and refuses a non-callable with a TypeError of its own --
@@ -408,11 +441,10 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rdi, rax
     lea rsi, [rbp - MG_NAME]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .mg_hook_raised, below
     ; Release it here, before anything branches: the hook is finished with,
-    ; and one release point on the straight line is worth four on the exits --
-    ; the unwind tail below abandons this frame into eval_exception_unwind and
-    ; would be the easy one to forget.  The result, or the 0 that says the
+    ; and one release point on the straight line is worth four on the exits.
+    ; The result, or the 0 that says the
     ; hook raised, goes to a frame slot across the DECREF, because obj_dealloc
     ; clobbers every caller-saved register, rax included.
     mov [rbp - MG_NAME], rax
@@ -426,11 +458,17 @@ DEF_FUNC module_getattr, MG_FRAME
     leave
     ret                         ; already a Value, and owned
 
+.mg_generic:
+    pop r12
+    pop rbx
+    leave
+    ret                         ; a Value, and owned
+
 .mg_hook_raised:
     ; An AttributeError is "absent" and has to reach getattr()'s default and
     ; hasattr(); raise_no_attribute reads attr_error_pending and propagates
     ; this one rather than replacing it, so `m.missing` still reports what the
-    ; hook said.  Anything else keeps unwinding.
+    ; hook said.  Anything else is a failure, handed back as one.
     mov rax, [gs:ThreadState.current_exception]
     test rax, rax
     jz .mg_really_not_found
@@ -448,10 +486,12 @@ DEF_FUNC module_getattr, MG_FRAME
     ret
 
 .mg_hook_unwind:
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    xor eax, eax
     pop r12
     pop rbx
     leave
-    jmp eval_exception_unwind
+    ret
 
 .mg_really_not_found:
     RET_NULL
@@ -463,8 +503,10 @@ DEF_FUNC module_getattr, MG_FRAME
 END_FUNC module_getattr
 
 ;; ============================================================================
-;; module_setattr(PyObject *self, PyObject *name_str, PyObject *value) -> int
+;; module_setattr(PyObject *self, PyObject *name_str, PyObject *value)
+;;   -> rax = 0, or -1 with the AttributeError pending
 ;; Set attribute in module's dict
+;; Fails: -1
 ;; ============================================================================
 DEF_FUNC module_setattr
     ; A NULL value is tp_setattr's DELETE convention -- the same one
@@ -483,9 +525,8 @@ DEF_FUNC module_setattr
     jz .ms_delete
     mov rdi, [rax + PyModuleObject.mod_dict]
     ; rsi = name_str and rdx = value are both already Values
-    call dict_set
-    xor eax, eax               ; return 0 (success)
-    leave
+    call dict_set       ; err: returned to the caller as is
+    leave                       ; rax is dict_set's own 0 or -1
     ret
 
 .ms_delete:
@@ -493,7 +534,7 @@ DEF_FUNC module_setattr
     push rsi                    ; the name, likewise
     mov rdi, [rax + PyModuleObject.mod_dict]
     extern dict_del_opt
-    call dict_del_opt           ; -1 when the name was never there
+    call dict_del_opt           ; -1 when the name was never there -- err: the key is an attribute name, a str
     pop rsi
     pop rdi
     test eax, eax
@@ -506,9 +547,12 @@ DEF_FUNC module_setattr
     ; CPython raises AttributeError naming the module, exactly as a failed
     ; READ of the same name does.  Storing a NULL under a fresh key, which is
     ; what this used to do, invented an entry instead.
-    xor edx, edx
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    extern set_no_attribute
+    call set_no_attribute
+    mov rax, -1
+    leave
+    ret
 END_FUNC module_setattr
 
 ;; ============================================================================
@@ -545,11 +589,12 @@ DEF_FUNC module_repr, MR_FRAME
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get       ; err: tested below, once the name is released
     pop rdi
     push rax
     call obj_decref
     pop rax
+    ERR_PENDING .mr_fail
     test rax, rax
     jz .mr_no_file
     V_UNPACK rax, rdx
@@ -642,6 +687,11 @@ DEF_FUNC module_repr, MR_FRAME
     pop rbx
     leave
     ret
+.mr_fail:                       ; the module's dict could not be searched
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC module_repr
 
 ;; ============================================================================
@@ -682,32 +732,42 @@ DEF_FUNC_LOCAL module_repr_from, MRF_FRAME
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
     call mrf_append
+    ERR_NULL .mrf_fail
     mov [rbp - MRF_ACC], rax
     lea rdi, [rel mod_repr_from_r]
     call str_from_cstr_heap
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
     call mrf_append
+    ERR_NULL .mrf_fail
     mov [rbp - MRF_ACC], rax
     mov rdi, [rbp - MRF_FILE]
     call obj_repr
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
     call mrf_append
+    ERR_NULL .mrf_fail
     mov [rbp - MRF_ACC], rax
     lea rdi, [rel mod_repr_close_r]
     call str_from_cstr_heap
     mov rdi, [rbp - MRF_ACC]
     mov rsi, rax
-    call mrf_append
+    call mrf_append           ; err: its 0 is this function's own answer
     mov edx, TAG_PTR
+    leave
+    ret
+.mrf_fail:
+    RET_NULL                    ; a __repr__ raised; the pieces are released
     leave
     ret
 END_FUNC module_repr_from
 
 ;; ============================================================================
-;; mrf_append(rdi = a str, owned, rsi = a str, owned) -> rax = the two
+;; mrf_append(rdi = a str, owned, rsi = a str, owned, or 0) -> rax = the two
 ;;   concatenated; both references released
+;; Fails: 0
+;; when the second is 0 -- an obj_repr that raised, handed straight on -- with
+;; that exception still pending.
 ;; ============================================================================
 MRA_A     equ 8
 MRA_B     equ 16
@@ -715,9 +775,12 @@ MRA_FRAME equ 16
 DEF_FUNC_LOCAL mrf_append, MRA_FRAME
     mov [rbp - MRA_A], rdi
     mov [rbp - MRA_B], rsi
+    test rsi, rsi
+    jz .mra_fail
     mov ecx, TAG_PTR
     extern str_concat
     call str_concat
+    ERR_NULL .mra_fail
     push rax
     sub rsp, 8
     mov rdi, [rbp - MRA_A]
@@ -726,6 +789,17 @@ DEF_FUNC_LOCAL mrf_append, MRA_FRAME
     call obj_decref
     add rsp, 8
     pop rax
+    leave
+    ret
+.mra_fail:
+    mov rdi, [rbp - MRA_A]
+    call obj_decref
+    mov rdi, [rbp - MRA_B]
+    test rdi, rdi
+    jz .mra_fail_out
+    call obj_decref
+.mra_fail_out:
+    xor eax, eax
     leave
     ret
 END_FUNC mrf_append
@@ -801,8 +875,6 @@ extern ap_free
 extern obj_incref
 extern obj_decref
 extern dict_new
-extern dict_get
-extern dict_set
 extern dict_type
 extern str_type
 extern str_from_cstr
@@ -810,7 +882,6 @@ extern str_from_cstr_heap
 extern str_new_heap
 extern obj_repr
 extern type_type
-extern raise_exception
 extern exc_TypeError_type
 
 section .text
@@ -871,6 +942,7 @@ END_FUNC namespace_new
 ;; namespace_dealloc, sixteen bytes above the block gc_alloc had handed out.
 ;;
 ;; CPython takes keywords only, and says so.
+;; Fails: 0
 ;; ============================================================================
 NTC_TYPE  equ 8
 NTC_NS    equ 16
@@ -923,6 +995,7 @@ DEF_FUNC namespace_type_call, NTC_FRAME
     mov rdi, [rbp - NTC_NS]
     mov rdi, [rdi + PySimpleNamespaceObject.ns_dict]
     call dict_set
+    ERR_M1 .ntc_set_raised
     inc qword [rbp - NTC_I]
     jmp .ntc_kw_loop
 
@@ -939,7 +1012,11 @@ DEF_FUNC namespace_type_call, NTC_FRAME
     ret
 
 .ntc_positional:
-    RAISE exc_TypeError_type, "no positional arguments expected"
+    FAIL exc_TypeError_type, "no positional arguments expected", .ntc_fail
+.ntc_set_raised:
+    mov rdi, [rbp - NTC_NS]     ; the namespace being filled
+    call obj_decref
+    jmp .ntc_fail
 END_FUNC namespace_type_call
 
 ;; namespace_set(rdi = ns, rsi = name cstr, rdx = value Value)
@@ -955,7 +1032,7 @@ DEF_FUNC namespace_set
     mov rdi, rbx
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop r12
@@ -1018,6 +1095,7 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     mov rdi, [rbx + PySimpleNamespaceObject.ns_dict]
     mov rsi, [rbp - NSG_NAME]
     call dict_get
+    ERR_PENDING .nsg_none
     V_UNPACK rax, rdx
     test edx, edx
     jz .nsg_none
@@ -1038,7 +1116,9 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     ret
 END_FUNC namespace_getattr
 
-;; namespace_setattr(rdi = self, rsi = name, rdx = value Value) -> 0
+;; namespace_setattr(rdi = self, rsi = name, rdx = value Value)
+;;   -> rax = 0, or -1 with the exception pending
+;; Fails: -1
 NSS_SELF  equ 8
 NSS_NAME  equ 16
 NSS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
@@ -1053,14 +1133,13 @@ DEF_FUNC namespace_setattr, NSS_FRAME
     ; `del ns.a` then showed as `a=` in the repr and read back as garbage.
     test rdx, rdx
     jz .nss_delete
-    call dict_set
-    xor eax, eax
-    leave
+    call dict_set       ; err: returned to the caller as is
+    leave                       ; rax is dict_set's own 0 or -1
     ret
 
 .nss_delete:
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is an attribute name, a str
     test eax, eax
     js .nss_missing
     xor eax, eax
@@ -1070,12 +1149,16 @@ DEF_FUNC namespace_setattr, NSS_FRAME
 .nss_missing:
     mov rdi, [rbp - NSS_SELF]
     mov rsi, [rbp - NSS_NAME]
-    xor edx, edx
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    mov qword [gs:ThreadState.attr_error_pending], 0
+    call set_no_attribute
+    jmp .nss_fail
 
 .nss_no_dict:
-    RAISE exc_TypeError_type, "namespace has no attribute storage"
+    SET_EXC exc_TypeError_type, "namespace has no attribute storage"
+.nss_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC namespace_setattr
 
 ;; namespace_repr(rdi = self) -> str   "namespace(a=1, b=2)"
@@ -1104,6 +1187,7 @@ DEF_FUNC namespace_repr, NR_FRAME
     jnz .nr_recursive
     mov rdi, [rbp - NR_SELF]
     call repr_push
+    ERR_M1 .nr_too_deep         ; nothing was pushed
 
     lea rbx, [rbp - NR_BUF]
     xor r13d, r13d
@@ -1131,6 +1215,14 @@ DEF_FUNC namespace_repr, NR_FRAME
     mov byte [rbx + r13], '('
     inc r13
     jmp .nr_setup
+
+.nr_too_deep:
+    xor eax, eax                ; the RecursionError is pending
+    xor edx, edx
+    pop r13
+    pop rbx
+    leave
+    ret
 
 .nr_recursive:
     lea rdi, [rel nr_recursive_str]
@@ -1398,8 +1490,9 @@ section .text
 
 ;; ============================================================================
 ;; module_type_new(rdi = type, rsi = args, rdx = nargs)
-;;   -> fat (rax = the new module, rdx = TAG_PTR); raises and does not return
-;;      on a bad argument
+;;   -> fat (rax = the new module, rdx = TAG_PTR); (0, 0) with the TypeError
+;;      pending on a bad argument
+;; Fails: 0
 ;;
 ;; `types.ModuleType(name[, doc])`.  module_type had no tp_new and no tp_init,
 ;; so type_call fell through to instance_new, which allocated
@@ -1463,7 +1556,7 @@ DEF_FUNC module_type_new, MTN_FRAME
     mov rax, [rbp - MTN_MOD]
     mov rdi, [rax + PyModuleObject.mod_dict]
     mov rdx, rcx
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref
@@ -1482,13 +1575,17 @@ DEF_FUNC module_type_new, MTN_FRAME
 
 .mtn_bad_name:
     add rsp, 16
-    RAISE exc_TypeError_type, "module.__init__() argument 1 must be str, not None"
+    FAIL exc_TypeError_type, "module.__init__() argument 1 must be str, not None", .mtn_fail
 .mtn_arity:
     CSTRING rdi, "module() takes at most 2 arguments ("
     mov rsi, rdx
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+.mtn_fail:
+    RET_NULL
+    leave
+    ret
 END_FUNC module_type_new
 
 ;; MMI_SET key_cstr, value -- write one entry into the module being
@@ -1550,6 +1647,7 @@ END_FUNC module_type_new
 ;; -- and with neither name in module's tp_dict, `super().__init__` resolved
 ;; to object's and raised, while `super().__new__` hit the object.__new__
 ;; gate.  module_type had no tp_dict at all.
+;; Fails: 0
 ;; ============================================================================
 MMN_TYPE  equ 8
 MMN_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -1591,11 +1689,15 @@ DEF_FUNC module_method_new, MMN_FRAME
     ret
 
 .mmn_no_args:
-    RAISE exc_TypeError_type, "module.__new__(): not enough arguments"
+    FAIL exc_TypeError_type, "module.__new__(): not enough arguments", .mmn_fail
 .mmn_not_a_type:
-    RAISE exc_TypeError_type, "module.__new__(X): X is not a type object"
+    FAIL exc_TypeError_type, "module.__new__(X): X is not a type object", .mmn_fail
 .mmn_not_a_module:
-    RAISE exc_TypeError_type, "module.__new__(X): X is not a subtype of module"
+    SET_EXC exc_TypeError_type, "module.__new__(X): X is not a subtype of module"
+.mmn_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC module_method_new
 
 ;; ============================================================================
@@ -1603,6 +1705,7 @@ END_FUNC module_method_new
 ;;
 ;; `module.__init__(self, name[, doc])` -- the half that writes the name, the
 ;; docstring and the three attributes CPython leaves as None.
+;; Fails: 0
 ;; ============================================================================
 MMI_SELF  equ 8
 MMI_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -1681,13 +1784,17 @@ DEF_FUNC module_method_init, MMI_FRAME
 
 .mmi_bad_self:
     add rsp, 16
-    RAISE exc_TypeError_type, \
-        "module.__init__() argument 1 must be a module"
+    FAIL exc_TypeError_type, \
+        "module.__init__() argument 1 must be a module", .mmi_fail
 .mmi_bad_name:
-    RAISE exc_TypeError_type, \
-        "module.__init__() argument 1 must be str, not None"
+    FAIL exc_TypeError_type, \
+        "module.__init__() argument 1 must be str, not None", .mmi_fail
 .mmi_arity:
-    RAISE exc_TypeError_type, "module.__init__() takes at most 2 arguments"
+    SET_EXC exc_TypeError_type, "module.__init__() takes at most 2 arguments"
+.mmi_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC module_method_init
 
 extern new_from_slot
@@ -1706,7 +1813,7 @@ DEF_FUNC namespace_dunder_new
     mov rdx, rsi
     mov rsi, rdi
     lea rdi, [rel namespace_type]
-    call new_from_slot
+    call new_from_slot          ; err: its 0 is this __new__'s own
     leave
     ret
 END_FUNC namespace_dunder_new

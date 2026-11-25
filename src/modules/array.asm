@@ -28,6 +28,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern obj_decref
@@ -43,7 +44,7 @@ extern obj_as_slice_index
 extern none_singleton
 extern bool_true
 extern bool_false
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_IndexError_type
@@ -52,7 +53,6 @@ extern type_type
 extern str_type
 extern int_type
 extern int_promote_mpz
-extern eval_exception_unwind
 extern bool_type
 extern float_type
 extern bytes_type
@@ -174,7 +174,8 @@ DEF_FUNC array_new_empty, 8
 END_FUNC array_new_empty
 
 ;; ============================================================================
-;; array_reserve(rdi = the array, rsi = items wanted) -> eax = 1, or 0 raising
+;; array_reserve(rdi = the array, rsi = items wanted) -> eax = 1
+;; Fails: 0
 ;;
 ;; Grows by doubling, as list does.  The buffer MOVES, which is why nothing
 ;; may hold a pointer into it across an append.
@@ -190,8 +191,7 @@ DEF_FUNC array_reserve, AR_FRAME
 
     ; Nothing may be holding a pointer into the buffer: it is about to move.
     call array_no_exports
-    test eax, eax
-    jz .arr_raised
+    ERR_NULL .arr_raised
     mov rdi, [rbp - AR_ARR]
     mov rsi, [rbp - AR_WANT]
 
@@ -228,7 +228,9 @@ DEF_FUNC array_reserve, AR_FRAME
     ret
 .arr_nomem:
     extern exc_MemoryError_type
-    RAISE exc_MemoryError_type, "out of memory"
+    SET_EXC exc_MemoryError_type, "out of memory"
+    leave
+    ret
 END_FUNC array_reserve
 
 ;; ============================================================================
@@ -335,7 +337,7 @@ DEF_FUNC array_item_value, AIV_FRAME
     lea rdi, [rbp - AIV_ARG]
     mov esi, 1
     extern builtin_chr
-    call builtin_chr
+    call builtin_chr            ; err: its 0 is this function's own
     leave
     ret
 END_FUNC array_item_value
@@ -694,8 +696,7 @@ DEF_FUNC_LOCAL array_int_arg
     ret
 .aia_hand_over:
     call obj_as_index
-    cmp qword [gs:ThreadState.current_exception], 0
-    jne .aia_failed
+    ERR_M1 .aia_failed
     mov edx, 1
     leave
     ret
@@ -739,20 +740,18 @@ DEF_FUNC array_richcompare, ARC_FRAME
     mov qword [rbp - ARC_L2], 0
 
     call array_tolist
-    test rax, rax
-    jz .arc_error
+    ERR_NULL .arc_error
     mov [rbp - ARC_L1], rax
     mov rdi, [rbp - ARC_RIGHT]
     call array_tolist
-    test rax, rax
-    jz .arc_error
+    ERR_NULL .arc_error
     mov [rbp - ARC_L2], rax
 
     mov rdi, [rbp - ARC_L1]
     mov rsi, rax
     mov rdx, [rbp - ARC_OP]
     extern list_richcompare
-    call list_richcompare
+    call list_richcompare     ; err: (0, 0) with the exception pending is this slot's answer too
     mov [rbp - ARC_RES], rax
     mov [rbp - ARC_TAG], rdx
     call .arc_drop
@@ -761,10 +760,8 @@ DEF_FUNC array_richcompare, ARC_FRAME
     leave
     ret
 
-.arc_error:
+.arc_error:                     ; tp_richcompare: 0 with it pending
     call .arc_drop
-    leave
-    jmp eval_exception_unwind
 
 .arc_not_impl:
     RET_NULL
@@ -845,7 +842,8 @@ DEF_FUNC array_sq_item
 END_FUNC array_sq_item
 
 ;; ============================================================================
-;; array_append_value(rdi = the array, rsi = a Value) -> eax = 1, or 0 raising
+;; array_append_value(rdi = the array, rsi = a Value) -> eax = 1
+;; Fails: 0
 ;; ============================================================================
 AAV_ARR   equ 8
 AAV_VAL   equ 16
@@ -857,14 +855,12 @@ DEF_FUNC array_append_value, AAV_FRAME
     ; that moves the buffer: CPython's array_resize makes this test first, and
     ; an append that happens to fit the spare capacity is a resize all the same.
     call array_no_exports
-    test eax, eax
-    jz .aav_fail
+    ERR_NULL .aav_fail
     mov rdi, [rbp - AAV_ARR]
     mov rsi, [rdi + PyArrayObject.ob_size]
     inc rsi
     call array_reserve
-    test eax, eax
-    jz .aav_fail
+    ERR_NULL .aav_fail
     mov rdi, [rbp - AAV_ARR]
     mov rsi, [rdi + PyArrayObject.ob_size]
     mov rdx, [rbp - AAV_VAL]
@@ -883,7 +879,8 @@ DEF_FUNC array_append_value, AAV_FRAME
 END_FUNC array_append_value
 
 ;; ============================================================================
-;; array_extend_iterable(rdi = the array, rsi = a Value) -> eax = 1, or 0
+;; array_extend_iterable(rdi = the array, rsi = a Value) -> eax = 1
+;; Fails: 0
 ;;
 ;; Another array of the SAME typecode is copied wholesale; anything else is
 ;; iterated and appended one item at a time, which is what makes the range
@@ -899,8 +896,7 @@ DEF_FUNC array_extend_iterable, 40
 
     ; As in array_append_value: the length is about to change.
     call array_no_exports
-    test eax, eax
-    jz .aei_fail
+    ERR_NULL .aei_fail
     mov rdi, [rbp - AEI_ARR]
 
     ; The same typecode: a straight copy, and the only path that does not go
@@ -918,8 +914,7 @@ DEF_FUNC array_extend_iterable, 40
     mov rsi, [rdi + PyArrayObject.ob_size]
     add rsi, [rbx + PyArrayObject.ob_size]
     call array_reserve
-    test eax, eax
-    jz .aei_fail
+    ERR_NULL .aei_fail
     mov rdi, [rbp - AEI_ARR]
     mov rax, [rdi + PyArrayObject.ob_size]
     imul rax, [rdi + PyArrayObject.ob_isize]
@@ -946,6 +941,7 @@ DEF_FUNC array_extend_iterable, 40
     mov rdi, rbx
     V_UNPACK rdi, rsi
     call get_iterator_opt
+    ERR_PENDING .aei_fail
     test rax, rax
     jz .aei_not_iterable
     mov [rbp - AEI_ITER], rax
@@ -961,7 +957,7 @@ DEF_FUNC array_extend_iterable, 40
     mov rbx, rax
     mov rdi, [rbp - AEI_ARR]
     mov rsi, rax
-    call array_append_value
+    call array_append_value     ; err: tested below, once the item is released
     push rax
     ; DECREF_V, not obj_decref: tp_iternext answers a VALUE, and an int
     ; immediate is not a pointer to dereference.
@@ -989,8 +985,7 @@ DEF_FUNC array_extend_iterable, 40
     leave
     ret
 .aei_not_iterable:
-    pop rbx
-    RAISE exc_TypeError_type, "cannot extend array from a non-iterable"
+    FAIL exc_TypeError_type, "cannot extend array from a non-iterable", .aei_fail
 END_FUNC array_extend_iterable
 
 ;; ============================================================================
@@ -1045,8 +1040,7 @@ DEF_FUNC array_type_new, ATN_FRAME
     mov rsi, [rbp - ATN_ARGS]
     mov rsi, [rsi + 8]          ; args[1], one Value per slot
     call array_extend_iterable
-    test eax, eax
-    jz .atn_drop
+    ERR_NULL .atn_drop
 
 .atn_done:
     mov rax, [rbp - ATN_ARR]
@@ -1058,29 +1052,30 @@ DEF_FUNC array_type_new, ATN_FRAME
     mov rdi, [rbp - ATN_ARR]
     call obj_decref
 .atn_null:
-    xor eax, eax
-    xor edx, edx
+    RET_NULL                    ; tp_new: rax = 0 and edx = 0
     leave
-    V_PACK rax, rdx
     ret
 .atn_bad_code:
-    RAISE exc_ValueError_type, \
-          "bad typecode (must be b, B, u, h, H, i, I, l, L, q, Q, f or d)"
+    FAIL exc_ValueError_type, \
+          "bad typecode (must be b, B, u, h, H, i, I, l, L, q, Q, f or d)", \
+          .atn_null
 .atn_not_a_char:
     ; CPython's \x02 form spells NoneType as "None", which is what this
     ; message wants: "not None", not "not NoneType".
     mov rsi, [rbp - ATN_ARR]
     CSTRING rdi, \
         `array() argument 1 must be a unicode character, not \x02`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .atn_null
 .atn_arity:
-    RAISE exc_TypeError_type, \
-          "array() takes 1 or 2 arguments"
+    FAIL exc_TypeError_type, \
+          "array() takes 1 or 2 arguments", .atn_null
 END_FUNC array_type_new
 
 ;; ============================================================================
-;; array_tolist(rdi = the array) -> rax = a new list, or 0 raising
+;; array_tolist(rdi = the array) -> rax = a new list
+;; Fails: 0
 ;; ============================================================================
 ATL_ARR   equ 8
 ATL_LIST  equ 16
@@ -1105,7 +1100,7 @@ DEF_FUNC array_tolist, ATL_FRAME
     push rax
     mov rdi, [rbp - ATL_LIST]
     mov rsi, rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     DECREF_V rdi, rcx           ; a Value; list_append took its own reference
     inc qword [rbp - ATL_I]
@@ -1170,8 +1165,7 @@ DEF_FUNC array_repr, ARP_FRAME
 
 .arp_with_items:
     call array_tolist
-    test rax, rax
-    jz .arp_null
+    ERR_NULL .arp_null
     mov [rbp - ARP_LIST], rax
     mov rdi, rax
     extern obj_repr
@@ -1260,8 +1254,7 @@ DEF_FUNC array_subscript, 8   ; + 1 push = 16, 16-aligned
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp qword [gs:ThreadState.current_exception], 0
-    jne .asub_fail
+    ERR_M1 .asub_fail
     mov rdi, rbx
     mov rsi, rax
     pop rbx
@@ -1290,8 +1283,7 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     mov rdi, rsi
     V_UNPACK rdi, rdx
     call obj_as_index
-    cmp qword [gs:ThreadState.current_exception], 0
-    jne .aas_fail
+    ERR_M1 .aas_fail
     mov rdi, [rbp - AAS_ARR]
     test rax, rax
     jns .aas_have
@@ -1321,8 +1313,7 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     ; would be left describing bytes that have moved.
     mov rdi, [rbp - AAS_ARR]
     call array_no_exports
-    test eax, eax
-    jz .aas_fail
+    ERR_NULL .aas_fail
     mov rdi, [rbp - AAS_ARR]
     mov rcx, [rdi + PyArrayObject.ob_isize]
     mov rax, [rbp - AAS_IDX]
@@ -1461,8 +1452,9 @@ array_format_strs:
 section .text
 
 ;; ============================================================================
-;; array_no_exports(rdi = an array) -> eax = 1 when it may be resized, or 0
-;;                                     with BufferError set
+;; array_no_exports(rdi = an array) -> eax = 1 when it may be resized
+;; Fails: 0
+;; (the BufferError a live export refuses a resize with)
 ;;
 ;; CPython's array_resize makes this test first, with this wording.
 ;; ============================================================================
@@ -1540,8 +1532,7 @@ DEF_FUNC array_m_append
     mov rdi, [rdi]
     mov rsi, rdx
     call array_append_value
-    test eax, eax
-    jz .ama_fail
+    ERR_NULL .ama_fail
     LOAD_NONE rax
     INCREF rax
     mov edx, TAG_PTR
@@ -1555,7 +1546,7 @@ DEF_FUNC array_m_append
     V_PACK rax, rdx
     ret
 .ama_arity:
-    RAISE exc_TypeError_type, "append() takes exactly one argument"
+    FAIL exc_TypeError_type, "append() takes exactly one argument", .ama_fail
 END_FUNC array_m_append
 
 ;; array_m_extend(args, nargs) -> None, or 0 raising
@@ -1566,8 +1557,7 @@ DEF_FUNC array_m_extend
     mov rdi, [rdi]
     mov rsi, rdx
     call array_extend_iterable
-    test eax, eax
-    jz .ame_fail
+    ERR_NULL .ame_fail
     LOAD_NONE rax
     INCREF rax
     mov edx, TAG_PTR
@@ -1581,13 +1571,13 @@ DEF_FUNC array_m_extend
     V_PACK rax, rdx
     ret
 .ame_arity:
-    RAISE exc_TypeError_type, "extend() takes exactly one argument"
+    FAIL exc_TypeError_type, "extend() takes exactly one argument", .ame_fail
 END_FUNC array_m_extend
 
 ;; array_m_tolist(args, nargs) -> a list of the items
 DEF_FUNC array_m_tolist
     mov rdi, [rdi]
-    call array_tolist
+    call array_tolist           ; err: its 0 is this method's own
     mov edx, TAG_PTR
     test rax, rax
     jnz .amt_ok
@@ -1643,8 +1633,7 @@ DEF_FUNC array_m_frombytes, 40
 
     ; As in array_append_value: the length is about to change.
     call array_no_exports
-    test eax, eax
-    jz .afb_fail
+    ERR_NULL .afb_fail
 
     ; Anything bytes-LIKE, which is what CPython takes: a bytes, a bytearray or
     ; a memoryview.  An exact-bytes test refused the other two.
@@ -1691,8 +1680,7 @@ DEF_FUNC array_m_frombytes, 40
     add rsi, [rdi + PyArrayObject.ob_size]
     call array_reserve
     pop rsi
-    test eax, eax
-    jz .afb_fail
+    ERR_NULL .afb_fail
 
     mov rdi, [rbp - AFB_ARR]
     mov rax, [rdi + PyArrayObject.ob_size]
@@ -1723,22 +1711,19 @@ DEF_FUNC array_m_frombytes, 40
     V_PACK rax, rdx
     ret
 .afb_arity:
-    pop rbx
-    RAISE exc_TypeError_type, "frombytes() takes exactly one argument"
+    FAIL exc_TypeError_type, "frombytes() takes exactly one argument", .afb_fail
 .afb_need_bytes:
-    pop rbx
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    FAIL exc_TypeError_type, "a bytes-like object is required", .afb_fail
 .afb_not_multiple:
-    pop rbx
-    RAISE exc_ValueError_type, \
-          "bytes length not a multiple of item size"
+    FAIL exc_ValueError_type, \
+          "bytes length not a multiple of item size", .afb_fail
 END_FUNC array_m_frombytes
 
 ;; ============================================================================
 ;; The two names fromfile and tofile look up, built once by
 ;; array_module_create and kept for the life of the process.
 ;;
-;; A missing `read` is reported by raise_no_attribute, which READS the name
+;; A missing `read` is reported by set_no_attribute, which READS the name
 ;; str and does not return -- so a str built per call could not be released
 ;; before it, and would leak on exactly the path that raises.
 ;; ============================================================================
@@ -1749,8 +1734,8 @@ section .text
 
 extern obj_getattr_opt
 extern obj_call_n
-extern raise_no_attribute
-extern raise_type_error_counted
+extern set_no_attribute
+extern set_type_error_counted
 extern type_is_subtype
 extern exc_EOFError_type
 
@@ -1799,6 +1784,7 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index           ; an i64, or it raises and does not return
+    ERR_M1 .idx_fail
     test rax, rax
     js .aff_negative
     mov rdi, [rbp - AFF_ARR]
@@ -1820,7 +1806,7 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     mov rdi, [rbp - AFF_FN]
     lea rsi, [rbp - AFF_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .aff_fail, below
     mov [rbp - AFF_BUF], rax
     mov rdi, [rbp - AFF_ARG]
     DECREF_V rdi, rcx           ; the count, which may have been a heap int
@@ -1857,14 +1843,12 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     ; would be left pointing at the old buffer.
     mov rdi, [rbp - AFF_ARR]
     call array_no_exports
-    test eax, eax
-    jz .aff_fail_buf
+    ERR_NULL .aff_fail_buf
     mov rdi, [rbp - AFF_ARR]
     mov rsi, [rdi + PyArrayObject.ob_size]
     add rsi, [rbp - AFF_ITEMS]
     call array_reserve
-    test eax, eax
-    jz .aff_fail_buf
+    ERR_NULL .aff_fail_buf
 
     ; The destination is read AFTER the reserve: the buffer has just moved.
     mov rdi, [rbp - AFF_ARR]
@@ -1935,8 +1919,8 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     jne .aff_fail
     mov rdi, [rbp - AFF_FILE]
     mov rsi, [rel array_str_read]
-    xor edx, edx
-    call raise_no_attribute
+    call set_no_attribute
+    jmp .aff_fail
 .aff_arity:
     ; CPython counts self in the number it wants and not in the number it
     ; got: "takes exactly 2 positional arguments (0 given)" for `a.fromfile()`.
@@ -1946,7 +1930,13 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
 .aff_arity_count:
     CSTRING rdi, "fromfile() takes exactly 2 positional arguments ("
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
+.idx_fail:                      ; not an index: the exception is pending
+    xor eax, eax
+    leave
+    ret
 END_FUNC array_m_fromfile
 
 ;; ============================================================================
@@ -2007,7 +1997,7 @@ DEF_FUNC array_m_tofile, ATF_FRAME
     mov rdi, [rbp - ATF_FN]
     lea rsi, [rbp - ATF_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .atf_fail, below
     mov [rbp - ATF_RES], rax
     mov rdi, [rbp - ATF_ARG]
     DECREF_V rdi, rcx
@@ -2035,8 +2025,8 @@ DEF_FUNC array_m_tofile, ATF_FRAME
     jne .atf_fail
     mov rdi, [rbp - ATF_FILE]
     mov rsi, [rel array_str_write]
-    xor edx, edx
-    call raise_no_attribute     ; does not return
+    call set_no_attribute
+    jmp .atf_fail
 .atf_arity:
     sub rsi, 1
     jns .atf_arity_count
@@ -2044,7 +2034,9 @@ DEF_FUNC array_m_tofile, ATF_FRAME
 .atf_arity_count:
     CSTRING rdi, "tofile() takes exactly 1 positional argument ("
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC array_m_tofile
 
 ;; ============================================================================
@@ -2118,7 +2110,9 @@ DEF_FUNC array_m_byteswap
 .abs_arity_count:
     CSTRING rdi, "array.byteswap() takes no arguments ("
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC array_m_byteswap
 
 ;; array_m_buffer_info(args, nargs) -> (address, length)
@@ -2210,7 +2204,7 @@ DEF_FUNC array_getattr, AGA_FRAME
     lea rdi, [rbp - AGA_NAME]
     mov esi, 1
     extern builtin_chr
-    call builtin_chr
+    call builtin_chr            ; err: its 0 is this function's own
     leave
     ret
 
@@ -2289,7 +2283,7 @@ DEF_FUNC array_module_create, AMC_FRAME
     call type_stamp_methods
 
     ; The two names fromfile and tofile look up.  Built here rather than per
-    ; call because raise_no_attribute reads the str and never returns.
+    ; call because the error path reads the str and has nothing to release.
     CSTRING rdi, "read"
     call str_from_cstr_heap
     test rax, rax
@@ -2316,7 +2310,7 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel array_type]
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - AMC_KEY]
     call obj_decref
 
@@ -2334,7 +2328,7 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, r12
     mov rsi, [rbp - AMC_KEY]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - AMC_KEY]
     call obj_decref
     mov rdi, [rbp - AMC_FN]
@@ -2392,7 +2386,9 @@ DEF_FUNC array_m_getitem
     leave
     jmp array_subscript
 .amg_arity:
-    RAISE exc_TypeError_type, "__getitem__() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "__getitem__() takes exactly one argument"
+    leave
+    ret
 END_FUNC array_m_getitem
 
 ;; ============================================================================
@@ -2420,7 +2416,7 @@ DEF_FUNC array_m_setitem
     V_PACK rax, rdx
     ret
 .ams_arity:
-    RAISE exc_TypeError_type, "__setitem__() takes exactly two arguments"
+    FAIL exc_TypeError_type, "__setitem__() takes exactly two arguments", .ams_fail
 END_FUNC array_m_setitem
 
 ;; ============================================================================

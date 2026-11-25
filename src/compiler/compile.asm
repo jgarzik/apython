@@ -21,9 +21,11 @@
 %include "value.inc"
 %include "compiler.inc"
 
+extern dict_get
+extern dict_set
+extern set_exception
 extern ap_free
 extern ap_strcmp
-extern dict_get
 extern obj_as_index
 extern obj_call_n
 extern str_from_cstr_heap
@@ -2030,8 +2032,6 @@ section .text
 
 extern builtins_dict_global
 extern type_is_subtype
-extern dict_get
-extern dict_set
 extern dict_type
 extern eval_frame
 extern frame_free
@@ -2040,7 +2040,6 @@ extern obj_dealloc
 extern obj_decref
 extern none_singleton
 extern obj_incref
-extern raise_exception
 extern str_from_cstr_heap
 extern str_type
 extern code_type
@@ -2070,7 +2069,10 @@ section .text
 ;; ============================================================================
 ;; ev_resolve_ns(Comp-less) - shared globals/locals resolution
 ;;   rdi = args, rsi = nargs
-;;   -> rax = globals, rdx = locals, or rax = 0 on a type error already raised
+;;   -> rax = globals, rdx = locals
+;; Fails: 0
+;;   -- a TypeError is pending: globals that are not a dict, or no frame to
+;;   take the defaults from.
 ;;
 ;; Defaults follow CPython exactly:
 ;;   neither given  -> the calling frame's globals and locals
@@ -2155,6 +2157,10 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     mov rax, [rbp - NS_GLOB]
     test rax, rax
     jz .no_frame
+    ; It is a Value, and an int is an immediate: eval("1", 1) read ob_type
+    ; off the number.
+    V_TEST_PTR rax, rcx
+    ja .globals_not_dict
     ; PyDict_Check accepts a subclass, and an exact-type test rejected one --
     ; `exec(src, MyDict())` is ordinary Python.
     mov rdi, [rax + PyObject.ob_type]
@@ -2170,17 +2176,21 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     ret
 
 .globals_not_dict:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "globals must be a real dict"
-    call raise_exception
+    FAIL exc_TypeError_type, "globals must be a real dict", .ns_fail
 .no_frame:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval must be given globals and locals when called without a frame"
-    call raise_exception
+    SET_EXC exc_TypeError_type, "eval must be given globals and locals when called without a frame"
+.ns_fail:
+    ; Neither arm is reached with ev_locals_owned set: a locals dict is only
+    ; built from the calling frame, whose globals are a dict.
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC ev_resolve_ns
 
 ;; ============================================================================
 ;; ev_inject_builtins(PyObject *globals) -> rax = the builtins mapping to use
+;; Fails: 0
 ;;
 ;; Only injected when absent -- a caller that provides its own __builtins__ is
 ;; making a deliberate choice about what the evaluated code can reach.  The
@@ -2198,6 +2208,7 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
     mov rdi, rbx
     mov rsi, r12
     call dict_get
+    ERR_PENDING .eib_fail       ; the caller's globals hold a key that would not compare
     test rax, rax
     jnz .present
 
@@ -2205,6 +2216,7 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
     mov rsi, r12
     mov rdx, [rel builtins_dict_global]
     call dict_set
+    ERR_M1 .eib_fail
     mov rax, [rel builtins_dict_global]
 .present:
     mov rbx, rax
@@ -2226,6 +2238,14 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
 .fallback:
     mov rax, [rel builtins_dict_global]
 .done:
+    pop r12
+    pop rbx
+    leave
+    ret
+.eib_fail:
+    mov rdi, r12                ; the name
+    call obj_decref
+    xor eax, eax
     pop r12
     pop rbx
     leave
@@ -2305,6 +2325,7 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     ja .bad_nargs
 
     call ev_resolve_ns
+    ERR_NULL .ev_own_prop_0     ; nothing is held yet
     mov [rbp - EV_GLOB], rax
     mov [rbp - EV_LOC], rdx
     mov rcx, [rel ev_locals_owned]
@@ -2312,6 +2333,7 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
 
     mov rdi, rax
     call ev_inject_builtins
+    ERR_NULL .propagate
     mov [rbp - EV_BLT], rax
 
     mov rdi, [rbp - EV_ARGS]
@@ -2421,13 +2443,9 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     ret
 
 .bad_nargs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() takes 1 to 3 arguments"
-    call raise_exception
+    FAIL exc_TypeError_type, "eval() takes 1 to 3 arguments", .ev_own_prop_0
 .bad_source:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "eval() arg 1 must be a string, bytes or code object"
-    call raise_exception
+    FAIL exc_TypeError_type, "eval() arg 1 must be a string, bytes or code object", .propagate
 END_FUNC builtin_eval_fn
 
 ;; ============================================================================
@@ -2465,7 +2483,7 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     xor esi, esi
     xor edx, edx
     extern import_module
-    call import_module
+    call import_module          ; err: its 0 is tested below, once the name is released
     mov [rbp - CAB_MOD], rax
     mov rdi, [rbp - CAB_KEY]
     call obj_decref
@@ -2479,7 +2497,7 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     mov rdi, [rbp - CAB_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get           ; err: a 0 goes to .cab_fail either way, with whatever is pending
     push rax
     mov rdi, [rbp - CAB_KEY]
     call obj_decref
@@ -2651,6 +2669,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     jz .co_have_flags
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .propagate
     mov [rbp - CO_FLAGS], rax
 .co_have_flags:
     mov rbx, [rbp - CO_SLOTS]           ; source
@@ -2799,7 +2818,7 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov [rbp - CO_RAW], rsi
     lea rsi, [rbp - CO_RAW]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: .propagate, below
     push rax
     mov rdi, [rbp - CO_RAW]
     call obj_decref
@@ -2816,26 +2835,19 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     call obj_decref
     jmp .propagate
 
+    ; The argument refusals.  Nothing is held at any of them -- every
+    ; argument is the caller's -- so each records its exception and leaves
+    ; through .propagate, as a failed compile does.
 .bad_nargs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "compile() takes 3 to 6 arguments"
-    call raise_exception
+    FAIL exc_TypeError_type, "compile() takes 3 to 6 arguments", .propagate
 .bad_source:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "compile() arg 1 must be a string, bytes or AST object"
-    call raise_exception
+    FAIL exc_TypeError_type, "compile() arg 1 must be a string, bytes or AST object", .propagate
 .bad_filename:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "compile() arg 2 must be a string"
-    call raise_exception
+    FAIL exc_TypeError_type, "compile() arg 2 must be a string", .propagate
 .bad_mode:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "compile() arg 3 must be a string"
-    call raise_exception
+    FAIL exc_TypeError_type, "compile() arg 3 must be a string", .propagate
 .unsupported_mode:
-    lea rdi, [rel exc_ValueError_type]
-    CSTRING rsi, "compile() mode must be 'exec', 'eval' or 'single'"
-    call raise_exception
+    FAIL exc_ValueError_type, "compile() mode must be 'exec', 'eval' or 'single'", .propagate
 END_FUNC builtin_compile_fn
 
 ;; ============================================================================
@@ -2860,6 +2872,7 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     ja .bad_nargs
 
     call ev_resolve_ns
+    ERR_NULL .ev_own_prop_2     ; nothing is held yet
     mov [rbp - EV_GLOB], rax
     mov [rbp - EV_LOC], rdx
     mov rcx, [rel ev_locals_owned]
@@ -2867,6 +2880,7 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
 
     mov rdi, rax
     call ev_inject_builtins
+    ERR_NULL .propagate
     mov [rbp - EV_BLT], rax
 
     mov rdi, [rbp - EV_ARGS]
@@ -2956,13 +2970,9 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     ret
 
 .bad_nargs:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "exec() takes 1 to 3 arguments"
-    call raise_exception
+    FAIL exc_TypeError_type, "exec() takes 1 to 3 arguments", .ev_own_prop_2
 .bad_source:
-    lea rdi, [rel exc_TypeError_type]
-    CSTRING rsi, "exec() arg 1 must be a string, bytes or code object"
-    call raise_exception
+    FAIL exc_TypeError_type, "exec() arg 1 must be a string, bytes or code object", .propagate
 END_FUNC builtin_exec_fn
 
 section .rodata

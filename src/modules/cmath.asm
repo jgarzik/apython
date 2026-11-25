@@ -42,7 +42,7 @@ extern bool_false
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_OverflowError_type
-extern raise_exception
+extern set_exception
 extern math_to_double
 extern obj_dealloc
 
@@ -52,7 +52,7 @@ section .text
 ;; cm_arg1(rdi = args, rsi = nargs, rdx = the name for the message)
 ;;   -> xmm0 = the real part, xmm1 = the imaginary part
 ;;
-;; Does not return when the arity is wrong or the argument is not a number.
+;; The wrong arity and an argument that is not a number are refused there.
 ;; The accepted set is complex_to_parts': complex, float, int, bool and their
 ;; subclasses, which is what `complex()` itself takes and what CPython's cmath
 ;; accepts -- it reaches __complex__ and __float__ too, which this does not.
@@ -64,13 +64,16 @@ CM1_TMP   equ 40            ; whatever __complex__ answered, owned
 CM1_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 
 ;; ============================================================================
-;; cm_to_parts(rdi = a Value, rsi = two doubles out) -> eax = 1 on success
+;; cm_to_parts(rdi = a Value, rsi = two doubles out)
+;;   -> rax = 1 on success, 0 when it is not a number at all
+;; Fails: -1
 ;;
 ;; complex_to_parts widened by the protocol CPython's cmath uses: __complex__
 ;; first, then __float__ or __index__, which is what lets it take a Decimal or
-;; a Fraction.  Non-raising, apart from the one case that must raise -- a
-;; __complex__ that answers something other than a complex, which CPython
-;; reports by name.
+;; a Fraction.  Three answers, not two: 0 leaves the wording to the caller,
+;; which knows the function's name, and -1 is an exception already pending --
+;; a __complex__, __float__ or __index__ that raised, or a __complex__ that
+;; answered something other than a complex, which CPython reports by name.
 ;; ============================================================================
 DEF_FUNC_LOCAL cm_to_parts, CM1_FRAME
     mov [rbp - CM1_ARG], rdi
@@ -82,27 +85,28 @@ DEF_FUNC_LOCAL cm_to_parts, CM1_FRAME
     mov rdi, [rbp - CM1_ARG]
     CSTRING rsi, "__complex__"
     extern dunder_call_1
-    call dunder_call_1
+    call dunder_call_1          ; err: 0, absent or raised, goes to .ctp_try_real
     test rax, rax
     jz .ctp_try_real
     mov [rbp - CM1_TMP], rax
     mov rdi, rax
     mov rsi, [rbp - CM1_OK]
     call complex_to_parts
-    mov [rbp - CM1_PARTS], rax          ; the verdict, across the release
+    test eax, eax
+    jz .ctp_bad_complex                 ; it names the type, so before the release
     mov rdi, [rbp - CM1_TMP]
     DECREF_V rdi, rcx
-    cmp qword [rbp - CM1_PARTS], 0
-    je .ctp_bad_complex
     mov eax, 1
     jmp .ctp_done
 
 .ctp_try_real:
-    ; __complex__ is absent; a raise would already have unwound.
-    ; math_to_double is the real-number funnel, and it asks __float__ and
-    ; __index__ without raising either.
+    ; __complex__ is absent -- or it raised, and 0 is the answer to both.
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .ctp_fail
+    ; math_to_double is the real-number funnel: __float__, then __index__.
     mov rdi, [rbp - CM1_ARG]
     call math_to_double
+    ERR_M1 .ctp_fail
     test eax, eax
     jz .ctp_no
     mov rcx, [rbp - CM1_OK]
@@ -122,15 +126,22 @@ DEF_FUNC_LOCAL cm_to_parts, CM1_FRAME
     ; CPython names what came back, not what went in.
     mov rsi, [rbp - CM1_TMP]
     CSTRING rdi, `__complex__ returned non-complex (type \x01)`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    mov rdi, [rbp - CM1_TMP]
+    DECREF_V rdi, rcx
+.ctp_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC cm_to_parts
 
 ;; ============================================================================
 ;; cm_arg1(rdi = args, rsi = nargs, rdx = the name for the message)
-;;   -> xmm0 = the real part, xmm1 = the imaginary part
+;;   -> xmm0 = the real part, xmm1 = the imaginary part, rax = 0
+;; Fails: -1
 ;;
-;; Does not return when the arity is wrong or the argument is not a number.
+;; The wrong arity and an argument that is not a number are both refused here.
 ;; ============================================================================
 DEF_FUNC_LOCAL cm_arg1, CM1_FRAME
     cmp rsi, 1
@@ -139,28 +150,36 @@ DEF_FUNC_LOCAL cm_arg1, CM1_FRAME
     mov [rbp - CM1_ARG], rdi
     lea rsi, [rbp - CM1_PARTS]
     call cm_to_parts
+    ERR_M1 .cm1_fail
     test eax, eax
     jz .cm1_type
     movsd xmm0, [rbp - CM1_PARTS]
     movsd xmm1, [rbp - CM1_PARTS + 8]
+    xor eax, eax
     leave
     ret
 .cm1_type:
     ; The same sentence math.asm raises, and CPython's cmath raises it too.
     mov rsi, [rbp - CM1_ARG]
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .cm1_fail
 .cm1_arity:
     CSTRING rdi, "cmath function takes exactly one argument ("
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    call raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+.cm1_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC cm_arg1
 
 ;; ============================================================================
 ;; cm_ret(edi = 1 when this function can OVERFLOW, xmm0/xmm1 = the result,
 ;;        xmm2/xmm3 = the argument it came from)
-;;   -> rax = the complex, as a Value; does not return on an error
+;;   -> rax = the complex, as a Value
+;; Fails: 0
 ;;
 ;; math_ret_1's counterpart, and the same rule: the decision is made from the
 ;; argument and the result alone, with no errno.  A FINITE argument that gives
@@ -214,9 +233,14 @@ DEF_FUNC_LOCAL cm_ret, CMR_FRAME
 .cmr_error:
     cmp qword [rbp - CMR_OVF], 0
     jne .cmr_overflow
-    RAISE exc_ValueError_type, "math domain error"
+    SET_EXC exc_ValueError_type, "math domain error"
+    jmp .cmr_fail
 .cmr_overflow:
-    RAISE exc_OverflowError_type, "math range error"
+    SET_EXC exc_OverflowError_type, "math range error"
+.cmr_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC cm_ret
 
 ;; ============================================================================
@@ -232,6 +256,7 @@ CM_FRAME  equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC cmath_%1, CM_FRAME
     lea rdx, [rel cm_n_%1]
     call cm_arg1
+    ERR_M1 %%fail
     movsd [rbp - CM_A], xmm0
     movsd [rbp - CM_A + 8], xmm1
     and rsp, -16
@@ -240,7 +265,11 @@ DEF_FUNC cmath_%1, CM_FRAME
     mov edi, %3
     movsd xmm2, [rbp - CM_A]
     movsd xmm3, [rbp - CM_A + 8]
-    call cm_ret
+    call cm_ret                 ; err: its 0 is this function's 0
+    leave
+    ret
+%%fail:
+    xor eax, eax
     leave
     ret
 END_FUNC cmath_%1
@@ -284,6 +313,7 @@ DEF_FUNC cmath_log, CML_FRAME
     mov esi, 1
     lea rdx, [rel cm_n_log]
     call cm_arg1
+    ERR_M1 .cml_fail
     ; The ARGUMENT is kept too, not just the running value: cm_ret's domain
     ; rule reads it, and log(0) -- a finite argument giving an infinite
     ; answer -- is exactly the case it exists for.
@@ -303,6 +333,7 @@ DEF_FUNC cmath_log, CML_FRAME
     mov rdi, [rdi + 8]          ; args[1], the base
     lea rsi, [rbp - CML_B]
     call cm_to_parts
+    ERR_M1 .cml_fail
     test eax, eax
     jz .cml_type
     movsd xmm0, [rbp - CML_B]
@@ -319,7 +350,7 @@ DEF_FUNC cmath_log, CML_FRAME
     xor edi, edi                ; a singularity, not an overflow
     movsd xmm2, [rbp - CML_ARG]
     movsd xmm3, [rbp - CML_ARG + 8]
-    call cm_ret
+    call cm_ret                 ; err: its 0 is this function's 0
     leave
     ret
 
@@ -327,9 +358,14 @@ DEF_FUNC cmath_log, CML_FRAME
     mov rdi, [rbp - CML_B + 8]
     mov rsi, [rdi + 8]
     CSTRING rdi, `must be real number, not \x01`
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .cml_fail
 .cml_arity:
-    RAISE exc_TypeError_type, "log() takes 1 or 2 arguments"
+    SET_EXC exc_TypeError_type, "log() takes 1 or 2 arguments"
+.cml_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC cmath_log
 
 ;; ============================================================================
@@ -368,6 +404,7 @@ END_FUNC cm_div
 DEF_FUNC cmath_phase
     lea rdx, [rel cm_n_phase]
     call cm_arg1
+    ERR_M1 .cph_fail
     movsd xmm2, xmm0
     movsd xmm0, xmm1            ; atan2 takes (y, x)
     movsd xmm1, xmm2
@@ -377,6 +414,10 @@ DEF_FUNC cmath_phase
     movq rdi, xmm0
     call float_from_f64
     V_PACK rax, rdx
+    leave
+    ret
+.cph_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC cmath_phase
@@ -390,6 +431,7 @@ CMP_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 DEF_FUNC cmath_polar, CMP_FRAME
     lea rdx, [rel cm_n_polar]
     call cm_arg1
+    ERR_M1 .cmp_fail
     movsd [rbp - CMP_R], xmm0
     movsd [rbp - CMP_R + 8], xmm1
     and rsp, -16
@@ -444,12 +486,14 @@ DEF_FUNC cmath_rect, CRT_FRAME
     mov rdi, [rax]
     mov [rbp - CRT_PHI], rax
     call math_to_double
+    ERR_M1 .cmr_fail
     test eax, eax
     jz .cmr_type
     movsd [rbp - CRT_R], xmm0
     mov rax, [rbp - CRT_PHI]
     mov rdi, [rax + 8]
     call math_to_double
+    ERR_M1 .cmr_fail
     test eax, eax
     jz .cmr_type
     movsd [rbp - CRT_PHI], xmm0
@@ -469,13 +513,18 @@ DEF_FUNC cmath_rect, CRT_FRAME
     mov edi, 1                  ; r * cos(phi) can run out of range
     movsd xmm2, [rbp - CRT_R]
     movsd xmm3, [rbp - CRT_PHI]
-    call cm_ret
+    call cm_ret                 ; err: its 0 is this function's 0
     leave
     ret
 .cmr_type:
-    RAISE exc_TypeError_type, "rect() arguments must be real numbers"
+    SET_EXC exc_TypeError_type, "rect() arguments must be real numbers"
+    jmp .cmr_fail
 .cmr_arity:
-    RAISE exc_TypeError_type, "rect() takes exactly two arguments"
+    SET_EXC exc_TypeError_type, "rect() takes exactly two arguments"
+.cmr_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC cmath_rect
 
 ;; ============================================================================
@@ -488,7 +537,12 @@ END_FUNC cmath_rect
 DEF_FUNC cmath_%1
     lea rdx, [rel cm_n_%1]
     call cm_arg1
+    ERR_M1 %%fail
     call cm_%2
+    leave
+    ret
+%%fail:
+    xor eax, eax
     leave
     ret
 END_FUNC cmath_%1
@@ -589,6 +643,7 @@ DEF_FUNC cmath_isclose, CIC_FRAME
     lea rcx, [rbp - CIC_KWOUT]
     extern math_bind_kw
     call math_bind_kw
+    ERR_M1 .cic_fail
     cmp rax, 2
     jne .cic_args
 
@@ -596,12 +651,14 @@ DEF_FUNC cmath_isclose, CIC_FRAME
     mov rdi, [rdi]
     lea rsi, [rbp - CIC_A]
     call cm_to_parts
+    ERR_M1 .cic_fail
     test eax, eax
     jz .cic_type
     mov rdi, [rbp - CIC_DIFF]
     mov rdi, [rdi + 8]
     lea rsi, [rbp - CIC_B]
     call cm_to_parts
+    ERR_M1 .cic_fail
     test eax, eax
     jz .cic_type
 
@@ -609,6 +666,7 @@ DEF_FUNC cmath_isclose, CIC_FRAME
     test rdi, rdi
     jz .cic_default_rel
     call math_to_double
+    ERR_M1 .cic_fail
     test eax, eax
     jz .cic_type
     jmp .cic_have_rel
@@ -621,6 +679,7 @@ DEF_FUNC cmath_isclose, CIC_FRAME
     test rdi, rdi
     jz .cic_default_abs
     call math_to_double
+    ERR_M1 .cic_fail
     test eax, eax
     jz .cic_type
     jmp .cic_have_abs
@@ -707,11 +766,17 @@ DEF_FUNC cmath_isclose, CIC_FRAME
     ret
 
 .cic_negative:
-    RAISE exc_ValueError_type, "tolerances must be non-negative"
+    SET_EXC exc_ValueError_type, "tolerances must be non-negative"
+    jmp .cic_fail
 .cic_type:
-    RAISE exc_TypeError_type, "must be real number"
+    SET_EXC exc_TypeError_type, "must be real number"
+    jmp .cic_fail
 .cic_args:
-    RAISE exc_TypeError_type, "isclose() takes exactly two positional arguments"
+    SET_EXC exc_TypeError_type, "isclose() takes exactly two positional arguments"
+.cic_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC cmath_isclose
 
 ;; ============================================================================

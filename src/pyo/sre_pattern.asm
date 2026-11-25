@@ -20,7 +20,7 @@ extern list_new
 extern list_append
 extern tuple_new
 extern none_singleton
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern type_type
 extern str_type
@@ -35,7 +35,6 @@ extern bool_false
 extern sre_match
 extern sre_template_parse
 extern sre_template_expand
-extern raise_type_error_counted
 extern sre_state_reset_marks
 extern sre_search
 extern sre_state_init
@@ -108,6 +107,8 @@ END_FUNC sre_pattern_repr
 ;; Helper: run match/search/fullmatch and return MatchObject or None
 ;; rdi = pattern obj, rsi = string, rdx = pos, rcx = endpos,
 ;; r8 = mode (0=match, 1=search, 2=fullmatch)
+;; Fails: 0
+;; (a subject of the wrong kind, or the matcher's own exception: (0, 0))
 ;; ============================================================================
 PM_PAT      equ 8
 PM_STR      equ 16
@@ -137,6 +138,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     mov r8, [rbp - PM_ENDPOS]
     lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
+    ERR_M1 .pm_fail
 
     ; Set fullmatch mode if applicable
     mov rax, [rbp - PM_MODE]
@@ -159,11 +161,14 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     mov rsi, [rsi + SRE_PatternObject.code]
     mov edx, 1                 ; this SUCCESS is the pattern's own
     call sre_match
+    cmp dword [rbp - PM_STATE + SRE_State.error], 0
+    jne .pm_fail
     jmp .check_result
 
 .do_search:
     lea rdi, [rbp - PM_STATE]
     call sre_search
+    ERR_M1 .pm_fail
 
 .check_result:
     test eax, eax
@@ -204,6 +209,19 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     pop rbx
     leave
     ret
+
+.pm_fail:
+    ; The exception is pending.  A state that never got past the subject
+    ; check is all zeros, which sre_state_fini takes.
+    lea rdi, [rbp - PM_STATE]
+    call sre_state_fini
+    RET_NULL
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_do_match
 
 ;; ============================================================================
@@ -212,6 +230,7 @@ END_FUNC sre_pattern_do_match
 ;; ============================================================================
 ;; ============================================================================
 ;; sp_arg_i64(rdi: argument Value) -> rax: int64
+;; Fails: -1
 ;;
 ;; pos/endpos arguments used to be read straight out of the payload word,
 ;; which is only correct while every integer is a SmallInt.  Normalize here
@@ -249,8 +268,9 @@ DEF_FUNC_LOCAL sp_arg_i64
     jmp .sai_out
 .sai_type_error:
     extern exc_TypeError_type
-    extern raise_exception
-    RAISE exc_TypeError_type, "an integer is required"
+    SET_EXC exc_TypeError_type, "an integer is required"
+    mov rax, -1
+    jmp .sai_out
 .sai_small:
     mov rax, rdi
 .sai_out:
@@ -289,6 +309,7 @@ DEF_FUNC sre_pattern_match_method
     jb .match_no_pos
     mov rdi, [r12 + 8]
     call sp_arg_i64
+    ERR_M1 .match_fail
     mov rcx, rax               ; pos
 .match_no_pos:
     mov rdx, rcx               ; rdx = pos
@@ -299,6 +320,7 @@ DEF_FUNC sre_pattern_match_method
     jb .match_no_endpos
     mov rdi, [r12 + 16]
     call sp_arg_i64
+    ERR_M1 .match_fail
     mov rcx, rax               ; endpos
 .match_no_endpos:
 
@@ -307,7 +329,7 @@ DEF_FUNC sre_pattern_match_method
     ; rdx = pos
     ; rcx = endpos
     xor r8d, r8d               ; mode = 0 (match)
-    call sre_pattern_do_match
+    call sre_pattern_do_match   ; err: its 0 is this method's own
 
     pop r12
     pop rbx
@@ -316,7 +338,13 @@ DEF_FUNC sre_pattern_match_method
     ret
 
 .match_error:
-    RAISE exc_TypeError_type, "match() requires a string argument"
+    SET_EXC exc_TypeError_type, "match() requires a string argument"
+.match_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_match_method
 
 ;; ============================================================================
@@ -341,6 +369,7 @@ DEF_FUNC sre_pattern_search_method, 8            ; 3 pushes, so rsp is 16-aligne
     jb .search_no_pos
     mov rdi, [r12 + 8]
     call sp_arg_i64
+    ERR_M1 .search_fail
     mov rdx, rax               ; pos
 .search_no_pos:
 
@@ -350,12 +379,13 @@ DEF_FUNC sre_pattern_search_method, 8            ; 3 pushes, so rsp is 16-aligne
     jb .search_no_endpos
     mov rdi, [r12 + 16]
     call sp_arg_i64
+    ERR_M1 .search_fail
     mov rcx, rax               ; endpos
 .search_no_endpos:
 
     mov rdi, rbx
     mov r8d, 1                 ; mode = search
-    call sre_pattern_do_match
+    call sre_pattern_do_match   ; err: its 0 is this method's own
 
     pop r13
     pop r12
@@ -365,7 +395,14 @@ DEF_FUNC sre_pattern_search_method, 8            ; 3 pushes, so rsp is 16-aligne
     ret
 
 .search_error:
-    RAISE exc_TypeError_type, "search() requires a string argument"
+    SET_EXC exc_TypeError_type, "search() requires a string argument"
+.search_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_search_method
 
 ;; ============================================================================
@@ -390,6 +427,7 @@ DEF_FUNC sre_pattern_fullmatch_method, 8            ; 3 pushes, so rsp is 16-ali
     jb .fm_no_pos
     mov rdi, [r12 + 8]
     call sp_arg_i64
+    ERR_M1 .fm_fail
     mov rdx, rax               ; pos
 .fm_no_pos:
 
@@ -399,12 +437,13 @@ DEF_FUNC sre_pattern_fullmatch_method, 8            ; 3 pushes, so rsp is 16-ali
     jb .fm_no_endpos
     mov rdi, [r12 + 16]
     call sp_arg_i64
+    ERR_M1 .fm_fail
     mov rcx, rax               ; endpos
 .fm_no_endpos:
 
     mov rdi, rbx
     mov r8d, 2                 ; mode = fullmatch
-    call sre_pattern_do_match
+    call sre_pattern_do_match   ; err: its 0 is this method's own
 
     pop r13
     pop r12
@@ -414,7 +453,14 @@ DEF_FUNC sre_pattern_fullmatch_method, 8            ; 3 pushes, so rsp is 16-ali
     ret
 
 .fm_error:
-    RAISE exc_TypeError_type, "fullmatch() requires a string argument"
+    SET_EXC exc_TypeError_type, "fullmatch() requires a string argument"
+.fm_fail:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_fullmatch_method
 
 ;; ============================================================================
@@ -571,6 +617,7 @@ FA_STR      equ 16
 FA_LIST     equ 24
 FA_STATE    equ 24 + SRE_State_size   ; state base at BOTTOM of frame
 FA_FRAME    equ 24 + SRE_State_size
+FA_BASE     equ FA_FRAME + 40         ; rsp after the prologue's five pushes
 
 DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -596,6 +643,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rdi
     mov rdi, [rdi + 16]
     call sp_arg_i64
+    ERR_M1 .fa_fail_early
     pop rdi
     mov rcx, rax               ; args[2] = pos
 .fa_no_pos:
@@ -608,6 +656,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rdi
     mov rdi, [rdi + 24]
     call sp_arg_i64
+    ERR_M1 .fa_fail_early
     pop rdi
     mov r8, rax                ; args[3] = endpos
 .fa_no_endpos:
@@ -627,6 +676,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     mov rdx, [rbp - FA_STR]
     lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
+    ERR_M1 .fa_fail
 
     mov r12, [rbp - FA_PAT]   ; pattern
     mov r15d, [r12 + SRE_PatternObject.groups]  ; number of groups
@@ -639,6 +689,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; Search
     lea rdi, [rbp - FA_STATE]
     call sre_search
+    ERR_M1 .fa_fail
     test eax, eax
     jz .fa_done
 
@@ -664,7 +715,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -699,7 +750,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -765,7 +816,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     ; Append tuple to list
     mov rdi, r14
     mov rsi, rbx
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     mov rdi, rbx
     call obj_decref
     lea rdi, [rbp - FA_STATE]
@@ -818,8 +869,26 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.fa_fail:
+    ; The exception is pending; the list so far and the state are ours.
+    mov rdi, r14
+    call obj_decref
+    lea rdi, [rbp - FA_STATE]
+    call sre_state_fini
+    jmp .fa_fail_early
 .fa_error:
-    RAISE exc_TypeError_type, "findall() requires a string argument"
+    SET_EXC exc_TypeError_type, "findall() requires a string argument"
+.fa_fail_early:
+    ; Reached with an argument still pushed, so rsp is set rather than popped.
+    lea rsp, [rbp - FA_BASE]
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_findall_method
 
 ;; ============================================================================
@@ -846,6 +915,7 @@ SUB_NPIECES  equ 96
 SUB_BADIDX   equ 104
 SUB_STATE    equ 104 + SRE_State_size
 SUB_FRAME    equ 104 + SRE_State_size
+SUB_BASE     equ SUB_FRAME + 40       ; rsp after the prologue's five pushes
 
 DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ; rdi = args (fat array), rsi = nargs
@@ -908,6 +978,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdi, [rdi + 24]       ; args[3] = count
     call sp_arg_i64
     pop rdi
+    ERR_M1 .sub_abort_out
 .sub_no_count:
     mov [rbp - SUB_COUNT], rax
     mov qword [rbp - SUB_NSUBS], 0
@@ -960,6 +1031,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdi, rax
     mov rsi, [rbp - SUB_PAT]
     call sre_template_parse
+    ERR_NULL .sub_abort_nostate
     mov [rbp - SUB_TMPL], rax
     mov rcx, [rax + PyListObject.ob_size]
     cmp rcx, 1
@@ -993,8 +1065,13 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdx, [rbp - SUB_REPL_TAG]
     V_PACK rsi, rdx
     CSTRING rdi, `expected str instance, \x01 found`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+.sub_abort_nostate:
+    ; Refused before the state was built: only the empty result is held.
+    mov rdi, [rbp - SUB_RESULT]
+    call obj_decref
+    jmp .sub_abort_out
 
 .sub_have_template:
 
@@ -1006,6 +1083,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov r8, 0x7fffffffffffffff
     lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
+    ERR_M1 .sub_abort
 
 .sub_loop:
     ; Check count limit
@@ -1019,6 +1097,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     lea rdi, [rbp - SUB_STATE]
     call sre_state_reset_marks
     call sre_search
+    ERR_M1 .sub_abort
     test eax, eax
     jz .sub_finish
 
@@ -1048,7 +1127,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SUB_RESULT, tested below
     push rax                   ; save new result
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
@@ -1056,6 +1135,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_RESULT], rax
     pop rdi
     call obj_decref
+    cmp qword [rbp - SUB_RESULT], 0
+    je .sub_abort
     inc qword [rbp - SUB_NPIECES]
 .sub_no_prefix:
 
@@ -1080,7 +1161,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SUB_RESULT, tested below
     jmp .sub_repl_concated
 
 .sub_expand_repl:
@@ -1094,7 +1175,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     push rax                   ; a pair, so the calls stay 16-byte aligned
     mov rdi, [rbp - SUB_TMPL]
     mov rsi, rax
-    call sre_template_expand
+    call sre_template_expand    ; err: tested once the match is released
     pop rdi
     pop rdi                    ; the match object
     push rax
@@ -1102,6 +1183,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call obj_decref
     pop rsi
     pop rsi
+    test rsi, rsi
+    jz .sub_expand_failed
     push rsi
     push rsi
     mov rdi, rsi
@@ -1124,7 +1207,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SUB_RESULT, tested below
     pop rdi
     pop rdi                    ; the expansion again
     push rax
@@ -1141,6 +1224,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     call obj_decref
     pop rax
     mov [rbp - SUB_RESULT], rax
+    test rax, rax
+    jz .sub_abort
     jmp .sub_after_repl
 
 .sub_callable_repl:
@@ -1204,7 +1289,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SUB_RESULT, tested below
     push rax
     push rax
     mov rdi, [rbp - SUB_RESULT]
@@ -1222,6 +1307,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
 
     pop r13
     pop r12
+    cmp qword [rbp - SUB_RESULT], 0
+    je .sub_abort
 
 .sub_after_repl:
     ; Update state
@@ -1285,7 +1372,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SUB_RESULT, tested below
     push rax
     mov rdi, [rbp - SUB_RESULT]
     call obj_decref
@@ -1293,6 +1380,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov [rbp - SUB_RESULT], rax
     pop rdi
     call obj_decref
+    cmp qword [rbp - SUB_RESULT], 0
+    je .sub_abort
 
 .sub_done:
     cmp qword [rbp - SUB_BADIDX], -1
@@ -1356,7 +1445,14 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
 .sub_join_tail:
     mov rsi, [rbp - SUB_BADIDX]
     lea rdi, [rel sp_join_item]
-    call raise_type_error_counted     ; does not return
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .sub_abort_out
+
+.sub_expand_failed:               ; the template raised; r12 and r13 are pushed
+    pop r13
+    pop r12
+    jmp .sub_abort
 
 .sub_callable_raised:
     ; Give back the match the callable was handed and the two registers the
@@ -1389,6 +1485,9 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
 .sub_abort_result:
     lea rdi, [rbp - SUB_STATE]
     call sre_state_fini
+.sub_abort_out:
+    ; Also reached with an argument still pushed, so rsp is set, not popped.
+    lea rsp, [rbp - SUB_BASE]
     xor eax, eax
     pop r15
     pop r14
@@ -1399,7 +1498,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     ret
 
 .sub_error:
-    RAISE exc_TypeError_type, "sub() requires repl and string arguments"
+    SET_EXC exc_TypeError_type, "sub() requires repl and string arguments"
+    jmp .sub_abort_out
 END_FUNC sre_pattern_sub_method
 
 ;; ============================================================================
@@ -1424,6 +1524,7 @@ SN_NPIECES  equ 96
 SN_BADIDX   equ 104
 SN_STATE    equ 104 + SRE_State_size
 SN_FRAME    equ 104 + SRE_State_size
+SN_BASE     equ SN_FRAME + 40         ; rsp after the prologue's five pushes
 
 DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rbx
@@ -1479,6 +1580,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdi, [rdi + 24]
     call sp_arg_i64
     pop rdi
+    ERR_M1 .subn_abort_out
 .subn_no_count:
     mov [rbp - SN_COUNT], rax
     mov qword [rbp - SN_NSUBS], 0
@@ -1527,6 +1629,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdi, rax
     mov rsi, [rbp - SN_PAT]
     call sre_template_parse
+    ERR_NULL .subn_abort_nostate
     mov [rbp - SN_TMPL], rax
     mov rcx, [rax + PyListObject.ob_size]
     cmp rcx, 1
@@ -1560,7 +1663,13 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdx, [rbp - SN_REPL_TAG]
     V_PACK rsi, rdx
     CSTRING rdi, `expected str instance, \x01 found`
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+.subn_abort_nostate:
+    ; Refused before the state was built: only the empty result is held.
+    mov rdi, [rbp - SN_RESULT]
+    call obj_decref
+    jmp .subn_abort_out
 
 .subn_have_template:
 
@@ -1571,6 +1680,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov r8, 0x7fffffffffffffff
     lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
+    ERR_M1 .subn_abort
 
 .subn_loop:
     mov rax, [rbp - SN_COUNT]
@@ -1583,6 +1693,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     lea rdi, [rbp - SN_STATE]
     call sre_state_reset_marks
     call sre_search
+    ERR_M1 .subn_abort
     test eax, eax
     jz .subn_finish
 
@@ -1608,7 +1719,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SN_RESULT, tested below
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
@@ -1616,6 +1727,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_RESULT], rax
     pop rdi
     call obj_decref
+    cmp qword [rbp - SN_RESULT], 0
+    je .subn_abort
     inc qword [rbp - SN_NPIECES]
 .subn_no_prefix:
 
@@ -1640,7 +1753,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SN_RESULT, tested below
     jmp .subn_repl_concated
 
 .subn_expand_repl:
@@ -1654,7 +1767,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     push rax                   ; a pair, so the calls stay 16-byte aligned
     mov rdi, [rbp - SN_TMPL]
     mov rsi, rax
-    call sre_template_expand
+    call sre_template_expand    ; err: tested once the match is released
     pop rdi
     pop rdi                    ; the match object
     push rax
@@ -1662,6 +1775,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
     pop rsi
     pop rsi
+    test rsi, rsi
+    jz .subn_expand_failed
     push rsi
     push rsi
     mov rdi, rsi
@@ -1684,7 +1799,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SN_RESULT, tested below
     pop rdi
     pop rdi                    ; the expansion again
     push rax
@@ -1701,6 +1816,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     call obj_decref
     pop rax
     mov [rbp - SN_RESULT], rax
+    test rax, rax
+    jz .subn_abort
     jmp .subn_after_repl
 
 .subn_callable_repl:
@@ -1723,25 +1840,37 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov edx, 1
     mov rax, [rbp - SN_CALLABLE]
     call rax
-    V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16
+    ; tp_call returns a Value, and str_concat below takes Values: unpacking
+    ; here decoded it a second time, so a non-str replacement had its payload
+    ; used as an address.
+    add rsp, 16               ; pop fat array
 
-    ; The same NULL as in sub above: the callable raised.
+    ; A NULL here means the callable RAISED, and it means nothing else -- a
+    ; replacement of None is the none singleton, not 0.  Untested, the 0 went
+    ; to sre_concat as a string and the exception the caller was owed came
+    ; back as "expected str instance,  found", with the missing type name in
+    ; the middle of the message where the NULL had been.
     test rax, rax
     jz .subn_callable_raised
 
+    ; Save replacement string
     push rax
-    push rdx
+    push rax                  ; keep the stack 16-byte aligned
 
-    ; DECREF match
+    ; DECREF match object
     mov rdi, r14
     call obj_decref
 
-    ; Concat replacement
-    pop rcx                    ; replacement tag
-    pop rsi                    ; replacement payload
-    push rsi                   ; save repl payload for DECREF
-    push rcx                   ; save repl tag for DECREF
+    ; Concat replacement with result.  sre_concat rejects anything that is
+    ; not a string of the pattern's kind -- except None, which CPython's own
+    ; sub() treats as "replace with nothing" rather than as an error.
+    pop rsi                    ; (alignment copy)
+    pop rsi                    ; the replacement Value
+    push rsi                   ; save for DECREF
+    push rsi                   ; alignment
+    lea rax, [rel none_singleton]
+    cmp rsi, rax
+    je .subn_repl_none
     inc qword [rbp - SN_NPIECES]
     mov rdi, [rbp - SN_RESULT]
     push rdi
@@ -1751,20 +1880,26 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SN_RESULT, tested below
+    push rax
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
     pop rax
+    pop rax
     mov [rbp - SN_RESULT], rax
 
+.subn_repl_none:
     ; DECREF replacement string from tp_call
-    pop rdx                    ; repl tag
-    pop rax                    ; repl payload
-    DECREF_VAL rax, rdx
+    pop rax
+    pop rax
+    mov rdi, rax
+    XDECREF_V rdi, rdx
 
     pop r13
     pop r12
+    cmp qword [rbp - SN_RESULT], 0
+    je .subn_abort
 
 .subn_after_repl:
     mov [rbp - SN_LASTEND], r13
@@ -1823,7 +1958,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     pop rsi
     pop rdi
     extern sre_concat
-    call sre_concat        ; str or bytes, as the pattern is
+    call sre_concat        ; err: its 0 lands in SN_RESULT, tested below
     push rax
     mov rdi, [rbp - SN_RESULT]
     call obj_decref
@@ -1831,6 +1966,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov [rbp - SN_RESULT], rax
     pop rdi
     call obj_decref
+    cmp qword [rbp - SN_RESULT], 0
+    je .subn_abort
 
 .subn_build_tuple:
     cmp qword [rbp - SN_BADIDX], -1
@@ -1913,7 +2050,14 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
 .subn_join_tail:
     mov rsi, [rbp - SN_BADIDX]
     lea rdi, [rel sp_join_item]
-    call raise_type_error_counted     ; does not return
+    extern set_type_error_counted
+    call set_type_error_counted
+    jmp .subn_abort_out
+
+.subn_expand_failed:               ; the template raised; r12 and r13 are pushed
+    pop r13
+    pop r12
+    jmp .subn_abort
 
 .subn_callable_raised:
     mov rdi, r14
@@ -1942,6 +2086,9 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
 .subn_abort_result:
     lea rdi, [rbp - SN_STATE]
     call sre_state_fini
+.subn_abort_out:
+    ; Also reached with an argument still pushed, so rsp is set, not popped.
+    lea rsp, [rbp - SN_BASE]
     xor eax, eax
     pop r15
     pop r14
@@ -1952,7 +2099,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     ret
 
 .subn_error:
-    RAISE exc_TypeError_type, "subn() requires repl and string arguments"
+    SET_EXC exc_TypeError_type, "subn() requires repl and string arguments"
+    jmp .subn_abort_out
 END_FUNC sre_pattern_subn_method
 
 ;; ============================================================================
@@ -1992,6 +2140,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rdi, [rdi + 16]       ; args[2] = maxsplit
     call sp_arg_i64
     pop rdi
+    ERR_M1 .split_fail_early
 .split_no_max:
     mov [rbp - SP_MAX], rax
     mov qword [rbp - SP_NSPLIT], 0
@@ -2014,6 +2163,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov r8, 0x7fffffffffffffff
     lea r9, [rel sre_shared_cpcache]   ; see its definition
     call sre_state_init
+    ERR_M1 .split_fail
 
 .split_loop:
     mov rax, [rbp - SP_MAX]
@@ -2026,6 +2176,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     lea rdi, [rbp - SP_STATE]
     call sre_state_reset_marks
     call sre_search
+    ERR_M1 .split_fail
     test eax, eax
     jz .split_finish
 
@@ -2049,7 +2200,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -2089,7 +2240,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -2137,7 +2288,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     push rax
     push rdx
     V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdx
     pop rax
     DECREF_VAL rax, rdx
@@ -2157,8 +2308,24 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.split_fail:
+    ; The exception is pending; the list so far and the state are ours.
+    mov rdi, r14
+    call obj_decref
+    lea rdi, [rbp - SP_STATE]
+    call sre_state_fini
+    jmp .split_fail_early
 .split_error:
-    RAISE exc_TypeError_type, "split() requires a string argument"
+    SET_EXC exc_TypeError_type, "split() requires a string argument"
+.split_fail_early:
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_split_method
 
 ;; ============================================================================
@@ -2454,6 +2621,7 @@ DEF_FUNC sre_pattern_hash, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, [rbx + SRE_PatternObject.pattern]
     extern obj_hash
     call obj_hash
+    ERR_M1 .sph_ret             ; bytearray is a pattern too, and is unhashable
 
     ; XOR flags
     mov ecx, [rbx + SRE_PatternObject.flags]
@@ -2466,6 +2634,7 @@ DEF_FUNC sre_pattern_hash, 8            ; 1 pushes, so rsp is 16-aligned
     shl rcx, 16
     xor rax, rcx
 
+.sph_ret:
     pop rbx
     leave
     ret
@@ -2563,6 +2732,7 @@ END_FUNC sre_pattern_richcompare
 ;; Pattern.finditer(string, pos=0, endpos=sys.maxsize)
 ;; Returns an SRE_Scanner iterator.
 ;; ============================================================================
+FIT_BASE equ 32             ; rsp after the prologue: 8 + 3 pushes
 DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-aligned
     ; rdi = args (fat array), rsi = nargs
     push rbx
@@ -2585,6 +2755,7 @@ DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-alig
     jb .fi_no_pos
     mov rdi, [r12 + 8]
     call sp_arg_i64
+    ERR_M1 .fi_fail
     mov rdx, rax               ; pos
 .fi_no_pos:
 
@@ -2594,6 +2765,7 @@ DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-alig
     jb .fi_no_endpos
     mov rdi, [r12 + 16]
     call sp_arg_i64
+    ERR_M1 .fi_fail
     mov rcx, rax               ; endpos
 .fi_no_endpos:
 
@@ -2609,6 +2781,7 @@ DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-alig
     mov rsi, rbx                ; the pattern, so the kinds are checked
     extern sre_require_subject
     call sre_require_subject
+    ERR_M1 .fi_fail
     add rsp, 8
     pop rsi
     pop rcx
@@ -2631,7 +2804,16 @@ DEF_FUNC sre_pattern_finditer_method, 8            ; 3 pushes, so rsp is 16-alig
     ret
 
 .fi_error:
-    RAISE exc_TypeError_type, "finditer() requires a string argument"
+    SET_EXC exc_TypeError_type, "finditer() requires a string argument"
+.fi_fail:
+    ; Reached with the arguments still pushed, so rsp is set, not popped.
+    lea rsp, [rbp - FIT_BASE]
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC sre_pattern_finditer_method
 
 ;; ============================================================================
@@ -2737,6 +2919,7 @@ END_FUNC sre_scanner_iter_self
 
 ;; ============================================================================
 ;; sre_scanner_iternext(rdi=self) -> (rax, edx) fat value
+;; Fails: 0?
 ;; Returns next match via sre_search, or NULL on exhaustion.
 ;; ============================================================================
 SI_SELF    equ 8
@@ -2764,6 +2947,7 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     mov r8, [rbx + SRE_ScannerObject.endpos]
     lea r9, [rbx + SRE_ScannerObject.cp_buf]  ; decode cache
     call sre_state_init
+    ERR_M1 .si_raised
 
     ; Reset state marks
     lea rdi, [rbp - SI_STATE]
@@ -2775,6 +2959,7 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     ; Search
     lea rdi, [rbp - SI_STATE]
     call sre_search
+    ERR_M1 .si_raised
     test eax, eax
     jz .si_no_match
 
@@ -2843,6 +3028,13 @@ DEF_FUNC sre_scanner_iternext, SI_FRAME
     pop rbx
     leave
     ret
+
+.si_raised:
+    ; 0 with the exception pending is tp_iternext's "it raised"; the scanner
+    ; keeps its position.
+    lea rdi, [rbp - SI_STATE]
+    call sre_state_fini
+    jmp .si_exhausted
 END_FUNC sre_scanner_iternext
 
 ;; ============================================================================
@@ -2852,6 +3044,7 @@ END_FUNC sre_scanner_iternext
 DEF_FUNC sre_scanner_search_method
     mov rdi, [rdi]             ; self = args[0] payload
     call sre_scanner_iternext
+    ERR_PENDING .ssm_done       ; (0, 0), which V_PACK hands on as 0
     ; If NULL (tag=0), return None
     test edx, edx
     jnz .ssm_done
@@ -2892,6 +3085,7 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     mov r8, [rbx + SRE_ScannerObject.endpos]
     lea r9, [rbx + SRE_ScannerObject.cp_buf]  ; decode cache
     call sre_state_init
+    ERR_M1 .sm2_raised
 
     ; Reset marks
     lea rdi, [rbp - SM2_STATE]
@@ -2909,6 +3103,8 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     mov rsi, [rsi + SRE_PatternObject.code]
     mov edx, 1
     call sre_match
+    cmp dword [rbp - SM2_STATE + SRE_State.error], 0
+    jne .sm2_raised
     test eax, eax
     jz .sm2_no_match
 
@@ -2964,6 +3160,16 @@ DEF_FUNC sre_scanner_match_method, SM2_FRAME
     pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.sm2_raised:
+    lea rdi, [rbp - SM2_STATE]
+    call sre_state_fini
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
     ret
 END_FUNC sre_scanner_match_method
 

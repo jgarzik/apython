@@ -166,33 +166,28 @@ reasoning that chose them and what changing one would cost.
   in a code object's length and unittest formats a traceback through the
   second.  That is fixed; 84 tests run now.
 
-- **A raise from a C-level slot is a non-local jump, so a C caller cannot
-  absorb it.**  `slot_mp_subscript` and its siblings end in `slot_reraise`,
-  which tail-jumps into `eval_exception_unwind`; a builtin's own miss --
-  `dict_subscript`'s KeyError, say -- goes through `RAISE`, which does the
-  same.  Neither returns to its caller, so an opcode that wants to try a
-  lookup and recover from the miss cannot go through the slot at all.
+- **A builtin's own raise is still a non-local jump, so a C caller cannot
+  absorb it.**  The slot WRAPPERS are no longer the problem: `slot_mp_subscript`
+  and its siblings return the slot's error value with the exception pending,
+  every indirect call of a slot checks for it, and `type_call` releases the
+  instance when a `__new__` or `__init__` fails by returning.  What is left
+  is each builtin's own miss -- `dict_subscript`'s KeyError, say -- which
+  still goes through `RAISE` and so still abandons every native frame between
+  it and the eval loop.  `python3 src/compiler/raisemap.py` is the map, and
+  the table of what each slot kind returns for an error is in CLAUDE.md,
+  "Errors return".
 
-  It also LEAKS.  `type_call` holds the new instance in a register across the
-  `__init__` call, and a builtin `__init__` that refuses its arguments raises
-  from inside itself -- so the instance is never released.  Measured at about
-  128 bytes per refusal, the same for every shape: `_io.FileIO("/no/such")`,
-  `_io.FileIO()` with no arguments, `_io.FileIO(path, "zz")` and
-  `_io.BytesIO(5.5)` all leak identically, while a Python `__init__` that
-  raises leaks nothing, because that one RETURNS with the exception set.  So
-  it is general to every builtin `__init__` registered in a type's dict, and
-  the fix is the same one this entry already names rather than anything local
-  to `_io`.
-
-  `mapping_getitem_opt` is the way round it for a heaptype (ask
-  `__getitem__` through `dunder_call_2`, which does return), and LOAD_NAME
-  and SETUP_ANNOTATIONS use it for a locals mapping that is not a dict.  It
-  does not help for a builtin `__getitem__`, so a dict SUBCLASS keeps the
-  direct table read in LOAD_NAME where CPython's `PyDict_CheckExact` sends it
-  through `PyObject_GetItem`: an overridden `__getitem__` on a dict subclass
-  used as `exec()` locals is not consulted.  Fixing it properly means the
-  builtin subscripts reporting a miss by RETURNING rather than by raising,
-  which is every caller of `dict_subscript`.
+  Two consequences remain.  A builtin `__init__` that refuses its arguments by
+  jumping leaks the instance `type_call` was building; `_io.FileIO` and
+  `_io.BytesIO` return now and leak nothing, and the rest are the same change
+  one function at a time.  And an opcode that wants to try a lookup and
+  recover from the miss still cannot go through a BUILTIN's slot:
+  `mapping_getitem_opt` is the way round it for a heaptype, and LOAD_NAME and
+  SETUP_ANNOTATIONS use it for a locals mapping that is not a dict, but a
+  dict SUBCLASS keeps the direct table read in LOAD_NAME where CPython's
+  `PyDict_CheckExact` sends it through `PyObject_GetItem` -- an overridden
+  `__getitem__` on a dict subclass used as `exec()` locals is not consulted.
+  Fixing that means `dict_subscript` reporting a miss by returning.
 
 - **OSError's four named attributes are in its instance `__dict__`.**
   `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and

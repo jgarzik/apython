@@ -50,7 +50,7 @@ extern str_concat
 extern tuple_type
 extern type_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern get_iterator_opt
 
 section .text
@@ -357,7 +357,7 @@ DEF_FUNC_LOCAL ssr_append_cstr
     mov rdi, rbx
     mov rsi, r12
     mov ecx, TAG_PTR
-    call str_concat
+    call str_concat           ; err: both strs were built from C strings just above
     push rax
     push rax
     mov rdi, rbx
@@ -378,7 +378,7 @@ DEF_FUNC_LOCAL ssr_append_obj
     mov rbx, rdi
     mov r12, rsi
     mov ecx, TAG_PTR
-    call str_concat             ; rdi is the accumulator already
+    call str_concat             ; rdi is the accumulator already -- err: obj_repr answered, and it answers a str
     push rax
     push rax
     mov rdi, rbx
@@ -481,6 +481,7 @@ END_FUNC structseq_dealloc
 ;; and never untracked.  A built-and-dropped terminal_size aborted the process
 ;; with "double free or corruption"; shutil.get_terminal_size() makes exactly
 ;; that call.
+;; Fails: 0
 ;; ============================================================================
 SSC_TYPE  equ 8
 SSC_OBJ   equ 16
@@ -515,6 +516,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     mov rdi, [rsi]
     V_UNPACK rdi, rsi           ; get_iterator still takes (payload, tag), not
     call get_iterator_opt       ; a Value; passing only the payload left the
+    ERR_PENDING .ssc_fail
                                 ; tag register holding whatever was in it
     test rax, rax
     jz .ssc_not_sequence
@@ -591,6 +593,7 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     test rax, rax
     jz .ssc_bad_len
     call rax
+    ERR_PENDING .ssc_propagate
     V_UNPACK rax, rdx
     test edx, edx
     jz .ssc_bad_len
@@ -632,8 +635,8 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     mov rdi, [rbp - SSC_TYPE]
     mov rsi, [rbp - SSC_N]
     mov rdx, [rbp - SSC_I]
-    call structseq_raise_length
-    ud2
+    call structseq_set_length
+    jmp .ssc_fail
 .ssc_propagate:
     mov rdi, [rbp - SSC_OBJ]
     call obj_decref
@@ -653,17 +656,18 @@ DEF_FUNC structseq_type_new, SSC_FRAME
     leave
     ret
 .ssc_not_sequence:
-    RAISE exc_TypeError_type, "constructor requires a sequence"
+    FAIL exc_TypeError_type, "constructor requires a sequence", .ssc_fail
 .ssc_argerr:
-    RAISE exc_TypeError_type, "structseq() missing required argument 'sequence' (pos 1)"
+    FAIL exc_TypeError_type, "structseq() missing required argument 'sequence' (pos 1)", .ssc_fail
 END_FUNC structseq_type_new
 
-;; structseq_raise_length(rdi = type, rsi = wanted, rdx = given,
-;;                        rcx = the connective, one of the three ssq_takes_*)
+;; structseq_set_length(rdi = type, rsi = wanted, rdx = given,
+;;                      rcx = the connective, one of the three ssq_takes_*)
+;;   -> rax = 0, always, with the TypeError pending
 ;; "os.terminal_size() takes a 2-sequence (3-sequence given)", or the "at
 ;; least" / "at most" wording where the field count and the sequence length
 ;; differ.
-DEF_FUNC structseq_raise_length
+DEF_FUNC structseq_set_length
     push rbx
     push r12
     push r13
@@ -695,9 +699,14 @@ DEF_FUNC structseq_raise_length
     call ssq_copy
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel ssq_msgbuf]
-    call raise_exception
-    ud2
-END_FUNC structseq_raise_length
+    call set_exception
+    pop r13
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC structseq_set_length
 
 DEF_FUNC_LOCAL ssq_copy         ; (rdi = dest, rsi = src, rdx = max) -> the NUL
     xor ecx, ecx

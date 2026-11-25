@@ -10,7 +10,7 @@
 %include "opcodes.inc"
 
 extern int_promote_mpz
-extern raise_exception
+extern set_exception
 extern __gmpz_add
 extern __gmpz_clear
 extern __gmpz_cmp_si
@@ -63,6 +63,7 @@ END_FUNC pow_is_plain_int
 
 ;; ============================================================================
 ;; builtin_pow_fn(rdi = args Value[], rsi = nargs) -> rax = a Value
+;; Fails: 0
 ;; 2 args: base ** exp
 ;; 3 args: pow(base, exp, mod) — modular exponentiation
 ;; ============================================================================
@@ -180,7 +181,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov ecx, r8d            ; exp tag (TAG_SMALLINT)
     V_PACK rdi, rdx
     V_PACK rsi, rcx
-    call int_power
+    call int_power            ; err: the 0 is this builtin's own answer
     V_UNPACK rax, rdx       ; int_power returns a Value
     ; rax = result payload, edx = result tag
     pop r13
@@ -257,14 +258,17 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov rsi, [rbp - POW_BASE]
     mov edx, [rbp - POW_BTAG]
     call pow_load_mpz
+    ERR_M1 .pow_fail_clear
     lea rdi, [rbp - POW_MEXP]
     mov rsi, [rbp - POW_EXP]
     mov edx, [rbp - POW_ETAG]
     call pow_load_mpz
+    ERR_M1 .pow_fail_clear
     lea rdi, [rbp - POW_MMOD]
     mov rsi, [rbp - POW_MOD]
     mov edx, [rbp - POW_MTAG]
     call pow_load_mpz
+    ERR_M1 .pow_fail_clear
 
     lea rdi, [rbp - POW_MMOD]
     xor esi, esi
@@ -421,24 +425,25 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
 
 .pow_complex_modulo:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "complex modulo"
+    FAIL exc_ValueError_type, "complex modulo", .pow_propagate
 
 .pow_not_all_ints:
-    RAISE exc_TypeError_type, "pow() 3rd argument not allowed unless all arguments are integers"
+    FAIL exc_TypeError_type, "pow() 3rd argument not allowed unless all arguments are integers", .pow_propagate
 
 .pow_not_invertible:
-    call pow_clear_mpz
-    RAISE exc_ValueError_type, "base is not invertible for the given modulus"
+    SET_EXC exc_ValueError_type, "base is not invertible for the given modulus"
+    jmp .pow_fail_clear
 
 .pow_zero_mod:
+    SET_EXC exc_ValueError_type, "pow() 3rd argument cannot be 0"
+    ; fall through
+.pow_fail_clear:
+    ; The error exit for everything after the four mpz_t were initialised.
     call pow_clear_mpz
-    RAISE exc_ValueError_type, "pow() 3rd argument cannot be 0"
+    jmp .pow_propagate
 
 .pow_error:
-    RAISE exc_TypeError_type, "pow() takes 2 or 3 arguments"
-
-.pow_type_error:
-    RAISE exc_TypeError_type, "pow() arguments must be numeric"
+    FAIL exc_TypeError_type, "pow() takes 2 or 3 arguments", .pow_propagate
 END_FUNC builtin_pow_fn
 
 ;; ============================================================================
@@ -467,7 +472,9 @@ DEF_FUNC_LOCAL pow_is_int_operand
 END_FUNC pow_is_int_operand
 
 ;; ============================================================================
-;; pow_load_mpz(rdi = an initialised mpz_t, rsi = payload, edx = tag) -> void
+;; pow_load_mpz(rdi = an initialised mpz_t, rsi = payload, edx = tag)
+;;   -> rax = 0
+;; Fails: -1
 ;; Sets the mpz from an int in either representation.
 ;; ============================================================================
 DEF_FUNC_LOCAL pow_load_mpz
@@ -486,14 +493,19 @@ DEF_FUNC_LOCAL pow_load_mpz
     add rax, PyIntObject.mpz
     mov rsi, rax
     call __gmpz_set wrt ..plt
+    xor eax, eax
     leave
     ret
 .plm_small:
     call __gmpz_set_si wrt ..plt
+    xor eax, eax
     leave
     ret
 .plm_bad:
-    RAISE exc_TypeError_type, "pow() arguments must be numeric"
+    SET_EXC exc_TypeError_type, "pow() arguments must be numeric"
+    mov rax, -1
+    leave
+    ret
 END_FUNC pow_load_mpz
 
 ;; ============================================================================

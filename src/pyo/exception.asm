@@ -19,16 +19,16 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
+extern dict_get
+extern dict_set
 extern exc_repr
 extern exc_str
 extern traceback_type
 extern ap_memcpy
 extern oserror_str
 extern oserror_new
-extern raise_oserror
-extern raise_oserror_owned
-extern raise_oserror_owned2
-extern raise_oserror_build
+extern oserror_build
 extern type_number_methods
 
 extern ap_malloc
@@ -45,7 +45,6 @@ extern str_type
 extern type_getattr
 extern type_repr
 extern type_type
-extern raise_exception_obj
 extern str_new_heap
 extern none_singleton
 extern int_from_i64
@@ -54,13 +53,10 @@ extern int_to_i64
 extern int_type
 extern obj_repr
 extern obj_str
-extern raise_exception
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
-extern dict_get
 extern dict_new
-extern dict_set
 extern eg_dealloc
 extern exc_BaseExceptionGroup_type
 extern exc_ExceptionGroup_type
@@ -247,21 +243,9 @@ DEF_FUNC exc_set_context, ESC_FRAME
 END_FUNC exc_set_context
 
 ;; ============================================================================
-;; raise_key_error(rdi = key Value) -- does not return.
+;; set_key_error(rdi = key Value) -> rax = 0, always, with it pending
 ;; CPython reports the missing key itself as the exception's single argument,
 ;; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
-;; ============================================================================
-DEF_FUNC raise_key_error
-    call set_key_error
-    mov rdi, [gs:ThreadState.current_exception]
-    mov qword [gs:ThreadState.current_exception], 0
-    call raise_exception_obj
-    ud2
-END_FUNC raise_key_error
-
-;; ============================================================================
-;; set_key_error(rdi = key Value) -- the same KeyError, RECORDED rather than
-;; raised, for a caller that has a C stack it still has to unwind by hand.
 ;; ============================================================================
 global set_key_error
 DEF_FUNC set_key_error
@@ -272,6 +256,7 @@ DEF_FUNC set_key_error
     mov rdi, rax
     extern exc_install
     call exc_install
+    xor eax, eax
     leave
     ret
 END_FUNC set_key_error
@@ -448,7 +433,7 @@ DEF_FUNC exc_getattr
     jnz .not_code
     mov rdi, rbx
     lea rsi, [rel exc_SystemExit_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jnz .get_code
 .not_code:
@@ -502,7 +487,7 @@ DEF_FUNC exc_getattr
     mov rdi, rbx
 
     lea rsi, [rel exc_UnicodeError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jz .not_unicode_attr
     ; An explicit assignment wins, as it does for SyntaxError's.
@@ -511,6 +496,7 @@ DEF_FUNC exc_getattr
     jz .uni_from_args
     mov rsi, r12
     call dict_get
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -522,7 +508,7 @@ DEF_FUNC exc_getattr
     ; span it must replace, so a translate error's handler got nonsense.
     mov rdi, rbx
     lea rsi, [rel exc_UnicodeTranslateError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jz .uni_have_index
     test r14d, r14d
@@ -601,7 +587,7 @@ DEF_FUNC exc_getattr
 .syn_attr:
     mov rdi, rbx
     lea rsi, [rel exc_SyntaxError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jz .not_syntax_attr
     ; An explicit `e.lineno = 3` wins, the way .get_code lets one win.
@@ -610,6 +596,7 @@ DEF_FUNC exc_getattr
     jz .syn_from_args
     mov rsi, r12
     call dict_get
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -664,6 +651,7 @@ DEF_FUNC exc_getattr
     jz .eg_type_start
     mov rsi, r12
     call dict_get
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -681,7 +669,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .eg_type_next
     mov rsi, r12
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_type
@@ -696,6 +684,7 @@ DEF_FUNC exc_getattr
     jz .not_found
     mov rsi, r12
     call dict_get
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_dict
@@ -733,7 +722,7 @@ DEF_FUNC exc_getattr
     ; numpy's import-time fallback reads it off the ImportError it catches.
     mov rdi, rbx
     lea rsi, [rel exc_ImportError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jz .eg_really_not_found
     mov rax, [rbx + PyExceptionObject.exc_args]
@@ -756,13 +745,13 @@ DEF_FUNC exc_getattr
     ; the ImportError question.
     mov rdi, rbx
     lea rsi, [rel exc_AttributeError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jnz .return_none
 .eg_import_default:
     mov rdi, rbx
     lea rsi, [rel exc_ImportError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jnz .return_none
     jmp .eg_really_not_found
@@ -770,7 +759,7 @@ DEF_FUNC exc_getattr
 .eg_attr_default:
     mov rdi, rbx
     lea rsi, [rel exc_AttributeError_type]
-    call exc_isinstance
+    call exc_isinstance         ; err: a static type is never refused
     test eax, eax
     jnz .return_none
 
@@ -868,6 +857,7 @@ DEF_FUNC exc_getattr
     jz .code_from_args
     mov rsi, r12
     call dict_get
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -1001,7 +991,11 @@ END_FUNC exc_getattr
 ;; ============================================================================
 ;; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
 ;; Store a custom attribute on an exception object using exc_dict.
-;; rdi = exc, rsi = name, rdx = value, ecx = value_tag
+;; rdi = exc, rsi = name, rdx = value, ecx = value_tag  -> rax = 0
+;; Fails: -1
+;; Only a field name (args, __cause__, __context__, __traceback__,
+;; __suppress_context__, __dict__) or a delete can be refused; a store under
+;; any other name cannot fail.
 ;; ============================================================================
 ESA_VAL   equ 8
 ESA_TAG   equ 16
@@ -1089,9 +1083,9 @@ DEF_FUNC exc_setattr, ESA_FRAME
 .esa_have_dict:
     mov rdi, [rbx + PyExceptionObject.exc_dict]
     ; rsi = name and rdx = value are both already Values
-    call dict_set
+    call dict_set       ; err: returned to the caller as is
 
-    xor eax, eax            ; return 0 (success)
+    ; rax is dict_set's own 0 or -1
     xor edx, edx
 
     pop r12
@@ -1123,9 +1117,7 @@ DEF_FUNC exc_setattr, ESA_FRAME
     leave
     ret
 .esa_dict_bad:
-    pop r12
-    pop rbx
-    RAISE exc_TypeError_type, "__dict__ must be set to a dictionary"
+    FAIL exc_TypeError_type, "__dict__ must be set to a dictionary", .esa_fail
 
 .esa_delete:
     ; `del e.args` is refused rather than reported as a missing attribute:
@@ -1135,7 +1127,7 @@ DEF_FUNC exc_setattr, ESA_FRAME
     call ap_strcmp
     test eax, eax
     jnz .esa_delete_dict
-    RAISE exc_TypeError_type, "args may not be deleted"
+    FAIL exc_TypeError_type, "args may not be deleted", .esa_fail
 .esa_delete_dict:
     mov rax, [rbx + PyExceptionObject.exc_dict]
     test rax, rax
@@ -1143,7 +1135,7 @@ DEF_FUNC exc_setattr, ESA_FRAME
     mov rdi, rax
     mov rsi, r12
     extern dict_del_opt
-    call dict_del_opt
+    call dict_del_opt         ; err: the key is an attribute name, a str
     test eax, eax
     jnz .esa_del_missing
     xor eax, eax            ; return 0 (success)
@@ -1155,12 +1147,14 @@ DEF_FUNC exc_setattr, ESA_FRAME
 .esa_del_missing:
     mov rdi, rbx
     mov rsi, r12
-    xor edx, edx
-    extern raise_no_attribute
+    extern set_no_attribute
+    call set_no_attribute       ; the read form, .name and .obj filled in
+.esa_fail:
+    mov rax, -1                 ; tp_setattr: -1 with the exception pending
     pop r12
     pop rbx
     leave
-    jmp raise_no_attribute      ; does not return
+    ret
 
 .esa_args:
     ; CPython's BaseException_set_args is PySequence_Tuple(val) then
@@ -1173,11 +1167,9 @@ DEF_FUNC exc_setattr, ESA_FRAME
     lea rdi, [rel tuple_type]
     lea rsi, [rbp - ESA_VAL]        ; a one-Value argument array
     mov edx, 1
-    call tuple_type_call
+    call tuple_type_call      ; err: the 0 is tested just below
     test rax, rax
-    jz .esa_args_out                ; an iterable that raised part way; the
-                                    ; exception stands and op_store_attr's
-                                    ; DUNDER_RAISED finds it
+    jz .esa_fail                    ; an iterable that raised part way
     mov rdi, [rbx + PyExceptionObject.exc_args]
     mov [rbx + PyExceptionObject.exc_args], rax     ; the new tuple is owned
     test rdi, rdi
@@ -1269,13 +1261,13 @@ DEF_FUNC exc_setattr, ESA_FRAME
     jne .esa_field_bad_tb
     cmp esi, PyExceptionObject.exc_cause
     jne .esa_field_bad_context
-    RAISE exc_TypeError_type, \
-        "exception cause must be None or derive from BaseException"
+    FAIL exc_TypeError_type, \
+        "exception cause must be None or derive from BaseException", .esa_fail
 .esa_field_bad_context:
-    RAISE exc_TypeError_type, \
-        "exception context must be None or derive from BaseException"
+    FAIL exc_TypeError_type, \
+        "exception context must be None or derive from BaseException", .esa_fail
 .esa_field_bad_tb:
-    RAISE exc_TypeError_type, "__traceback__ must be a traceback or None"
+    FAIL exc_TypeError_type, "__traceback__ must be a traceback or None", .esa_fail
 
 .esa_suppress:
     ; CPython's setter takes a bool and nothing else, down to the wording.
@@ -1299,13 +1291,15 @@ DEF_FUNC exc_setattr, ESA_FRAME
     leave
     ret
 .esa_suppress_bad:
-    RAISE exc_TypeError_type, "attribute value type must be bool"
+    FAIL exc_TypeError_type, "attribute value type must be bool", .esa_fail
 END_FUNC exc_setattr
 
 ;; ============================================================================
 ;; exc_isinstance(PyExceptionObject *exc, PyTypeObject *type) -> int (0/1)
+;; Fails: -1
 ;; Check if exception is an instance of type, walking tp_base chain.
-;; If type is a tuple, checks each element.
+;; If type is a tuple, checks each element.  Only a target that is not a
+;; class is refused, so a caller naming a static type has nothing to check.
 ;; ============================================================================
 extern tuple_type
 DEF_FUNC_BARE exc_isinstance
@@ -1346,7 +1340,13 @@ DEF_FUNC_BARE exc_isinstance
     mov rdi, [rdi + PyExceptionObject.ob_type]
     jmp type_is_subtype
 .not_a_class:
-    RAISE exc_TypeError_type, "catching classes that do not inherit from BaseException is not allowed"
+    push rbp                    ; bare, and reached at either stack parity
+    mov rbp, rsp
+    and rsp, -16
+    SET_EXC exc_TypeError_type, "catching classes that do not inherit from BaseException is not allowed"
+    mov rax, -1
+    leave
+    ret
 .not_match:
     xor eax, eax
     ret
@@ -1367,14 +1367,18 @@ DEF_FUNC_BARE exc_isinstance
     mov rdi, rbx               ; exc
     mov rsi, [r12 + rcx*8]    ; type element
     ; Recursive call for nested tuples
-    call exc_isinstance
+    call exc_isinstance         ; err: .tuple_found hands a -1 on as it is
     pop rcx
     test eax, eax
     jnz .tuple_found
     inc rcx
     jmp .tuple_loop
 .tuple_found:
+    cmp eax, -1
+    je .tuple_raised            ; an element that is not a class
     mov eax, 1
+.tuple_raised:
+    movsx rax, eax
     pop r13
     pop r12
     pop rbx
@@ -1551,13 +1555,17 @@ DEF_FUNC exc_method_with_traceback, EWT_FRAME
     V_PACK rax, rdx                 ; builtins return one Value
     ret
 .ewt_bad:
-    RAISE exc_TypeError_type, "__traceback__ must be a traceback or None"
+    SET_EXC exc_TypeError_type, "__traceback__ must be a traceback or None"
+    leave
+    ret
 .ewt_arity:
     dec rsi                         ; the count CPython reports excludes self
     CSTRING rdi, "BaseException.with_traceback() takes exactly one argument ("
     CSTRING rdx, " given)"
-    extern raise_type_error_counted
-    jmp raise_type_error_counted
+    extern set_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
 END_FUNC exc_method_with_traceback
 
 ;; ============================================================================
@@ -1678,15 +1686,14 @@ DEF_FUNC exc_method_new, EMN_FRAME
     V_PACK rax, rdx
     ret
 .emn_no_type:
-    pop rbx
-    RAISE exc_TypeError_type, \
-          "BaseException.__new__(): not enough arguments"
+    FAIL exc_TypeError_type, \
+          "BaseException.__new__(): not enough arguments", .emn_fail
 .emn_not_a_type:
     mov rsi, rbx
-    pop rbx
     CSTRING rdi, `BaseException.__new__(X): X is not a type object (\x01)`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .emn_fail
 .emn_group:
     ; Hand the whole call on, minus the class, which eg_type_call takes as its
     ; first argument in the tp_new shape rather than in the args array.
@@ -1704,11 +1711,11 @@ DEF_FUNC exc_method_new, EMN_FRAME
     ; raise_type_error_with_TYPENAME: the argument here IS a class, so the
     ; name wanted is its own and not its type's, which is always "type".
     mov rsi, rbx
-    pop rbx
     CSTRING rdi, \
         `BaseException.__new__(\x01): \x01 is not a subtype of BaseException`
-    extern raise_type_error_with_typename
-    jmp raise_type_error_with_typename
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .emn_fail
 END_FUNC exc_method_new
 
 ;; ============================================================================
@@ -1768,6 +1775,7 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     jz .ean_make
     mov rsi, [rbp - EAN_NAME]
     call dict_get
+    ERR_PENDING .ean_raised
     test rax, rax
     jz .ean_make
 
@@ -1796,7 +1804,7 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     mov rsi, [rbp - EAN_NAME]
     mov rdx, rax
     xor ecx, ecx
-    call exc_setattr                    ; creates exc_dict when there is none
+    call exc_setattr                    ; err: __notes__ is no field name
     ; The dict holds it now.  Dropping the constructor's reference leaves one
     ; owner, so the list a program reads back is the one appended to here.
     mov rdi, [rbp - EAN_LIST]
@@ -1805,7 +1813,7 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
 .ean_append:
     mov rdi, [rbp - EAN_LIST]
     mov rsi, [rbp - EAN_NOTE]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
 
 .ean_out:
     mov rdi, [rbp - EAN_NAME]
@@ -1820,19 +1828,30 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
 .ean_not_list:
     mov rdi, [rbp - EAN_NAME]
     call obj_decref
-    RAISE exc_TypeError_type, "Cannot add note: __notes__ is not a list"
+    SET_EXC exc_TypeError_type, "Cannot add note: __notes__ is not a list"
+    leave
+    ret
 
 .ean_not_str:
     mov rsi, [rbp - EAN_NOTE]
     CSTRING rdi, `note must be a str, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    call set_type_error_with_name
+    leave
+    ret
 
 .ean_arity:
     dec rsi                             ; the count CPython reports excludes self
     CSTRING rdi, "BaseException.add_note() takes exactly one argument ("
     CSTRING rdx, " given)"
-    jmp raise_type_error_counted
+    call set_type_error_counted
+    leave
+    ret
+.ean_raised:                    ; the exception's dict could not be searched
+    mov rdi, [rbp - EAN_NAME]
+    call obj_decref
+    xor eax, eax
+    leave
+    ret
 END_FUNC exc_method_add_note
 
 ;; ============================================================================
@@ -2237,7 +2256,8 @@ DEF_FUNC exc_type_call, ETC_FRAME
     pop rdx
     lea rdi, [r8 + PyStrObject.data]
     mov rsi, [rbx + PyTypeObject.tp_name]
-    call exc_raise_bad_keyword
+    call exc_set_bad_keyword
+    jmp .etc_fail
 .etc_kw_name:
     add rsp, 8
     pop r9
@@ -2257,7 +2277,13 @@ DEF_FUNC exc_type_call, ETC_FRAME
 .etc_no_keywords:
     xor edi, edi                ; no keyword name: the whole class is refused
     mov rsi, [rbx + PyTypeObject.tp_name]
-    call exc_raise_bad_keyword
+    call exc_set_bad_keyword
+.etc_fail:                      ; refused before anything was built
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 .etc_kw_done:
     mov rdx, [rbp - ETC_NARGS]
     mov rsi, [rbp - ETC_ARGS]
@@ -2407,8 +2433,9 @@ DEF_FUNC_LOCAL exc_kw_family, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC exc_kw_family
 
-;; exc_raise_bad_keyword(rdi = the keyword's name as a C string, or 0 when the
-;;                        type takes none at all; rsi = the type's name)
+;; exc_set_bad_keyword(rdi = the keyword's name as a C string, or 0 when the
+;;                      type takes none at all; rsi = the type's name)
+;;   -> rax = 0, always, with the TypeError pending
 ;; CPython's two wordings:
 ;;   'foo' is an invalid keyword argument for AttributeError()
 ;;   ValueError() takes no keyword arguments
@@ -2416,7 +2443,7 @@ ERB_NAME  equ 8
 ERB_TYPE  equ 16
 ERB_BUF   equ 192
 ERB_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-DEF_FUNC_LOCAL exc_raise_bad_keyword, ERB_FRAME
+DEF_FUNC_LOCAL exc_set_bad_keyword, ERB_FRAME
     mov [rbp - ERB_NAME], rdi
     mov [rbp - ERB_TYPE], rsi
     lea rdi, [rbp - ERB_BUF]
@@ -2448,8 +2475,11 @@ DEF_FUNC_LOCAL exc_raise_bad_keyword, ERB_FRAME
 .erb_raise:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - ERB_BUF]
-    call raise_exception
-END_FUNC exc_raise_bad_keyword
+    extern set_exception
+    call set_exception
+    leave
+    ret
+END_FUNC exc_set_bad_keyword
 
 ;; exc_store_named(rdi = the exception, rsi = the family,
 ;;                 rdx = the 'name' Value or 0, rcx = the second one or 0)
@@ -2483,7 +2513,7 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     ; which outlive the exception anyway, and because the defaults are the
     ; None singleton.
     xor ecx, ecx
-    call exc_setattr
+    call exc_setattr            ; err: `name` is no field name
     add rsp, 8
     pop rdi
     call obj_decref
@@ -2506,7 +2536,7 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
     lea rdx, [rel none_singleton]
 .esn_have2:
     xor ecx, ecx                ; borrowed, as above
-    call exc_setattr
+    call exc_setattr            ; err: nor is `path` or `obj`
     add rsp, 8
     pop rdi
     call obj_decref
@@ -2515,10 +2545,11 @@ DEF_FUNC_LOCAL exc_store_named, ESN_FRAME
 END_FUNC exc_store_named
 
 ;; ============================================================================
-;; exc_raise_import(rdi = the type, rsi = message C string,
-;;                  rdx = the `name` Value or 0, rcx = the `path` Value or 0,
-;;                  r8 = 1 to release rdx and rcx afterwards, 0 to borrow them)
-;;     -- does not return
+;; exc_set_import(rdi = the type, rsi = message C string,
+;;                rdx = the `name` Value or 0, rcx = the `path` Value or 0,
+;;                r8 = 1 to release rdx and rcx afterwards, 0 to borrow them)
+;;     -> rax = 0, always, with the exception pending
+;; exc_raise_import, below, is the same and then unwinds: for a handler.
 ;;
 ;; The import machinery's own ImportErrors, with the two named attributes
 ;; CPython's carry.  exc_from_cstr cannot do this for the family in general:
@@ -2540,7 +2571,7 @@ ERI_NAME  equ 8
 ERI_PATH  equ 16
 ERI_OWN   equ 24
 ERI_FRAME equ 32                ; + 0 pushes = 32, 16-aligned
-DEF_FUNC exc_raise_import, ERI_FRAME
+DEF_FUNC exc_set_import, ERI_FRAME
     mov [rbp - ERI_NAME], rdx
     mov [rbp - ERI_PATH], rcx
     mov [rbp - ERI_OWN], r8
@@ -2573,19 +2604,15 @@ DEF_FUNC exc_raise_import, ERI_FRAME
     add rsp, 8
     pop rdi
 .eri_raise:
-    call raise_exception_obj
-    ud2
+    extern exc_install
+    call exc_install
+    xor eax, eax
+    leave
+    ret
 .eri_oom:
-    ; No memory for the exception itself; the unwinder still has to run, and
-    ; exc_install handles a 0 by leaving whatever is pending in place.
-    xor edi, edi
-    call raise_exception_obj
-    ud2
-END_FUNC exc_raise_import
-
-
-
-
+    xor edi, edi                ; exc_from_cstr answered 0
+    jmp .eri_raise
+END_FUNC exc_set_import
 
 ;; ============================================================================
 ;; Data section - Exception type objects and name strings

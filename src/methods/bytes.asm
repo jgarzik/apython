@@ -37,7 +37,7 @@ extern list_new
 extern list_append
 extern list_type
 extern tuple_type
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern tuple_type_call
@@ -51,7 +51,7 @@ extern bool_true
 section .text
 
 ;; ============================================================================
-;; BYTES_NEEDLE sub_slot, scratch_slot
+;; BYTES_NEEDLE sub_slot, scratch_slot, error_exit
 ;;
 ;; find(), count() and index() take an INT as well as a bytes-like -- CPython's
 ;; do, and `charmap.find(1, q)` in the regex compiler is exactly that call.
@@ -63,7 +63,8 @@ section .text
 ;; one data byte, which is all the bodies below read.  It lives exactly as
 ;; long as the frame, so nothing owns or releases it.
 ;; ============================================================================
-%macro BYTES_NEEDLE 2           ; %1 = the sub slot, %2 = the scratch slot
+%macro BYTES_NEEDLE 3           ; %1 = the sub slot, %2 = the scratch slot,
+                                ; %3 = the caller's error exit
     ; int_is_integer, not a pointer test: True, every int under INT_STRESS=1,
     ; and every int subclass instance all arrive as pointers, and a tag test
     ; sends them down the bytes-like path to be read as an object header.
@@ -87,12 +88,13 @@ section .text
     mov rdi, [rbp - %1]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 %3
     test rax, rax
     jl %%range
     cmp rax, 255
     jle %%in_range
 %%range:
-    RAISE exc_ValueError_type, "byte must be in range(0, 256)"
+    FAIL exc_ValueError_type, "byte must be in range(0, 256)", %3
 %%in_range:
     lea rcx, [rbp - %2]
     mov qword [rcx + PyBytesObject.ob_size], 1
@@ -117,6 +119,7 @@ section .text
 ;; bytes_per_sep bytes is joined by it: b"abcd".hex(":") is '61:62:63:64'
 ;; and b"abcd".hex(":", 2) is '6162:6364'.  Both arguments were accepted and
 ;; then IGNORED, which is a wrong answer rather than a missing feature.
+;; Fails: 0
 ;; ============================================================================
 extern bytes_type
 BH_SELF   equ 8
@@ -139,9 +142,10 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     push rdi
     push rsi
     mov rdi, [rdi + 8]
-    call bh_sep_char             ; raises for anything but a 1-char str
+    call bh_sep_char             ; refuses anything but a 1-char str
     pop rsi
     pop rdi
+    ERR_M1 .bh_fail
     mov [rbp - BH_SEP], rax
     cmp rsi, 3
     jl .bh_no_sep
@@ -149,6 +153,7 @@ DEF_FUNC bytes_method_hex, BH_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .bh_fail
     ; A POSITIVE group counts from the right and a negative one from the
     ; left, which is only the same when the length divides: b"abcde"
     ; groups as 61-6263-6465 one way and 6162-6364-65 the other.  Zero
@@ -280,7 +285,11 @@ DEF_FUNC bytes_method_hex, BH_FRAME
 
 .bh_group_zero:
     extern exc_ValueError_type
-    RAISE exc_ValueError_type, "bytes_per_sep must be non-zero"
+    SET_EXC exc_ValueError_type, "bytes_per_sep must be non-zero"
+.bh_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_method_hex
 
 ;; ============================================================================
@@ -289,6 +298,7 @@ END_FUNC bytes_method_hex
 ;; CPython asks for its length first, so a non-string is "object of type 'X'
 ;; has no len()" rather than a message about separators, and only a
 ;; one-character string is accepted.
+;; Fails: -1
 ;; ============================================================================
 BHS_ARG   equ 8             ; the argument, for the refusal below
 BHS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -325,9 +335,11 @@ DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     jz .bsc_no_len
 .bsc_measure:
     call rcx
+    ERR_M1 .bsc_fail            ; the separator's __len__ raised
     cmp rax, 1
     jne .bsc_bad_len
-    RAISE exc_TypeError_type, "sep must be str or bytes."
+    SET_EXC exc_TypeError_type, "sep must be str or bytes."
+    jmp .bsc_fail
 
 .bsc_bytes:
     mov rcx, [rdi + PyBytesObject.ob_size]
@@ -346,14 +358,21 @@ DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     leave
     ret
 .bsc_not_ascii:
-    RAISE exc_ValueError_type, "sep must be ASCII."
+    SET_EXC exc_ValueError_type, "sep must be ASCII."
+    jmp .bsc_fail
 .bsc_bad_len:
-    RAISE exc_ValueError_type, "sep must be length 1."
+    SET_EXC exc_ValueError_type, "sep must be length 1."
+    jmp .bsc_fail
 .bsc_no_len:
     mov rsi, [rbp - BHS_ARG]
     CSTRING rdi, `object of type '\x01' has no len()`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bsc_fail
+.bsc_fail:
+    mov rax, -1
+    leave
+    ret
 END_FUNC bh_sep_char
 
 ;; ============================================================================
@@ -366,6 +385,7 @@ END_FUNC bh_sep_char
 ;; binascii.unhexlify needs -- and binascii is what base64, quopri, uu and
 ;; plistlib come in behind.  CPython skips ASCII whitespace between BYTES
 ;; (not inside a pair), and rejects anything else.
+;; Fails: 0
 ;; ============================================================================
 BFH_SRC   equ 8
 BFH_OUT   equ 16
@@ -504,7 +524,7 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     lea rsi, [rsp + 8]
     mov edx, 1
     extern type_call
-    call type_call
+    call type_call              ; err: 0 goes to the caller, once the bytes are released
     V_UNPACK rax, rdx
     mov rcx, rax
     add rsp, 8
@@ -525,7 +545,7 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     lea rsi, [rsp + 8]
     mov edx, 1
     extern bytearray_type_call
-    call bytearray_type_call
+    call bytearray_type_call  ; err: the 0 is tested below, once the bytes are released
     mov rcx, rax
     add rsp, 8
     pop rdi
@@ -550,12 +570,13 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
     mov rdi, [rbp - BFH_OUT]
     call ap_free
     mov rsi, [rbp - BFH_I]
-    call bfh_raise_position
+    call bfh_set_position
+    jmp .bfh_nomem
 .bfh_bad:
     mov rdi, [rbp - BFH_OUT]
     call ap_free
     mov rsi, [rbp - BFH_I]
-    call bfh_raise_position
+    call bfh_set_position
 .bfh_nomem:
     xor eax, eax
     leave
@@ -563,10 +584,16 @@ DEF_FUNC bytes_fromhex_impl, BFH_FRAME
 .bfh_type:
     mov rsi, rdi
     CSTRING rdi, `fromhex() argument must be str, not \x02`
-    extern raise_type_error_with_name
-    call raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .bfh_args:
-    RAISE exc_TypeError_type, "fromhex() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "fromhex() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_fromhex_impl
 
 ;; bfh_digit(eax = a character) -> eax = its value, or -1
@@ -597,12 +624,12 @@ DEF_FUNC_BARE bfh_digit
     ret
 END_FUNC bfh_digit
 
-;; bfh_raise_position(rsi = the character index)
-;;   -> does not return: the position is raised as a ValueError
+;; bfh_set_position(rsi = the character index)
+;;   -> rax = 0, always, with the position pending as a ValueError
 BRP_POS   equ 8
 BRP_BUF   equ 176
 BRP_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL bfh_raise_position, BRP_FRAME
+DEF_FUNC_LOCAL bfh_set_position, BRP_FRAME
     mov [rbp - BRP_POS], rsi
     lea rdi, [rbp - BRP_BUF]
     CSTRING rsi, "non-hexadecimal number found in fromhex() arg at position "
@@ -614,9 +641,11 @@ DEF_FUNC_LOCAL bfh_raise_position, BRP_FRAME
     call msg_append_i64
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rbp - BRP_BUF]
-    extern raise_exception
-    call raise_exception
-END_FUNC bfh_raise_position
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC bfh_set_position
 
 ;; ============================================================================
 ;; bytes_affix_match(rdi = one affix Value, rsi = the subject's data,
@@ -672,6 +701,7 @@ END_FUNC bytes_affix_match
 ;; take EITHER one affix or a tuple of them -- `data.startswith((b'PK',
 ;; b'\x1f\x8b'))` is the idiom that matters, and routing the whole argument
 ;; through bytes_like_ptr_len turned it into a TypeError.
+;; Fails: 0
 ;; ============================================================================
 BAF_SELF  equ 8
 BAF_SLEN  equ 16
@@ -721,6 +751,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .baf_fail
     mov r11, rax
     mov r8, [rbp - BAF_SLEN]
     test r11, r11
@@ -740,6 +771,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rdi, [rdi + 24]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .baf_fail
     pop r11
     mov rcx, [rbp - BAF_SLEN]
     test rax, rax
@@ -823,7 +855,8 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     ret
 
 .baf_self_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .baf_fail
 .baf_item_type:
     ; CPython words a bad ELEMENT differently from a bad argument: "a
     ; bytes-like object is required, not 'str'" rather than "first arg must
@@ -836,8 +869,8 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     call baf_append_quoted_typename
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bj_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .baf_fail
 .baf_arg_type:
     ; CPython names the method and the offending type: "startswith first arg
     ; must be bytes or a tuple of bytes, not str".
@@ -852,8 +885,8 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     call baf_append_typename
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bj_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .baf_fail
 .baf_argerr:
     ; CPython counts the affix and the window, not self: "takes at least 1
     ; argument (0 given)" and "takes at most 3 arguments (4 given)".
@@ -876,8 +909,12 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     call bj_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bj_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .baf_fail
+.baf_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_method_affix
 
 ;; ============================================================================
@@ -936,7 +973,7 @@ END_FUNC baf_append_typename
 DEF_FUNC bytes_method_startswith
     xor edx, edx
     lea rcx, [rel baf_name_startswith]
-    call bytes_method_affix
+    call bytes_method_affix     ; err: its 0 is this method's own
     leave
     ret
 END_FUNC bytes_method_startswith
@@ -947,7 +984,7 @@ END_FUNC bytes_method_startswith
 DEF_FUNC bytes_method_endswith
     mov edx, 1
     lea rcx, [rel baf_name_endswith]
-    call bytes_method_affix
+    call bytes_method_affix     ; err: its 0 is this method's own
     leave
     ret
 END_FUNC bytes_method_endswith
@@ -956,6 +993,7 @@ END_FUNC bytes_method_endswith
 ;; bytes_method_count(args, nargs) -> SmallInt
 ;; args[0]=self (bytes), args[1]=sub (bytes)
 ;; Count non-overlapping occurrences of sub in self.
+;; Fails: 0
 ;; ============================================================================
 BC_SELF   equ 8
 BC_SUB    equ 16
@@ -976,7 +1014,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov [rbp - BC_SUB], rcx
     mov [rbp - BC_ARGS], rdi
     mov [rbp - BC_NARGS], rsi
-    BYTES_NEEDLE BC_SUB, BC_ONE
+    BYTES_NEEDLE BC_SUB, BC_ONE, .bc_fail
 
     ; Both sides through bytes_like_ptr_len: a bytearray argument was read
     ; with a bytes layout, so ob_size found its capacity and the data pointer
@@ -1013,6 +1051,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .bc_fail
     pop r9
     pop r8
     mov r11, rax
@@ -1034,6 +1073,7 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rdi, [rdi + 24]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .bc_fail
     add rsp, 8
     pop r11
     pop r9
@@ -1130,14 +1170,22 @@ DEF_FUNC bytes_method_count, BC_FRAME
     mov rsi, [rbp - BC_SUB]
     CSTRING rdi, \
         `argument should be integer or bytes-like object, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bc_fail
 .bc_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .bc_fail
 .bc_error:
-    RAISE exc_TypeError_type, "count() takes at most 3 arguments"
+    SET_EXC exc_TypeError_type, "count() takes at most 3 arguments"
+    jmp .bc_fail
 .bc_noargs:
-    RAISE exc_TypeError_type, "count() takes at least 1 argument (0 given)"
+    SET_EXC exc_TypeError_type, "count() takes at least 1 argument (0 given)"
+    jmp .bc_fail
+.bc_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_method_count
 
 
@@ -1168,6 +1216,7 @@ BF_FRAME  equ BF_ONE + 40   ; + 0 pushes = 112
 ;; in where the scan starts, and index and rindex differ from the first two
 ;; only in answering a miss with a ValueError.  bytes had the first of the
 ;; four and neither of the others.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_find_impl, BF_FRAME
     mov [rbp - BF_RIGHT], rdx
@@ -1183,7 +1232,7 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov [rbp - BF_SUB], rcx
     mov [rbp - BF_ARGS], rdi
     mov [rbp - BF_NARGS], rsi
-    BYTES_NEEDLE BF_SUB, BF_ONE
+    BYTES_NEEDLE BF_SUB, BF_ONE, .bf_fail
 
     ; The slots hold (pointer, length) from here on, not objects: a bytearray
     ; argument read with a bytes layout found its capacity where the length
@@ -1212,6 +1261,7 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov rdi, [rdi + 16]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .bf_fail
     mov r11, rax
     mov r8, [rbp - BF_SLEN]
     test r11, r11
@@ -1227,6 +1277,7 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov rdi, [rdi + 24]
     V_UNPACK rdi, rdx
     call obj_as_index
+    ERR_M1 .bf_fail
     pop r11
     mov rcx, [rbp - BF_SLEN]
     test rax, rax
@@ -1340,7 +1391,8 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     ret
 
 .bf_miss_error:
-    RAISE exc_ValueError_type, "subsection not found"
+    SET_EXC exc_ValueError_type, "subsection not found"
+    jmp .bf_fail
 
 .bf_found_at_start:
     mov rax, r11
@@ -1353,12 +1405,19 @@ DEF_FUNC bytes_find_impl, BF_FRAME
     mov rsi, [rbp - BF_SUB]
     CSTRING rdi, \
         `argument should be integer or bytes-like object, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bf_fail
 .bf_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .bf_fail
 .bf_error:
-    RAISE exc_TypeError_type, "find() takes at most 3 arguments"
+    SET_EXC exc_TypeError_type, "find() takes at most 3 arguments"
+    jmp .bf_fail
+.bf_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_find_impl
 
 ;; ============================================================================
@@ -1410,6 +1469,7 @@ END_FUNC bytes_method_rindex
 ;;
 ;; strip([chars]): with no argument, ASCII whitespace; with one, every byte in
 ;; it, as a set.  bytes had none of the three.
+;; Fails: 0
 ;; ============================================================================
 BST_SELF  equ 8
 BST_CHARS equ 16
@@ -1497,12 +1557,21 @@ DEF_FUNC bytes_strip_impl, BST_FRAME
 .bst_arg_type:
     mov rsi, [rbp - BST_CHARS]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    xor eax, eax
+    leave
+    ret
 .bst_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    xor eax, eax
+    leave
+    ret
 .bst_error:
-    RAISE exc_TypeError_type, "strip() takes at most 1 argument"
+    SET_EXC exc_TypeError_type, "strip() takes at most 1 argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC bytes_strip_impl
 
 ;; bst_in_set(edi = a byte) -> eax = 1 when it is to be stripped.  Reads the
@@ -1581,6 +1650,7 @@ END_FUNC bytes_method_rstrip
 ;;
 ;; partition and rpartition.  A separator that is not there answers the whole
 ;; string and two empties, at whichever end.
+;; Fails: 0
 ;; ============================================================================
 BPT_SELF  equ 8
 BPT_SEP   equ 16
@@ -1736,16 +1806,26 @@ DEF_FUNC bytes_partition_impl, BPT_FRAME
     ret
 
 .bpt_empty_sep:
-    RAISE exc_ValueError_type, "empty separator"
+    SET_EXC exc_ValueError_type, "empty separator"
+    jmp .bpt_fail
 .bpt_arg_type:
     mov rsi, [rbp - BPT_SEP]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bpt_fail
 .bpt_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .bpt_fail
 .bpt_error:
-    RAISE exc_TypeError_type, "partition() takes exactly one argument"
+    SET_EXC exc_TypeError_type, "partition() takes exactly one argument"
+    jmp .bpt_fail
+.bpt_fail:
+    lea rsp, [rbp - BPT_FRAME - 8]      ; whatever a site still had pushed
+    xor eax, eax
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_partition_impl
 
 ;; ============================================================================
@@ -1770,6 +1850,7 @@ END_FUNC bytes_method_rpartition
 ;; bytes_method_replace(args, nargs) -> new bytes
 ;; args[0]=self (bytes), args[1]=old (bytes), args[2]=new (bytes)
 ;; Scan self for old subsequence, build new PyBytesObject with replacements.
+;; Fails: 0
 ;; ============================================================================
 extern bytes_new
 extern bytes_from_data
@@ -1848,6 +1929,7 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     V_UNPACK rdi, rdx           ; obj_as_index takes the pair, as str.replace
     extern obj_as_index         ; hands it
     call obj_as_index
+    ERR_M1 .br_fail
     mov [rbp - BR_COUNT], rax
     jmp .br_count_done
 .br_count_unlimited:
@@ -2046,12 +2128,25 @@ DEF_FUNC bytes_method_replace, BR_FRAME
     mov rsi, [rbp - BR_NEW]
 .br_arg_type:
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .br_fail
 .br_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .br_fail
 .br_error:
-    RAISE exc_TypeError_type, "replace() takes exactly 2 arguments"
+    SET_EXC exc_TypeError_type, "replace() takes exactly 2 arguments"
+    jmp .br_fail
+.br_fail:
+    lea rsp, [rbp - BR_FRAME - 40]     ; whatever a site still had pushed
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_method_replace
 
 ;; ============================================================================
@@ -2061,6 +2156,7 @@ END_FUNC bytes_method_replace
 ;; One implementation for split and rsplit, the shape str_split_impl already
 ;; has.  The two differ only in which end maxsplit counts from, so the
 ;; right-hand arms scan backwards and insert each piece at the front.
+;; Fails: 0
 ;; ============================================================================
 BSP_SEPLEN equ 8
 BSP_MAX    equ 16           ; splits left, or negative for "no limit"
@@ -2103,6 +2199,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     V_UNPACK rdi, rdx
     extern obj_as_index
     call obj_as_index
+    ERR_M1 .bsp_fail
     add rsp, 8
     pop rdi
     mov [rbp - BSP_MAX], rax
@@ -2191,7 +2288,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov rdi, r13
     mov rsi, rax
     push rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop rcx
@@ -2262,7 +2359,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov rdi, r13
     mov rsi, rax
     push rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
     pop r11
@@ -2290,7 +2387,7 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     mov rdi, r13
     mov rsi, rax
     push rax
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     pop rdi
     call obj_decref
 
@@ -2444,22 +2541,37 @@ DEF_FUNC bytes_split_impl, BSP_FRAME
     lea rdi, [rsp + 8]
     mov esi, 3
     extern list_method_insert
-    call list_method_insert
+    call list_method_insert         ; err: a fresh list and the index 0 cannot be refused
     pop rdi
     add rsp, 32
     call obj_decref
     ret
 
 .bsp_empty_sep:
-    RAISE exc_ValueError_type, "empty separator"
+    mov rdi, r13                    ; the result list, made just above
+    call obj_decref
+    SET_EXC exc_ValueError_type, "empty separator"
+    jmp .bsp_fail
 
 .bsp_arg_type:
     mov rsi, [rbp - BSP_SEP]
     CSTRING rdi, `a bytes-like object is required, not '\x01'`
-    extern raise_type_error_with_name
-    jmp raise_type_error_with_name
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .bsp_fail
 .bsp_type:
-    RAISE exc_TypeError_type, "a bytes-like object is required"
+    SET_EXC exc_TypeError_type, "a bytes-like object is required"
+    jmp .bsp_fail
+.bsp_fail:
+    lea rsp, [rbp - BSP_FRAME - 40]     ; whatever a site still had pushed
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC bytes_split_impl
 
 ;; ============================================================================
@@ -2506,6 +2618,7 @@ BJ_FRAME  equ 72            ; + 5 pushes = 112, 16-aligned
 ;; bytes_method_join(rdi = args, rsi = nargs) -> rax = Value
 ;; b.join(iterable): every item has to be bytes-like, and the refusal
 ;; names the one that was not and where it sat.
+;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_method_join, BJ_FRAME
     push rbx
@@ -2549,6 +2662,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
+    ERR_PENDING .bj_fail        ; the argument's __iter__ raised
     test rax, rax
     jz .bj_not_iterable_pop
     V_UNPACK rax, rdx
@@ -2558,7 +2672,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     lea rsi, [rdi + 8]          ; &args[1]; rdi is still the args pointer
     lea rdi, [rel tuple_type]
     mov edx, 1
-    call tuple_type_call        ; raises for a non-iterable, as CPython does
+    call tuple_type_call        ; raises for a non-iterable, as CPython does -- err: the 0 is tested just below
     ; ...and it can fail for a reason of its own: draining the iterable runs
     ; whatever produced it, and a generator that raises part way through
     ; leaves NULL here with the exception already pending.  Reading ob_size
@@ -2703,7 +2817,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     ret
 
 .bj_error:
-    RAISE exc_TypeError_type, "join() argument must be a list of bytes"
+    SET_EXC exc_TypeError_type, "join() argument must be a list of bytes"
+    jmp .bj_fail
 
 .bj_bad_item:
     ; CPython names the position and the type, which is the whole difference
@@ -2739,12 +2854,14 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     call bj_append_typename
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel bj_msgbuf]
-    call raise_exception
-    ud2
+    call set_exception
+    jmp .bj_fail
 
 .bj_materialise_failed:
     ; Nothing to raise: whatever the iterable did is already pending, and the
     ; NULL is what says so.
+.bj_fail:
+    lea rsp, [rbp - BJ_FRAME - 40]      ; whatever a site still had pushed
     xor eax, eax
     xor edx, edx
     pop r15
@@ -2756,12 +2873,13 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     ret
 
 .bj_not_iterable_pop:
-    add rsp, 8
-    RAISE exc_TypeError_type, "can only join an iterable"
+    SET_EXC exc_TypeError_type, "can only join an iterable"
+    jmp .bj_fail
 
 .bj_item_error:
     BJ_RELEASE_TMP
-    RAISE exc_TypeError_type, "sequence item: expected a bytes-like object"
+    SET_EXC exc_TypeError_type, "sequence item: expected a bytes-like object"
+    jmp .bj_fail
 END_FUNC bytes_method_join
 
 ;; ============================================================================

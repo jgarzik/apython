@@ -375,7 +375,7 @@ DEF_FUNC gc_walk_generation, GWG_FRAME
     cmp rsi, [rbp - GWG_LIST]
     je .gwg_next
     mov rdi, [rbp - GWG_LIST]
-    call list_append
+    call list_append          ; err: gc.get_objects built this list for the walk
 .gwg_next:
     mov rbx, [rbx + PyGC_Head.gc_next]
     jmp .gwg_loop
@@ -961,7 +961,17 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     je .saveall_done
     lea rsi, [rbx + GC_HEAD_SIZE]
     mov rdi, [rel gc_garbage_list]
-    call list_append
+    call list_append          ; err: cleared just below -- the collector cannot fail
+    cmp rax, -1
+    jne .saveall_kept
+    ; gc.garbage is being sorted, by whatever this collection interrupted.
+    ; The object is not recorded; the refusal is not the collection's to
+    ; report, so it is taken down again.
+    extern exc_fetch
+    call exc_fetch
+    mov rdi, rax
+    XDECREF_V rdi, rax
+.saveall_kept:
     mov r14, [rbx + PyGC_Head.gc_prev]
     and r14, GC_PREV_MASK_FINALIZED  ; kept; only COLLECTING is being cleared
     mov rdi, rbx

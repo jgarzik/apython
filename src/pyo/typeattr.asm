@@ -36,6 +36,9 @@
 %include "object.inc"
 %include "value.inc"
 
+extern dict_get_mro
+extern dict_set
+extern dict_set_str
 extern type_type
 extern object_type
 extern str_from_cstr
@@ -54,12 +57,11 @@ extern value_type
 extern type_refresh_attr_flags
 extern getset_descr_new
 extern str_from_cstr_heap
-extern dict_set
 extern obj_decref
 extern list_new
 extern list_append
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 
 ;; The attributes exposed, in slot order.  Every one of them is a name
 ;; type_getattr answers from the type itself rather than from its dict.
@@ -99,7 +101,9 @@ tya_cstrs:
 section .text
 
 ;; ============================================================================
-;; tya_fetch(rdi = self Value, rsi = name str) -> rax = Value, or 0 raising
+;; tya_fetch(rdi = self Value, rsi = name str) -> rax = Value, or 0 with the
+;;   exception pending
+;; Fails: 0
 ;;
 ;; The body every thunk tail-jumps into.  `self` reaches a getset getter
 ;; unchecked as far as its own type goes -- getset_check_receiver only proves
@@ -119,7 +123,9 @@ DEF_FUNC_LOCAL tya_fetch, TYF_FRAME
     leave
     jmp type_getattr
 .tyf_not_a_type:
-    RAISE exc_TypeError_type, "descriptor requires a type object"
+    SET_EXC exc_TypeError_type, "descriptor requires a type object"
+    leave
+    ret
 END_FUNC tya_fetch
 
 ;; CPython's Py_TPFLAGS_*, for the bits this tree can answer honestly.
@@ -182,6 +188,7 @@ TYA_GET tya_get_weakrefoffset, 9
 ;; the subset is the less wrong: BASETYPE, HAVE_GC and the subclass bits are
 ;; what anything in Python actually tests, and they are exact.
 ;; DIVERGENCES.md carries the list.
+;; Fails: 0
 ;; ============================================================================
 TGF_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL tya_get_flags, TGF_FRAME
@@ -197,7 +204,9 @@ DEF_FUNC_LOCAL tya_get_flags, TGF_FRAME
     leave
     ret
 .tgf_bad:
-    RAISE exc_TypeError_type, "descriptor requires a type object"
+    SET_EXC exc_TypeError_type, "descriptor requires a type object"
+    leave
+    ret
 END_FUNC tya_get_flags
 
 ;; ============================================================================
@@ -335,7 +344,7 @@ DEF_FUNC type_dict_add_attrs, TDA_FRAME
     mov rdi, [rbp - TDA_DICT]
     mov rsi, [rbp - TDA_NAME]
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     mov rdi, r12
     call obj_decref
     inc rbx
@@ -357,6 +366,7 @@ END_FUNC type_dict_add_attrs
 ;; CPython's recomputes the linearization; this reads the one the class
 ;; already carries, which is the same list for every class that has one and
 ;; is the only answer available for a static type that has none.
+;; Fails: 0
 ;; ============================================================================
 TMM_LIST  equ 8
 TMM_TUPLE equ 16
@@ -398,7 +408,7 @@ DEF_FUNC type_method_mro, TMM_FRAME
     mov rdi, [rbp - TMM_LIST]
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rsi, [rax + rbx*8]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc rbx
     jmp .tmm_copy
 .tmm_copied:
@@ -420,18 +430,23 @@ DEF_FUNC type_method_mro, TMM_FRAME
     leave
     ret
 .tmm_arity:
-    RAISE exc_TypeError_type, "mro() takes no arguments"
+    FAIL exc_TypeError_type, "mro() takes no arguments", .tmm_failed
 .tmm_not_a_type:
-    RAISE exc_TypeError_type, "mro() requires a type"
+    FAIL exc_TypeError_type, "mro() requires a type", .tmm_failed
 END_FUNC type_method_mro
 
 ;; ============================================================================
 ;; type_setattr(rdi = the type, rsi = the name str, rdx = the value Value or 0
-;;              to delete, ecx = the value's tag) -> eax = 0, or never returns
+;;              to delete, ecx = the value's tag)
+;;   -> rax = 0, or -1 with the exception pending
 ;;
 ;; Writes into the type's tp_dict, except for the names that are not dict
 ;; entries at all: __name__ is tp_name, and a static type refuses every write.
+;; Fails: -1
 ;; ============================================================================
+TS_RBX equ 8                ; the caller's rbx, the first push: the refusals
+                            ; are reached at four different stack depths, so
+                            ; the error exit reloads it rather than popping
 DEF_FUNC type_setattr
     push rbx
     push rcx                    ; keep the stack aligned
@@ -530,6 +545,7 @@ DEF_FUNC type_setattr
     ; dict_set(dict, name Value, value Value)
     pop rcx
     call dict_set
+    ERR_M1 .ts_fail
     jmp .ts_wrote
 
 .ts_meta_data:
@@ -537,14 +553,15 @@ DEF_FUNC type_setattr
     push rsi
     push rdx
     push rdx                    ; the pad: four pushes keep the call aligned
-    call ts_meta_descr_set
+    call ts_meta_descr_set      ; err: the sign is tested once the stack is back
     pop rdx
     pop rdx
     pop rsi
     pop rdi
     test eax, eax
     jz .ts_no_meta_data
-    xor eax, eax                ; a raise inside it is left pending
+    js .ts_fail                 ; the descriptor took the write, and raised
+    xor eax, eax
     pop rcx
     pop rbx
     leave
@@ -556,7 +573,7 @@ DEF_FUNC type_setattr
     ; across, since rsi does not survive a call and there is no frame.
     mov [rsp], rsi
     extern dict_del_opt
-    call dict_del_opt           ; -1 when it was never there
+    call dict_del_opt           ; -1 when it was never there -- err: the key is an attribute name, a str
     mov rsi, [rsp]
     pop rcx
     test eax, eax
@@ -582,6 +599,7 @@ DEF_FUNC type_setattr
     call type_refresh_attr_flags
 .ts_done:
 
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -591,9 +609,9 @@ DEF_FUNC type_setattr
     ; a key that was never there.  CPython raises, and so does the instance
     ; path next door.  rsi is the name, restored above.
     mov rdi, rbx                ; the type -- a pointer is its own Value
-    mov edx, 1                  ; a delete is a set, as far as the wording goes
-    extern raise_no_attribute
-    call raise_no_attribute     ; does not return
+    extern set_no_attribute_store   ; a delete is a set, as far as the wording goes
+    call set_no_attribute_store
+    jmp .ts_fail
 
 .ts_rename:
     ; tp_name points into a PyStrObject's data, and the type owns a reference
@@ -658,8 +676,7 @@ DEF_FUNC type_setattr
     ; the caller's, so it is built the way the immutable-type refusal below is.
     ;
     ; The value goes on the machine stack, not into a callee-saved register:
-    ; r13 is the eval loop's value-stack top, and this path leaves through the
-    ; unwinder rather than returning.
+    ; this function saves only rbx.
     push rdx
     push rdx                            ; and a pad, to keep rsp even
     lea r8, [rel ts_imm_buf]
@@ -687,7 +704,8 @@ DEF_FUNC type_setattr
     mov byte [r8 + rcx], 0
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel ts_imm_buf]
-    call raise_exception
+    call set_exception
+    jmp .ts_fail
 
 .ts_requalify_del:
     ; CPython says "immutable type" here even for a class that is not one:
@@ -703,7 +721,8 @@ DEF_FUNC type_setattr
     mov byte [r8 + rcx], 0
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel ts_imm_buf]
-    call raise_exception
+    call set_exception
+    jmp .ts_fail
 
 .ts_immutable:
     ; "cannot set 'foo' attribute of immutable type 'str'".  Both halves are
@@ -735,12 +754,18 @@ DEF_FUNC type_setattr
     mov byte [r8 + rcx], 0
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel ts_imm_buf]
-    call raise_exception
+    call set_exception
+    jmp .ts_fail
 
 .ts_rename_static:
-    RAISE exc_TypeError_type, "cannot set __name__ of a built-in type"
+    FAIL exc_TypeError_type, "cannot set __name__ of a built-in type", .ts_fail
 .ts_rename_bad:
-    RAISE exc_TypeError_type, "can only assign string to __name__"
+    SET_EXC exc_TypeError_type, "can only assign string to __name__"
+.ts_fail:
+    mov rax, -1
+    mov rbx, [rbp - TS_RBX]
+    leave
+    ret
 END_FUNC type_setattr
 
 ;; ============================================================================
@@ -950,7 +975,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jz .tga_next_base
 
     mov rsi, rbx
-    call dict_get               ; a Value; 0 is the only miss
+    call dict_get_mro               ; a Value; 0 is the only miss
     test rax, rax
     jnz .tga_found
 
@@ -1173,7 +1198,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jz .tga_module_builtin
     mov rsi, rbx
     extern dict_get
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jz .tga_module_builtin
     V_UNPACK rax, rdx
@@ -1224,7 +1249,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test rdi, rdi
     jz .tga_ann_try_meta
     mov rsi, rbx
-    call dict_get               ; a Value; 0 is the only miss
+    call dict_get_mro               ; a Value; 0 is the only miss
     test rax, rax
     jnz .tga_found
 .tga_ann_try_meta:
@@ -1236,7 +1261,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test rdi, rdi
     jz .tga_tp_try_meta
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jnz .tga_found
 .tga_tp_try_meta:
@@ -1279,6 +1304,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov rdx, rax
     mov rsi, rbx                ; the name, "__annotations__"
     call dict_set
+    ERR_M1 .tga_ann_set_raised
     pop rax
     pop rax
     mov edx, TAG_PTR
@@ -1365,7 +1391,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test rdi, rdi
     jz .tga_meta_next
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jnz .tga_meta_found
@@ -1409,7 +1435,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     mov rdi, rax
     xor esi, esi                   ; the receiver here is a CLASS, by design
     extern builtin_should_bind
-    call builtin_should_bind
+    call builtin_should_bind     ; err: no receiver given, nothing to refuse
     mov ecx, eax
     pop rdx
     pop rax
@@ -1451,15 +1477,21 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.tga_ann_set_raised:            ; the class's dict refused the new __annotations__
+    pop rdi
+    pop rax
+    call obj_decref
+    jmp .tga_really_really_not_found
 END_FUNC type_getattr_meta
 
 ;; ============================================================================
 ;; ts_meta_descr_set(rdi = a class, rsi = the name, rdx = the value Value, or
-;;   0 to delete) -> eax = 1 when a data descriptor on the metatype took it
+;;   0 to delete) -> eax = 1 when a data descriptor on the metatype took it,
+;;   0 when there is none, rax = -1 when one took it and raised
+;; Fails: -1
 ;;
 ;; A property's setter or deleter, or a descriptor's __set__ / __delete__,
-;; called with the CLASS as the instance.  What either raises is left pending
-;; for the caller's own check, as op_store_attr's property arm leaves it.
+;; called with the CLASS as the instance.
 ;; ============================================================================
 TSM_CLS   equ 8
 TSM_VAL   equ 16
@@ -1482,6 +1514,7 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     mov rdx, [rbp - TSM_VAL]    ; 0 is the deleter's
     extern property_descr_set
     call property_descr_set
+    ERR_M1 .tsm_raised
     jmp .tsm_yes
 .tsm_general:
     cmp qword [rbp - TSM_VAL], 0
@@ -1496,6 +1529,7 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     lea rcx, [rel dunder_set]
     extern dunder_call_3
     call dunder_call_3
+    ERR_PENDING .tsm_raised
     jmp .tsm_result
 .tsm_delete:
     mov rdi, [rbp - TSM_DESC]
@@ -1504,14 +1538,19 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     mov ecx, TAG_PTR
     extern dunder_call_2
     call dunder_call_2
+    ERR_PENDING .tsm_raised
 .tsm_result:
-    DECREF_V rax, rcx           ; the answer is None, or 0 when it raised
+    DECREF_V rax, rcx           ; the answer is None, or 0 for no such dunder
 .tsm_yes:
     mov eax, 1
     leave
     ret
 .tsm_no:
     xor eax, eax
+    leave
+    ret
+.tsm_raised:
+    mov rax, -1
     leave
     ret
 END_FUNC ts_meta_descr_set

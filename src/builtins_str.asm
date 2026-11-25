@@ -11,8 +11,8 @@
 
 extern str_type
 extern obj_repr
-extern raise_type_error_counted
-extern raise_type_error_with_name
+extern set_type_error_counted
+extern set_type_error_with_name
 extern bytes_type_call
 extern ba_shared_decode
 extern _bytes_decode_impl
@@ -21,7 +21,7 @@ extern bytes_type
 extern bytearray_type
 extern memoryview_type
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern rbt_append_cstr
 extern value_type
 extern none_type
@@ -51,6 +51,7 @@ END_FUNC str_type_call
 ;; ============================================================================
 ;; 3. builtin_str_fn(rdi = args, rsi = nargs) - str(x[, encoding[, errors]])
 ;;   -> rax = Value
+;; Fails: 0
 ;;
 ;; The decoding form was missing outright: `str(b, "utf-8")` was
 ;; "str() takes at most 1 argument".  CPython's re/_parser.py uses it, which
@@ -66,6 +67,7 @@ SB_ERR   equ 24
 SB_NPOS  equ 32
 SB_NKW   equ 40
 SB_ARGS  equ 48
+SB_TMP   equ 56          ; the "utf-8" made here when only errors= was given
 SB_ARGV  equ 80          ; the three-slot array handed to decode:
                          ; [-80] self, [-72] encoding, [-64] errors
 SB_FRAME equ 96          ; + 0 pushes = 96
@@ -77,6 +79,7 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     mov [rbp - SB_ARGS], rdi
     mov [rbp - SB_NPOS], rsi
     mov qword [rbp - SB_NKW], 0
+    mov qword [rbp - SB_TMP], 0
 
     ; Keyword arguments arrive as trailing positional slots, named by
     ; kw_names_pending.  str's three names are object, encoding and errors.
@@ -123,7 +126,8 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     pop r9
     pop rax
     lea rdi, [r10 + PyStrObject.data]
-    call str_raise_bad_keyword
+    call str_set_bad_keyword
+    jmp .str_failed
 .str_kw_object:
     mov rcx, [rsp + 8]
     mov [rbp - SB_OBJ], rcx
@@ -208,8 +212,9 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     CSTRING rdi, "utf-8"
     call str_from_cstr
     mov [rbp - SB_ENC], rax
+    mov [rbp - SB_TMP], rax
     pop rax
-    ; The temporary is dropped below, once the decode has read it.
+    ; The temporary is dropped at .str_done, once the decode has read it.
 .str_have_enc:
     ; CPython checks both here and names str(), not the decode underneath.
     push rax
@@ -217,9 +222,11 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     mov rdi, [rbp - SB_ENC]
     CSTRING rsi, "encoding"
     call str_require_str_arg
+    ERR_M1 .str_failed
     mov rdi, [rbp - SB_ERR]
     CSTRING rsi, "errors"
     call str_require_str_arg
+    ERR_M1 .str_failed
     add rsp, 8
     pop rax
 
@@ -252,13 +259,11 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     jmp .str_not_bytes
 
 .str_call_bytes:
-    call _bytes_decode_impl
-    leave
-    ret
+    call _bytes_decode_impl   ; err: the 0 is this function's own answer
+    jmp .str_done
 .str_call_bytearray:
     call ba_shared_decode
-    leave
-    ret
+    jmp .str_done
 .str_call_memoryview:
     ; A memoryview has no decode of its own; CPython's str() reads its buffer.
     ; Copying it to a bytes first is the same answer for the contiguous views
@@ -271,44 +276,63 @@ DEF_FUNC builtin_str_fn, SB_FRAME
     call bytes_type_call
     pop rsi
     pop rdi
-    test rax, rax
-    jz .str_failed
+    ERR_NULL .str_failed
     mov [rbp - SB_ARGV], rax
     push rax
     sub rsp, 8
     lea rdi, [rbp - SB_ARGV]
-    call _bytes_decode_impl
+    call _bytes_decode_impl   ; err: the 0 is this function's own answer
     add rsp, 8
     pop rdi
     push rax
     call obj_decref
     pop rax
-    leave
-    ret
-.str_failed:
-    xor eax, eax
-    leave
-    ret
+    jmp .str_done
 
 .str_decoding_str:
-    RAISE exc_TypeError_type, "decoding str is not supported"
+    FAIL exc_TypeError_type, "decoding str is not supported", .str_failed
 .str_not_bytes:
     mov rsi, [rbp - SB_OBJ]
     lea rdi, [rel str_decode_needs_bytes]
-    call raise_type_error_with_name
+    call set_type_error_with_name
+    jmp .str_failed
 .str_too_many:
     mov rsi, [rbp - SB_NPOS]
     add rsi, [rbp - SB_NKW]
     lea rdi, [rel str_too_many_msg]
     CSTRING rdx, " given)"
-    call raise_type_error_counted
+    call set_type_error_counted
+    ; fall through: the error exit
+.str_failed:
+    xor eax, eax
+.str_done:
+    ; rax = the result, or 0 with the exception pending.  Either way the
+    ; encoding made here goes back.  rsp may be anywhere: leave resets it.
+    mov rdi, [rbp - SB_TMP]
+    test rdi, rdi
+    jz .str_ret
+    mov [rbp - SB_TMP], rax
+    call obj_decref
+    mov rax, [rbp - SB_TMP]
+.str_ret:
+    ; str's tp_new answers the (rax, edx) pair, and obj_decref has just
+    ; used edx: a str is a pointer, and a failure is (0, 0).
+    mov edx, TAG_PTR
+    test rax, rax
+    jnz .str_out
+    xor edx, edx
+.str_out:
+    leave
+    ret
 END_FUNC builtin_str_fn
 
 ;; ============================================================================
 ;; str_require_str_arg(rdi = the argument, or 0 when it was not given,
 ;;                     rsi = the parameter's name)
-;;   -> returns, or raises TypeError
-;; Raises "str() argument 'encoding' must be str, not int", CPython's wording.
+;;   -> rax = 0
+;; Fails: -1
+;; The TypeError is "str() argument 'encoding' must be str, not int",
+;; CPython's wording.
 ;; ============================================================================
 SRA_NAME  equ 8
 SRA_ARG   equ 16
@@ -360,22 +384,26 @@ DEF_FUNC_LOCAL str_require_str_arg, SRA_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - SRA_BUF]
-    call raise_exception
+    call set_exception
+    mov rax, -1
+    leave
+    ret
 .sras_ok:
+    xor eax, eax
     leave
     ret
 END_FUNC str_require_str_arg
 
 
 ;; ============================================================================
-;; str_raise_bad_keyword(rdi = the keyword's name, as a C string)
-;;   -> does not return
+;; str_set_bad_keyword(rdi = the keyword's name, as a C string)
+;;   -> rax = 0, always, with the TypeError pending
 ;; "'foo' is an invalid keyword argument for str()".
 ;; ============================================================================
 SRK_NAME  equ 8
 SRK_BUF   equ 176
 SRK_FRAME equ 176           ; + 0 pushes = 176, 16-aligned
-DEF_FUNC_LOCAL str_raise_bad_keyword, SRK_FRAME
+DEF_FUNC_LOCAL str_set_bad_keyword, SRK_FRAME
     mov [rbp - SRK_NAME], rdi
     lea rdi, [rbp - SRK_BUF]
     CSTRING rsi, "'"
@@ -388,5 +416,7 @@ DEF_FUNC_LOCAL str_raise_bad_keyword, SRK_FRAME
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rbp - SRK_BUF]
-    call raise_exception
-END_FUNC str_raise_bad_keyword
+    call set_exception
+    leave
+    ret
+END_FUNC str_set_bad_keyword

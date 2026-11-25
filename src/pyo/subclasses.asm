@@ -34,6 +34,8 @@
 
 ASM_INIT
 
+extern dict_get_str
+extern dict_set_str
 extern dict_new
 extern dict_get
 extern dict_set
@@ -45,7 +47,7 @@ extern ap_malloc
 extern ap_realloc
 extern ap_free
 extern v_int_bias
-extern raise_exception
+extern set_exception
 extern exc_TypeError_type
 extern type_check_is_class
 
@@ -94,7 +96,7 @@ DEF_FUNC sub_list_for_type, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rax
     mov rsi, rbx
     add rsi, [rel v_int_bias]   ; a user address always fits an int immediate
-    call dict_get
+    call dict_get_str
     test rax, rax
     jz .none
     sub rax, [rel v_int_bias]   ; the SubList address, stored the same way
@@ -151,7 +153,7 @@ DEF_FUNC_LOCAL sub_list_add, SLA_FRAME
     add rsi, [rel v_int_bias]
     mov rdx, [rbp - SLA_LIST]
     add rdx, [rel v_int_bias]
-    call dict_set
+    call dict_set_str
     call sub_table_refresh
     mov rax, [rbp - SLA_LIST]
 
@@ -318,7 +320,7 @@ DEF_FUNC subclass_unregister, SU_FRAME
     mov rdi, [rel subclass_table]
     mov rsi, [rbp - SU_TYPE]
     add rsi, [rel v_int_bias]
-    call dict_del
+    call dict_del             ; err: an int key in a table of ints, and sub_list_for_type just found it
     mov rdi, [r12 + SubList.items]
     call ap_free
     mov rdi, r12
@@ -339,6 +341,7 @@ END_FUNC subclass_unregister
 ;; against a subclass of the ABC rather than against the ABC itself?" -- has no
 ;; way to ask without it, so issubclass(X, A) answered False for an X
 ;; registered against a subclass of A.
+;; Fails: 0
 ;; ============================================================================
 TMS_LIST  equ 8
 TMS_SUBS  equ 16
@@ -382,7 +385,7 @@ DEF_FUNC type_method_subclasses, TMS_FRAME
     mov rdx, [rax + SubList.items]
     mov rsi, [rdx + rcx*8]
     mov rdi, [rbp - TMS_LIST]
-    call list_append
+    call list_append          ; err: a list built here is not being sorted
     inc qword [rbp - TMS_IDX]
     jmp .tms_copy
 
@@ -396,7 +399,14 @@ DEF_FUNC type_method_subclasses, TMS_FRAME
     ret
 
 .tms_args:
-    RAISE exc_TypeError_type, "__subclasses__() takes no arguments"
+    SET_EXC exc_TypeError_type, "__subclasses__() takes no arguments"
+    jmp .tms_fail
 .tms_type:
-    RAISE exc_TypeError_type, "__subclasses__() requires a type"
+    SET_EXC exc_TypeError_type, "__subclasses__() requires a type"
+.tms_fail:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC type_method_subclasses
