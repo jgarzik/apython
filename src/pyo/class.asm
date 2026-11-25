@@ -997,12 +997,14 @@ TC_NO_SELF  equ 96
 %endmacro
 
 ;; ============================================================================
-;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, or 0
+;; tc_winner_metatype(rdi = args) -> rax = the metatype to delegate to, 0, or
+;;   -1 when two of them are unrelated
 ;;
 ;; args[1] is the bases tuple.  A base whose metatype is `type` -- or the
 ;; user_type_metatype that stands in for it here -- contributes nothing; of the
-;; rest the most derived wins, which is CPython's rule minus the conflict
-;; diagnosis.  0 means an ordinary type() call.
+;; rest the most derived wins, which is CPython's rule.  0 means an ordinary
+;; type() call.  -1 is a metaclass conflict, the caller's to report: nothing
+;; is pending.
 ;; ============================================================================
 TWM_ARGS  equ 8
 TWM_WIN   equ 16
@@ -1066,15 +1068,24 @@ DEF_FUNC_LOCAL tc_winner_metatype, TWM_FRAME
     jz .twm_take
     cmp rdx, rcx
     je .twm_next
-    ; Keep whichever is the subclass of the other; a genuine conflict just
-    ; leaves the one already found.
+    ; Keep whichever is the subclass of the other.  When neither is, there
+    ; is no winner: that used to leave the one already found, so
+    ; `type("N", (A1, A2), {})` built a class where the class statement, and
+    ; CPython, refuse.
     mov rdi, rcx
     mov rsi, rdx
     extern type_is_subtype
     call type_is_subtype
     mov rcx, [rbp - TWM_ITEM]
     test eax, eax
-    jz .twm_next
+    jnz .twm_take
+    mov rdi, [rbp - TWM_WIN]
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jnz .twm_next
+    mov qword [rbp - TWM_WIN], -1
+    jmp .twm_done
 .twm_take:
     mov [rbp - TWM_WIN], rcx
 .twm_next:
@@ -1168,6 +1179,8 @@ DEF_FUNC type_call
     pop rsi
     test rax, rax
     jz .tta_plain
+    cmp rax, -1
+    je .tta_conflict
     mov rdi, rax
     call type_call              ; err: the metatype's own tp_call; its 0 is ours
     leave
@@ -1180,7 +1193,9 @@ DEF_FUNC type_call
     ; block and wrote type fields into it, so the result printed as
     ; <class ''> and the process aborted with a double free.
     push rbx
+    push r12
     mov rbx, rsi                        ; args
+    mov r12, rdx                        ; how many, class keywords included
 
     mov rdi, [rbx]                      ; name
     V_TEST_PTR rdi, rax
@@ -1200,9 +1215,7 @@ DEF_FUNC type_call
     jne .type_three_bad_bases
     mov rcx, [rsi + PyTupleObject.ob_size]
     test rcx, rcx
-    jnz .type_three_check_bases
-    xor esi, esi
-    jmp .type_three_have_base
+    jz .type_three_have_base
 .type_three_check_bases:
     ; Every base has to BE a class.  Nothing looked, so `type("X", (5,), {})`
     ; handed an int to type_from_parts, which read tp_basicsize off it -- a
@@ -1227,18 +1240,24 @@ DEF_FUNC type_call
     cmp rax, rcx
     jne .type_three_bad_ns
 
-    ; type_from_parts consumes a reference to the namespace and borrows the
-    ; name: the class takes its own.  One was taken here too and never given
-    ; back, a str leaked per class whenever the name was built for the call.
-    inc qword [rdx + PyObject.ob_refcnt]
-    mov rdi, [rbx]
-    extern type_from_parts
-    call type_from_parts
-    ERR_NULL .type_three_fail
-    mov edx, TAG_PTR
+    ; The rest is type.__new__'s as well: the class keywords, which follow
+    ; the three in the array, and the call of type_from_parts.  A class is a
+    ; pointer and a pointer is its own Value.
+    mov rdi, rbx
+    mov rsi, r12
+    xor edx, edx                        ; the default metatype
+    extern type_new_impl
+    call type_new_impl                  ; err: its 0 is ours
+    pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
+    ret
+
+.tta_conflict:
+    ; Two bases whose metatypes are unrelated.  The scan used to keep
+    ; whichever it met first and build the class with it.
+    SET_EXC exc_TypeError_type, "metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases"
+    leave                               ; set_exception answered 0
     ret
 
 .type_three_bad_name:
@@ -1251,6 +1270,7 @@ DEF_FUNC type_call
     SET_EXC exc_TypeError_type, "type() argument 3 must be dict"
 .type_three_fail:
     xor eax, eax
+    pop r12
     pop rbx
     leave
     ret

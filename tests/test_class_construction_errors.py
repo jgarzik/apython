@@ -97,6 +97,22 @@ class MetaKeywords(type):
         super().__init__(name, bases, ns)
 
 
+class M1(type):
+    pass
+
+
+class M2(type):
+    pass
+
+
+class A1(metaclass=M1):
+    pass
+
+
+class A2(metaclass=M2):
+    pass
+
+
 counter = [0]
 
 
@@ -115,7 +131,9 @@ case("slots twice", lambda: type(fresh(), (), {"__slots__": ("a", "a")}))
 case("slots and __dict__", lambda: type(fresh(), (), {"__slots__": ("a", "__dict__")}))
 case("qualname", lambda: type(fresh(), (), {"__qualname__": "Q.N"}))
 case("descriptor with __set_name__", lambda: type(fresh(), (), {"d": GoodSetName()}))
+case("base takes keywords", lambda: type(fresh(), (TakesKeywords,), {}, tag=1))
 case("metaclass from a base", lambda: type(fresh(), (Meta("B", (), {}),), {}))
+case("type.__new__", lambda: type.__new__(type, fresh(), (X,), {"v": 1}))
 case("type.__new__ with a metaclass", lambda: type.__new__(Meta, fresh(), (), {}))
 
 print("--- type(): bases that are refused")
@@ -156,25 +174,10 @@ print("--- type(): the hooks")
 case("__init_subclass__ raises", lambda: type("N", (RaisesInInitSubclass,), {"v": [1]}))
 case("__init_subclass__ raises, fresh",
      lambda: type(fresh(), (X, RaisesInInitSubclass), {"__slots__": ("a",)}))
+case("a keyword nothing takes, type()", lambda: type("N", (X,), {}, tag=1), message=False)
 case("__set_name__ raises", lambda: type("N", (), {"d": BadSetName()}), message=False)
 case("__set_name__ raises, with slots",
      lambda: type(fresh(), (X,), {"__slots__": "s", "d": BadSetName()}), message=False)
-
-
-class M1(type):
-    pass
-
-
-class M2(type):
-    pass
-
-
-class A1(metaclass=M1):
-    pass
-
-
-class A2(metaclass=M2):
-    pass
 
 
 class EntriesRaise:
@@ -364,18 +367,44 @@ def s_entries_not_tuple():
         pass
 
 
+print("--- type() and type.__new__: the metaclass, and arguments of the wrong kind")
+case("metaclass conflict", lambda: type("N", (A1, A2), {"a": [1]}))
+case("metaclass conflict, called", lambda: M1("N", (A2,), {"a": [1]}))
+case("metaclass conflict, type.__new__", lambda: type.__new__(M1, "N", (A2,), {}))
+case("a base's metaclass wins", lambda: type(type.__new__(type, fresh(), (A1,), {})) is M1 or 1 / 0)
+case("keywords through type.__new__",
+     lambda: type.__new__(type, fresh(), (TakesKeywords,), {}, tag=1).kw["tag"])
+case("keywords through a metaclass", lambda: MetaKeywords(fresh(), (TakesKeywords,), {}, tag=1))
+case("a keyword nothing takes, called", lambda: Meta("N", (X,), {}, tag=1), message=False)
+case("type.__new__ of nothing", lambda: type.__new__(), message=False)
+case("type.__new__ of too little", lambda: type.__new__(type, "N"), message=False)
+case("the name is an int", lambda: type.__new__(type, 1, (), {}))
+case("the bases are an int", lambda: type.__new__(type, "N", 3, {}))
+case("a base is an int", lambda: type.__new__(type, "N", (X, 3), {}))
+case("the namespace is an int", lambda: type.__new__(type, "N", (), 3))
+case("the namespace is a list", lambda: type.__new__(type, "N", (), [1]))
+case("the metaclass is int", lambda: type.__new__(int, "N", (), {}))
+case("the metaclass is 3", lambda: type.__new__(3, "N", (), {}))
+case("type.__init__ of two", lambda: type.__init__(int, 1, 2))
+case("type() of an int name", lambda: type(1, (), {}), message=False)
+case("type() of int bases", lambda: type("N", 3, {}), message=False)
+case("type() of an int namespace", lambda: type("N", (), 3), message=False)
+case("type() of two", lambda: type("N", ()))
+
 print("--- the class statement: the success paths")
 case("plain", s_plain)
 case("keywords", s_keywords)
 case("slots and a class cell", s_slots)
 case("metaclass", s_metaclass)
 case("metaclass taking keywords", s_metaclass_keywords)
+case("metaclass, base takes keywords", s_metaclass_base_keywords)
 case("metaclass is a function", s_metaclass_function)
 case("__mro_entries__", s_mro_entries)
 case("super()", s_super)
 
 print("--- the class statement: refused")
 case("a keyword nothing takes", s_bad_keyword, message=False)
+case("the same, through a metaclass", s_bad_keyword_metaclass, message=False)
 case("bool", s_bool)
 case("layout conflict", s_layout)
 case("inconsistent MRO", s_mro, message=False)
