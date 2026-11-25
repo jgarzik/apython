@@ -1,18 +1,18 @@
 ; objerr.asm - the arity and receiver error messages.
 ;
 ; Split out of object.asm, which reached the 100k cap that src/compiler/lint.py
-; enforces.  The seam is the one object.asm already had: these six build a
-; message into a stack buffer and hand it to raise_exception, and none of them
-; returns.  They share nothing with the object protocol above them but the two
-; append helpers, and every one of them exists for the same reason -- CPython
-; reports the count and the receiver it actually got, and this tree used to
-; report the rule and leave the caller to guess what it had passed.
+; enforces.  The seam is the one object.asm already had: each of these builds
+; a message into a stack buffer and records the exception.  They share nothing
+; with the object protocol above them but the two append helpers, and every
+; one of them exists for the same reason -- CPython reports the count and the
+; receiver it actually got, and this tree used to report the rule and leave
+; the caller to guess what it had passed.
 ;
-; Each is now a pair with ONE body.  set_<name> composes the message, records
-; the exception and returns 0, for anything that is called; raise_<name> is
-; that and then the unwind, for an opcode handler.
+; Every one RETURNS: set_<name> composes the message, records the exception
+; and answers 0.  The handful an opcode handler raises with have a jumping
+; twin, raise_<name>, in src/opcodes/raise.asm -- nothing here jumps.
 ;
-; The remaining raise_* helpers stay in object.asm: they are interleaved with
+; The remaining set_* helpers stay in object.asm: they are interleaved with
 ; value_type, dunder_require_self and the msg_append_* primitives they are
 ; built on, and cutting between them would mean moving those too.
 
@@ -28,10 +28,8 @@ extern rbt_typename
 extern value_type
 extern ap_strcmp
 
-; --- raising ---
-extern raise_exception
+; --- recording ---
 extern set_exception
-extern eval_exception_unwind
 extern exc_TypeError_type
 extern exc_ValueError_type
 
@@ -75,22 +73,13 @@ DEF_FUNC set_type_error_counted, RTC_FRAME
     ret
 END_FUNC set_type_error_counted
 
-;; raise_type_error_counted(the same arguments) -> does not return
-;; set_type_error_counted, then the unwind: for a handler, which alone may jump.
-global raise_type_error_counted
-DEF_FUNC raise_type_error_counted
-    call set_type_error_counted
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_type_error_counted
-
 ;; ============================================================================
 ;; set_value_error_counted(rdi = the text before the number, rsi = the
 ;;                           count, rdx = the text after it, or 0)
 ;;   -> rax = 0, always, with the exception pending:
 ;;      the composed message, as a ValueError
 ;;
-;; The same composition as raise_type_error_counted, for the messages that
+;; The same composition as set_type_error_counted, for the messages that
 ;; are ValueErrors: "Item 0 of second argument (exceptions) is not an
 ;; exception".
 ;; ============================================================================
@@ -157,15 +146,6 @@ DEF_FUNC set_typed_message, RTM_FRAME
     leave
     ret
 END_FUNC set_typed_message
-
-;; raise_typed_message(the same arguments) -> does not return
-;; set_typed_message, then the unwind: for a handler, which alone may jump.
-global raise_typed_message
-DEF_FUNC raise_typed_message
-    call set_typed_message
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_typed_message
 
 ;; ============================================================================
 ;; set_final_base(rdi = the type's name, as a C string)
@@ -826,15 +806,6 @@ DEF_FUNC set_callable_arg, RCA_FRAME
     ret
 END_FUNC set_callable_arg
 
-;; raise_callable_arg(the same arguments) -> does not return
-;; set_callable_arg, then the unwind: for a handler, which alone may jump.
-global raise_callable_arg
-DEF_FUNC raise_callable_arg
-    call set_callable_arg
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_callable_arg
-
 ;; ============================================================================
 ;; set_missing_arguments(rdi = the PyFuncObject, rsi = its half-filled frame)
 ;;   -> rax = 0, always, with the exception pending:
@@ -1073,10 +1044,8 @@ END_FUNC set_missing_arguments
 ;; The AttributeError every failed attribute access ends in.  It moved here
 ;; from object.asm, which crossed the 100k cap when the two attributes CPython
 ;; hangs on the exception were added -- and this is objerr.asm's subject
-;; exactly: a message built into a buffer and handed to a raise that does not
-;; return.
+;; exactly: a message built into a buffer and recorded.
 ;; ============================================================================
-extern eval_exception_unwind
 extern value_type
 extern module_type
 extern str_type
@@ -1084,15 +1053,18 @@ extern exc_AttributeError_type
 extern exc_isinstance
 extern exc_from_cstr
 extern exc_setattr
-extern raise_exception_obj
 extern str_intern_cstr
 extern dict_get
 extern obj_decref
 extern none_singleton
 ;; ============================================================================
-;; raise_no_attribute(rdi = the object as a Value, rsi = the attribute name,
+;; set_attribute_error(rdi = the object as a Value, rsi = the attribute name,
 ;;                     edx = 1 for a store or a delete, 0 for a read)
-;;   -> does not return: the AttributeError CPython raises
+;;   -> rax = 0, always, with the AttributeError CPython raises pending
+;;
+;; What LOAD_ATTR ends in when nothing answered.  If a __getattr__ hook has
+;; already raised an AttributeError of its own (attr_error_pending), that one
+;; is kept and only completed; otherwise a fresh one is composed.
 ;;
 ;; The message names both nouns -- a module and a class name THEMSELVES rather
 ;; than their type, because "'module' object has no attribute 'zzz'" tells a
@@ -1103,30 +1075,27 @@ extern none_singleton
 RNA_OBJ   equ 8
 RNA_NAME  equ 16
 RNA_ISSET equ 24            ; 1 for a store or a delete, 0 for a read
-RNA_NORET equ 32            ; 1 from set_no_attribute: install, then RETURN
-; The message is built in the frame rather than in object.asm's shared rtn_buf:
-; that buffer stayed behind, and a raiser that never returns has no reason to
-; want a static one.
+; The message is built in the frame rather than in object.asm's shared
+; rtn_buf, which stayed behind.
 RNA_BUFSZ equ 512
 RNA_BUF   equ 32 + RNA_BUFSZ
 RNA_FRAME equ RNA_BUF       ; + 2 pushes, 16-aligned
 
-; .rna_set_attr's own frame, which is its own rbp and not raise_no_attribute's.
+; .rna_set_attr's own frame, which is its own rbp and not set_attribute_error's.
 RSA_VAL   equ 8
 RSA_NAME  equ 16
 RSA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 extern str_type
-DEF_FUNC raise_no_attribute, RNA_FRAME
+global set_attribute_error
+DEF_FUNC set_attribute_error, RNA_FRAME
     push rbx
     push r12
     ; A __getattr__ that raised AttributeError already said what it wanted
     ; said.  Replacing it here with a generic message threw that away, so
-    ; instance_getattr hands it over with this flag rather than unwinding --
-    ; which would skip getattr()'s and hasattr()'s own frames.
+    ; instance_getattr hands it over with this flag.
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov [rbp - RNA_ISSET], rdx
-    mov qword [rbp - RNA_NORET], 0
     cmp qword [gs:ThreadState.attr_error_pending], 0
     je .rna_fresh
     mov qword [gs:ThreadState.attr_error_pending], 0
@@ -1184,11 +1153,11 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call .rna_set_attr
 
 .rna_pending_raise:
-    pop r12
-    pop rbx
-    leave
-    PUBLISH_SP
-    jmp eval_exception_unwind
+    ; The hook's own AttributeError goes out.  This used to republish the
+    ; handler's stack pointer and jump, which told the unwinder that
+    ; LOAD_ATTR had released the receiver it had only popped: one object
+    ; leaked per `o.x` whose __getattr__ said no.
+    jmp .rna_return
 .rna_name_raised:
     ; The pending AttributeError's own dict could not be searched, and what
     ; that raised has taken its place: it is what goes out.
@@ -1385,26 +1354,12 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     call .rna_set_attr
 
 .rna_installed:
-    cmp qword [rbp - RNA_NORET], 0
-    jne .rna_return
-    ; The tail raise_exception has: it does not republish PyFrame.disp_sp
-    ; either, because every caller here is inside a helper the opcode called
-    ; rather than an opcode that has popped operands of its own.
-    leave
-    jmp eval_exception_unwind
+    jmp .rna_return
 
 .rna_bare:
     ; A store, a delete, or an exc_from_cstr that could not allocate.
     lea rdi, [rel exc_AttributeError_type]
     mov rsi, rbx
-    cmp qword [rbp - RNA_NORET], 0
-    jne .rna_bare_set
-    call raise_exception
-    ud2
-.rna_bare_set:
-    ; The returning forms.  This arm went straight to .rna_return, which
-    ; answered 0 with nothing pending: harmless while only the read form
-    ; returned, since a read reaches here only when an allocation failed.
     call set_exception
     jmp .rna_return
 
@@ -1437,24 +1392,23 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     ret
 
 .rna_return:
-    ; set_no_attribute's exit: the exception is installed and pending.
+    ; The one exit: the exception is installed and pending.
     lea rsp, [rbp - RNA_FRAME - 16]
     xor eax, eax
     pop r12
     pop rbx
     leave
     ret
-END_FUNC raise_no_attribute
+END_FUNC set_attribute_error
 
 ;; ============================================================================
 ;; set_no_attribute(rdi = the object as a Value, rsi = the attribute name)
 ;;   -> rax = 0, always, with that same AttributeError pending
 ;;
-;; raise_no_attribute's read form, for a lookup that has to say "absent" to a
-;; caller that may swallow it.  A __slots__ slot never assigned is one:
-;; unwinding from inside instance_getattr skipped hasattr()'s and getattr()'s
-;; own native frames, so `hasattr(o, "slot")` RAISED instead of answering
-;; False.  The prologue is raise_no_attribute's, so its body can be shared.
+;; set_attribute_error's read form with nothing consulted first: always a
+;; fresh AttributeError, whatever a hook left pending.  A __slots__ slot never
+;; assigned is one caller.  The prologue is set_attribute_error's, so its body
+;; can be shared.
 ;; ============================================================================
 DEF_FUNC set_no_attribute, RNA_FRAME
     push rbx
@@ -1462,9 +1416,8 @@ DEF_FUNC set_no_attribute, RNA_FRAME
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov qword [rbp - RNA_ISSET], 0
-    mov qword [rbp - RNA_NORET], 1
     xor edx, edx
-    jmp raise_no_attribute.rna_fresh
+    jmp set_attribute_error.rna_fresh
 END_FUNC set_no_attribute
 
 ;; set_no_attribute_store(rdi = the object as a Value, rsi = the name)
@@ -1480,8 +1433,7 @@ DEF_FUNC set_no_attribute_store, RNA_FRAME
     mov [rbp - RNA_NAME], rsi
     mov [rbp - RNA_OBJ], rdi
     mov qword [rbp - RNA_ISSET], 1
-    mov qword [rbp - RNA_NORET], 1
-    jmp raise_no_attribute.rna_fresh
+    jmp set_attribute_error.rna_fresh
 END_FUNC set_no_attribute_store
 
 ;; ============================================================================

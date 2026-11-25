@@ -213,7 +213,6 @@ CPS_FRAME equ 96            ; + 0 pushes = 96, 16-byte aligned
 extern ap_malloc
 extern ap_free
 extern strtod
-extern raise_value_error_with_repr
 extern exc_ValueError_type
 
 DEF_FUNC complex_parse_string, CPS_FRAME

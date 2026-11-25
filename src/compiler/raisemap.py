@@ -205,13 +205,15 @@ def classify(funcs, byfile):
 
     # A raiser that never comes back: no `ret`, and every way out of it is a
     # jump-style raise.  Found to a fixed point, since they are built on each
-    # other (raise_type_error_counted -> raise_exception).
+    # other (raise_no_attribute -> eval_exception_unwind).  They all live in
+    # the handler files now -- src/opcodes/raise.asm, and a few a handler
+    # keeps beside itself.
     noret = set(SEEDS)
     changed = True
     while changed:
         changed = False
         for f in every:
-            if f.name in noret or f.has_ret or is_handler_file(f.path):
+            if f.name in noret or f.has_ret:
                 continue
             outs = [t for _, k, t in f.calls if k == 'jmp']
             hits = [t for _, k, t in f.calls if t in noret]

@@ -246,20 +246,9 @@ DEF_FUNC exc_set_context, ESC_FRAME
 END_FUNC exc_set_context
 
 ;; ============================================================================
-;; raise_key_error(rdi = key Value) -- does not return.
+;; set_key_error(rdi = key Value) -> rax = 0, always, with it pending
 ;; CPython reports the missing key itself as the exception's single argument,
 ;; so that KeyError('k') and str(e) == "'k'" carry which key was absent.
-;; ============================================================================
-DEF_FUNC raise_key_error
-    call set_key_error
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_key_error
-
-;; ============================================================================
-;; set_key_error(rdi = key Value) -> rax = 0, always, with it pending
-;; The same KeyError, RECORDED rather than raised, for a caller that has a C
-;; stack it still has to unwind by hand.
 ;; ============================================================================
 global set_key_error
 DEF_FUNC set_key_error
@@ -2627,16 +2616,6 @@ DEF_FUNC exc_set_import, ERI_FRAME
     xor edi, edi                ; exc_from_cstr answered 0
     jmp .eri_raise
 END_FUNC exc_set_import
-
-DEF_FUNC exc_raise_import
-    call exc_set_import
-    leave
-    jmp eval_exception_unwind
-END_FUNC exc_raise_import
-
-
-
-
 
 ;; ============================================================================
 ;; Data section - Exception type objects and name strings

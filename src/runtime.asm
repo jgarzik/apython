@@ -2057,18 +2057,6 @@ DEF_FUNC set_list_sorting_error
     ret
 END_FUNC set_list_sorting_error
 
-;; ============================================================================
-;; list_sorting_error - raise ValueError when list is mutated during sort
-;; Called when ob_item == NULL (list is being sorted)
-;; Does not return: the twin, then the unwind.  For handlers.
-;; ============================================================================
-DEF_FUNC list_sorting_error
-    call set_list_sorting_error
-    leave
-    extern eval_exception_unwind
-    jmp eval_exception_unwind
-END_FUNC list_sorting_error
-
 section .rodata
 err_prefix: db "Error: "
 err_newline: db 10

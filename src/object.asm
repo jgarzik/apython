@@ -1097,22 +1097,6 @@ rtn_compose:
     ret
 END_FUNC set_type_error_with_typename
 
-;; The raising half of each set_* twin in this file is the twin and then the
-;; unwind, for an opcode handler -- which alone may jump.
-;; raise_type_error_with_name(set_type_error_with_name's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC raise_type_error_with_name
-    call set_type_error_with_name
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_type_error_with_name
-
-;; raise_type_error_with_typename(set_type_error_with_typename's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC raise_type_error_with_typename
-    call set_type_error_with_typename
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_type_error_with_typename
-
 ;; ============================================================================
 ;; type_name_message(rdi = a template whose \x01 stands for a type name and
 ;;                   whose \x02 stands for the same but "None" for NoneType,
@@ -1329,13 +1313,6 @@ DEF_FUNC_BARE set_binop_type_error
     jmp set_binop_type_error_ex
 END_FUNC set_binop_type_error
 
-;; raise_binop_type_error(set_binop_type_error's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC raise_binop_type_error
-    call set_binop_type_error
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_binop_type_error
-
 ;; ============================================================================
 ;; compose_binop_type_error(rdi = left Value, rsi = right Value,
 ;;                          rdx = the prefix, rcx = the text before the first
@@ -1400,13 +1377,6 @@ DEF_FUNC set_binop_type_error_ex
     leave
     ret
 END_FUNC set_binop_type_error_ex
-
-;; raise_binop_type_error_ex(set_binop_type_error_ex's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC raise_binop_type_error_ex
-    call set_binop_type_error_ex
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_binop_type_error_ex
 
 ; The cap and the buffer have to agree: 40 (prefix) + 3 + 80 + 7 + 80 + 1 + a
 ; NUL is 212, which overran a 192-byte buffer and wrote into the globals
@@ -1696,13 +1666,6 @@ rvr_body:
     leave
     ret
 END_FUNC set_value_error_with_repr
-
-;; raise_value_error_with_repr(set_value_error_with_repr's arguments) -> does not return: the twin, then the unwind
-DEF_FUNC raise_value_error_with_repr
-    call set_value_error_with_repr
-    leave
-    jmp eval_exception_unwind
-END_FUNC raise_value_error_with_repr
 
 ;; ============================================================================
 ;; set_value_error_with_repr2(rdi = prefix, rsi = the object Value,
