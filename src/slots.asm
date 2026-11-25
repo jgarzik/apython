@@ -70,7 +70,9 @@ section .text
 ;; "implements no numeric/sequence/mapping protocol" means, so they must stay
 ;; NULL unless the class actually defines something.
 ;; ============================================================================
-DEF_FUNC_LOCAL slot_ensure_table
+SET_OWNS  equ 8             ; the TYPE_FLAG_OWNS_* bit for this kind of table
+SET_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL slot_ensure_table, SET_FRAME
     push rbx
     push r12
     push r13
@@ -83,14 +85,17 @@ DEF_FUNC_LOCAL slot_ensure_table
     je .set_sequence
     mov r13, PyTypeObject.tp_as_mapping
     mov r14, PyMappingMethods_size
+    mov qword [rbp - SET_OWNS], TYPE_FLAG_OWNS_MAPPING
     jmp .go
 .set_number:
     mov r13, PyTypeObject.tp_as_number
     mov r14, PyNumberMethods_size
+    mov qword [rbp - SET_OWNS], TYPE_FLAG_OWNS_NUMBER
     jmp .go
 .set_sequence:
     mov r13, PyTypeObject.tp_as_sequence
     mov r14, PySequenceMethods_size
+    mov qword [rbp - SET_OWNS], TYPE_FLAG_OWNS_SEQUENCE
 
 .go:
     mov rax, [rbx + r13]
@@ -135,12 +140,18 @@ DEF_FUNC_LOCAL slot_ensure_table
     call ap_memcpy
     pop rax
     mov [rbx + r13], rax
-    jmp .have
+    jmp .owned
 
 .fresh:
     mov rdi, r14
     call .alloc_zeroed
     mov [rbx + r13], rax
+
+.owned:
+    ; Allocated for this type, so this type frees it: user_type_dealloc reads
+    ; the bit.  rax is the table and stays so.
+    mov rcx, [rbp - SET_OWNS]
+    or [rbx + PyTypeObject.tp_flags], rcx
 
 .have:
     pop r14

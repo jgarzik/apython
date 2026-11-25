@@ -2217,6 +2217,24 @@ DEF_FUNC user_type_dealloc, 16           ; 2 pushes, so rsp is 16-aligned
     call obj_decref
 .utd_no_mro:
 
+    ; The method tables slot_ensure_table allocated for this class.  Only
+    ; those: a table inherited by pointer is a base's, or static.
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OWNS_NUMBER
+    jz .utd_no_number
+    mov rdi, [rbx + PyTypeObject.tp_as_number]
+    call ap_free
+.utd_no_number:
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OWNS_SEQUENCE
+    jz .utd_no_sequence
+    mov rdi, [rbx + PyTypeObject.tp_as_sequence]
+    call ap_free
+.utd_no_sequence:
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OWNS_MAPPING
+    jz .utd_no_mapping
+    mov rdi, [rbx + PyTypeObject.tp_as_mapping]
+    call ap_free
+.utd_no_mapping:
+
     ; Free the type object itself (gc_alloc'd)
     mov rdi, rbx
     call gc_dealloc

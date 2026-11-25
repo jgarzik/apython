@@ -129,6 +129,8 @@ case("slots", lambda: type(fresh(), (), {"__slots__": ("a", "b")}))
 case("slots, one name", lambda: type(fresh(), (), {"__slots__": "abc"}))
 case("slots twice", lambda: type(fresh(), (), {"__slots__": ("a", "a")}))
 case("slots and __dict__", lambda: type(fresh(), (), {"__slots__": ("a", "__dict__")}))
+case("slots on a str subclass", lambda: type(fresh(), (str,), {"__slots__": ("a",)}))
+case("empty slots on an int subclass", lambda: type(fresh(), (int,), {"__slots__": ()}))
 case("qualname", lambda: type(fresh(), (), {"__qualname__": "Q.N"}))
 case("descriptor with __set_name__", lambda: type(fresh(), (), {"d": GoodSetName()}))
 case("base takes keywords", lambda: type(fresh(), (TakesKeywords,), {}, tag=1))
@@ -136,12 +138,37 @@ case("metaclass from a base", lambda: type(fresh(), (Meta("B", (), {}),), {}))
 case("type.__new__", lambda: type.__new__(type, fresh(), (X,), {"v": 1}))
 case("type.__new__ with a metaclass", lambda: type.__new__(Meta, fresh(), (), {}))
 
+
+
+def builtin_bases():
+    for base in (list, dict, int, tuple, float, bytes, str, set, ValueError, type, property):
+        type(fresh(), (base,), {})
+
+
+def operator_dunders():
+    ns = {"__len__": lambda self: 0, "__add__": lambda self, other: self,
+          "__getitem__": lambda self, key: key}
+    a = type(fresh(), (), dict(ns))
+    b = type(fresh(), (a,), {"__neg__": lambda self: self})
+    c = type(fresh(), (b, list), {"__contains__": lambda self, x: True})
+    del a
+    assert len(b()) == 0 and 3 in c() and c()[4] == 4
+    b.__mul__ = lambda self, other: 7
+    assert b() * 2 == 7 and c() * 2 == 7
+
+
+print("--- type(): what a class with operators owns")
+case("a builtin for a base", builtin_bases)
+case("dunders, and subclasses of them", operator_dunders)
+
 print("--- type(): bases that are refused")
 case("an int for a base", lambda: type("N", (3,), {}))
 case("a str for a base", lambda: type("N", ("a",), {}))
 case("bool", lambda: type("B", (bool,), {"a": 1}))
 case("bool, fresh name", lambda: type(fresh(), (X, bool), {"a": [1]}))
 case("layout conflict", lambda: type("N", (int, str), {"a": 1}))
+case("layout conflict, subclasses",
+     lambda: type("N", (type("L", (list,), {}), type("D", (dict,), {})), {}))
 case("inconsistent MRO", lambda: type("N", (object, int), {"a": 1}), message=False)
 case("inconsistent MRO, own classes", lambda: type("N", (X, Y), {"a": 1}), message=False)
 
