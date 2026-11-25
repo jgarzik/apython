@@ -4,25 +4,8 @@
 # re-record with
 #   bash tests/raise_probe.sh --record
 # in the commit that fixes it.
-cb | dict | c.__init__(other) | eq | nth=1
-cb | dict | c.__init__(other) | eq | nth=3
-cb | dict | c.__init__(other) | hash | nth=1
-cb | dict | c.__init__(other) | hash | nth=3
 cb | dict | c.keys() & other.keys() | eq | nth=1
 cb | dict | c.keys() & other.keys() | eq | nth=3
-cb | dict | c.update((e, 1) for e in gen(8)) | eq | nth=1
-cb | dict | c.update((e, 1) for e in gen(8)) | eq | nth=3
-cb | dict | c.update((e, 1) for e in gen(8)) | hash | nth=1
-cb | dict | c.update((e, 1) for e in gen(8)) | hash | nth=3
-cb | dict | c.update(other) | eq | nth=1
-cb | dict | c.update(other) | eq | nth=3
-cb | dict | c.update(other) | hash | nth=1
-cb | dict | c.update(other) | hash | nth=3
-cb | dict | dict.fromkeys(gen(8)) | hash | nth=1
-cb | dict | dict.fromkeys(gen(8)) | hash | nth=3
-cb | dict | dict.fromkeys(gen(8)) | iter | nth=3
-cb | list | dict.fromkeys(c) | hash | nth=1
-cb | list | dict.fromkeys(c) | hash | nth=3
 func | math.gcd('s',)
 func | math.gcd(1.5,)
 func | math.gcd(<class 'object'>,)
@@ -36,15 +19,3 @@ func | time.strptime(None,)
 func | time.strptime([],)
 func | time.strptime(b'b',)
 meth | list.index(<class 'object'>,)
-new | dict('s',)
-new | dict('s',) **kw
-new | dict(-1,)
-new | dict(-1,) **kw
-new | dict(1.5,)
-new | dict(1.5,) **kw
-new | dict(<class 'object'>,)
-new | dict(<class 'object'>,) **kw
-new | dict(None,)
-new | dict(None,) **kw
-new | dict(b'b',)
-new | dict(b'b',) **kw
