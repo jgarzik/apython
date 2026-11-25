@@ -626,7 +626,14 @@ END_FUNC dict_get_ret
 ;;
 ;; The same price as dict_get on a hit and on a miss: the failure is told
 ;; apart in the miss path, from the register dict_lookup answered in.
+;;
+;; dict_get_quiet is the same code under the name its other use reads by: a
+;; lookup that stands in for a C FIELD in CPython -- OSError's errno and
+;; filename live in the exception's dict here -- where there is nothing that
+;; could fail there, so a failure here is "absent" as well.
 ;; ============================================================================
+    global dict_get_quiet:function
+dict_get_quiet:
 DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
     push rbx
     mov rbx, rdi

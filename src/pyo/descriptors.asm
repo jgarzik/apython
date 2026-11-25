@@ -6,6 +6,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern dict_get_mro
 extern str_type
 extern generic_alias_dealloc
 
@@ -1086,7 +1087,7 @@ DEF_FUNC mappingproxy_getattr, MPG_FRAME
     jz .mpg_none
     push rdi
     mov rdi, rax
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     pop rdi
     test edx, edx

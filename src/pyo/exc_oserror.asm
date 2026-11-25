@@ -16,6 +16,7 @@
 %include "object.inc"
 
 ; --- objects ---
+extern dict_get_quiet
 extern obj_decref
 extern obj_repr
 extern obj_str
@@ -197,7 +198,7 @@ DEF_FUNC_LOCAL oserror_field, 8            ; 1 pushes, so rsp is 16-aligned
     push rax
     mov rdi, [rbx - OSS_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_quiet
     mov rcx, rax
     pop rdi
     push rcx
@@ -675,7 +676,7 @@ DEF_FUNC_LOCAL oserror_named, ONM_FRAME
     mov [rbp - ONM_KEY], rax
     mov rdi, [rbp - ONM_DICT]
     mov rsi, rax
-    call dict_get                       ; a borrowed Value, or 0 for a miss
+    call dict_get_quiet                       ; a borrowed Value, or 0 for a miss
     mov [rbp - ONM_DICT], rax           ; ONM_DICT is spent; hold the answer
     mov rdi, [rbp - ONM_KEY]
     call obj_decref                     ; str_intern_cstr's own reference

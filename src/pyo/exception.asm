@@ -19,6 +19,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
+extern dict_get_ret
+extern dict_set_ret
 extern exc_repr
 extern exc_str
 extern traceback_type
@@ -508,7 +511,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .uni_from_args
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -607,7 +611,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .syn_from_args
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -661,7 +666,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .eg_type_start
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -679,7 +685,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .eg_type_next
     mov rsi, r12
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_type
@@ -693,7 +699,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .not_found
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_in_dict
@@ -865,7 +872,8 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .code_from_args
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_in_dict
@@ -1091,9 +1099,9 @@ DEF_FUNC exc_setattr, ESA_FRAME
 .esa_have_dict:
     mov rdi, [rbx + PyExceptionObject.exc_dict]
     ; rsi = name and rdx = value are both already Values
-    call dict_set
+    call dict_set_ret       ; err: returned to the caller as is
 
-    xor eax, eax            ; return 0 (success)
+    ; rax is dict_set's own 0 or -1
     xor edx, edx
 
     pop r12
@@ -1782,7 +1790,8 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     test rdi, rdi
     jz .ean_make
     mov rsi, [rbp - EAN_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .ean_raised
     test rax, rax
     jz .ean_make
 
@@ -1851,6 +1860,12 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     CSTRING rdi, "BaseException.add_note() takes exactly one argument ("
     CSTRING rdx, " given)"
     call set_type_error_counted
+    leave
+    ret
+.ean_raised:                    ; the exception's dict could not be searched
+    mov rdi, [rbp - EAN_NAME]
+    call obj_decref
+    xor eax, eax
     leave
     ret
 END_FUNC exc_method_add_note

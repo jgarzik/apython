@@ -24,6 +24,7 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_mro
 extern type_type
 extern type_is_subtype
 extern type_mro_next
@@ -307,7 +308,7 @@ DEF_FUNC super_find, SF_FRAME
 
     push rax
     mov rsi, [rbp - SF_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     pop rcx
     test edx, edx               ; the tag, not the payload: a hit may be int 0

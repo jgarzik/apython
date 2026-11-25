@@ -12,6 +12,8 @@
 
 %include "macros.inc"
 %include "object.inc"
+extern dict_get_ret
+extern dict_set_ret
 extern type_number_methods
 extern gc_alloc
 extern gc_track
@@ -636,7 +638,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rdi, rdi
     jz .check_type_dict
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET .getattr_unwind
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_inst
@@ -665,7 +668,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rdi, rdi
     jz .not_found
     mov rsi, [rbp - IG_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET .getattr_unwind
     V_UNPACK rax, rdx
     test edx, edx
     jnz .found_inst
@@ -731,7 +735,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rdi, rdi
     jz .ft_no_inst
     mov rsi, [rbp - IG_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET .ig_dict_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .ft_no_inst
@@ -1088,6 +1093,9 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.ig_dict_raised:                ; the instance dict could not be searched
+    add rsp, 16                 ; the saved type-dict answer; IG_HELD has it
+    jmp .getattr_unwind
 END_FUNC instance_getattr_default
 
 ;; ============================================================================
@@ -1431,7 +1439,8 @@ DEF_FUNC instance_setattr
     jz .sa_dict_del
     mov rsi, r12                ; name
     mov rdx, r13                ; value
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .sa_fail
 .sa_ok:
     xor eax, eax
     pop r14

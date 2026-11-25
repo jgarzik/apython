@@ -9,6 +9,9 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_ret
+extern dict_set_ret
+extern dict_set_str
 extern none_singleton
 extern ap_malloc
 extern gc_alloc
@@ -446,7 +449,7 @@ DEF_FUNC func_call
 
     ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
     mov rdi, rax            ; kwdefaults dict
-    call dict_get
+    call dict_get_ret       ; err: tested at .kw_default_miss, once the loop registers are back
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
     mov r8, rax             ; r8 = value payload (or NULL)
@@ -456,7 +459,7 @@ DEF_FUNC func_call
     pop rax                 ; rax = kwdefaults dict
 
     test r10, r10
-    jz .kw_defaults_next    ; not in kwdefaults, skip (would be error)
+    jz .kw_default_miss     ; not in kwdefaults, skip (would be error)
 
     ; Assign and INCREF
     movsxd r9, esi
@@ -528,6 +531,14 @@ DEF_FUNC func_call
     ; this function owns: the arguments are the caller's.
     xor eax, eax
     jmp .fc_out
+.kw_default_miss:
+    ; Absent -- or __kwdefaults__, which is an ordinary dict, could not be
+    ; searched.  The frame goes back as it does for any other refusal.
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .kw_defaults_next
+    mov rdi, r12
+    call frame_free
+    jmp .fc_refused
 END_FUNC func_call
 
 ;; ============================================================================
@@ -656,7 +667,8 @@ DEF_FUNC func_bind_kwargs
     mov rsi, [rsi + rax*8]         ; key = kw_name (already a Value)
     mov rax, [rsp+24]
     mov rdx, [r13 + rax*8]         ; the value Value
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .kw_set_raised
     jmp .kw_next
 
 .kw_unexpected:
@@ -685,6 +697,11 @@ DEF_FUNC func_bind_kwargs
     pop rbx
     leave
     ret
+.kw_set_raised:                 ; the **kwargs dict refused a name
+    mov rdi, r12
+    call frame_free             ; as set_unexpected_keyword frees it
+    xor eax, eax
+    jmp .kw_out
 END_FUNC func_bind_kwargs
 
 ;; ============================================================================
@@ -882,9 +899,9 @@ DEF_FUNC func_setattr, SC_FRAME
     ; dict_set(func_dict, name Value, value Value)
     mov rsi, r12
     mov rdx, r13
-    call dict_set
+    call dict_set_ret       ; err: returned to the caller as is
 
-    xor eax, eax
+    ; rax is dict_set's own 0 or -1
     pop r14
     pop r13
     pop r12
@@ -1361,7 +1378,8 @@ DEF_FUNC func_getattr
     jz .not_found
 
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .not_found
@@ -1448,7 +1466,7 @@ DEF_FUNC func_getattr
     mov rsi, [rax + r15*8]      ; the name
     mov rdx, [rax + r15*8 + 8]  ; the value
     mov rdi, r14
-    call dict_set
+    call dict_set_str
     add r15, 2
     jmp .fa_pair
 .fa_folded:
@@ -1524,7 +1542,8 @@ DEF_FUNC func_getattr
     test rdi, rdi
     jz .fgfd_none
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .fgfd_raised
     V_UNPACK rax, rdx
     test edx, edx
     jz .fgfd_none
@@ -1556,7 +1575,8 @@ DEF_FUNC func_getattr
     test rdi, rdi
     jz .doc_from_code
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .not_found
     V_UNPACK rax, rdx
     test edx, edx
     jz .doc_from_code
@@ -1613,7 +1633,7 @@ DEF_FUNC func_getattr
     push rax
     mov rdi, [rbx + PyFuncObject.func_globals]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret       ; err: tested at .fg_module_miss, once the name is released
     V_UNPACK rax, rdx
     pop rdi
     push rax
@@ -1622,7 +1642,7 @@ DEF_FUNC func_getattr
     pop rdx
     pop rax
     test edx, edx
-    jz .doc_none
+    jz .fg_module_miss
     jmp .return_ptr_attr
 
 .return_code:
@@ -1663,6 +1683,13 @@ DEF_FUNC func_getattr
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.fgfd_raised:                   ; inside .fg_from_dict: drop its return address
+    add rsp, 8
+    jmp .not_found
+.fg_module_miss:                ; no __name__ in the globals, or they could not be searched
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .doc_none
+    jmp .not_found
 END_FUNC func_getattr
 
 ;; ============================================================================

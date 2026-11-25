@@ -7,6 +7,9 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_ret
+extern dict_set_ret
+extern dict_set_str
 extern ap_malloc
 extern gc_alloc
 extern gc_track
@@ -124,7 +127,7 @@ DEF_FUNC module_new_of, MNO_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rax
@@ -139,7 +142,7 @@ DEF_FUNC module_new_of, MNO_FRAME
     mov rdi, r12
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rax
@@ -268,7 +271,8 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     jz .mdd_default
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get               ; a Value; 0 is the miss, and it never raises
+    call dict_get_ret               ; a Value; 0 is the miss, and it never raises
+    ERR_PENDING .mdd_fail
     test rax, rax
     jz .mdd_default
 
@@ -299,6 +303,11 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
 .mdd_default:
     mov rdi, rbx
     call dir_default          ; err: its 0 is this method's own answer
+    pop rbx
+    leave
+    ret
+.mdd_fail:                      ; the module's dict could not be searched
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -355,7 +364,8 @@ DEF_FUNC module_getattr, MG_FRAME
     test rdi, rdi
     jz .not_found
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET .mg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
     ; INCREF if found (dict_get returns borrowed ref)
@@ -387,7 +397,8 @@ DEF_FUNC module_getattr, MG_FRAME
     jz .mg_really_not_found
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get               ; a Value; 0 is the miss, and it never raises
+    call dict_get_ret               ; a Value; 0 is the miss, and it never raises
+    ERR_PENDING .mg_really_not_found
     test rax, rax
     jz .mg_really_not_found
     mov [rbp - MG_HOOK], rax    ; borrowed; nothing below runs Python
@@ -516,9 +527,8 @@ DEF_FUNC module_setattr
     jz .ms_delete
     mov rdi, [rax + PyModuleObject.mod_dict]
     ; rsi = name_str and rdx = value are both already Values
-    call dict_set
-    xor eax, eax               ; return 0 (success)
-    leave
+    call dict_set_ret       ; err: returned to the caller as is
+    leave                       ; rax is dict_set's own 0 or -1
     ret
 
 .ms_delete:
@@ -581,11 +591,12 @@ DEF_FUNC module_repr, MR_FRAME
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get_ret       ; err: tested below, once the name is released
     pop rdi
     push rax
     call obj_decref
     pop rax
+    ERR_PENDING .mr_fail
     test rax, rax
     jz .mr_no_file
     V_UNPACK rax, rdx
@@ -675,6 +686,11 @@ DEF_FUNC module_repr, MR_FRAME
 .mr_done:
     call obj_repr_buf_str
     mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.mr_fail:                       ; the module's dict could not be searched
+    xor eax, eax
     pop rbx
     leave
     ret
@@ -982,7 +998,8 @@ DEF_FUNC namespace_type_call, NTC_FRAME
     mov rdx, [rdx + rcx*8]                  ; the value
     mov rdi, [rbp - NTC_NS]
     mov rdi, [rdi + PySimpleNamespaceObject.ns_dict]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .ntc_set_raised
     inc qword [rbp - NTC_I]
     jmp .ntc_kw_loop
 
@@ -1000,6 +1017,10 @@ DEF_FUNC namespace_type_call, NTC_FRAME
 
 .ntc_positional:
     FAIL exc_TypeError_type, "no positional arguments expected", .ntc_fail
+.ntc_set_raised:
+    mov rdi, [rbp - NTC_NS]     ; the namespace being filled
+    call obj_decref
+    jmp .ntc_fail
 END_FUNC namespace_type_call
 
 ;; namespace_set(rdi = ns, rsi = name cstr, rdx = value Value)
@@ -1015,7 +1036,7 @@ DEF_FUNC namespace_set
     mov rdi, rbx
     mov rsi, rax
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop r12
@@ -1077,7 +1098,8 @@ DEF_FUNC namespace_getattr, NSG_FRAME
 .nsg_lookup:
     mov rdi, [rbx + PySimpleNamespaceObject.ns_dict]
     mov rsi, [rbp - NSG_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .nsg_none
     V_UNPACK rax, rdx
     test edx, edx
     jz .nsg_none
@@ -1115,9 +1137,8 @@ DEF_FUNC namespace_setattr, NSS_FRAME
     ; `del ns.a` then showed as `a=` in the repr and read back as garbage.
     test rdx, rdx
     jz .nss_delete
-    call dict_set
-    xor eax, eax
-    leave
+    call dict_set_ret       ; err: returned to the caller as is
+    leave                       ; rax is dict_set's own 0 or -1
     ret
 
 .nss_delete:
@@ -1539,7 +1560,7 @@ DEF_FUNC module_type_new, MTN_FRAME
     mov rax, [rbp - MTN_MOD]
     mov rdi, [rax + PyModuleObject.mod_dict]
     mov rdx, rcx
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref

@@ -36,6 +36,9 @@
 %include "object.inc"
 %include "value.inc"
 
+extern dict_get_mro
+extern dict_set_ret
+extern dict_set_str
 extern type_type
 extern object_type
 extern str_from_cstr
@@ -342,7 +345,7 @@ DEF_FUNC type_dict_add_attrs, TDA_FRAME
     mov rdi, [rbp - TDA_DICT]
     mov rsi, [rbp - TDA_NAME]
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     mov rdi, r12
     call obj_decref
     inc rbx
@@ -542,7 +545,8 @@ DEF_FUNC type_setattr
     jz .ts_dict_del
     ; dict_set(dict, name Value, value Value)
     pop rcx
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .ts_fail
     jmp .ts_wrote
 
 .ts_meta_data:
@@ -972,7 +976,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jz .tga_next_base
 
     mov rsi, rbx
-    call dict_get               ; a Value; 0 is the only miss
+    call dict_get_mro               ; a Value; 0 is the only miss
     test rax, rax
     jnz .tga_found
 
@@ -1195,7 +1199,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jz .tga_module_builtin
     mov rsi, rbx
     extern dict_get
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jz .tga_module_builtin
     V_UNPACK rax, rdx
@@ -1246,7 +1250,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test rdi, rdi
     jz .tga_ann_try_meta
     mov rsi, rbx
-    call dict_get               ; a Value; 0 is the only miss
+    call dict_get_mro               ; a Value; 0 is the only miss
     test rax, rax
     jnz .tga_found
 .tga_ann_try_meta:
@@ -1258,7 +1262,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test rdi, rdi
     jz .tga_tp_try_meta
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     test rax, rax
     jnz .tga_found
 .tga_tp_try_meta:
@@ -1300,7 +1304,8 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     push rax
     mov rdx, rax
     mov rsi, rbx                ; the name, "__annotations__"
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .tga_ann_set_raised
     pop rax
     pop rax
     mov edx, TAG_PTR
@@ -1387,7 +1392,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test rdi, rdi
     jz .tga_meta_next
     mov rsi, rbx
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jnz .tga_meta_found
@@ -1473,6 +1478,11 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+.tga_ann_set_raised:            ; the class's dict refused the new __annotations__
+    pop rdi
+    pop rax
+    call obj_decref
+    jmp .tga_really_really_not_found
 END_FUNC type_getattr_meta
 
 ;; ============================================================================

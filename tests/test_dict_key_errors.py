@@ -155,3 +155,69 @@ def locals_colliding():
 
 
 check("locals(), colliding f_locals", locals_colliding)
+
+# --- attribute lookup: the instance's dict fails, the type's does not -------
+class Plain:
+    pass
+
+
+def instance_with(name):
+    o = Plain()
+    o.__dict__[BadEq(name)] = 1
+    return o
+
+
+check("o.y, colliding __dict__", lambda: instance_with("y").y)
+check("o.y = 1, colliding __dict__", lambda: setattr(instance_with("y"), "y", 1))
+check("getattr(o, 'y', 0)", lambda: getattr(instance_with("y"), "y", 0))
+check("hasattr(o, 'y')", lambda: hasattr(instance_with("y"), "y"))
+
+# A class body may put anything in its namespace, and a lookup along the MRO
+# treats a key that will not compare as "not here": CPython's _PyType_Lookup
+# clears the error.
+Odd = type("Odd", (), {BadEq("x"): 1})
+check("C.x, colliding class namespace", lambda: Odd.x)
+check("C().x, colliding class namespace", lambda: Odd().x)
+
+
+def module_with(name):
+    m = type(sys)("m")
+    m.__dict__[BadEq(name)] = 1
+    return m
+
+
+check("module.z", lambda: module_with("z").z)
+check("module.z = 1", lambda: setattr(module_with("z"), "z", 1))
+
+
+def function_with(name):
+    def f():
+        pass
+    f.__dict__[BadEq(name)] = 1
+    return f
+
+
+check("function.a", lambda: function_with("a").a)
+check("function.a = 1", lambda: setattr(function_with("a"), "a", 1))
+
+
+def exception_with(name):
+    e = ValueError("v")
+    e.__dict__[BadEq(name)] = 1
+    return e
+
+
+check("exception.k", lambda: exception_with("k").k)
+check("exception.k = 1", lambda: setattr(exception_with("k"), "k", 1))
+check("add_note, colliding __notes__",
+      lambda: exception_with("__notes__").add_note("n"))
+
+
+def kwdefaults_colliding():
+    def f(*, a=1):
+        return a
+    f.__kwdefaults__ = {BadEq("a"): 1}
+    return f()
+
+
+check("call, colliding __kwdefaults__", kwdefaults_colliding)

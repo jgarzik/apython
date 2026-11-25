@@ -18,6 +18,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
 extern eval_exception_unwind
 extern object_type
 extern exc_TypeError_type
@@ -732,7 +733,7 @@ DEF_FUNC type_defines_dunder, TDD_FRAME
     test rdi, rdi
     jz .tdd_next
     mov rsi, [rbp - TDD_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx               ; the tag: a hit may be a false-looking payload
     jnz .tdd_yes
