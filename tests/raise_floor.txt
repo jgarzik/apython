@@ -3,11 +3,8 @@
 # above its number.  Lower one with
 #   python3 src/compiler/lint.py --record-raise
 # in the commit that earns it; a row at zero is dropped.
-src/buildclass.asm                     14
-src/buildclass_stmt.asm                9
-src/mro.asm                            1
 src/object.asm                         5
-src/objerr.asm                         7
+src/objerr.asm                         6
 src/pyo/dict.asm                       3
 src/pyo/exception.asm                  2
 src/runtime.asm                        1
