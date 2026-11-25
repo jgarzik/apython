@@ -336,7 +336,7 @@ DEF_FUNC_LOCAL bh_sep_char, BHS_FRAME
     jz .bsc_no_len
 .bsc_measure:
     call rcx
-    ERR_M1_JUMP
+    ERR_M1 .bsc_fail            ; the separator's __len__ raised
     cmp rax, 1
     jne .bsc_bad_len
     SET_EXC exc_TypeError_type, "sep must be str or bytes."
@@ -2663,7 +2663,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .bj_fail        ; the argument's __iter__ raised
     test rax, rax
     jz .bj_not_iterable_pop
     V_UNPACK rax, rdx

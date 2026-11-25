@@ -1337,12 +1337,11 @@ DEF_FUNC str_method_join
     push rdi
     push rsi
     extern get_iterator_opt
-    call get_iterator_opt       ; 0 when there is no iterator to be had
-    ERR_PENDING_JUMP
+    call get_iterator_opt       ; err: 0 when there is no iterator to be had; .join_iter_miss tells that from a raise, once the argument is popped
     pop rsi
     pop rdi
     test rax, rax
-    jz .join_not_iterable
+    jz .join_iter_miss
     mov rdi, rax
     call obj_decref             ; only the answer was wanted
     lea rdi, [rel tuple_type]
@@ -1531,6 +1530,12 @@ DEF_FUNC str_method_join
     mov rdi, rbx
     call obj_decref             ; the separator this borrowed
     SET_EXC exc_TypeError_type, "can only join an iterable"
+    jmp .join_fail
+.join_iter_miss:                ; not iterable -- or its __iter__ raised
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .join_not_iterable
+    mov rdi, rbx
+    call obj_decref
     jmp .join_fail
 
 .join_type_error:
@@ -2664,7 +2669,7 @@ DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
     cmp rax, -1
     je .frf_not_subscriptable
     test rax, rax
-    jz .frf_bad_item
+    jz .frf_item_miss
     xchg rbx, rax               ; the new object where a release cannot
     DECREF_V rax, rcx           ; reach it: the old one may be a temporary
     jmp .frf_suffix
@@ -2682,6 +2687,9 @@ DEF_FUNC_LOCAL fm_apply_suffix, FRF_FRAME
 .frf_not_subscriptable:
     SET_EXC exc_TypeError_type, "object is not subscriptable"
     jmp .frf_fail
+.frf_item_miss:                 ; no such item -- or __getitem__ raised, and that stands
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .frf_fail
 .frf_bad_item:
     SET_EXC exc_KeyError_type, "no such item in a format field"
 .frf_fail:
@@ -2709,9 +2717,8 @@ DEF_FUNC_LOCAL fm_subscript
     mov rax, [rax + PyMappingMethods.mp_subscript]
     test rax, rax
     jz .fms_no_protocol
-    call rax
-    ERR_PENDING_JUMP            ; __getitem__ raised
-    leave
+    call rax                    ; 0 with the exception pending when __getitem__
+    leave                       ; raised: the caller tells that from a miss
     ret
 .fms_no_protocol:
     ; -1, not 0: "this object cannot be subscripted at all" is a TypeError in
@@ -2933,9 +2940,8 @@ DEF_FUNC_LOCAL fm_lookup
     mov rax, [rax + PyMappingMethods.mp_subscript]
     test rax, rax
     jz .fml_none
-    call rax
-    ERR_PENDING_JUMP            ; __getitem__ raised
-    mov r8d, 1
+    call rax                    ; 0 with the exception pending when __getitem__
+    mov r8d, 1                  ; raised: .fmap_lookup_failed keeps it
     leave
     ret
 .fml_none:

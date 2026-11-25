@@ -1029,7 +1029,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     jz .trn_have_lookup
     mov rdi, rax
     call rdx
-    ERR_M1_JUMP
+    ERR_M1 .trn_fail_out        ; the table's __len__ raised; no list exists yet
     mov [rbp - TRN_LEN], rax
 
 .trn_have_lookup:

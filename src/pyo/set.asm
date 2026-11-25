@@ -2010,8 +2010,7 @@ DEF_FUNC set_nb_or, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_union
-    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
+    call set_method_union  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_or
@@ -2023,8 +2022,7 @@ DEF_FUNC set_nb_and, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_intersection
-    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
+    call set_method_intersection  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_and
@@ -2159,8 +2157,7 @@ DEF_FUNC set_nb_sub, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_difference
-    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
+    call set_method_difference  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_sub
@@ -2172,8 +2169,7 @@ DEF_FUNC set_nb_xor, SNB_FRAME
     mov [rbp - SNB_RIGHT], rsi         ; args[1] = right
     lea rdi, [rbp - SNB_LEFT]
     mov esi, 2
-    call set_method_symmetric_difference
-    ERR_NULL_JUMP               ; a 0 from an nb slot reads as NotImplemented
+    call set_method_symmetric_difference  ; err: returned as is -- 0 WITH an exception pending is a failure to the dispatch, not NotImplemented
     leave
     ret
 END_FUNC set_nb_xor

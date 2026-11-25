@@ -597,7 +597,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov esi, TAG_PTR
     extern get_iterator_opt
     call get_iterator_opt
-    ERR_PENDING_JUMP
+    ERR_PENDING .du_propagate   ; the pair's __iter__ raised
     test rax, rax
     jz .du_not_a_sequence
     mov rdi, rax

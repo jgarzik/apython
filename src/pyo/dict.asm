@@ -2045,9 +2045,8 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov esi, 2
     extern dict_method_update
     call dict_method_update
-    ERR_NULL_JUMP               ; a 0 from here reads as NotImplemented
-    test rax, rax
-    jz .nb_ior_failed           ; update raised; hand the failure on
+    ERR_NULL .nb_ior_failed     ; update raised: 0 WITH it pending is a failure,
+                                ; where 0 alone would read as NotImplemented
     DECREF_V rax, rcx           ; update answers None
     mov rax, [rbp - DIO_LEFT]
     INCREF rax
