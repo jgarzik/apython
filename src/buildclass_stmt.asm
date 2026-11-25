@@ -36,7 +36,7 @@ extern obj_incref
 extern set_exception
 extern str_from_cstr_heap
 extern dict_type
-extern dict_set_jumping
+extern dict_set
 extern str_type
 extern tuple_new
 extern tuple_type
@@ -787,9 +787,15 @@ BCL_RSP   equ 8 + 40 + 64
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rbp - BCL_ORIG]
-    call dict_set_jumping               ; takes its own reference
+    call dict_set               ; err: tested once the key is released
     pop rdi
+    push rax                    ; the verdict, across the release
+    sub rsp, 8
     call obj_decref
+    add rsp, 8
+    pop rax
+    ERR_M1 .bc_fail             ; the namespace is the body's: a key of its
+                                ; own refused the comparison
 .bc_orig_release:
     mov rdi, [rbp - BCL_ORIG]
     mov qword [rbp - BCL_ORIG], 0

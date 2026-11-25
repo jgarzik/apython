@@ -116,7 +116,9 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
 
     mov rdi, [rbp - TSN_NS]
     mov rsi, rcx
-    call dict_get_jumping
+    extern dict_get
+    call dict_get
+    ERR_DICT_GET .raised        ; the key is the namespace's own, and anyone's
     V_UNPACK rax, rdx
     test edx, edx
     jz .next                            ; deleted while we walked
@@ -278,7 +280,8 @@ DEF_FUNC type_mangle_name, TMN_FRAME
 END_FUNC type_mangle_name
 
 ;; ============================================================================
-;; type_apply_hash_rule(rdi = the type, rsi = the class dict)
+;; type_apply_hash_rule(rdi = the type, rsi = the class dict) -> rax = 0
+;; Fails: -1
 ;;
 ;; Python's inherited-hash rule, which is about a name being ABSENT and so
 ;; cannot be a slot wrapper:
@@ -301,6 +304,7 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     CSTRING rdi, "__hash__"
     mov rsi, [rbp - TAH_DICT]
     call tah_dict_get
+    ERR_PENDING .tah_fail
     test rax, rax
     jz .tah_no_hash
 
@@ -316,6 +320,7 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     CSTRING rdi, "__eq__"
     mov rsi, [rbp - TAH_DICT]
     call tah_dict_get
+    ERR_PENDING .tah_fail
     test rax, rax
     jnz .tah_unhashable
 
@@ -359,18 +364,30 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     mov rdi, [rbp - TAH_DICT]
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    extern dict_set_jumping
-    call dict_set_jumping
+    extern dict_set
+    call dict_set               ; err: tested once the key is released
     add rsp, 8
     pop rdi
+    push rax                    ; the verdict, across the release
+    sub rsp, 8
     call obj_decref
+    add rsp, 8
+    pop rax
+    ERR_M1 .tah_fail
 .tah_done:
+    xor eax, eax
+    leave
+    ret
+.tah_fail:
+    mov rax, -1
     leave
     ret
 END_FUNC type_apply_hash_rule
 
 ;; ============================================================================
 ;; type_wrap_implicit_classmethods(rdi = the type, rsi = the class dict)
+;;   -> rax = 0
+;; Fails: -1
 ;;
 ;; __init_subclass__ and __class_getitem__ are classmethods even when the
 ;; class body defines them as plain functions -- CPython does this in
@@ -390,14 +407,24 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
 
     CSTRING rbx, "__init_subclass__"
     call .twi_one
+    test eax, eax
+    jnz .twi_fail
     CSTRING rbx, "__class_getitem__"
     call .twi_one
+    test eax, eax
+    jnz .twi_fail
 .twi_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.twi_fail:
+    mov rax, -1
     pop rbx
     leave
     ret
 
-;; rbx = the name, as a C string
+;; rbx = the name, as a C string -> eax = 0, or -1 with the exception pending
 .twi_one:
     push rbx
     sub rsp, 8
@@ -410,8 +437,9 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
 
     mov rdi, [rbp - TWI_DICT]
     mov rsi, rax
-    extern dict_get_jumping
-    call dict_get_jumping
+    extern dict_get
+    call dict_get
+    ERR_DICT_GET .twi_one_fail
     test rax, rax
     jz .twi_release
 
@@ -443,21 +471,33 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
     mov rdi, [rbp - TWI_DICT]
     mov rsi, [rbp - TWI_KEY]
     mov rdx, rax
-    extern dict_set_jumping
-    call dict_set_jumping
+    extern dict_set
+    call dict_set               ; err: tested once the wrapper is released
     add rsp, 8
     pop rdi
+    push rax                    ; the verdict, across the release
+    sub rsp, 8
     extern obj_decref
     call obj_decref             ; dict_set took its own reference
+    add rsp, 8
+    pop rax
+    ERR_M1 .twi_one_fail
 
 .twi_release:
     mov rdi, [rbp - TWI_KEY]
     call obj_decref
+    xor eax, eax
+    ret
+.twi_one_fail:
+    mov rdi, [rbp - TWI_KEY]
+    call obj_decref
+    mov eax, -1
     ret
 END_FUNC type_wrap_implicit_classmethods
 
 ;; tah_dict_get(rdi = a name C string, rsi = the dict)
 ;;   -> rax = the Value, or 0 when absent
+;; Fails: 0?
 DEF_FUNC_LOCAL tah_dict_get, 16
     push rbx
     sub rsp, 8
@@ -468,8 +508,9 @@ DEF_FUNC_LOCAL tah_dict_get, 16
     sub rsp, 8
     mov rdi, rbx
     mov rsi, rax
-    extern dict_get_jumping
-    call dict_get_jumping
+    extern dict_get
+    call dict_get               ; err: returned to the caller as is, once the
+                                ; key this built is released
     add rsp, 8
     pop rdi
     push rax
@@ -550,7 +591,9 @@ DEF_FUNC type_slots_conflict, TSC_FRAME
     mov [rbp - TSC_NAME], rax                   ; owned from here
     mov rdi, [rbp - TSC_DICT]
     mov rsi, rax
-    call dict_get_jumping                               ; a Value; 0 is the miss
+    extern dict_get
+    call dict_get               ; a Value; 0 is the miss
+    ERR_DICT_GET .tsc_fail_name
     test rax, rax
     jz .tsc_release
 
@@ -616,6 +659,7 @@ DEF_FUNC type_slots_conflict, TSC_FRAME
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rbp - TSC_BUF]
     call set_exception
+.tsc_fail_name:
     mov rdi, [rbp - TSC_NAME]
     call obj_decref
     mov rax, -1

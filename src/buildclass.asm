@@ -19,8 +19,9 @@ extern dict_type
 extern dict_new
 extern dunder_call_3
 extern dunder_lookup
-extern dict_get_jumping
-extern dict_set_jumping
+extern dict_get
+extern dict_set
+extern dict_get_mro
 extern str_from_cstr_heap
 extern obj_getattr_opt
 extern obj_call_n
@@ -118,7 +119,9 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov [rbp - BFC_KEY], rax
     mov rdi, [rbp - BFC_DICT]
     mov rsi, rax
-    call dict_get_jumping                       ; a Value; 0 is the miss
+    call dict_get               ; a Value; 0 is the miss
+    ERR_DICT_GET .bfc_fail_key  ; a foreign key in the namespace refused the
+                                ; comparison
     test rax, rax
     jz .bfc_drop_key
 
@@ -158,6 +161,13 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov rsi, [rbp - BFC_FOUND]
     extern set_type_error_with_name
     call set_type_error_with_name
+    mov rax, -1
+    leave
+    ret
+
+.bfc_fail_key:
+    mov rdi, [rbp - BFC_KEY]
+    call obj_decref
     mov rax, -1
     leave
     ret
@@ -251,11 +261,14 @@ DEF_FUNC_LOCAL bc_solid_base
 END_FUNC bc_solid_base
 
 ;; ============================================================================
-;; bc_take_qualname(r12 = the new heaptype) -> nothing
+;; bc_take_qualname(r12 = the new heaptype) -> rax = 0
+;; Fails: -1
 ;;
 ;; Moves __qualname__ out of tp_dict and into ht_qualname.  CPython's type_new
 ;; does the same.  Whether it IS a str was settled by bc_check_qualname before
-;; the type existed, so nothing here raises.
+;; the type existed, so the only failure left is the lookup's own: tp_dict is
+;; a copy of the caller's namespace, and a key in it that is not a str can
+;; refuse to be compared with the name.
 ;; ============================================================================
 BTQ_KEY   equ 8
 BTQ_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -270,7 +283,8 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     mov [rbp - BTQ_KEY], rax
     mov rdi, [r12 + PyTypeObject.tp_dict]
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .btq_fail_key
     test rax, rax
     jz .btq_release_key
 
@@ -294,9 +308,16 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     mov rdi, [rbp - BTQ_KEY]
     call obj_decref
 .btq_done:
+    xor eax, eax
     leave
     ret
 
+.btq_fail_key:
+    mov rdi, [rbp - BTQ_KEY]
+    call obj_decref
+    mov rax, -1
+    leave
+    ret
 END_FUNC bc_take_qualname
 
 ;; ============================================================================
@@ -328,7 +349,8 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
     jz .bcq_done
     mov [rbp - BCQ_KEY], rax
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .bcq_fail_key
     push rax
     sub rsp, 8
     mov rdi, [rbp - BCQ_KEY]
@@ -352,6 +374,12 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
     ret
 .bcq_done:
     xor eax, eax
+    leave
+    ret
+.bcq_fail_key:
+    mov rdi, [rbp - BCQ_KEY]
+    call obj_decref
+    mov rax, -1
     leave
     ret
 END_FUNC bc_check_qualname
@@ -703,7 +731,8 @@ TFP_RSP   equ 40 + 88
     mov rbx, rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .tfp_fail_ns_key
     V_UNPACK rax, rdx
     mov r12, rax
     mov [rbp - TFP_SLOTV], rdx
@@ -916,6 +945,7 @@ TFP_RSP   equ 40 + 88
     ; it; here it sat in tp_dict, so every instance of every class answered
     ; its class's -- and vars(C) had an entry CPython's does not.
     call bc_take_qualname
+    ERR_M1 .tfp_fail_type
 
     ; __new__ is an implicit staticmethod.  Without the wrapper, looking it up
     ; through the class or through super() binds it like an ordinary method
@@ -927,7 +957,8 @@ TFP_RSP   equ 40 + 88
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     mov rbx, rax                ; the current __new__, as a Value
     V_TEST_PTR rbx, rax
     ja .tfp_new_done
@@ -954,7 +985,8 @@ TFP_RSP   equ 40 + 88
     mov rdi, r15
     mov rsi, [rsp]              ; the "__new__" key
     mov rdx, rbx
-    call dict_set_jumping
+    call dict_set
+    ERR_M1 .tfp_fail_type_key_rbx
     mov rdi, rbx
     call obj_decref             ; the dict holds it now
 .tfp_new_done:
@@ -969,7 +1001,8 @@ TFP_RSP   equ 40 + 88
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .bc_have_module
     mov rcx, [gs:ThreadState.eval_saved_r12]
@@ -984,7 +1017,8 @@ TFP_RSP   equ 40 + 88
     mov rdi, [gs:ThreadState.eval_saved_r12]
     mov rdi, [rdi + PyFrame.globals]
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get               ; the caller's globals: anyone's dict
+    ERR_DICT_GET .tfp_fail_type_key2
     V_UNPACK rax, rdx
     pop rdi
     push rax
@@ -997,7 +1031,8 @@ TFP_RSP   equ 40 + 88
     mov rdi, r15
     mov rsi, [rsp]                  ; the "__module__" key
     mov rdx, rax
-    call dict_set_jumping
+    call dict_set
+    ERR_M1 .tfp_fail_type_key
     or qword [rbp - TFP_FILLED], TFP_FILLED_MODULE
 .bc_have_module:
     pop rdi
@@ -1020,13 +1055,15 @@ TFP_RSP   equ 40 + 88
     push rax
     mov rdi, r15
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     test rax, rax               ; a Value; 0 is the miss
     jnz .bc_have_doc
     mov rdi, r15
     mov rsi, [rsp]
     lea rdx, [rel none_singleton]
-    call dict_set_jumping
+    call dict_set
+    ERR_M1 .tfp_fail_type_key
     or qword [rbp - TFP_FILLED], TFP_FILLED_DOC
 .bc_have_doc:
     pop rdi
@@ -1040,7 +1077,8 @@ TFP_RSP   equ 40 + 88
     push rax                        ; save __slots__ str
     mov rdi, r15                    ; class_dict
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .tfp_fail_type_key
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rdi                         ; __slots__ str
     push rdx                        ; save dict_get tag
@@ -1297,7 +1335,8 @@ TFP_RSP   equ 40 + 88
     mov rsi, [rsp]                 ; name (key)
     mov rdx, rax                   ; descriptor (value)
     push rax                       ; save descriptor for DECREF
-    call dict_set_jumping
+    call dict_set
+    ERR_M1 .tfp_fail_type_key2  ; the descriptor, then the name
 
     ; DECREF our ref on descriptor (dict now owns one via INCREF in dict_set)
     pop rdi
@@ -1330,7 +1369,8 @@ TFP_RSP   equ 40 + 88
 
     mov rdi, r15            ; class_dict
     mov rsi, rax            ; "__init__" str
-    call dict_get_jumping
+    call dict_get_mro       ; a slot being filled in from the type's own
+                            ; namespace, which is what _PyType_Lookup is for
     V_UNPACK rax, rdx           ; dict_get returns a Value
     mov rbx, rax            ; rbx = __init__ func or NULL
 
@@ -1694,6 +1734,7 @@ TFP_RSP   equ 40 + 88
     mov rdi, r12
     mov rsi, r15
     call type_apply_hash_rule
+    ERR_M1 .tfp_fail_type
 
     ; Two names are implicitly classmethods, whatever the class body wrote.
     ; CPython wraps them in type_new; without it `Template.__init_subclass__()`
@@ -1703,6 +1744,7 @@ TFP_RSP   equ 40 + 88
     mov rdi, r12
     mov rsi, r15
     call type_wrap_implicit_classmethods
+    ERR_M1 .tfp_fail_type
 
     ; The metatype, if type.__new__ was handed one, and BEFORE any user code
     ; runs -- __init_subclass__ below and __set_name__ further down alike.  A
@@ -1797,6 +1839,7 @@ TFP_RSP   equ 40 + 88
     mov rsi, [rbp - TFP_ADDDICT]
     mov rdx, [rbp - TFP_ADDWEAK]
     call bc_layout_entries
+    ERR_M1 .tfp_fail_type
 
     ; Does anything in this MRO define a __getattribute__ of its own?  Asked
     ; once, here, instead of on every attribute access.  tp_mro, tp_dict and
@@ -1895,6 +1938,32 @@ TFP_RSP   equ 40 + 88
     leave
     ret
 
+.tfp_fail_type_key_rbx:
+    ; ... holding something in rbx as well, over the key.
+    pop rdi
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+    jmp .tfp_fail_type
+
+.tfp_fail_type_key2:
+    ; ... from under TWO owned references on the machine stack.  Both are
+    ; popped before either is released, so the release runs at the depth the
+    ; body's own did.
+    pop rdi
+    pop rbx
+    call obj_decref
+    mov rdi, rbx
+    call obj_decref
+    jmp .tfp_fail_type
+
+.tfp_fail_type_key:
+    ; A lookup in the class's namespace failed -- it is a copy of the
+    ; caller's, and a key in it that is not a str may refuse to be compared
+    ; with a name -- from under the name the body pushed.
+    pop rdi
+    call obj_decref
+
 .tfp_fail_type:
     ; Refused with the type object already built.  It owns everything taken
     ; since -- the dict the namespace became, the name, the bases, the MRO --
@@ -1917,6 +1986,10 @@ TFP_RSP   equ 40 + 88
     mov rdi, r12
     call obj_decref
     jmp .tfp_fail
+
+.tfp_fail_ns_key:
+    mov rdi, rbx                ; the name the failed lookup was for
+    call obj_decref
 
 .tfp_fail_ns:
     ; Refused before anything was built: the namespace is all there is.
@@ -2053,7 +2126,8 @@ END_FUNC bc_base_has_dict
 
 ;; ============================================================================
 ;; bc_layout_entries(rdi = the new heaptype, rsi = 1 to add __dict__,
-;;                   rdx = 1 to add __weakref__) -> nothing
+;;                   rdx = 1 to add __weakref__) -> rax = 0
+;; Fails: -1
 ;;
 ;; One read-only GS_NAMED getset per name, owned by the type, and skipped when
 ;; the name is already taken -- which is what keeps a `__slots__` naming either
@@ -2093,6 +2167,7 @@ DEF_FUNC_LOCAL bc_layout_entries, BLE_FRAME
     extern obj_generic_attr
     lea rdx, [rel obj_generic_attr]
     call bc_add_layout_getset
+    ERR_M1 .ble_out             ; rax is the -1 already
 
 .ble_weak:
     cmp qword [rbp - BLE_ADDW], 0
@@ -2102,8 +2177,11 @@ DEF_FUNC_LOCAL bc_layout_entries, BLE_FRAME
     extern weakref_slot_get
     lea rdx, [rel weakref_slot_get]
     call bc_add_layout_getset
+    ERR_M1 .ble_out
 
 .ble_done:
+    xor eax, eax
+.ble_out:
     pop rbx
     leave
     ret
@@ -2111,7 +2189,8 @@ END_FUNC bc_layout_entries
 
 ;; ============================================================================
 ;; bc_add_layout_getset(rdi = name cstr, rsi = the owning type,
-;;                      rdx = a tp_getattr-shaped getter) -> nothing
+;;                      rdx = a tp_getattr-shaped getter) -> rax = 0
+;; Fails: -1
 ;;
 ;; GS_NAMED means the getter is called (self, gs_name) and answers from the
 ;; name, which is what obj_generic_attr and weakref_slot_get both are; see
@@ -2136,7 +2215,8 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rbx, [rbx + PyTypeObject.tp_dict]
     mov rdi, rbx
     mov rsi, rax
-    call dict_get_jumping
+    call dict_get
+    ERR_DICT_GET .bal_fail_name
     test rax, rax               ; a Value; 0 is the miss
     jnz .bal_drop_name          ; the class already has the name
 
@@ -2154,7 +2234,8 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rdi, rbx
     mov rsi, [rbp - BAL_NAME]
     mov rdx, rax
-    call dict_set_jumping
+    call dict_set
+    ERR_M1 .bal_fail_desc
     mov rdi, [rbp - BAL_DESC]
     call obj_decref             ; dict_set took its own
 .bal_drop_name:
@@ -2162,6 +2243,18 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     call obj_decref             ; str_intern_cstr's, and getset_descr_new took
                                 ; one of its own for gs_name
 .bal_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+
+.bal_fail_desc:
+    mov rdi, [rbp - BAL_DESC]
+    call obj_decref
+.bal_fail_name:
+    mov rdi, [rbp - BAL_NAME]
+    call obj_decref
+    mov rax, -1
     pop rbx
     leave
     ret

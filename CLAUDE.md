@@ -259,8 +259,6 @@ After `dict_get` on a path where a miss is the ordinary answer -- attribute
 and global lookup -- or where an exception may already be pending, check
 with `ERR_DICT_GET` / `ERR_DICT_IDX`: they read the failure from `rdx` (-2),
 where `ERR_PENDING` loads the thread state on every miss.
-`dict_get_jumping` and its two siblings are temporary, for the
-class-construction code only.
 
 `op_call` turns a 0 that arrives with nothing pending into SystemError, so a
 callee never returns 0 without setting one.  `type_call` releases the

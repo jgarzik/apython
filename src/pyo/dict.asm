@@ -672,32 +672,6 @@ DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
 END_FUNC dict_get_mro
 
 ;; ============================================================================
-;; dict_get_jumping / dict_set_jumping / dict_get_index_jumping
-;;   -> as dict_get / dict_set / dict_get_index, and they do not return a
-;;      failure: they unwind with it
-;;
-;; TEMPORARY.  What the three public entries did before their callers were
-;; swept, kept under names that say so for the class-construction code
-;; (buildclass*.asm, mro.asm, type_call), which was being converted by
-;; someone else at the time and still expects the jump.  Each caller that
-;; gains an error exit moves to the plain name and a check; these go when
-;; the last one has.
-;; ============================================================================
-DEF_FUNC dict_get_jumping
-    call dict_get               ; err: the jump below is this entry's whole purpose
-    test rax, rax
-    jnz .dgj_done
-    cmp rdx, -2
-    je .dgj_raised
-.dgj_done:
-    leave
-    ret
-.dgj_raised:
-    leave
-    jmp eval_exception_unwind
-END_FUNC dict_get_jumping
-
-;; ============================================================================
 ;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1,
 ;;   or -2 with the exception pending when the key cannot be hashed or a
 ;;   key's __eq__ raised
@@ -985,22 +959,6 @@ DEF_FUNC dict_get_index, 16     ; + 0 pushes = 16, 16-aligned
     leave
     ret
 END_FUNC dict_get_index
-
-;; dict_get_index_jumping(rdi=dict, rsi=key) -> rax = the dense index, or -1
-;; It unwinds with a failure: see dict_get_jumping.
-DEF_FUNC dict_get_index_jumping
-    call dict_get_index         ; err: the jump below is this entry's whole purpose
-    test rax, rax
-    jns .dgij_done
-    cmp rdx, -2
-    je .dgij_raised
-.dgij_done:
-    leave
-    ret
-.dgij_raised:
-    leave
-    jmp eval_exception_unwind
-END_FUNC dict_get_index_jumping
 
 ;; ============================================================================
 ;; dict_find_slot(rdi=dict, rsi=key, rdx=hash, rcx=key_tag)
@@ -1393,19 +1351,6 @@ DEF_FUNC dict_set, DS_FRAME
     leave
     ret
 END_FUNC dict_set
-
-;; dict_set_jumping(rdi=dict, rsi=key, rdx=value Value) -> rax = 0
-;; It unwinds with a failure: see dict_get_jumping.
-DEF_FUNC dict_set_jumping
-    call dict_set               ; err: the jump below is this entry's whole purpose
-    test rax, rax
-    jnz .dsj_raised
-    leave
-    ret
-.dsj_raised:
-    leave
-    jmp eval_exception_unwind
-END_FUNC dict_set_jumping
 
 ;; ============================================================================
 ;; dict_dealloc(PyObject *self)
