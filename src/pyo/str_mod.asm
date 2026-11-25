@@ -9,7 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern dict_get_ret
+extern dict_get
 extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
@@ -1577,7 +1577,7 @@ DEF_FUNC_LOCAL str_mod_subscript
     REQUIRE_DICT_TYPE rax, rcx, .sms_generic
 .sms_dict:
     extern dict_get
-    call dict_get_ret       ; err: returned as is; the caller tells a miss from a failure
+    call dict_get       ; err: returned as is; the caller tells a miss from a failure
     leave
     ret
 .sms_generic:

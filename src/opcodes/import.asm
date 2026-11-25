@@ -3,14 +3,13 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern dict_get_ret
+extern dict_get
 extern eval_dispatch
 extern import_module
 extern obj_decref
 extern raise_exception
 extern exc_ImportError_type
 extern exc_raise_import
-extern dict_get
 extern str_from_cstr_heap
 extern str_type
 extern obj_dealloc
@@ -184,7 +183,6 @@ END_FUNC import_module_dict
 ;; If attr not found on module, tries importing <pkg_name>.<attr_name>
 ;; as a submodule (CPython submodule fallback).
 ;; ============================================================================
-extern dict_get
 extern dict_set
 extern obj_incref
 extern str_from_cstr_heap
@@ -256,7 +254,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -271,7 +269,7 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -470,7 +468,7 @@ DEF_FUNC_LOCAL ife_str_field, ISF_FRAME
     mov [rbp - ISF_KEY], rax
     mov rdi, [rbp - ISF_DICT]
     mov rsi, rax
-    call dict_get_ret                   ; a Value; 0 is the miss
+    call dict_get                   ; a Value; 0 is the miss
     ERR_DICT_GET_JUMP
     mov rbx, rax
     mov rdi, [rbp - ISF_KEY]
@@ -537,7 +535,7 @@ DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
     mov [rbp - IFI_KEY], rax
     mov rdi, [rbp - IFI_DICT]
     mov rsi, rax
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     mov [rbp - IFI_SPEC], rax
     mov rdi, [rbp - IFI_KEY]

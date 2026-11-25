@@ -4,8 +4,8 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_get_str
 extern dict_set_str
 extern ap_malloc
@@ -29,8 +29,6 @@ extern set_exception
 extern str_from_cstr_heap
 extern str_intern_cstr
 extern dict_new
-extern dict_get
-extern dict_set
 extern list_new
 extern list_append
 extern type_type
@@ -144,7 +142,7 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     mov rbx, rax
     pop rdi
     mov rsi, rbx
-    call dict_get_ret           ; err: tested once the key is released
+    call dict_get           ; err: tested once the key is released
     push rax
     mov rdi, rbx
     call obj_decref
@@ -617,7 +615,7 @@ DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
 .ipp_have_key:
     mov rsi, rax
     mov rdi, [rbx + PyModuleObject.mod_dict]
-    call dict_get_ret           ; a Value; 0 is the miss
+    call dict_get           ; a Value; 0 is the miss
     ERR_PENDING .ipp_raised
     test rax, rax
     jz .ipp_no
@@ -741,7 +739,7 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules first
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .fail           ; nothing is held yet
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -805,7 +803,7 @@ DEF_FUNC import_module, IF_FRAME
 
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .walk_get_raised
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .walk_have_module
@@ -879,7 +877,7 @@ DEF_FUNC import_module, IF_FRAME
     jz .walk_drop_key
     mov rsi, [rsp]
     mov rdx, [rsp + 8]          ; this prefix's module
-    call dict_set_ret
+    call dict_set
     ERR_M1 .walk_set_raised
 .walk_drop_key:
     pop rdi
@@ -998,7 +996,7 @@ DEF_FUNC import_module, IF_FRAME
     ; out, so ask sys.modules again rather than trust what was read before.
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .cached_wait_raised
     add rsp, 16
     test rax, rax
@@ -1047,7 +1045,7 @@ DEF_FUNC import_module, IF_FRAME
     push rax
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    call dict_get_ret           ; err: tested below, once the prefix string is released
+    call dict_get           ; err: tested below, once the prefix string is released
     V_UNPACK rax, rdx
     mov rcx, rax
     pop rdi
@@ -1200,7 +1198,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     call import_module_dict
     mov rdi, rax
     mov rsi, [rbp - ISA_T1]
-    call dict_get_ret           ; err: a 0 goes to .isa_none either way; both callers hand on what is pending
+    call dict_get           ; err: a 0 goes to .isa_none either way; both callers hand on what is pending
     V_UNPACK rax, rdx
     mov [rbp - ISA_T2], rax
     mov rdi, [rbp - ISA_T1]
@@ -1248,7 +1246,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     jz .isa_out
     mov rsi, [rbp - ISA_ATTR]
     mov rdx, [rbp - ISA_T2]
-    call dict_set_ret
+    call dict_set
     ERR_M1 .isa_set_raised
 .isa_out:
     mov rax, [rbp - ISA_T2]
@@ -1286,7 +1284,7 @@ DEF_FUNC_LOCAL ifl_get, IFG_FRAME
     mov [rbp - IFG_KEY], rax
     mov rdi, [rbp - IFG_DICT]
     mov rsi, rax
-    call dict_get_ret           ; err: returned to the caller as is, once the key is released
+    call dict_get           ; err: returned to the caller as is, once the key is released
     mov [rbp - IFG_VAL], rax
     mov rdi, [rbp - IFG_KEY]
     call obj_decref
@@ -1398,7 +1396,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; Check sys.modules first — avoid re-loading already-imported modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .fl_fail        ; nothing is held yet
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .found_in_sysmod
@@ -1459,7 +1457,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; Look up parent in sys.modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, r12
-    call dict_get_ret           ; err: tested at .fl_parent_miss, once the name is released
+    call dict_get           ; err: tested at .fl_parent_miss, once the name is released
     V_UNPACK rax, rdx           ; dict_get returns a Value
     mov r13, rax                ; r13 = parent module payload (or 0)
     push rdx                    ; save dict_get tag for found check
@@ -1947,7 +1945,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
     mov rdx, r13
-    call dict_set_ret
+    call dict_set
     ERR_M1 .fl_register_failed
 
     ; Set __builtins__ in module dict
@@ -2016,7 +2014,7 @@ DEF_FUNC import_load_module, IF_FRAME
     ; r13` could hand back freed memory.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
-    call dict_get_ret           ; borrowed Value, or 0 for a miss
+    call dict_get           ; borrowed Value, or 0 for a miss
     ERR_PENDING .fl_reread_failed
     test rax, rax
     jz .fl_keep_created         ; the body deleted itself; hand back what we made
@@ -2106,7 +2104,7 @@ DEF_FUNC import_load_module, IF_FRAME
     ; itself, so look before deleting -- dict_del raises on a missing key.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
-    call dict_get_ret           ; err: cleanup under the body's exception; a miss and a failure both skip the delete
+    call dict_get           ; err: cleanup under the body's exception; a miss and a failure both skip the delete
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jz .br_not_cached
     mov rdi, [rel sys_modules_dict]

@@ -8,7 +8,7 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern dict_get_ret
+extern dict_get
 extern complex_to_parts
 extern obj_incref
 extern complex_from_doubles
@@ -2181,7 +2181,6 @@ section .text
 ;; ============================================================================
 
 extern import_module
-extern dict_get
 extern obj_call_n
 extern exc_DeprecationWarning_type
 
@@ -2225,7 +2224,7 @@ DEF_FUNC deprecation_warn, DW_FRAME
     mov rdi, [rbp - DW_ARGS]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get_ret               ; err: a 0 goes to .dw_no_module, which clears what is pending
+    call dict_get               ; err: a 0 goes to .dw_no_module, which clears what is pending
     mov [rbp - DW_MSG], rax         ; the function, across the release
     mov rdi, [rbp - DW_TMP]
     call obj_decref

@@ -16,16 +16,14 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern dict_get_index_ret
+extern dict_get_index
 extern dict_get_mro
-extern dict_get_ret
+extern dict_get
 extern exc_TypeError_type
 
 section .text
 
 extern eval_dispatch
-extern dict_get
-extern dict_get_index
 extern instance_setattr
 extern raise_exception
 extern obj_incref
@@ -141,7 +139,7 @@ DEF_FUNC_BARE op_load_global
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
     mov edx, TAG_PTR
-    call dict_get_index_ret
+    call dict_get_index
     ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .try_builtins
@@ -174,7 +172,7 @@ DEF_FUNC_BARE op_load_global
     pop rsi                    ; rsi = name
     push rsi                   ; save name for error message
     mov edx, TAG_PTR
-    call dict_get_index_ret
+    call dict_get_index
     ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .not_found
@@ -258,7 +256,7 @@ DEF_FUNC_BARE op_load_name
 
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
@@ -296,7 +294,7 @@ DEF_FUNC_BARE op_load_name
     ; Try globals: dict_get(globals, name)
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
@@ -305,7 +303,7 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
@@ -896,7 +894,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_NAME]
     mov edx, TAG_PTR
     extern dict_get_index
-    call dict_get_index_ret
+    call dict_get_index
     ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .la_simple_push             ; gone already: do not cache a miss

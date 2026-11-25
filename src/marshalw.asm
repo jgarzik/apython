@@ -53,7 +53,7 @@ MARSHAL_FLAG_REF              equ 0x80
 ; header and nothing else.
 MW_SET_ENTRY_KEY              equ 8
 
-extern dict_get_ret
+extern dict_get
 extern ap_malloc
 extern ap_realloc
 extern ap_free
@@ -1290,7 +1290,6 @@ extern sys_rename
 extern sys_getpid
 extern ap_strlen
 extern ap_memset
-extern dict_get
 extern sys_module_obj
 
 PYCW_MAGIC       equ 0x0a0d0dcb
@@ -1335,7 +1334,7 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     mov rsi, rax
     push rax
     push rax
-    call dict_get_ret                   ; err: tested below, once the name is released
+    call dict_get                   ; err: tested below, once the name is released
     pop rcx
     pop rdi
     push rax

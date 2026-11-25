@@ -5,8 +5,8 @@
 %include "object.inc"
 %include "gil.inc"
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_set_str
 extern ap_malloc
 extern obj_decref
@@ -14,7 +14,6 @@ extern obj_incref
 extern str_from_cstr_heap
 extern float_from_f64
 extern dict_new
-extern dict_set
 extern module_new
 extern builtin_func_new
 extern none_singleton
@@ -66,7 +65,7 @@ DEF_FUNC_LOCAL tm_add_int, TAI_FRAME
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rbp - TAI_OBJ]
-    call dict_set_ret       ; err: returned to the caller, once the name and the int are released
+    call dict_set       ; err: returned to the caller, once the name and the int are released
     mov [rbp - TAI_VAL], rax    ; dict_set's answer, across the releases
     pop rdi
     call obj_decref
@@ -875,7 +874,6 @@ TSP_MOD   equ 48            ; the module, and then the function, while looked up
 TSP_KW    equ 56            ; the parked kw_names_pending
 TSP_FRAME equ 72            ; + 1 push = 80, 16-aligned
 extern import_module
-extern dict_get
 extern obj_incref
 extern obj_call_n
 DEF_FUNC time_strptime_func, TSP_FRAME
@@ -911,7 +909,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rdi, [rbp - TSP_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get_ret       ; err: a 0 goes to .tsp_no_impl, which keeps what is pending
+    call dict_get       ; err: a 0 goes to .tsp_no_impl, which keeps what is pending
     mov [rbp - TSP_MOD], rax
     mov rdi, [rbp - TSP_TMP]
     call obj_decref
@@ -1027,7 +1025,7 @@ DEF_FUNC_LOCAL tm_publish_tz, 16      ; + 0 pushes = 16, 16-aligned
     mov rdi, r12
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set_ret       ; err: tested once the name and the tuple are released
+    call dict_set       ; err: tested once the name and the tuple are released
     mov [rbp - PTZ_RC], rax     ; dict_set's answer, across the releases
     pop rdi
     call obj_decref

@@ -13,8 +13,8 @@
 
 
 ; External functions
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_set_str
 extern eval_exception_unwind
 extern int_type
@@ -35,8 +35,6 @@ extern list_new
 extern list_append
 extern tuple_new
 extern dict_new
-extern dict_get
-extern dict_set
 extern none_singleton
 extern bool_true
 extern bool_false
@@ -1068,7 +1066,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     mov rcx, [rbp - TRN_SUB]
     test rcx, rcx
     jnz .trn_call_sub
-    call dict_get_ret               ; a miss is a NULL Value
+    call dict_get               ; a miss is a NULL Value
     ERR_PENDING .trn_fail           ; a colliding key's __eq__ raised
     test rax, rax
     jz .trn_keep
@@ -1502,7 +1500,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rsi, rdi
     mov rdx, [rbp - SMT_TO]
     mov rdi, r12
-    call dict_set_ret               ; the key may be an int SUBCLASS, whose
+    call dict_set               ; the key may be an int SUBCLASS, whose
     ERR_M1 .smt_fail_table          ; __hash__ is Python
 .smt_dict_next:
     inc r13

@@ -489,7 +489,7 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
 
     ; dict_set(dict, key Value, value Value)
     mov rdi, r15
-    call dict_set_ret
+    call dict_set
     ERR_M1 .dtc_kw_raised
 
     pop rdx
@@ -573,7 +573,7 @@ END_FUNC dict_type_call
 ;; a failure, so a wrong claim stops the strict suite instead of being lost.
 ;; ============================================================================
 DEF_FUNC dict_get_str
-    call dict_get_ret           ; err: trapped below, which is the point
+    call dict_get           ; err: trapped below, which is the point
     test rax, rax
     jnz .dgs_ok
     cmp rdx, -2
@@ -588,19 +588,24 @@ END_FUNC dict_get_str
 dict_get_str:
 %endif
 ;; ============================================================================
-;; dict_get_ret(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
+;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
 ;; Fails: 0?
 ;;
-;; The value is BORROWED.  dict_get below is the same lookup; the two differ
-;; in what a key's __eq__ raising does.  This one answers 0 with the
-;; exception pending, which is where every caller is headed.
+;; The value is BORROWED.  0 alone is "absent"; 0 with an exception pending
+;; is a key that cannot be hashed, or a stored key whose __eq__ raised when
+;; its hash collided with this one -- which a str key into a dict Python can
+;; reach is not safe from.  dict_get_str above is for the caller that IS.
 ;;
 ;; When it answers 0, rdx says which 0: -1 for absent, -2 for a failure.  A
 ;; miss is the COMMON answer on an attribute or a global lookup, and
 ;; ERR_PENDING would pay a load from the thread state on every one of them;
-;; ERR_DICT_GET (macros.inc) reads the register instead.
+;; ERR_DICT_GET (macros.inc) reads the register instead.  It is also the
+;; check to use where an exception may ALREADY be pending -- a report being
+;; written, a frame being torn down -- since it does not ask.
 ;; ============================================================================
-DEF_FUNC dict_get_ret, 8        ; + 1 push = 16, 16-aligned
+DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
+    ; One push, not two: this is on the path of every global load and every
+    ; attribute lookup, and the frame carries the alignment instead.
     push rbx
     mov rbx, rdi
     call dict_lookup            ; rax = entries index, -1, or -2
@@ -618,7 +623,7 @@ DEF_FUNC dict_get_ret, 8        ; + 1 push = 16, 16-aligned
     pop rbx
     leave
     ret
-END_FUNC dict_get_ret
+END_FUNC dict_get
 
 ;; ============================================================================
 ;; dict_get_mro(rdi=dict, rsi=name) -> rax = value Value (borrowed), or 0
@@ -666,44 +671,31 @@ DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
     ret
 END_FUNC dict_get_mro
 
-    global dict_get_jumping:function    ; the name this is about to keep
-dict_get_jumping:
 ;; ============================================================================
-;; dict_get(rdi=dict, rsi=key Value) -> rax = value Value, or 0 when absent
+;; dict_get_jumping / dict_set_jumping / dict_get_index_jumping
+;;   -> as dict_get / dict_set / dict_get_index, and they do not return a
+;;      failure: they unwind with it
 ;;
-;; The value is BORROWED.  A key's __eq__ that raises still UNWINDS from
-;; here, transitionally: there are well over a hundred callers, nearly all of
-;; them probing a namespace with a name, and each has to be read before it
-;; can be told to check or be waived.  Until that sweep this has no error
-;; return to declare; dict_get_ret above is what a new caller wants.
+;; TEMPORARY.  What the three public entries did before their callers were
+;; swept, kept under names that say so for the class-construction code
+;; (buildclass*.asm, mro.asm, type_call), which was being converted by
+;; someone else at the time and still expects the jump.  Each caller that
+;; gains an error exit moves to the plain name and a check; these go when
+;; the last one has.
 ;; ============================================================================
-DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
-    ; One push, not two: r12 was saved and never touched, and this is on the
-    ; path of every global load and every attribute lookup.  The frame carries
-    ; the alignment instead, which is where STYLE.md says padding belongs.
-    push rbx
-    mov rbx, rdi                ; the dict; rdi does not survive the call
-    call dict_lookup            ; rax = entries index or -1
+DEF_FUNC dict_get_jumping
+    call dict_get               ; err: the jump below is this entry's whole purpose
     test rax, rax
-    js .dg_miss
-    mov rcx, [rbx + PyDictObject.entries]
-    imul rax, rax, DICT_ENTRY_SIZE
-    mov rax, [rcx + rax + DictEntry.value]
-    pop rbx
+    jnz .dgj_done
+    cmp rdx, -2
+    je .dgj_raised
+.dgj_done:
     leave
     ret
-.dg_miss:
-    cmp rax, -1
-    jne .dg_raised
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-.dg_raised:                     ; transitional: see the docblock
-    pop rbx
+.dgj_raised:
     leave
     jmp eval_exception_unwind
-END_FUNC dict_get
+END_FUNC dict_get_jumping
 
 ;; ============================================================================
 ;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1,
@@ -971,17 +963,19 @@ DEF_FUNC dict_lookup, DL_FRAME
     ret
 END_FUNC dict_lookup
 
-    global dict_get_index_jumping:function
-dict_get_index_jumping:
 ;; ============================================================================
-;; dict_get_index_ret(rdi=dict, rsi=key) -> rax = the dense index, or -1
+;; dict_get_index(rdi=dict, rsi=key) -> rax = the dense index, or -1
 ;; Fails: -1
 ;;
-;; dict_get_index below, returning the failure: -1 with the exception pending
-;; and rdx = -2 (rdx = -1 beside a plain miss), which ERR_DICT_IDX reads so a
-;; global that lives in builtins does not cost a load from the thread state.
+;; Like dict_get, but answers the index into the DENSE array, which the
+;; LOAD_GLOBAL inline cache caches: it never moves except on a resize, and
+;; the cache is already guarded by dk_version.
+;;
+;; A failure is -1 with the exception pending and rdx = -2 (rdx = -1 beside a
+;; plain miss), which ERR_DICT_IDX reads so a global that lives in builtins
+;; does not cost a load from the thread state.
 ;; ============================================================================
-DEF_FUNC dict_get_index_ret, 16 ; + 0 pushes = 16, 16-aligned
+DEF_FUNC dict_get_index, 16     ; + 0 pushes = 16, 16-aligned
     call dict_lookup
     test rax, rax
     jns .dgir_done
@@ -990,31 +984,23 @@ DEF_FUNC dict_get_index_ret, 16 ; + 0 pushes = 16, 16-aligned
 .dgir_done:
     leave
     ret
-END_FUNC dict_get_index_ret
+END_FUNC dict_get_index
 
-;; ============================================================================
-;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
-;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
-;; ============================================================================
-DEF_FUNC dict_get_index, 16     ; + 0 pushes = 16, 16-aligned
-    ; The index into the *dense* array, which the LOAD_GLOBAL inline cache
-    ; caches.  A dense index never moves except on a resize, and the cache is
-    ; already guarded by dk_version, so it is strictly more stable than the
-    ; hash slot this used to return.
-    ;
-    ; rbx was pushed and popped purely to align rsp for the call; the frame
-    ; does that now, without the two instructions.
-    call dict_lookup
-    cmp rax, -2
-    je .dgi_raised
+;; dict_get_index_jumping(rdi=dict, rsi=key) -> rax = the dense index, or -1
+;; It unwinds with a failure: see dict_get_jumping.
+DEF_FUNC dict_get_index_jumping
+    call dict_get_index         ; err: the jump below is this entry's whole purpose
+    test rax, rax
+    jns .dgij_done
+    cmp rdx, -2
+    je .dgij_raised
+.dgij_done:
     leave
     ret
-.dgi_raised:
-    ; Transitional, as in dict_get: the four callers are opcode handlers
-    ; probing a namespace with a name, and each reads -1 as "absent".
+.dgij_raised:
     leave
     jmp eval_exception_unwind
-END_FUNC dict_get_index
+END_FUNC dict_get_index_jumping
 
 ;; ============================================================================
 ;; dict_find_slot(rdi=dict, rsi=key, rdx=hash, rcx=key_tag)
@@ -1179,19 +1165,10 @@ DEF_FUNC_BARE dict_reserve
     ret
 END_FUNC dict_reserve
 
-;; ============================================================================
-;; dict_set_ret(rdi=dict, rsi=key Value, rdx=value Value) -> rax = 0
-;; Fails: -1
-;; Insert or update a key-value pair.
-;;
-;; One body, entered twice, as dict_del and dict_del_opt are; dict_set is the
-;; other entry.  This one answers -1 with the exception pending when a key's
-;; __eq__ raised, which is where every caller is headed.
-;; ============================================================================
+; dict_set's frame, here because dict_maybe_track sits between this and it.
 DS_DICT  equ 8
 DS_KEY   equ 16
 DS_VAL   equ 24
-DS_RET   equ 32            ; 1 = return the failure, 0 = unwind with it
 DS_FRAME equ 40            ; + 3 pushes = 64, 16-aligned
 ;; ============================================================================
 ;; dict_maybe_track(rdi = the dict, rsi = a key Value, rdx = a value Value)
@@ -1258,7 +1235,7 @@ END_FUNC dict_value_trackable
 ;; dict_set_str(rdi=dict, rsi=key, rdx=value Value) -> rax = 0
 ;; The strict build's own copy: see dict_get_str.
 DEF_FUNC dict_set_str
-    call dict_set_ret           ; err: trapped below, which is the point
+    call dict_set           ; err: trapped below, which is the point
     test rax, rax
     jz .dss_ok
     ud2
@@ -1270,31 +1247,19 @@ END_FUNC dict_set_str
     global dict_set_str:function
 dict_set_str:
 %endif
-global dict_set_ret
-DEF_FUNC dict_set_ret, DS_FRAME
-    push rbx
-    push r12
-    push r13
-    mov qword [rbp - DS_RET], 1
-    jmp dict_set.ds_body
-END_FUNC dict_set_ret
-
-    global dict_set_jumping:function    ; the name this is about to keep
-dict_set_jumping:
 ;; ============================================================================
 ;; dict_set(rdi=dict, rsi=key Value, rdx=value Value) -> rax = 0
+;; Fails: -1
 ;;
-;; The same body.  A key's __eq__ that raises still UNWINDS from here,
-;; transitionally: there are nearly two hundred callers, most of them storing
-;; under a name, and each has to be read before it can be told to check or
-;; be waived.  Until that sweep this has no error return to declare.
+;; Insert or update a key-value pair.  -1 with the exception pending is a key
+;; that cannot be hashed, or a stored key whose __eq__ raised on a collision;
+;; nothing was stored.  dict_set_str above is for the caller that cannot meet
+;; either.
 ;; ============================================================================
 DEF_FUNC dict_set, DS_FRAME
     push rbx
     push r12
     push r13
-    mov qword [rbp - DS_RET], 0
-.ds_body:
     mov [rbp - DS_DICT], rdi
     mov [rbp - DS_KEY], rsi
     mov [rbp - DS_VAL], rdx
@@ -1421,21 +1386,26 @@ DEF_FUNC dict_set, DS_FRAME
     ret
 .ds_raised:
     ; A key's __eq__ raised.  Nothing was stored and nothing is held.
-    cmp qword [rbp - DS_RET], 0
-    je .ds_unwind
     mov rax, -1
     pop r13
     pop r12
     pop rbx
     leave
     ret
-.ds_unwind:                     ; transitional: see the docblock
-    pop r13
-    pop r12
-    pop rbx
+END_FUNC dict_set
+
+;; dict_set_jumping(rdi=dict, rsi=key, rdx=value Value) -> rax = 0
+;; It unwinds with a failure: see dict_get_jumping.
+DEF_FUNC dict_set_jumping
+    call dict_set               ; err: the jump below is this entry's whole purpose
+    test rax, rax
+    jnz .dsj_raised
+    leave
+    ret
+.dsj_raised:
     leave
     jmp eval_exception_unwind
-END_FUNC dict_set
+END_FUNC dict_set_jumping
 
 ;; ============================================================================
 ;; dict_dealloc(PyObject *self)
@@ -1510,7 +1480,7 @@ DEF_FUNC dict_subscript, DSUB_FRAME
 
     mov [rbp - DSUB_DICT], rdi ; the mapping, for __missing__ below
     mov rbx, rsi               ; save the key Value for the error message
-    call dict_get_ret          ; both take a key Value
+    call dict_get          ; both take a key Value
     ERR_PENDING .ds_missing_raised
     test rax, rax              ; a Value, and 0 is the only miss
     jz .key_error
@@ -1578,7 +1548,7 @@ DEF_FUNC_BARE dict_ass_subscript
     ; A NULL Value is 0 and no real Value is, so this test needs no tag
     test rdx, rdx
     jz .das_delete
-    jmp dict_set_ret
+    jmp dict_set
 .das_delete:
     jmp dict_del
 END_FUNC dict_ass_subscript
@@ -1885,7 +1855,7 @@ dict_iter_self:
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
     sub rsp, 8                  ; a bare function: the call wants rsp aligned
-    call dict_get_ret
+    call dict_get
     add rsp, 8
     ERR_PENDING .dc_raised
     test rax, rax               ; a Value, and 0 is the only miss
@@ -1962,7 +1932,7 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     mov rdi, [rbp - DNO_NEW]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    call dict_set_ret
+    call dict_set
     ERR_M1 .dno_raised
     pop rdi
     pop r8
@@ -2043,7 +2013,7 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov rdi, [rbp - DIO_LEFT]
     mov rsi, [rax + DictEntry.key]
     mov rdx, [rax + DictEntry.value]
-    call dict_set_ret
+    call dict_set
     ERR_M1 .nb_ior_failed
     pop rdi
     pop r8
@@ -2225,7 +2195,7 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     ; Value, or 0 when the key is not there.
     mov rdi, [rbp - DRC_RIGHT]
     mov rsi, [rbp - DRC_KEY]
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .drc_lookup_raised
     mov [rbp - DRC_RVAL], rax
     test rax, rax

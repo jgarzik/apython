@@ -20,7 +20,7 @@
 %include "opcodes.inc"
 
 extern dict_get_mro
-extern dict_get_ret
+extern dict_get
 extern dict_get_str
 extern dict_set_str
 extern ap_malloc
@@ -33,7 +33,6 @@ extern obj_hash
 extern obj_repr
 extern obj_richcompare_bool
 extern dict_new
-extern dict_get
 extern dict_set
 extern dict_del
 extern dict_type
@@ -1397,7 +1396,7 @@ DEF_FUNC wr_remove_dead_func, WRD_FRAME
     mov rsi, [rbx + 8]
     push rdi
     push rsi
-    call dict_get_ret       ; err: tested once the two arguments are popped
+    call dict_get       ; err: tested once the two arguments are popped
     pop rsi
     pop rdi
     ERR_PENDING .wrd_fail

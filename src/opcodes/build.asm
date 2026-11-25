@@ -14,8 +14,8 @@
 
 section .text
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern get_iterator_opt
 extern raise_unpack_count
 extern eval_dispatch
@@ -33,10 +33,8 @@ extern list_new_filled
 extern ap_memcpy
 extern list_append
 extern dict_new
-extern dict_set
 extern slice_new
 extern none_singleton
-extern dict_get
 extern str_from_cstr_heap
 extern range_iter_type
 extern list_iter_type
@@ -696,7 +694,7 @@ DEF_FUNC op_build_map, 24   ; + 0 pushes; a handler is entered ALIGNED, so this 
     shl rax, 4                 ; pair_index * 16 (2 payload slots)
     mov rsi, [r13 + rax]      ; key
     mov rdx, [r13 + rax + 8]  ; value
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     add rsp, 8
     pop rdx
@@ -780,7 +778,7 @@ DEF_FUNC op_build_const_key_map, 40   ; + 0 pushes; a handler is entered ALIGNED
     mov rax, rdx
     shl rax, 3                ; index * 8
     mov rdx, [r13 + rax]      ; value
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     inc qword [rbp - CKM_I]
     jmp .bckm_fill
@@ -2084,7 +2082,7 @@ DEF_FUNC op_map_add, 8    ; + 4 pushes at the call; a handler is entered ALIGNED
     mov r8, [rsp + MA_KTAG]   ; key tag
     V_PACK rsi, r8            ; dict_set takes Values
     V_PACK rdx, rcx
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
 
     ; DECREF key and value (tag-aware, dict_set INCREF'd them)
@@ -2181,7 +2179,7 @@ DEF_FUNC op_dict_update
     ; dict_set(target, key, value, value_tag, key_tag)
     push rbx
     mov rdi, [rbp - DU_DICT]
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     pop rbx
     push rbx
@@ -2321,7 +2319,6 @@ END_FUNC op_dict_update
 ;; DICT_MERGE (164): like DICT_UPDATE but raises TypeError on duplicate keys
 ;; Used for f(**a, **b) — duplicate keys across ** spreads are errors.
 ;; ============================================================================
-extern dict_get
 
 DM_SOURCE   equ 24
 DM_DICT     equ 32
@@ -2412,7 +2409,7 @@ DEF_FUNC op_dict_merge
     ; its tag in edx, so the key tag must not be restored over it.
     push rbx
     mov rdi, [rbp - DM_DICT]          ; target dict
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .dm_dup_error          ; key already exists in target
@@ -2423,7 +2420,7 @@ DEF_FUNC op_dict_merge
     mov rdx, [rbp - DM_VALV]
     push rbx
     mov rdi, [rbp - DM_DICT]
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     pop rbx
     push rbx

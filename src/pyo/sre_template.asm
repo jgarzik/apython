@@ -25,7 +25,7 @@
 %include "sre.inc"
 
 extern dict_get_quiet
-extern dict_get_ret
+extern dict_get
 extern set_exception
 extern ap_malloc
 extern ap_free
@@ -35,7 +35,6 @@ extern str_type
 extern bytes_type
 extern list_new
 extern list_append
-extern dict_get
 extern str_method_join
 extern sre_match_get_group_str
 extern none_singleton
@@ -666,7 +665,7 @@ DEF_FUNC sre_template_parse, TP_FRAME
     mov rdi, [rbp - TP_SCRATCH]
     push rsi
     sub rsp, 8
-    call dict_get_ret       ; err: tested at .tp_name_miss, once the name is released
+    call dict_get       ; err: tested at .tp_name_miss, once the name is released
     add rsp, 8
     pop rdi
     push rax

@@ -29,8 +29,8 @@
 %include "threadstate.inc"
 
 ASM_INIT
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_set_str
 extern ap_malloc
 extern obj_decref
@@ -39,7 +39,6 @@ extern obj_incref
 extern type_type
 extern dict_new
 extern frame_fast_to_locals
-extern dict_set
 extern str_from_cstr_heap
 extern ap_strcmp
 extern int_from_i64
@@ -469,7 +468,7 @@ DEF_FUNC_LOCAL frameobj_merge_dict, 48
     jz .fmd_next                ; empty or a tombstone
     mov rdx, [rcx + DictEntry.value]
     mov rdi, [rbp - FMD_DST]
-    call dict_set_ret
+    call dict_set
     ERR_M1 .fmd_fail
 .fmd_next:
     inc qword [rbp - FMD_I]
@@ -941,7 +940,7 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     sub rsp, 8
     mov rsi, rax
     extern dict_get
-    call dict_get_ret       ; err: tested at .sgm_miss, once the key is released
+    call dict_get       ; err: tested at .sgm_miss, once the key is released
     add rsp, 8
     pop rcx
     push rax

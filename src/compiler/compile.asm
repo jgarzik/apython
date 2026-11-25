@@ -21,12 +21,11 @@
 %include "value.inc"
 %include "compiler.inc"
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern set_exception
 extern ap_free
 extern ap_strcmp
-extern dict_get
 extern obj_as_index
 extern obj_call_n
 extern str_from_cstr_heap
@@ -2033,8 +2032,6 @@ section .text
 
 extern builtins_dict_global
 extern type_is_subtype
-extern dict_get
-extern dict_set
 extern dict_type
 extern eval_frame
 extern frame_free
@@ -2210,7 +2207,7 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
 
     mov rdi, rbx
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .eib_fail       ; the caller's globals hold a key that would not compare
     test rax, rax
     jnz .present
@@ -2218,7 +2215,7 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rel builtins_dict_global]
-    call dict_set_ret
+    call dict_set
     ERR_M1 .eib_fail
     mov rax, [rel builtins_dict_global]
 .present:
@@ -2500,7 +2497,7 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     mov rdi, [rbp - CAB_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get_ret           ; err: a 0 goes to .cab_fail either way, with whatever is pending
+    call dict_get           ; err: a 0 goes to .cab_fail either way, with whatever is pending
     push rax
     mov rdi, [rbp - CAB_KEY]
     call obj_decref

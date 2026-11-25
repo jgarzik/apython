@@ -18,10 +18,9 @@
 
 ASM_INIT
 
-extern dict_get_ret
+extern dict_get
 extern sys_modules_dict
 extern module_type
-extern dict_get
 extern str_from_cstr_heap
 extern obj_decref
 extern obj_dealloc
@@ -52,7 +51,7 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     test rdi, rdi
     jz .sc_have_mod
     mov rsi, [rbp - SC_NAME]
-    call dict_get_ret           ; err: borrowed; a failure is reported at .sc_raised, once the name is released
+    call dict_get           ; err: borrowed; a failure is reported at .sc_raised, once the name is released
 .sc_have_mod:
     mov [rbp - SC_MOD], rax
     mov rdi, [rbp - SC_NAME]
@@ -73,7 +72,7 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     mov rdi, [rbp - SC_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get_ret           ; err: borrowed; a failure is reported at .sc_raised, once the name is released
+    call dict_get           ; err: borrowed; a failure is reported at .sc_raised, once the name is released
     INCREF_V rax, rcx
     mov [rbp - SC_FN], rax
     mov rdi, [rbp - SC_NAME]

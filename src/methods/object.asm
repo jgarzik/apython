@@ -434,8 +434,8 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     mov rdi, [rbp - ORI_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    extern dict_get_ret
-    call dict_get_ret           ; err: a 0 goes to .ori_fail either way, with whatever is pending
+    extern dict_get
+    call dict_get           ; err: a 0 goes to .ori_fail either way, with whatever is pending
     push rax
     mov rdi, [rbp - ORI_KEY]
     call obj_decref

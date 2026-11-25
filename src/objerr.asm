@@ -1158,8 +1158,8 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov r12, rax
     mov rdi, [rbx + PyExceptionObject.exc_dict]
     mov rsi, r12
-    extern dict_get_ret
-    call dict_get_ret
+    extern dict_get
+    call dict_get
     ERR_DICT_GET .rna_name_raised   ; from the register: an exception IS pending here
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned

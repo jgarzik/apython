@@ -20,8 +20,8 @@
 %include "object.inc"
 
 extern dict_get_mro
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern exc_repr
 extern exc_str
 extern traceback_type
@@ -59,9 +59,7 @@ extern raise_exception
 extern tuple_new
 extern tuple_type
 extern ap_strcmp
-extern dict_get
 extern dict_new
-extern dict_set
 extern eg_dealloc
 extern exc_BaseExceptionGroup_type
 extern exc_ExceptionGroup_type
@@ -511,7 +509,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .uni_from_args
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
@@ -611,7 +609,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .syn_from_args
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
@@ -666,7 +664,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .eg_type_start
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
@@ -699,7 +697,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .not_found
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -872,7 +870,7 @@ DEF_FUNC exc_getattr
     test rdi, rdi
     jz .code_from_args
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .eg_really_not_found
     V_UNPACK rax, rdx
     test edx, edx
@@ -1099,7 +1097,7 @@ DEF_FUNC exc_setattr, ESA_FRAME
 .esa_have_dict:
     mov rdi, [rbx + PyExceptionObject.exc_dict]
     ; rsi = name and rdx = value are both already Values
-    call dict_set_ret       ; err: returned to the caller as is
+    call dict_set       ; err: returned to the caller as is
 
     ; rax is dict_set's own 0 or -1
     xor edx, edx
@@ -1790,7 +1788,7 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     test rdi, rdi
     jz .ean_make
     mov rsi, [rbp - EAN_NAME]
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .ean_raised
     test rax, rax
     jz .ean_make

@@ -9,8 +9,8 @@
 %include "opcodes.inc"
 
 ; External functions
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern eval_exception_unwind
 extern ap_memset
 extern obj_decref
@@ -19,10 +19,8 @@ extern tuple_new
 extern tuple_type
 extern dict_copy_shallow
 extern dict_new
-extern dict_get
 extern obj_getattr_opt
 extern obj_call_n
-extern dict_set
 extern dict_del
 extern none_singleton
 extern set_exception
@@ -62,7 +60,7 @@ DEF_FUNC dict_method_get
     ; dict_get(self, key)
     mov rdi, rbx
     mov rsi, [rax + 8]      ; key Value -- dict_get unpacks it itself, so
-    call dict_get_ret       ; decoding here would hand it a bare payload
+    call dict_get       ; decoding here would hand it a bare payload
     ERR_PENDING .dg_fail
     test rax, rax               ; a Value, and 0 is the only miss
     jnz .dg_found
@@ -176,7 +174,7 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
 
     mov rdi, rbx
     mov rsi, r13
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .dpop2_fail
     test rax, rax           ; a Value, and 0 is the only miss
     jz .dpop2_not_found
@@ -405,7 +403,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     INCREF_V rdx, rcx
     mov rsi, rdi                    ; key Value
     mov rdi, rbx                    ; self
-    call dict_set_ret               ; err: tested once the pair is released
+    call dict_set               ; err: tested once the pair is released
     mov [rbp - DU_RC], rax
     mov rdi, [rbp - DU_KEYV]
     DECREF_V rdi, rcx
@@ -497,7 +495,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rax, [r12 + PyTupleObject.ob_item]
     mov rsi, [rax + r14 * 8]            ; the key again
     mov rdi, [rbp - DU_SELF]
-    call dict_set_ret               ; err: tested once the value is released
+    call dict_set               ; err: tested once the value is released
     mov [rbp - DU_RC], rax
     mov rdi, [rbp - DU_PAIRV]
     DECREF_V rdi, rsi
@@ -630,7 +628,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     INCREF_V rsi, rcx
     INCREF_V rdx, rcx
     mov rdi, [rbp - DU_SELF]
-    call dict_set_ret               ; err: tested once the pair is released
+    call dict_set               ; err: tested once the pair is released
     mov [rbp - DU_RC], rax
     mov rdi, [rbp - DU_KEYV]
     DECREF_V rdi, rcx
@@ -666,7 +664,7 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rcx, [rbp - DU_ARGS]
     mov rdx, [rcx + rax * 8]        ; value Value
     mov rdi, [rbp - DU_SELF]
-    call dict_set_ret
+    call dict_set
     ERR_M1 .du_propagate
     inc r14
     jmp .du_kw_loop
@@ -741,7 +739,7 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
 
     mov rdi, rbx
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .sd_fail_args
     test rax, rax           ; a Value, and 0 is the only miss
     jnz .sd_found
@@ -760,7 +758,7 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    call dict_set_ret
+    call dict_set
     ERR_M1 .sd_fail
 
     mov rax, r13
@@ -910,7 +908,7 @@ DEF_FUNC dict_classmethod_fromkeys, DFK_FRAME
     mov rdx, [rbp - DFK_VAL]       ; value payload
     mov rcx, [rbp - DFK_VTAG]      ; value tag
     V_PACK rdx, rcx
-    call dict_set_ret              ; err: tested once the key is released
+    call dict_set              ; err: tested once the key is released
     mov r12, rax
     DECREF_V rbx, rax
     test r12, r12
@@ -1103,7 +1101,7 @@ DEF_FUNC dict_dunder_setitem
     mov rsi, [rdi + 8]
     mov rdx, [rdi + 16]
     mov rdi, rax
-    call dict_set_ret
+    call dict_set
     ERR_M1 .dds_fail
     lea rax, [rel none_singleton]
     INCREF rax

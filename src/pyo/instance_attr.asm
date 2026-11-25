@@ -12,8 +12,8 @@
 
 %include "macros.inc"
 %include "object.inc"
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern type_number_methods
 extern gc_alloc
 extern gc_track
@@ -25,8 +25,6 @@ extern set_exception
 extern none_singleton
 extern obj_incref
 extern dict_new
-extern dict_get
-extern dict_set
 extern str_from_cstr
 extern str_from_cstr_heap
 extern ap_strcmp
@@ -638,7 +636,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rdi, rdi
     jz .check_type_dict
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET .getattr_unwind
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -668,7 +666,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rdi, rdi
     jz .not_found
     mov rsi, [rbp - IG_NAME]
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET .getattr_unwind
     V_UNPACK rax, rdx
     test edx, edx
@@ -735,7 +733,7 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     test rdi, rdi
     jz .ft_no_inst
     mov rsi, [rbp - IG_NAME]
-    call dict_get_ret
+    call dict_get
     ERR_DICT_GET .ig_dict_raised
     V_UNPACK rax, rdx
     test edx, edx
@@ -1439,7 +1437,7 @@ DEF_FUNC instance_setattr
     jz .sa_dict_del
     mov rsi, r12                ; name
     mov rdx, r13                ; value
-    call dict_set_ret
+    call dict_set
     ERR_M1 .sa_fail
 .sa_ok:
     xor eax, eax

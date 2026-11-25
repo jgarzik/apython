@@ -6,8 +6,8 @@
 %include "object.inc"
 %include "sre.inc"
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern set_exception
 extern ap_malloc
 extern ap_free
@@ -18,8 +18,6 @@ extern obj_dealloc
 extern str_from_cstr_heap
 extern str_new_heap
 extern dict_new
-extern dict_set
-extern dict_get
 extern tuple_new
 extern none_singleton
 extern exc_TypeError_type
@@ -556,7 +554,7 @@ DEF_FUNC sre_match_resolve_group_idx
 
     ; dict_get(groupindex, key, key_tag)
     ; rsi = key (already set), edx = TAG_PTR
-    call dict_get_ret       ; err: tested at .rgi_miss
+    call dict_get       ; err: tested at .rgi_miss
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
     test edx, edx               ; the tag, not the payload: a hit may be int 0
@@ -1081,7 +1079,7 @@ DEF_FUNC sre_match_groupdict_method, GD_FRAME
     V_PACK rdx, rcx
     mov r8, r14                ; key tag
     V_PACK rsi, r8
-    call dict_set_ret
+    call dict_set
     ERR_M1 .gd_set_raised
     pop rdx
     pop rax
@@ -1236,7 +1234,7 @@ DEF_FUNC sre_match_subscript
 
     ; dict_get(groupindex, key, key_tag)
     mov rsi, r12               ; key
-    call dict_get_ret       ; err: tested at .ms_group_miss
+    call dict_get       ; err: tested at .ms_group_miss
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; rax = val payload, edx = val tag
     test edx, edx               ; the tag, not the payload: a hit may be int 0

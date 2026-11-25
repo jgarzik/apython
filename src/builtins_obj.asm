@@ -10,7 +10,7 @@
 %include "gil.inc"
 
 ; External symbols used
-extern dict_get_ret
+extern dict_get
 extern get_iterator_opt
 extern int_from_i64
 extern int_add
@@ -2145,7 +2145,7 @@ DEF_FUNC builtin_open_fn
     push rax
     mov rdi, [r13 + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get_ret           ; err: tested at .bo_missing, once the name is released
+    call dict_get           ; err: tested at .bo_missing, once the name is released
     mov r13, rax
     pop rdi
     call obj_decref
@@ -2858,7 +2858,6 @@ END_FUNC builtin_anext_fn
 ;; Fails: 0
 ;; ============================================================================
 extern sys_modules_dict
-extern dict_get
 extern obj_as_index
 extern exc_NotImplementedError_type
 extern ap_strcmp
@@ -3093,7 +3092,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - BIM_NAME]
     V_PACK rsi, rdx
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .imp_leaf_raised
     test rax, rax
     jz .imp_leaf_missing

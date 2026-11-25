@@ -26,11 +26,10 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern dict_get_index_ret
-extern dict_set_ret
+extern dict_get_index
+extern dict_set
 extern instance_setattr
 extern member_descr_type
-extern dict_get_index
 extern unbound_local_raise
 extern obj_dealloc
 extern opcode_dispatch_table
@@ -50,7 +49,6 @@ extern attr_may_be_data_descr
 
 extern eval_dispatch
 extern obj_decref
-extern dict_set
 extern dict_type
 extern raise_exception
 extern eval_exception_unwind
@@ -150,7 +148,7 @@ DEF_FUNC_BARE op_store_name
     V_PACK rdx, rcx
     push r9
     push r10
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     pop r10
     pop r9
@@ -188,7 +186,7 @@ DEF_FUNC_BARE op_store_name
     V_PACK rdx, rcx
     push r9
     push r10
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     pop r10
     pop r9
@@ -216,7 +214,7 @@ DEF_FUNC_BARE op_store_global
     V_PACK rdx, rcx
     push r9
     push r10
-    call dict_set_ret
+    call dict_set
     ERR_M1_JUMP
     pop r10
     pop r9
@@ -868,7 +866,7 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     mov rdi, rbx
     mov rsi, r13
     xor edx, edx
-    call dict_get_index_ret
+    call dict_get_index
     ERR_DICT_IDX_JUMP
     test rax, rax
     js .sts_out

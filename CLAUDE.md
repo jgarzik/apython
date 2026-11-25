@@ -243,6 +243,25 @@ already checks for it:
 | `nb_bool`, `sq_contains`, `tp_setattr`, `mp_ass_subscript`, `sq_ass_item`, a getset setter | -1 and an exception pending (callers sign-extend eax) |
 | `tp_as_buffer`, `tp_dealloc`, `tp_traverse`, `tp_clear` | nothing: they cannot fail |
 
+A dict lookup has four entries, and the one a caller uses is its claim about
+the key and the dict (`src/pyo/dict.asm`):
+
+| Entry | For | A failure is |
+|---|---|---|
+| `dict_get` / `dict_set` / `dict_get_index` | any dict Python can reach -- an instance `__dict__`, module globals, kwargs, `sys.modules`, an argument -- whatever the key | `Fails: 0?` / `-1` / `-1`, checked |
+| `dict_get_str` / `dict_set_str` | an exact `str` or int-immediate key into a dict the runtime owns at that moment: one it just built, a module's table before it is published, a registry | impossible; `EXC_STRICT` traps if it happens |
+| `dict_get_mro` | a TYPE's namespace on the way along an MRO | "not here", cleared -- `_PyType_Lookup` does the same |
+| `dict_get_quiet` | a read that is a C field in CPython (OSError's errno) | "absent", cleared |
+
+A `str` key is not enough for `_str`: a dict Python can reach may hold a
+foreign key with the same hash, and looking the name up runs its `__eq__`.
+After `dict_get` on a path where a miss is the ordinary answer -- attribute
+and global lookup -- or where an exception may already be pending, check
+with `ERR_DICT_GET` / `ERR_DICT_IDX`: they read the failure from `rdx` (-2),
+where `ERR_PENDING` loads the thread state on every miss.
+`dict_get_jumping` and its two siblings are temporary, for the
+class-construction code only.
+
 `op_call` turns a 0 that arrives with nothing pending into SystemError, so a
 callee never returns 0 without setting one.  `type_call` releases the
 instance it was building when `__new__` or `__init__` answers 0.

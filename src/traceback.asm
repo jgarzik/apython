@@ -29,7 +29,7 @@
 %include "macros.inc"
 %include "value.inc"
 
-extern dict_get_ret
+extern dict_get
 extern sys_write
 extern sys_open
 extern sys_read
@@ -1891,7 +1891,6 @@ TPN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
 
 extern list_type
 extern obj_repr
-extern dict_get
 extern type_is_subtype
 
 DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
@@ -1910,7 +1909,7 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     mov [rbp - TPN_IDX], rax                ; the name, owned, briefly
     mov rdi, [rbp - TPN_TMP]
     mov rsi, rax
-    call dict_get_ret           ; err: a failure is dropped at .tpn_miss, once the name is released
+    call dict_get           ; err: a failure is dropped at .tpn_miss, once the name is released
     mov [rbp - TPN_NOTES], rax
     mov rdi, [rbp - TPN_IDX]
     call obj_decref

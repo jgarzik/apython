@@ -33,11 +33,10 @@ endstruc
 %include "value.inc"
 
 extern dict_get_mro
-extern dict_set_ret
+extern dict_set
 extern eval_exception_unwind
 extern dict_new
 extern dict_get
-extern dict_set
 extern set_new
 extern set_add
 extern set_contains
@@ -126,7 +125,7 @@ DEF_FUNC_LOCAL abc_state_set, AS_FRAME
 .have_dict:
     mov rsi, rbx
     mov rdx, [rbp - AS_VAL]
-    call dict_set_ret       ; err: returned to the caller, once the name is released
+    call dict_set       ; err: returned to the caller, once the name is released
     mov rdi, rbx
     mov rbx, rax                ; dict_set's answer, across the release
     call obj_decref

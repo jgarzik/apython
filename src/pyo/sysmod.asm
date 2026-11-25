@@ -5,7 +5,7 @@
 %include "object.inc"
 
 extern dict_get_str
-extern dict_set_ret
+extern dict_set
 extern dict_set_str
 extern ap_malloc
 extern ap_strlen
@@ -25,7 +25,6 @@ extern bool_true
 extern bool_false
 extern dict_new
 extern str_intern
-extern dict_set
 extern dict_get
 extern list_new
 extern list_append
@@ -2765,7 +2764,7 @@ DEF_FUNC sys_displayhook_func, SDH_FRAME
     mov rdi, [rel builtins_dict_global]
     mov rsi, rax
     mov rdx, [rbp - SDH_VAL]
-    call dict_set_ret       ; err: tested once the name is released
+    call dict_set       ; err: tested once the name is released
     mov [rbp - SDH_VAL], rax    ; dict_set's answer, across the release
     pop rdi
     pop rdi

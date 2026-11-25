@@ -25,7 +25,7 @@
 ASM_INIT
 
 ; --- from io_bytesio.asm, the half split out of this one ---
-extern dict_set_ret
+extern dict_set
 extern dict_set_str
 extern bytesio_check
 extern io_make_bytesio
@@ -33,7 +33,6 @@ extern im_n_BytesIO
 extern im_n_flush
 
 extern dict_new
-extern dict_set
 extern str_from_cstr_heap
 extern module_new
 extern builtin_func_new
@@ -819,7 +818,7 @@ DEF_FUNC_LOCAL fileio_set_attr, FSA_FRAME
     mov rdi, [rdi + PyFileIOObject.inst_dict]
     mov rsi, [rbp - FSA_KEY]
     mov rdx, [rbp - FSA_VAL]
-    call dict_set_ret           ; err: returned to the caller, once the name is released
+    call dict_set           ; err: returned to the caller, once the name is released
     mov [rbp - FSA_VAL], rax
     mov rdi, [rbp - FSA_KEY]
     call obj_decref

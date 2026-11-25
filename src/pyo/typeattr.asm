@@ -37,7 +37,7 @@
 %include "value.inc"
 
 extern dict_get_mro
-extern dict_set_ret
+extern dict_set
 extern dict_set_str
 extern type_type
 extern object_type
@@ -57,7 +57,6 @@ extern value_type
 extern type_refresh_attr_flags
 extern getset_descr_new
 extern str_from_cstr_heap
-extern dict_set
 extern obj_decref
 extern list_new
 extern list_append
@@ -545,7 +544,7 @@ DEF_FUNC type_setattr
     jz .ts_dict_del
     ; dict_set(dict, name Value, value Value)
     pop rcx
-    call dict_set_ret
+    call dict_set
     ERR_M1 .ts_fail
     jmp .ts_wrote
 
@@ -1304,7 +1303,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     push rax
     mov rdx, rax
     mov rsi, rbx                ; the name, "__annotations__"
-    call dict_set_ret
+    call dict_set
     ERR_M1 .tga_ann_set_raised
     pop rax
     pop rax

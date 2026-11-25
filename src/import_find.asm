@@ -15,8 +15,8 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_get_str
 extern dict_set_str
 extern ap_malloc
@@ -40,8 +40,6 @@ extern set_exception
 extern str_from_cstr_heap
 extern str_intern_cstr
 extern dict_new
-extern dict_get
-extern dict_set
 extern list_new
 extern list_append
 extern type_type
@@ -1220,7 +1218,7 @@ DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IMN_NAME]
     mov rdx, rax
-    call dict_set_ret
+    call dict_set
     ERR_M1 .imn_fail_mod
 
     ; The module owns the dict now; release what dict_new gave us.

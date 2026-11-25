@@ -43,8 +43,8 @@
 
 ASM_INIT
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_set_str
 extern obj_call_n
 extern obj_decref
@@ -53,8 +53,6 @@ extern obj_incref
 extern str_from_cstr_heap
 extern str_new_heap
 extern dict_new
-extern dict_set
-extern dict_get
 extern none_singleton
 extern set_exception
 extern exc_TypeError_type
@@ -416,7 +414,7 @@ DEF_FUNC px_intern, 40
 
     mov rdi, rbx
     mov rsi, rax
-    call dict_get_ret           ; a Value; 0 is the miss
+    call dict_get           ; a Value; 0 is the miss
     ERR_PENDING .pi_raised
     test rax, rax
     jz .insert
@@ -442,7 +440,7 @@ DEF_FUNC px_intern, 40
     mov rdi, rbx
     mov rsi, [rbp - PI_STR]
     mov rdx, rsi            ; interned as its own key AND value
-    call dict_set_ret
+    call dict_set
     ERR_M1 .pi_raised
 .no_table:
     mov rax, [rbp - PI_STR]

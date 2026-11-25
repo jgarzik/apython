@@ -9,8 +9,8 @@
 %include "object.inc"
 %include "opcodes.inc"
 
-extern dict_get_ret
-extern dict_set_ret
+extern dict_get
+extern dict_set
 extern dict_set_str
 extern none_singleton
 extern ap_malloc
@@ -123,8 +123,6 @@ END_FUNC func_new
 ;; Fails: 0
 ;; ============================================================================
 extern dict_new
-extern dict_set
-extern dict_get
 extern ap_strcmp
 
 DEF_FUNC func_call
@@ -449,7 +447,7 @@ DEF_FUNC func_call
 
     ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
     mov rdi, rax            ; kwdefaults dict
-    call dict_get_ret       ; err: tested at .kw_default_miss, once the loop registers are back
+    call dict_get       ; err: tested at .kw_default_miss, once the loop registers are back
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
     mov r8, rax             ; r8 = value payload (or NULL)
@@ -667,7 +665,7 @@ DEF_FUNC func_bind_kwargs
     mov rsi, [rsi + rax*8]         ; key = kw_name (already a Value)
     mov rax, [rsp+24]
     mov rdx, [r13 + rax*8]         ; the value Value
-    call dict_set_ret
+    call dict_set
     ERR_M1 .kw_set_raised
     jmp .kw_next
 
@@ -899,7 +897,7 @@ DEF_FUNC func_setattr, SC_FRAME
     ; dict_set(func_dict, name Value, value Value)
     mov rsi, r12
     mov rdx, r13
-    call dict_set_ret       ; err: returned to the caller as is
+    call dict_set       ; err: returned to the caller as is
 
     ; rax is dict_set's own 0 or -1
     pop r14
@@ -1378,7 +1376,7 @@ DEF_FUNC func_getattr
     jz .not_found
 
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
@@ -1542,7 +1540,7 @@ DEF_FUNC func_getattr
     test rdi, rdi
     jz .fgfd_none
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .fgfd_raised
     V_UNPACK rax, rdx
     test edx, edx
@@ -1575,7 +1573,7 @@ DEF_FUNC func_getattr
     test rdi, rdi
     jz .doc_from_code
     mov rsi, r12
-    call dict_get_ret
+    call dict_get
     ERR_PENDING .not_found
     V_UNPACK rax, rdx
     test edx, edx
@@ -1633,7 +1631,7 @@ DEF_FUNC func_getattr
     push rax
     mov rdi, [rbx + PyFuncObject.func_globals]
     mov rsi, rax
-    call dict_get_ret       ; err: tested at .fg_module_miss, once the name is released
+    call dict_get       ; err: tested at .fg_module_miss, once the name is released
     V_UNPACK rax, rdx
     pop rdi
     push rax

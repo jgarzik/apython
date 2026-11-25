@@ -21,7 +21,6 @@
 %include "opcodes.inc"
 %include "compiler.inc"
 
-extern dict_get_ret
 extern dict_get
 extern obj_call_n
 extern str_from_cstr_heap
@@ -797,7 +796,7 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
     mov rdi, [rbp - CLW_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get_ret           ; err: a 0 goes to .clw_none, which clears what is pending
+    call dict_get           ; err: a 0 goes to .clw_none, which clears what is pending
     mov [rbp - CLW_MOD], rax
     mov rdi, [rbp - CLW_TMP]
     call obj_decref
