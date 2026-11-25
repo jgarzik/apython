@@ -458,3 +458,43 @@ print("--- __build_class__ called by hand")
 case("no arguments", lambda: __build_class__())
 case("not a function", lambda: __build_class__(None, "N", X))
 case("not a name", lambda: __build_class__(lambda: None, 3, X, tag=[1]))
+
+print("--- a refused class, afterwards")
+# It is listed by its base for as long as it is alive and no longer: the MRO
+# of a half-built class names the class, so that is until the collector runs.
+gc.disable()
+
+
+class Refuses:
+    def __init_subclass__(cls):
+        raise ValueError
+
+
+try:
+    class N(Refuses):
+        pass
+except ValueError:
+    pass
+print(len(Refuses.__subclasses__()))
+gc.collect()
+print(len(Refuses.__subclasses__()))
+
+# One that somebody kept is a whole class, and still its base's subclass.
+kept = []
+
+
+class Keeps:
+    def __init_subclass__(cls):
+        kept.append(cls)
+        raise ValueError
+
+
+try:
+    class N(Keeps):
+        v = 1
+except ValueError:
+    pass
+gc.collect()
+print(len(Keeps.__subclasses__()), kept[0].v, kept[0].__mro__ == (kept[0], Keeps, object),
+      isinstance(kept[0](), Keeps))
+gc.enable()
