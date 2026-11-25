@@ -19,7 +19,6 @@
 %include "object.inc"
 
 extern dict_get_mro
-extern eval_exception_unwind
 extern object_type
 extern exc_TypeError_type
 extern set_exception

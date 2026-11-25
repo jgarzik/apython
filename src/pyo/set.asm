@@ -18,7 +18,6 @@ extern obj_decref
 extern obj_dealloc
 extern obj_incref
 extern str_type
-extern eval_exception_unwind
 extern obj_richcompare_bool
 extern ap_memcpy
 extern ap_memset
@@ -1463,7 +1462,6 @@ END_FUNC set_dealloc
 ;; self = set_type, args = arg array, nargs = count
 ;; Fails: 0
 ;; ============================================================================
-extern raise_exception
 extern exc_TypeError_type
 
 STC_EXC   equ 16            ; current_exception before the iteration started

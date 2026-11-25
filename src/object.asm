@@ -18,7 +18,6 @@ extern bool_false
 extern bool_true
 extern int_repr
 extern int_type
-extern eval_exception_unwind
 extern int_promote_mpz
 extern int_to_i64
 extern float_type
@@ -2804,7 +2803,6 @@ DEF_FUNC_BARE obj_is_true
     ret
 
 .dunder_bool_none_error:
-    extern raise_exception
     extern exc_TypeError_type
     FAIL exc_TypeError_type, "cannot interpret 'NoneType' object as an integer", .fail
 

@@ -52,12 +52,10 @@ extern dunder_lookup_owner
 extern dunder_call_1
 extern dunder_iter
 extern dunder_next
-extern eval_exception_unwind
 extern exc_StopIteration_type
 extern obj_decref
 extern obj_as_index
 extern ap_malloc
-extern raise_exception
 extern exc_TypeError_type
 
 section .text

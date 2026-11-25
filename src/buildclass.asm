@@ -31,7 +31,6 @@ extern obj_decref
 extern bool_type
 extern gc_alloc
 extern gc_track
-extern raise_exception
 extern set_exception
 extern eval_frame
 extern frame_new

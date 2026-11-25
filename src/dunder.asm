@@ -29,7 +29,6 @@ extern dict_get
 extern obj_decref
 extern obj_incref
 extern exc_TypeError_type
-extern raise_exception
 
 ;; ============================================================================
 ;; dunder_name_obj(rdi = const char *literal) -> rax = PyStrObject*, borrowed

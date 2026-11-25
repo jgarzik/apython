@@ -17,7 +17,6 @@ extern bool_false
 extern none_singleton
 extern int_from_i64
 extern int_type
-extern raise_exception
 extern exc_ZeroDivisionError_type
 extern exc_OverflowError_type
 extern exc_ValueError_type

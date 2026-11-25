@@ -18,14 +18,12 @@
 %include "macros.inc"
 %include "value.inc"
 
-extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern tuple_new
 extern obj_dealloc
 extern obj_incref
 extern object_type
-extern raise_exception
 extern set_exception
 extern exc_TypeError_type
 

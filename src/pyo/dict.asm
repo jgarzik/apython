@@ -7,7 +7,6 @@
 
 extern ap_memcpy
 extern obj_richcompare_bool
-extern eval_exception_unwind
 extern bool_true
 extern bool_false
 extern ap_malloc
@@ -23,7 +22,6 @@ extern obj_decref
 extern obj_dealloc
 extern str_type
 extern fatal_error
-extern raise_exception
 extern obj_incref
 extern type_type
 extern tuple_type
@@ -531,7 +529,6 @@ DEF_FUNC dict_type_call, 8            ; 5 pushes, so rsp is 16-aligned
     SET_EXC exc_TypeError_type, "dict() argument must be a mapping or iterable"
 
 .dtc_propagate:
-    extern eval_exception_unwind
     RET_NULL
     pop r15
     pop r14

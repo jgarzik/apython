@@ -10,14 +10,12 @@
 %include "object.inc"
 
 extern dict_get
-extern eval_exception_unwind
 extern ap_malloc
 extern ap_free
 extern bool_true
 extern int_to_i64
 extern int_unwrap
 extern int_is_integer
-extern raise_exception
 extern exc_TypeError_type
 extern exc_OverflowError_type
 extern str_type

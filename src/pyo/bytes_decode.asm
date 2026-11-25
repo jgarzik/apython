@@ -33,7 +33,6 @@ extern exc_LookupError_type
 extern tuple_type
 extern tuple_new
 extern set_exception
-extern raise_exception
 extern obj_incref
 extern obj_decref
 extern obj_dealloc
@@ -50,7 +49,6 @@ extern ap_strlen
 extern int_to_i64
 extern type_is_subtype
 extern codec_error_id
-extern raise_type_error_with_name
 
 section .text
 

@@ -5,7 +5,6 @@
 %include "object.inc"
 %include "opcodes.inc"
 extern set_exception
-extern eval_exception_unwind
 extern none_singleton
 extern int_promote_mpz
 extern obj_dealloc
@@ -26,7 +25,6 @@ extern int_type
 extern bool_type
 extern exc_ValueError_type
 extern exc_TypeError_type
-extern raise_exception
 
 ;; ============================================================================
 ;; list_iter_new(PyListObject *list) -> PyListIterObject*

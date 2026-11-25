@@ -64,7 +64,6 @@ extern int_type
 extern float_type
 extern tuple_type
 extern bytes_type
-extern raise_exception
 extern set_exception
 extern exc_TypeError_type
 extern exc_ReferenceError_type

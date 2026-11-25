@@ -34,7 +34,6 @@ endstruc
 
 extern dict_get_mro
 extern dict_set
-extern eval_exception_unwind
 extern dict_new
 extern dict_get
 extern set_new

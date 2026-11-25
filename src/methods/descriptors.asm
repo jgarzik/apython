@@ -22,7 +22,6 @@
 %include "macros.inc"
 %include "object.inc"
 
-extern eval_exception_unwind
 extern obj_decref
 extern obj_dealloc
 extern obj_incref

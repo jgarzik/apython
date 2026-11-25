@@ -25,7 +25,6 @@ extern int_new_compact
 extern int_alloc_raw
 extern int_unwrap
 extern int_type
-extern raise_exception
 extern exc_ValueError_type
 extern strlen
 extern str_from_cstr_heap

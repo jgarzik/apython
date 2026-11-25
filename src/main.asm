@@ -850,8 +850,8 @@ DEF_FUNC main, 8
     mov rdi, rax
     xor esi, esi
     xor edx, edx
-    extern raise_oserror_build
-    call raise_oserror_build        ; rax = a BrokenPipeError, owned
+    extern oserror_build
+    call oserror_build        ; rax = a BrokenPipeError, owned
     test rax, rax
     jz .no_flush_failure
     push rax

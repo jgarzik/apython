@@ -16,7 +16,6 @@
 extern dict_get
 extern dict_set
 extern dict_set_str
-extern eval_exception_unwind
 extern int_type
 extern bool_type
 extern dict_type

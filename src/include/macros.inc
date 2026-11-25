@@ -444,9 +444,10 @@
 ;   call dict_get_item
 ;   ERR_NULL .fail                                 propagate through my exit
 ;
-; The _JUMP forms are for a caller that cannot return an error YET: they jump
-; into the unwinder exactly as the callee used to.  Outside src/opcodes/ and
-; src/eval.asm each one is debt, counted by tests/raise_floor.txt.
+; The _JUMP forms are a HANDLER's check: the callee returned its error, and
+; the handler -- which is the eval loop -- passes it to the unwinder.  lint.py
+; refuses them, and every other way into the unwinder, outside src/opcodes/
+; and src/eval.asm.
 ; ---------------------------------------------------------------------------
 %macro FAIL 3                   ; %1 = type, %2 = message, %3 = the error exit
     SET_EXC %1, %2

@@ -264,13 +264,15 @@ where `ERR_PENDING` loads the thread state on every miss.
 callee never returns 0 without setting one.  `type_call` releases the
 instance it was building when `__new__` or `__init__` answers 0.
 
-The conversion is in progress.  `python3 src/compiler/raisemap.py` is the map
-of what still jumps, `tests/raise_floor.txt` is the per-file ratchet, and the
-`ERR_*_JUMP` macros are the transitional form for a caller that cannot return
-an error yet: they jump exactly as the callee used to, and each one outside
-the handlers is counted as debt.  `tests/raise_probe.sh` is the measure of
-what it buys: every builtin made to fail, with `sys.getallocatedblocks()`
-read around each failure, ratcheted against `tests/raise_leak_floor.txt`.
+Lint holds the line: outside `src/opcodes/` and `src/eval.asm` no line of
+code may name a function that ends in the unwinder, a macro that expands to
+one (`RAISE`, `NO_KEYWORDS`, an `ERR_*_JUMP`), or `PUBLISH_SP`; and a pass in
+`src/compiler/` may not record an exception at all, only `comp_error`.  The
+`ERR_*_JUMP` macros are a handler's way of passing on an error its callee
+returned.  `python3 src/compiler/raisemap.py` maps where the handlers jump,
+and `tests/raise_probe.sh` measures what returning buys: every builtin made
+to fail, with `sys.getallocatedblocks()` read around each failure, ratcheted
+against `tests/raise_leak_floor.txt`.
 
 A destructor cannot fail: `tp_dealloc` and anything it calls swallows an
 error (CPython prints it as unraisable) rather than returning it.

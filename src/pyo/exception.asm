@@ -28,7 +28,7 @@ extern traceback_type
 extern ap_memcpy
 extern oserror_str
 extern oserror_new
-extern raise_oserror_build
+extern oserror_build
 extern type_number_methods
 
 extern ap_malloc
@@ -45,8 +45,6 @@ extern str_type
 extern type_getattr
 extern type_repr
 extern type_type
-extern raise_exception_obj
-extern eval_exception_unwind
 extern str_new_heap
 extern none_singleton
 extern int_from_i64
@@ -55,7 +53,6 @@ extern int_to_i64
 extern int_type
 extern obj_repr
 extern obj_str
-extern raise_exception
 extern tuple_new
 extern tuple_type
 extern ap_strcmp

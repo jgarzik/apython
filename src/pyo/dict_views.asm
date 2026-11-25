@@ -38,7 +38,6 @@ extern obj_decref
 extern obj_dealloc
 extern type_type
 extern obj_incref
-extern eval_exception_unwind
 extern get_iterator
 extern call_iternext
 extern gc_alloc

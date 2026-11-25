@@ -17,7 +17,6 @@ extern obj_dealloc
 extern obj_hash
 extern int_to_i64
 extern fatal_error
-extern raise_exception
 extern exc_IndexError_type
 extern obj_incref
 extern slice_type
@@ -27,7 +26,6 @@ extern type_type
 extern gc_untrack
 extern obj_is_true
 extern int_type
-extern eval_exception_unwind
 extern obj_richcompare_bool
 extern obj_as_index
 extern obj_as_index_seq

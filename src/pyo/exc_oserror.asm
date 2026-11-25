@@ -34,7 +34,6 @@ extern obj_dealloc
 extern exc_new
 extern exc_setattr
 extern exc_OSError_type
-extern raise_exception_obj
 extern none_singleton
 
 ; --- the subclasses the errno table maps to ---
@@ -507,7 +506,7 @@ DEF_FUNC set_oserror_owned2, ROO_FRAME
     mov rdx, r8
 .roo_second_plain:
     ; The release has to come after the build, which names the paths.
-    call raise_oserror_build    ; rax = the exception, and it took its own
+    call oserror_build    ; rax = the exception, and it took its own
                                 ; reference to both filenames
     push rax
     sub rsp, 8
@@ -544,7 +543,7 @@ END_FUNC set_oserror_owned2
 global set_oserror
 DEF_FUNC set_oserror
     xor edx, edx                ; no second path
-    call raise_oserror_build    ; rax = the exception, owned
+    call oserror_build    ; rax = the exception, owned
     test rax, rax
     jz .so_out
     mov rdi, rax
@@ -556,7 +555,7 @@ DEF_FUNC set_oserror
     ret
 END_FUNC set_oserror
 
-;; raise_oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
+;; oserror_build(rdi = errno, rsi = filename or 0, rdx = a second
 ;;                     filename or 0) -> rax = the exception
 ;;
 ;; The half of set_oserror that only builds, so a caller with cleanup of its
@@ -566,7 +565,7 @@ END_FUNC set_oserror
 ;; The second filename is CPython's five-argument form, (errno, strerror,
 ;; filename, winerror, filename2); OSError.__str__ already renders it as
 ;; "... : 'src' -> 'dst'".  rename reported only its source without it.
-DEF_FUNC raise_oserror_build, RO_FRAME
+DEF_FUNC oserror_build, RO_FRAME
     mov [rbp - RO_ARGS + 16], rsi   ; args[2] = filename, or NULL for now
     mov [rbp - RO_ARGS + 24], rdx   ; args[3] = winerror; overwritten below
     mov [rbp - RO_ARGS + 32], rdx   ; args[4] = filename2, or NULL
@@ -609,7 +608,7 @@ DEF_FUNC raise_oserror_build, RO_FRAME
     pop rax
     leave
     ret
-END_FUNC raise_oserror_build
+END_FUNC oserror_build
 
 section .data
 align 8

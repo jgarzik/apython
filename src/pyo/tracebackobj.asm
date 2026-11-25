@@ -24,7 +24,6 @@ extern ap_strcmp
 extern str_type
 extern type_type
 extern none_singleton
-extern raise_exception
 extern set_exception
 extern exc_AttributeError_type
 extern exc_TypeError_type

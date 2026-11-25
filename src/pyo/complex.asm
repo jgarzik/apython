@@ -34,7 +34,6 @@ extern float_type
 extern str_from_cstr
 extern ap_strcmp
 extern ap_memcpy
-extern raise_exception
 extern exc_ZeroDivisionError_type
 extern exc_OverflowError_type
 extern bool_true

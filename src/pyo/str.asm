@@ -5,7 +5,6 @@
 %include "object.inc"
 
 extern dict_get
-extern eval_exception_unwind
 extern none_singleton
 
 ;; ============================================================================
@@ -80,7 +79,6 @@ extern int_to_i64
 extern int_unwrap
 extern int_is_integer
 extern fatal_error
-extern raise_exception
 extern exc_IndexError_type
 extern exc_TypeError_type
 extern int_type

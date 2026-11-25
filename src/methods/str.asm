@@ -10,7 +10,6 @@
 
 
 ; External functions
-extern eval_exception_unwind
 extern str_alloc_bytes
 extern str_cp_width
 extern ap_malloc

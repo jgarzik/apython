@@ -7,7 +7,6 @@
 %include "macros.inc"
 %include "object.inc"
 %include "listsort.inc"
-extern eval_exception_unwind
 extern str_type
 extern ap_memcmp
 extern obj_as_index

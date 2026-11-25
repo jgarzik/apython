@@ -10,7 +10,6 @@
 
 
 ; External functions
-extern eval_exception_unwind
 extern str_type
 extern bytes_new
 extern bytearray_type_call

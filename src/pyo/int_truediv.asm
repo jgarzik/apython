@@ -18,7 +18,6 @@ ASM_INIT
 
 extern int_binop_unpack
 extern int_promote_mpz
-extern raise_exception
 extern exc_ZeroDivisionError_type
 extern exc_OverflowError_type
 extern __gmpz_init

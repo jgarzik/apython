@@ -9,9 +9,9 @@ those frames held leak, and a caller written in assembly cannot absorb the
 error.  Everything that is CALLED reports an error by setting the exception
 and returning 0 (or -1, for a function whose 0 is an answer).
 
-This module is the map of how far that is from true.  lint.py imports it for
-the per-file ratchet (tests/raise_floor.txt) and for the must-check rule; run
-directly it prints the map:
+It is true now outside src/opcodes/ and src/eval.asm, and lint.py keeps it so:
+this module is what its wall and its must-check rule are built on.  Run
+directly it prints the map of where the handlers jump:
 
     python3 src/compiler/raisemap.py              per-file counts
     python3 src/compiler/raisemap.py FILE...      every site in those files
@@ -31,8 +31,7 @@ SEEDS = frozenset(('raise_exception', 'raise_exception_obj',
                    'eval_exception_unwind'))
 
 # Macros that expand to a jump-style raise.
-RAISE_MACROS = ('RAISE', 'NO_KEYWORDS', 'NO_KEYWORDS_TP_INIT',
-                'POSIX_PATH_CHECK')
+RAISE_MACROS = ('RAISE', 'NO_KEYWORDS', 'NO_KEYWORDS_TP_INIT')
 # The transitional propagation: counted apart from the raises themselves,
 # because converting ONE callee adds one of these at each caller that cannot
 # return an error yet.  Both numbers end at zero outside the handlers.
@@ -91,10 +90,8 @@ class Func:
         self.has_ret = False
 
 
-def raising_macros(noret):
-    """Macros, in any .asm or .inc, whose body ends up in a jump-style raise:
-    SOCK_CHECK, POSIX_CHECK and their kind.  A use of one is a site like any
-    other, and without this a file full of them reads as clean."""
+def macro_bodies():
+    """{macro name: [code lines]} for every %macro in any .asm or .inc."""
     bodies = {}
     for path in all_asm() + sorted(glob.glob('src/include/*.inc')) \
             + ['src/compiler/compiler.inc']:
@@ -116,6 +113,15 @@ def raising_macros(noret):
                 code = strip(raw)
                 if code.strip():
                     bodies[name].append(code)
+    return bodies
+
+
+def raising_macros(noret):
+    """Macros, in any .asm or .inc, whose body ends up in a jump-style raise:
+    SOCK_CHECK, POSIX_CHECK and their kind.  A use of one is a site like any
+    other, and without this a file full of them reads as clean.  The
+    ERR_*_JUMP forms are left out: they are counted on their own."""
+    bodies = macro_bodies()
     bad = set(RAISE_MACROS)
     changed = True
     while changed:
@@ -131,6 +137,28 @@ def raising_macros(noret):
                     bad.add(name)
                     changed = True
                     break
+    return bad
+
+
+def jumping_macros(noret, seeds=()):
+    """Every macro whose expansion can NAME the unwinder, by any route: a
+    token of its body is a never-returning function, one of `seeds`, or
+    another such macro.  Wider than raising_macros on purpose -- it takes
+    ERR_*_JUMP and a macro handed the unwinder as an argument too -- because
+    it is what the wall in lint.py forbids outside the handlers."""
+    bodies = macro_bodies()
+    bad = set(RAISE_MACROS) | set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for name, body in bodies.items():
+            if name in bad:
+                continue
+            if any(t in noret or t in bad
+                   for code in body
+                   for t in re.findall(r'[A-Za-z_]\w*', code)):
+                bad.add(name)
+                changed = True
     return bad
 
 

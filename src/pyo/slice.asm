@@ -12,7 +12,6 @@
 %include "object.inc"
 
 extern set_exception
-extern eval_exception_unwind
 extern int_promote_mpz
 extern ap_malloc
 extern gc_alloc
@@ -28,7 +27,6 @@ extern bool_type
 extern exc_ValueError_type
 extern int_type
 extern type_type
-extern raise_exception
 extern exc_TypeError_type
 extern obj_as_index_clamped_msg
 extern ap_strcmp

@@ -11,7 +11,6 @@
 ; External functions
 extern dict_get
 extern dict_set
-extern eval_exception_unwind
 extern ap_memset
 extern obj_decref
 extern str_from_cstr_heap

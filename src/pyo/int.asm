@@ -58,7 +58,6 @@ extern __gmpz_fdiv_q_2exp
 extern __gmpz_pow_ui
 extern __gmpz_get_d
 
-extern raise_exception
 extern strlen
 extern exc_ValueError_type
 extern exc_ZeroDivisionError_type

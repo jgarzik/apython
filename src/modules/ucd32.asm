@@ -31,7 +31,7 @@ extern str_type
 extern str_cp_at
 extern builtin_func_new
 extern exc_TypeError_type
-extern raise_exception
+extern set_exception
 extern int_from_i64
 extern udp_run_lookup
 extern ucd32_normalize
@@ -108,9 +108,10 @@ DEF_FUNC ucd32_%1
     leave
     ret
 .type:
-    RAISE exc_TypeError_type, %3
 .arity:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3      ; rax = 0, the failed call's answer
+    leave
+    ret
 END_FUNC ucd32_%1
 %endmacro
 
@@ -139,9 +140,10 @@ DEF_FUNC ucd32_%1
     leave
     ret
 .type:
-    RAISE exc_TypeError_type, %3
 .arity:
-    RAISE exc_TypeError_type, %3
+    SET_EXC exc_TypeError_type, %3      ; rax = 0, the failed call's answer
+    leave
+    ret
 END_FUNC ucd32_%1
 %endmacro
 

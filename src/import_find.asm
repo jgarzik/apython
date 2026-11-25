@@ -45,7 +45,6 @@ extern list_append
 extern type_type
 extern module_new
 extern fatal_error
-extern raise_exception
 extern eval_frame
 extern frame_new
 extern frame_free

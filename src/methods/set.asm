@@ -10,7 +10,6 @@
 
 
 ; External functions
-extern eval_exception_unwind
 extern frozenset_type
 extern obj_decref
 extern tuple_type
