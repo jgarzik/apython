@@ -974,6 +974,25 @@ END_FUNC dict_lookup
     global dict_get_index_jumping:function
 dict_get_index_jumping:
 ;; ============================================================================
+;; dict_get_index_ret(rdi=dict, rsi=key) -> rax = the dense index, or -1
+;; Fails: -1
+;;
+;; dict_get_index below, returning the failure: -1 with the exception pending
+;; and rdx = -2 (rdx = -1 beside a plain miss), which ERR_DICT_IDX reads so a
+;; global that lives in builtins does not cost a load from the thread state.
+;; ============================================================================
+DEF_FUNC dict_get_index_ret, 16 ; + 0 pushes = 16, 16-aligned
+    call dict_lookup
+    test rax, rax
+    jns .dgir_done
+    mov rdx, rax                ; -1 or -2: which of the two
+    mov rax, -1
+.dgir_done:
+    leave
+    ret
+END_FUNC dict_get_index_ret
+
+;; ============================================================================
 ;; dict_get_index(rdi=dict, rsi=key, edx=key_tag) -> int64
 ;; Like dict_get but returns the slot index (for IC caching), -1 if not found.
 ;; ============================================================================

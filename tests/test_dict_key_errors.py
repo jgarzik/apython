@@ -257,3 +257,24 @@ def frame_locals_colliding():
 
 
 check("frame.f_locals, colliding", frame_locals_colliding)
+
+# --- the opcodes ---------------------------------------------------------------
+for what, mk in keys_for("a"):
+    check("{k: 1 for k in [%s]}" % what, lambda: {k: 1 for k in [mk()]})
+
+check("{**colliding, 'a': 1}", lambda: {**colliding("a"), "a": 1})
+check("globals()[k], colliding", lambda: eval("q", {BadEq("q"): 1}))
+check("store global, colliding", lambda: exec("q = 1", {BadEq("q"): 1}))
+check("load name, colliding locals",
+      lambda: exec("q", {}, {BadEq("q"): 1}))
+check("store name, colliding locals",
+      lambda: exec("q = 1", {}, {BadEq("q"): 1}))
+check("hasattr(C(), 'x')", lambda: hasattr(Odd(), "x"))
+check("getattr(C(), 'x', 5)", lambda: getattr(Odd(), "x", 5))
+
+
+def kw(**k):
+    return k
+
+
+check("f(**{non-str key})", lambda: kw(**colliding("a")))

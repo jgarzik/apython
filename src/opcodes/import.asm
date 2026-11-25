@@ -3,6 +3,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_ret
 extern eval_dispatch
 extern import_module
 extern obj_decref
@@ -255,7 +256,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
@@ -269,7 +271,8 @@ DEF_FUNC op_import_from, IF2_FRAME
     test rdi, rdi
     jz .if_try_submodule
     mov rsi, [rbp - IF_ATTR]
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .if_found_in_dict
@@ -467,7 +470,8 @@ DEF_FUNC_LOCAL ife_str_field, ISF_FRAME
     mov [rbp - ISF_KEY], rax
     mov rdi, [rbp - ISF_DICT]
     mov rsi, rax
-    call dict_get                   ; a Value; 0 is the miss
+    call dict_get_ret                   ; a Value; 0 is the miss
+    ERR_DICT_GET_JUMP
     mov rbx, rax
     mov rdi, [rbp - ISF_KEY]
     call obj_decref
@@ -533,7 +537,8 @@ DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
     mov [rbp - IFI_KEY], rax
     mov rdi, [rbp - IFI_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     mov [rbp - IFI_SPEC], rax
     mov rdi, [rbp - IFI_KEY]
     call obj_decref

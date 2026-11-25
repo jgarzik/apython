@@ -496,6 +496,14 @@
 %%ok:
 %endmacro
 
+%macro ERR_DICT_GET_JUMP 0
+    ERR_DICT_GET eval_exception_unwind
+%endmacro
+
+%macro ERR_DICT_IDX_JUMP 0
+    ERR_DICT_IDX eval_exception_unwind
+%endmacro
+
 %macro ERR_NULL_JUMP 0
     ERR_NULL eval_exception_unwind
 %endmacro

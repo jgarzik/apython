@@ -26,6 +26,8 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_index_ret
+extern dict_set_ret
 extern instance_setattr
 extern member_descr_type
 extern dict_get_index
@@ -148,7 +150,8 @@ DEF_FUNC_BARE op_store_name
     V_PACK rdx, rcx
     push r9
     push r10
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
     pop r10
     pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
@@ -185,7 +188,8 @@ DEF_FUNC_BARE op_store_name
     V_PACK rdx, rcx
     push r9
     push r10
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
     pop r10
     pop r9
     DECREF_VAL r9, r10
@@ -212,7 +216,8 @@ DEF_FUNC_BARE op_store_global
     V_PACK rdx, rcx
     push r9
     push r10
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
     pop r10
     pop r9
     ; DECREF value to release the stack's reference (dict_set INCREFed it)
@@ -863,7 +868,8 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     mov rdi, rbx
     mov rsi, r13
     xor edx, edx
-    call dict_get_index
+    call dict_get_index_ret
+    ERR_DICT_IDX_JUMP
     test rax, rax
     js .sts_out
     cmp rax, 0xFFFF                 ; the cache field is 16 bits wide

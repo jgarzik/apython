@@ -20,6 +20,9 @@
 
 section .text
 
+extern dict_get_mro
+extern dict_get_ret
+extern dict_set_ret
 extern eval_dispatch
 extern fatal_error
 extern async_gen_wrap_value
@@ -371,7 +374,8 @@ extern obj_decref
     mov rbx, rax                      ; save key in callee-saved rbx
     mov rdi, [rbp - IS_MODDICT]
     mov rsi, rax                      ; key = "__all__"
-    call dict_get                     ; → (rax=value, rdx=tag) or (0, 0)
+    call dict_get_ret                     ; → (rax=value, rdx=tag) or (0, 0)
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     ; Save result before DECREF of key
     push rax
@@ -450,7 +454,8 @@ extern obj_decref
     ; Look up name in mod_dict
     mov rdi, [rbp - IS_MODDICT]
     xor edx, edx
-    call dict_get                     ; → (rax=value, rdx=value_tag) or (0, 0)
+    call dict_get_ret                     ; → (rax=value, rdx=value_tag) or (0, 0)
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .is_all_absent                 ; the module does not define it
@@ -468,7 +473,8 @@ extern obj_decref
     mov rdx, r9                       ; value payload
     mov rcx, r10                      ; value tag
     V_PACK rdx, rcx
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
 
 .is_all_next:
     inc qword [rbp - IS_IDX]
@@ -515,7 +521,8 @@ extern obj_decref
     mov rdx, rax
     mov rdi, [rbp - IS_LOCALS]
     mov rsi, [rbp - IS_SUBNAME]
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
     jmp .is_all_next
 
 .is_all_really_absent:
@@ -618,7 +625,8 @@ extern obj_decref
     push rdx                          ; and a pad: the frame here is odd
     mov rdi, [rbp - IS_LOCALS]
     mov rsi, [rbx + DictEntry.key]
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
     pop rdi
     pop rdi
     DECREF_V rdi, rcx                 ; dict_set took its own reference
@@ -629,7 +637,8 @@ extern obj_decref
     mov rdi, [rbp - IS_LOCALS]
     ; rsi = key Value (already set), value comes straight from the entry
     mov rdx, [rbx + DictEntry.value]
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
 
 .is_dict_next:
     inc qword [rbp - IS_IDX]
@@ -980,7 +989,8 @@ DEF_FUNC op_setup_annotations
     extern dict_get
     mov rdi, rbx
     mov rsi, r13
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax
     jnz .sa_have
 
@@ -989,7 +999,8 @@ DEF_FUNC op_setup_annotations
     mov rdi, rbx
     mov rsi, r13
     mov rdx, r12
-    call dict_set
+    call dict_set_ret
+    ERR_M1_JUMP
     mov rdi, r12
     call obj_decref             ; dict_set took its own reference
     jmp .sa_have
@@ -1105,14 +1116,16 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 
     ; Try dict first
     mov rsi, [rsp + 8]         ; name
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
     ; Try globals
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp + 8]         ; name
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found
 
@@ -1123,7 +1136,8 @@ DEF_FUNC_BARE op_load_from_dict_or_globals
 
     ; Try builtins
     mov rdi, [r12 + PyFrame.builtins]
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .lfdg_found_no_pop
 
@@ -1209,7 +1223,8 @@ DEF_FUNC op_load_from_dict_or_deref, LFDOD_FRAME
     jne .lfdod_error
 
     ; Try dict first (the name is a string, so it is already a Value)
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .lfdod_found
@@ -1380,7 +1395,8 @@ DEF_FUNC op_match_keys, MK_FRAME
 
     ; Look up in subject
     mov rdi, [rbp - MK_SUBJ]
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jz .mk_fail
@@ -1522,7 +1538,7 @@ DEF_FUNC op_match_class, MC_FRAME
     mov rsi, rax                    ; rsi = "__match_args__" str obj
     pop rdi                         ; restore dict
     push rsi                        ; save string for DECREF
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rsi                         ; rsi = string to DECREF
     push rdx                        ; save dict_get tag
@@ -2041,7 +2057,8 @@ DEF_FUNC_LOCAL typing_call, TYC_FRAME
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     extern dict_get
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     mov [rbp - TYC_FN], rax
     pop rdi
     call obj_decref

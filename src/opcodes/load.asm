@@ -16,6 +16,9 @@
 %include "object.inc"
 %include "opcodes.inc"
 
+extern dict_get_index_ret
+extern dict_get_mro
+extern dict_get_ret
 extern exc_TypeError_type
 
 section .text
@@ -138,7 +141,8 @@ DEF_FUNC_BARE op_load_global
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
     mov edx, TAG_PTR
-    call dict_get_index
+    call dict_get_index_ret
+    ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .try_builtins
 
@@ -170,7 +174,8 @@ DEF_FUNC_BARE op_load_global
     pop rsi                    ; rsi = name
     push rsi                   ; save name for error message
     mov edx, TAG_PTR
-    call dict_get_index
+    call dict_get_index_ret
+    ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .not_found
 
@@ -253,7 +258,8 @@ DEF_FUNC_BARE op_load_name
 
     ; Try locals first: dict_get(locals, name)
     mov rsi, [rsp]             ; rsi = name
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
     jmp .try_globals
@@ -290,7 +296,8 @@ DEF_FUNC_BARE op_load_name
     ; Try globals: dict_get(globals, name)
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
@@ -298,7 +305,8 @@ DEF_FUNC_BARE op_load_name
     mov rdi, [r12 + PyFrame.builtins]
     pop rsi                    ; rsi = name
     push rsi                   ; save for error message
-    call dict_get
+    call dict_get_ret
+    ERR_DICT_GET_JUMP
     test rax, rax               ; dict_get returns a Value, and 0 on a miss
     jnz .found
 
@@ -469,7 +477,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_tag_next
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .la_tag_found
@@ -888,7 +896,8 @@ DEF_FUNC op_load_attr, LA_FRAME
     mov rsi, [rbp - LA_NAME]
     mov edx, TAG_PTR
     extern dict_get_index
-    call dict_get_index
+    call dict_get_index_ret
+    ERR_DICT_IDX_JUMP
     cmp rax, -1
     je .la_simple_push             ; gone already: do not cache a miss
     cmp rax, 0xFFFF
@@ -1756,7 +1765,7 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     push rax                       ; save current type
     push rax                       ; twice: rsp stays 16-byte aligned
     mov rsi, [rbp - LSA_NAME]      ; name
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx           ; dict_get returns a Value
     pop rcx
     pop rcx                        ; restore current type
@@ -2393,7 +2402,7 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     jz .ga_mro_next
     mov rdi, rax
     mov rsi, [rbp - GA_NAME]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jnz .ga_from_type

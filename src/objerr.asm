@@ -1158,8 +1158,9 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     mov r12, rax
     mov rdi, [rbx + PyExceptionObject.exc_dict]
     mov rsi, r12
-    extern dict_get
-    call dict_get
+    extern dict_get_ret
+    call dict_get_ret
+    ERR_DICT_GET .rna_name_raised   ; from the register: an exception IS pending here
     push rax
     push rax                    ; twice: rsp stays 16-byte aligned
     mov rdi, r12
@@ -1188,6 +1189,12 @@ DEF_FUNC raise_no_attribute, RNA_FRAME
     leave
     PUBLISH_SP
     jmp eval_exception_unwind
+.rna_name_raised:
+    ; The pending AttributeError's own dict could not be searched, and what
+    ; that raised has taken its place: it is what goes out.
+    mov rdi, r12
+    call obj_decref
+    jmp .rna_pending_raise
 .rna_fresh:
     push rdi
     call value_type
