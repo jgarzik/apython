@@ -422,6 +422,11 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `src/modules/impcore.asm` is `_impcore`, whose `create_builtin` is where
   BuiltinImporter ends up.  Bytecode is cached under the `apython-312` tag
   only, and `make` precompiles `stdlib/` and `lib/` with apython itself
+- `src/import_find.asm` — WHERE the assembly finder looks: which file under
+  a `sys.path` entry answers a name (a package directory, a cached `.pyc`
+  under either tag, a sourceless `.pyc`, the source), when a `.pyc` is stale,
+  the PEP 420 portions and the namespace module made from them.  Split off
+  when `import.asm` reached the 100k cap; what stayed decides WHAT to import
 - `src/modules/io.asm` — the `_iocore` module: the four `_IOBase` types the rest
   of the I/O stack subclasses, `UnsupportedOperation`, `FileIO` and `BytesIO`.
   The buffering and text layers are `lib/_io.py`, which assembles both halves

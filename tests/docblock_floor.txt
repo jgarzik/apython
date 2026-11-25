@@ -25,7 +25,7 @@ src/compiler/symtab.asm                6
 src/eval.asm                           9
 src/frame.asm                          3
 src/gc.asm                             13
-src/import.asm                         5
+src/import.asm                         1
 src/itertools.asm                      21
 src/marshal.asm                        7
 src/methods/bytes_str.asm              18
