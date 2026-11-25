@@ -5,6 +5,8 @@
 %include "object.inc"
 %include "compiler.inc"
 
+extern dict_get_str
+extern dict_set_str
 extern bool_init
 extern ap_strcmp
 extern value_selftest_main
@@ -531,7 +533,7 @@ DEF_FUNC main, 8
     mov rdx, rax                ; value = "__main__" str
     mov rsi, [rsp + 8]          ; key = "__name__" str
     mov rdi, [rsp + 16]         ; dict = globals (from stack)
-    call dict_set
+    call dict_set_str
     pop rdi                     ; value str
     call obj_decref
     pop rdi                     ; key str
@@ -546,7 +548,7 @@ DEF_FUNC main, 8
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -564,7 +566,7 @@ DEF_FUNC main, 8
     mov rdx, rax
     mov rsi, [rsp + 8]
     mov rdi, [rsp + 16]         ; globals dict
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -577,7 +579,7 @@ DEF_FUNC main, 8
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -589,7 +591,7 @@ DEF_FUNC main, 8
     mov rdi, [rsp + 8]         ; globals dict
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -608,7 +610,7 @@ DEF_FUNC main, 8
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rsp + 8]         ; key = "__main__" str
     mov rdx, rax               ; value = module object
-    call dict_set
+    call dict_set_str
     pop rdi                     ; module object (owned by sys.modules now)
     call obj_decref
     pop rdi                     ; "__main__" str
@@ -1089,7 +1091,7 @@ DEF_FUNC main_sys_options, MSO_FRAME
     mov [rbp - MSO_KEY], rax
     mov rdi, [rbp - MSO_XDICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_str
     mov [rbp - MSO_CUR], rax
     mov rdi, [rbp - MSO_KEY]
     call obj_decref
@@ -1098,7 +1100,7 @@ DEF_FUNC main_sys_options, MSO_FRAME
     mov [rbp - MSO_KEY], rax
     mov rdi, [rbp - MSO_XDICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_str
     mov [rbp - MSO_LIST], rax
     mov rdi, [rbp - MSO_KEY]
     call obj_decref
@@ -1219,7 +1221,7 @@ DEF_FUNC main_sys_options, MSO_FRAME
     mov rdi, [rbp - MSO_XDICT]
     mov rsi, [rbp - MSO_KEY]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     mov rdi, [rbp - MSO_KEY]
     call obj_decref
     mov rdi, [rbp - MSO_CUR]
@@ -1347,7 +1349,7 @@ DEF_FUNC main_run_startup, MIS_FRAME
     mov rdi, [rbp - MIS_DICT]
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    call dict_set
+    call dict_set_str
     add rsp, 8
     pop rdi
     call obj_decref

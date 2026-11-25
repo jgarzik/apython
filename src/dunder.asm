@@ -22,6 +22,7 @@
     mov [gs:ThreadState.kw_names_pending], %1
 %endmacro
 
+extern dict_get_mro
 extern none_singleton
 extern str_intern_cstr
 extern dict_get
@@ -175,7 +176,7 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
     jz .try_base
 
     mov rsi, r13
-    call dict_get           ; dict_get(tp_dict, name_str) -> borrowed ref
+    call dict_get_mro           ; dict_get(tp_dict, name_str) -> borrowed ref
     test rax, rax               ; a Value already, and 0 is the miss
     jnz .found
 
@@ -250,7 +251,7 @@ DEF_FUNC dunder_lookup_after, DLA_FRAME
     jz .dla_next
 
     mov rsi, r13
-    call dict_get           ; a Value already, and 0 is the miss
+    call dict_get_mro           ; a Value already, and 0 is the miss
     test rax, rax
     jnz .dla_done
 

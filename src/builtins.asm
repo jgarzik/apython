@@ -8,6 +8,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_str
 extern dict_new
 extern dict_set
 extern str_from_cstr
@@ -2062,7 +2063,7 @@ DEF_FUNC_LOCAL add_builtin_str, ABS_FRAME
     mov rdi, [rbp - ABS_DICT]
     mov rsi, rbx
     mov rdx, r12
-    call dict_set
+    call dict_set_str
     mov rdi, rbx
     call obj_decref
     mov rdi, r12
@@ -2096,7 +2097,7 @@ DEF_FUNC_LOCAL add_builtin_type
     mov rsi, rcx
     pop rdx                    ; type_obj
     push rcx                   ; save key for DECREF
-    call dict_set
+    call dict_set_str
 
     ; DECREF key
     pop rdi
@@ -3034,7 +3035,7 @@ DEF_FUNC_LOCAL add_exc_type_builtin
     mov rdi, rbx
     mov rsi, rax               ; key
     mov rdx, r12               ; type object
-    call dict_set
+    call dict_set_str
 
     ; DECREF key
     pop rdi

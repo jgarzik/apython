@@ -21,6 +21,8 @@
 %include "value.inc"
 %include "compiler.inc"
 
+extern dict_get_ret
+extern dict_set_ret
 extern set_exception
 extern ap_free
 extern ap_strcmp
@@ -2191,6 +2193,7 @@ END_FUNC ev_resolve_ns
 
 ;; ============================================================================
 ;; ev_inject_builtins(PyObject *globals) -> rax = the builtins mapping to use
+;; Fails: 0
 ;;
 ;; Only injected when absent -- a caller that provides its own __builtins__ is
 ;; making a deliberate choice about what the evaluated code can reach.  The
@@ -2207,14 +2210,16 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
 
     mov rdi, rbx
     mov rsi, r12
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .eib_fail       ; the caller's globals hold a key that would not compare
     test rax, rax
     jnz .present
 
     mov rdi, rbx
     mov rsi, r12
     mov rdx, [rel builtins_dict_global]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .eib_fail
     mov rax, [rel builtins_dict_global]
 .present:
     mov rbx, rax
@@ -2236,6 +2241,14 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
 .fallback:
     mov rax, [rel builtins_dict_global]
 .done:
+    pop r12
+    pop rbx
+    leave
+    ret
+.eib_fail:
+    mov rdi, r12                ; the name
+    call obj_decref
+    xor eax, eax
     pop r12
     pop rbx
     leave
@@ -2323,6 +2336,7 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
 
     mov rdi, rax
     call ev_inject_builtins
+    ERR_NULL .propagate
     mov [rbp - EV_BLT], rax
 
     mov rdi, [rbp - EV_ARGS]
@@ -2486,7 +2500,7 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     mov rdi, [rbp - CAB_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret           ; err: a 0 goes to .cab_fail either way, with whatever is pending
     push rax
     mov rdi, [rbp - CAB_KEY]
     call obj_decref
@@ -2869,6 +2883,7 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
 
     mov rdi, rax
     call ev_inject_builtins
+    ERR_NULL .propagate
     mov [rbp - EV_BLT], rax
 
     mov rdi, [rbp - EV_ARGS]

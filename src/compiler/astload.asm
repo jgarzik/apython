@@ -28,6 +28,7 @@
 %include "value.inc"
 %include "compiler.inc"
 
+extern dict_get_ret
 extern ast_make
 extern ast_at
 extern ast_span_at
@@ -540,7 +541,7 @@ DEF_FUNC_LOCAL al_prep_fn, ALP_FRAME
     mov rdi, [rbp - ALP_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret           ; err: a 0 goes to .alp_fail either way, with whatever is pending
     push rax
     push rax                    ; twice: keeps rsp 16-aligned for the calls
     mov rdi, [rbp - ALP_KEY]

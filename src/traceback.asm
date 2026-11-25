@@ -29,6 +29,7 @@
 %include "macros.inc"
 %include "value.inc"
 
+extern dict_get_ret
 extern sys_write
 extern sys_open
 extern sys_read
@@ -1909,14 +1910,14 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     mov [rbp - TPN_IDX], rax                ; the name, owned, briefly
     mov rdi, [rbp - TPN_TMP]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret           ; err: a failure is dropped at .tpn_miss, once the name is released
     mov [rbp - TPN_NOTES], rax
     mov rdi, [rbp - TPN_IDX]
     call obj_decref
 
     mov rax, [rbp - TPN_NOTES]
     test rax, rax
-    jz .tpn_out
+    jz .tpn_miss
     V_TEST_PTR rax, rcx
     ja .tpn_repr
     mov rdi, [rax + PyObject.ob_type]
@@ -1976,6 +1977,17 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     CSTRING rdi, `\n`
     call tb_write_cstr
 
+.tpn_miss:
+    ; No notes -- or the exception's dict could not be searched, and a report
+    ; prints what it can.  The exception being reported is still the pending
+    ; one here, so only something NEW is dropped: .tpn_out is about to write
+    ; the old one back over it.
+    mov rdi, [gs:ThreadState.current_exception]
+    cmp rdi, [rbp - TPN_EXC]
+    je .tpn_out
+    test rdi, rdi
+    jz .tpn_out
+    call obj_decref
 .tpn_out:
     mov rax, [rbp - TPN_EXC]
     mov [gs:ThreadState.current_exception], rax

@@ -4,6 +4,10 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_ret
+extern dict_set_ret
+extern dict_get_str
+extern dict_set_str
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
@@ -140,11 +144,12 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     mov rbx, rax
     pop rdi
     mov rsi, rbx
-    call dict_get
+    call dict_get_ret           ; err: tested once the key is released
     push rax
     mov rdi, rbx
     call obj_decref
     pop rax
+    ERR_PENDING .irr_fail       ; the globals held a key that would not compare
     test rax, rax
     jz .irr_no_package
     V_TEST_PTR rax, rcx
@@ -308,7 +313,7 @@ DEF_FUNC import_init
     pop rsi                     ; key = "builtins"
     push rsi                    ; re-save key for DECREF
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi                     ; DECREF key (dict_set INCREF'd)
     call obj_decref
     mov rdi, rbx                ; DECREF module (dict_set INCREF'd)
@@ -340,7 +345,7 @@ DEF_FUNC import_init
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
     mov rdx, rbx
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref                         ; the key; dict_set took its own
@@ -567,6 +572,7 @@ END_FUNC import_clear_attr_error
 ;; ============================================================================
 ;; import_parent_is_package(rdi = whatever sys.modules holds for the parent)
 ;;     -> rax = 1 if a submodule of it may be imported, 0 if not
+;; Fails: -1
 ;;
 ;; CPython reads `parent.__path__` and turns an AttributeError into "'a' is not
 ;; a package".  A plain module without __path__ answers no, and so does the
@@ -611,7 +617,8 @@ DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
 .ipp_have_key:
     mov rsi, rax
     mov rdi, [rbx + PyModuleObject.mod_dict]
-    call dict_get               ; a Value; 0 is the miss
+    call dict_get_ret           ; a Value; 0 is the miss
+    ERR_PENDING .ipp_raised
     test rax, rax
     jz .ipp_no
 .ipp_yes:
@@ -621,6 +628,11 @@ DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
     ret
 .ipp_no:
     xor eax, eax
+    pop rbx
+    leave
+    ret
+.ipp_raised:                    ; the module's dict could not be searched
+    mov rax, -1
     pop rbx
     leave
     ret
@@ -729,7 +741,8 @@ DEF_FUNC import_module, IF_FRAME
     ; Check sys.modules first
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .fail           ; nothing is held yet
     V_UNPACK rax, rdx           ; dict_get returns a Value
     test edx, edx
     jnz .found_cached
@@ -792,7 +805,8 @@ DEF_FUNC import_module, IF_FRAME
 
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .walk_get_raised
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .walk_have_module
 
@@ -821,6 +835,7 @@ DEF_FUNC import_module, IF_FRAME
     jz .walk_load
     mov rdi, rax
     call import_parent_is_package
+    ERR_M1 .walk_get_raised
     test eax, eax
     jnz .walk_load
     mov rcx, [rsp + 8]              ; where this component ends
@@ -864,7 +879,8 @@ DEF_FUNC import_module, IF_FRAME
     jz .walk_drop_key
     mov rsi, [rsp]
     mov rdx, [rsp + 8]          ; this prefix's module
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .walk_set_raised
 .walk_drop_key:
     pop rdi
     call obj_decref
@@ -930,6 +946,14 @@ DEF_FUNC import_module, IF_FRAME
     mov [rbp - IF_FAILLEN], rcx ; `import sys.foo.bar` fails at `sys.foo`
     jmp .import_error
 
+.walk_set_raised:               ; the parent's dict refused the store
+    pop rdi                     ; the bare component
+    call obj_decref
+    pop r13
+    jmp .walk_oom
+.walk_get_raised:               ; sys.modules, or the parent, could not be searched
+    pop rdi                     ; the prefix string
+    call obj_decref
 .walk_oom:
     pop rcx
     jmp .import_error
@@ -959,6 +983,7 @@ DEF_FUNC import_module, IF_FRAME
     push rax                    ; and a slot for the helper's one argument
     CSTRING rdi, "_ensure_initialized"
     call im_importlib_func
+    ERR_PENDING .cached_wait_raised
     test rax, rax
     jz .cached_waited           ; importlib is not up yet: nothing to wait on
     mov rcx, [rbp - IF_NAME]
@@ -973,7 +998,8 @@ DEF_FUNC import_module, IF_FRAME
     ; out, so ask sys.modules again rather than trust what was read before.
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IF_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .cached_wait_raised
     add rsp, 16
     test rax, rax
     jz .not_cached
@@ -1021,7 +1047,7 @@ DEF_FUNC import_module, IF_FRAME
     push rax
     mov rdi, [rel sys_modules_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret           ; err: tested below, once the prefix string is released
     V_UNPACK rax, rdx
     mov rcx, rax
     pop rdi
@@ -1030,7 +1056,11 @@ DEF_FUNC import_module, IF_FRAME
     pop rcx
     pop rax
     test rcx, rcx
-    jz .cached_as_is            ; not cached after all; the full one will do
+    jnz .cached_have_top
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .cached_as_is            ; not cached after all; the full one will do
+    jmp .fail                   ; sys.modules could not be searched
+.cached_have_top:
     mov rax, rcx
     jmp .cached_as_is
 .cached_blocked:
@@ -1117,6 +1147,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     ; ModuleNotFoundError for exactly that submodule taken as "absent".
     CSTRING rdi, "_import_submodule"
     call im_importlib_func
+    ERR_PENDING .isa_none
     test rax, rax
     jz .isa_own
     ; (module, name) as an argument array: ISA_T2 is the lower address.
@@ -1169,7 +1200,7 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     call import_module_dict
     mov rdi, rax
     mov rsi, [rbp - ISA_T1]
-    call dict_get
+    call dict_get_ret           ; err: a 0 goes to .isa_none either way; both callers hand on what is pending
     V_UNPACK rax, rdx
     mov [rbp - ISA_T2], rax
     mov rdi, [rbp - ISA_T1]
@@ -1217,9 +1248,16 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     jz .isa_out
     mov rsi, [rbp - ISA_ATTR]
     mov rdx, [rbp - ISA_T2]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .isa_set_raised
 .isa_out:
     mov rax, [rbp - ISA_T2]
+    leave
+    ret
+.isa_set_raised:                ; the package's dict refused the binding
+    mov rdi, [rbp - ISA_T2]
+    call obj_decref             ; the submodule is not the answer any more
+    xor eax, eax
     leave
     ret
 .isa_none:
@@ -1235,6 +1273,7 @@ section .text
 
 ;; ============================================================================
 ;; ifl_get(rdi = a dict, rsi = C string key) -> rax = the Value, BORROWED, or 0
+;; Fails: 0?
 ;; ============================================================================
 IFG_DICT  equ 8
 IFG_KEY   equ 16
@@ -1247,7 +1286,7 @@ DEF_FUNC_LOCAL ifl_get, IFG_FRAME
     mov [rbp - IFG_KEY], rax
     mov rdi, [rbp - IFG_DICT]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret           ; err: returned to the caller as is, once the key is released
     mov [rbp - IFG_VAL], rax
     mov rdi, [rbp - IFG_KEY]
     call obj_decref
@@ -1259,6 +1298,7 @@ END_FUNC ifl_get
 ;; ============================================================================
 ;; im_importlib_func(rdi = C string) -> rax = that function of
 ;;   lib/_importlib_bootstrap.py, BORROWED, or 0 while it is not loaded yet
+;; Fails: 0?
 ;;
 ;; Looked up each time rather than cached: a process-lifetime pointer to a
 ;; module attribute dangles when the module is dropped from sys.modules.
@@ -1269,7 +1309,7 @@ DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
     mov [rbp - IIF_NAME], rdi
     mov rdi, [rel sys_modules_dict]
     CSTRING rsi, "_importlib_bootstrap"
-    call ifl_get
+    call ifl_get                ; err: a 0 goes to .iif_none, which returns it with what is pending
     test rax, rax
     jz .iif_none
     V_TEST_PTR rax, rcx
@@ -1282,7 +1322,7 @@ DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
     test rdi, rdi
     jz .iif_none
     mov rsi, [rbp - IIF_NAME]
-    call ifl_get
+    call ifl_get                ; err: returned to the caller as is
     leave
     ret
 .iif_none:
@@ -1314,6 +1354,7 @@ DEF_FUNC import_find_and_load, IFL_FRAME
     mov [rbp - IFL_NAME], rdi
     CSTRING rdi, "_find_and_load"
     call im_importlib_func
+    ERR_PENDING .ifl_fail
     test rax, rax
     jz .ifl_own
     mov rcx, [rbp - IFL_NAME]
@@ -1327,6 +1368,10 @@ DEF_FUNC import_find_and_load, IFL_FRAME
 .ifl_own:
     mov rdi, [rbp - IFL_NAME]
     call import_find_and_load_asm   ; err: returned to the caller as is, either 0 included
+    leave
+    ret
+.ifl_fail:                      ; sys.modules could not be searched
+    xor eax, eax
     leave
     ret
 END_FUNC import_find_and_load
@@ -1353,7 +1398,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; Check sys.modules first — avoid re-loading already-imported modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - FL_NAME]
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .fl_fail        ; nothing is held yet
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .found_in_sysmod
 
@@ -1413,7 +1459,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; Look up parent in sys.modules
     mov rdi, [rel sys_modules_dict]
     mov rsi, r12
-    call dict_get
+    call dict_get_ret           ; err: tested at .fl_parent_miss, once the name is released
     V_UNPACK rax, rdx           ; dict_get returns a Value
     mov r13, rax                ; r13 = parent module payload (or 0)
     push rdx                    ; save dict_get tag for found check
@@ -1425,7 +1471,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ; If parent not found, fall through to sys.path search
     pop rdx                     ; restore dict_get tag
     test edx, edx
-    jz .search_sys_path
+    jz .fl_parent_miss
 
     ; Get parent's __path__ attribute (from module dict)
     ; Module dict is at module.ob_dict (PyModuleObject.ob_dict)
@@ -1536,6 +1582,10 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     mov rdi, [rbp - FL_NAME]
     lea rdi, [rdi + PyStrObject.data]
     call import_set_halted      ; rax = 0
+    jmp .fl_fail
+.fl_parent_miss:                ; absent, or sys.modules could not be searched
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .search_sys_path
     jmp .fl_fail
 .fl_path_failed:
     pop rdi                     ; the "__path__" string
@@ -1681,7 +1731,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1706,7 +1756,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1736,7 +1786,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1749,7 +1799,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1760,7 +1810,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     lea rdx, [rel none_singleton]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1775,7 +1825,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, rbx                ; name_str
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1840,7 +1890,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]         ; list
-    call dict_set
+    call dict_set_str
     pop rdi                     ; key
     call obj_decref
     pop rdi                     ; list
@@ -1880,7 +1930,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -1897,7 +1947,8 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
     mov rdx, r13
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .fl_register_failed
 
     ; Set __builtins__ in module dict
     lea rdi, [rel im_dunder_builtins]
@@ -1906,7 +1957,7 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, r15
     mov rsi, rax
     mov rdx, [rel builtins_dict_global]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
 
@@ -1965,7 +2016,8 @@ DEF_FUNC import_load_module, IF_FRAME
     ; r13` could hand back freed memory.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
-    call dict_get               ; borrowed Value, or 0 for a miss
+    call dict_get_ret           ; borrowed Value, or 0 for a miss
+    ERR_PENDING .fl_reread_failed
     test rax, rax
     jz .fl_keep_created         ; the body deleted itself; hand back what we made
     V_TEST_PTR rax, rcx
@@ -1988,6 +2040,26 @@ DEF_FUNC import_load_module, IF_FRAME
     pop rbx
     leave
     ret
+
+.fl_reread_failed:
+    ; sys.modules could not be searched after the body ran.  The frame, the
+    ; code and the dict have gone back; the module is all that is left.
+    mov rdi, r13
+    call obj_decref
+    xor eax, eax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.fl_register_failed:
+    ; sys.modules refused the new module: nothing ran and there is no frame.
+    mov rdi, r14                ; the code
+    call obj_decref
+    jmp .br_not_cached
 
 .load_failed:
     ; Free inner import's marshal refs array (if allocated)
@@ -2034,7 +2106,7 @@ DEF_FUNC import_load_module, IF_FRAME
     ; itself, so look before deleting -- dict_del raises on a missing key.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
-    call dict_get
+    call dict_get_ret           ; err: cleanup under the body's exception; a miss and a failure both skip the delete
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jz .br_not_cached
     mov rdi, [rel sys_modules_dict]

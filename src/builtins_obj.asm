@@ -10,6 +10,7 @@
 %include "gil.inc"
 
 ; External symbols used
+extern dict_get_ret
 extern get_iterator_opt
 extern int_from_i64
 extern int_add
@@ -2144,7 +2145,7 @@ DEF_FUNC builtin_open_fn
     push rax
     mov rdi, [r13 + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get
+    call dict_get_ret           ; err: tested at .bo_missing, once the name is released
     mov r13, rax
     pop rdi
     call obj_decref
@@ -2178,6 +2179,8 @@ DEF_FUNC builtin_open_fn
     jne .bo_fail
     FAIL exc_ImportError_type, "open() requires the _io module", .bo_fail
 .bo_missing:
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .bo_fail                ; _io's dict could not be searched: that is the error
     SET_EXC exc_ImportError_type, "_io.open is missing"
 .bo_fail:
     ; The parked keyword names may still be on the stack.
@@ -3090,7 +3093,8 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - BIM_NAME]
     V_PACK rsi, rdx
-    call dict_get
+    call dict_get_ret
+    ERR_PENDING .imp_leaf_raised
     test rax, rax
     jz .imp_leaf_missing
     V_UNPACK rax, rdx
@@ -3139,6 +3143,11 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
 .imp_fail:
     RET_NULL                    ; .imp_done releases BIM_TEMP, and `leave` the rest
     jmp .imp_done
+.imp_leaf_raised:               ; sys.modules could not be searched
+    mov rdi, [rsp]              ; the package, which is not the answer now
+    call obj_decref
+    add rsp, 8
+    jmp .imp_fail
 END_FUNC builtin_import_fn
 
 ;; ============================================================================

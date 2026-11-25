@@ -52,6 +52,7 @@ MARSHAL_FLAG_REF              equ 0x80
 ; .pyc file header
 PYC_MAGIC_3_12    equ 0x0a0d0dcb  ; 3531 in little-endian with \r\n
 PYC_HEADER_SIZE   equ 16          ; magic(4) + flags(4) + timestamp/size(8)
+extern dict_set_str
 extern str_intern_bytes
 extern int_promote_mpz
 extern none_singleton
@@ -2285,7 +2286,7 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -2304,7 +2305,7 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -2323,7 +2324,7 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -2341,7 +2342,7 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     pop rdi
@@ -2359,7 +2360,7 @@ DEF_FUNC marshal_module_init, 24        ; + 1 push = 32, 16-aligned
     mov rdi, [rbx + PyModuleObject.mod_dict]
     mov rsi, rax
     mov rdx, [rsp + 8]
-    call dict_set
+    call dict_set_str
     pop rdi
     call obj_decref
     add rsp, 8

@@ -25,6 +25,8 @@
 %include "opcodes.inc"
 %include "compiler.inc"
 
+extern dict_get_str
+extern dict_set_str
 extern ast_at
 extern ast_child
 extern ast_obj_at
@@ -264,7 +266,7 @@ DEF_FUNC sym_get, 8
     call sym_at
     mov rdi, [rax + Scope.symbols]
     mov rsi, rdx
-    call dict_get
+    call dict_get_str
     test rax, rax
     jz .absent
     V_TO_I64 rax
@@ -296,7 +298,7 @@ DEF_FUNC sym_set, SS_FRAME
     mov rdi, r12
     mov rsi, [rbp - SS_NAME]
     mov rdx, rax
-    call dict_set
+    call dict_set_str
     pop r12
     pop rbx
     leave

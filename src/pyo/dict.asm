@@ -613,6 +613,45 @@ DEF_FUNC dict_get_ret, 8        ; + 1 push = 16, 16-aligned
     ret
 END_FUNC dict_get_ret
 
+;; ============================================================================
+;; dict_get_mro(rdi=dict, rsi=name) -> rax = value Value (borrowed), or 0
+;;
+;; A TYPE's namespace, probed on the way along an MRO, where a failure is
+;; "not here".  A class body can put anything into its namespace --
+;; `type('C', (), {Odd(): 1})` -- so a name can collide with a key whose
+;; __eq__ raises.  CPython's _PyType_Lookup clears that error and answers
+;; "not found", because nothing that asks it expects one; so `C.x` is an
+;; AttributeError there and `len(c)` a TypeError, and so they are here.
+;; It used to unwind with the key's own exception.
+;;
+;; The same price as dict_get on a hit and on a miss: the failure is told
+;; apart in the miss path, from the register dict_lookup answered in.
+;; ============================================================================
+DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    call dict_lookup            ; rax = entries index, -1, or -2
+    test rax, rax
+    js .dgm_miss
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    mov rax, [rcx + rax + DictEntry.value]
+    pop rbx
+    leave
+    ret
+.dgm_miss:
+    cmp rax, -1
+    je .dgm_absent
+    xor edi, edi                ; drop what the key's __eq__ raised
+    extern exc_restore
+    call exc_restore
+.dgm_absent:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC dict_get_mro
+
     global dict_get_jumping:function    ; the name this is about to keep
 dict_get_jumping:
 ;; ============================================================================

@@ -5,6 +5,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_mro
 extern ap_malloc
 extern ap_free
 extern str_from_cstr
@@ -2996,7 +2997,7 @@ DEF_FUNC type_repr, TR_FRAME
     call str_from_cstr
     mov rsi, rax
     mov rdi, [rbp - TR_LEN]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jz .tr_name
@@ -3057,7 +3058,7 @@ DEF_FUNC type_repr, TR_FRAME
     call str_from_cstr
     mov rsi, rax
     mov rdi, [rbp - TR_LEN]
-    call dict_get
+    call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jz .tr_name_from_tp

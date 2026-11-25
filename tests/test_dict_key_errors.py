@@ -128,3 +128,30 @@ class IntKey(int):
 
 check("maketrans({bad int: 'x'})", lambda: str.maketrans({IntKey(5): "x"}))
 check("format_map, colliding", lambda: "{a}".format_map(colliding("a")))
+
+# --- dicts the interpreter keeps, and Python can reach -----------------------
+check("eval, colliding __builtins__",
+      lambda: eval("1", {BadEq("__builtins__"): 1}))
+check("exec, colliding __builtins__",
+      lambda: exec("pass", {BadEq("__builtins__"): 1}))
+
+
+def import_colliding():
+    k = BadEq("colorsys")
+    sys.modules[k] = None
+    try:
+        __import__("colorsys")
+    finally:
+        del sys.modules[k]
+
+
+check("__import__, colliding sys.modules", import_colliding)
+
+
+def locals_colliding():
+    a = 1
+    locals()[BadEq("a")] = 2
+    return locals()
+
+
+check("locals(), colliding f_locals", locals_colliding)

@@ -53,6 +53,7 @@ MARSHAL_FLAG_REF              equ 0x80
 ; header and nothing else.
 MW_SET_ENTRY_KEY              equ 8
 
+extern dict_get_ret
 extern ap_malloc
 extern ap_realloc
 extern ap_free
@@ -1334,7 +1335,7 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     mov rsi, rax
     push rax
     push rax
-    call dict_get
+    call dict_get_ret                   ; err: tested below, once the name is released
     pop rcx
     pop rdi
     push rax
@@ -1343,7 +1344,16 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     pop rax
     pop rcx
     test rax, rax
-    jz .pw_have_flag                    ; absent means write
+    jnz .pw_flag_found
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .pw_have_flag                    ; absent means write
+    ; sys's dict could not be searched.  A cache entry is an optimisation:
+    ; drop the error with it, as every other failure in here is dropped.
+    xor edi, edi
+    extern exc_restore
+    call exc_restore
+    jmp .pw_out
+.pw_flag_found:
     lea rcx, [rel bool_false]
     cmp rax, rcx
     jne .pw_out

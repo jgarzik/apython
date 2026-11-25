@@ -9,6 +9,7 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_set_ret
 extern ap_malloc
 extern ap_free
 extern obj_dealloc
@@ -631,7 +632,8 @@ DEF_FUNC frame_fast_to_locals, FTL_FRAME
     test rsi, rsi
     jz .ftl_next
     mov rdi, [rbp - FTL_DICT]
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .ftl_fail            ; f_locals held a key that would not compare
 .ftl_next:
     inc qword [rbp - FTL_I]
     jmp .ftl_loop

@@ -15,6 +15,10 @@
 %include "macros.inc"
 %include "object.inc"
 
+extern dict_get_ret
+extern dict_set_ret
+extern dict_get_str
+extern dict_set_str
 extern ap_malloc
 extern ap_free
 extern ap_memcpy
@@ -1216,7 +1220,8 @@ DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, [rbp - IMN_NAME]
     mov rdx, rax
-    call dict_set
+    call dict_set_ret
+    ERR_M1 .imn_fail_mod
 
     ; The module owns the dict now; release what dict_new gave us.
     mov rdi, [rbp - IMN_DICT]
@@ -1225,6 +1230,9 @@ DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
     leave
     ret
 
+.imn_fail_mod:                  ; sys.modules refused it
+    mov rdi, [rbp - IMN_MOD]
+    call obj_decref
 .imn_fail_dict:
     mov rdi, [rbp - IMN_DICT]
     call obj_decref
@@ -1245,7 +1253,7 @@ DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
     mov rdx, [rbp - IMN_KEY]
     push rax
     push rax                    ; a pair, so the call stays 16-byte aligned
-    call dict_set
+    call dict_set_str
     pop rdi
     pop rdi
     call obj_decref
