@@ -230,8 +230,7 @@ reasoning that chose them and what changing one would cost.
   `zipfile`, `tarfile` and `shutil`, which imported before and could not
   compress.  So is `array`, which was the largest of these by reach.  So are `_ssl` and `_ctypes`, over OpenSSL and libffi, and `_thread` over
   real threads.  What is left is genuinely C: `_tracemalloc`, `_symtable`,
-  `_sqlite3`, `_crypt`, `_curses`, `_tkinter`, and `_multiprocessing` and
-  `_queue`, which `multiprocessing` and `queue.SimpleQueue`'s fast path want.  `fcntl`,
+  `_sqlite3`, `_crypt`, `_curses`, `_tkinter`, and `_queue`, which `queue.SimpleQueue`'s fast path wants.  `fcntl`,
   `resource`, `syslog`, `pwd`, `grp`, `audioop` and `_lsprof` are there now
   and none of them needed much: two descriptor calls in `posixfd.asm`, two
   resource calls in `posixproc.asm`, and Python for the rest -- `syslog` over

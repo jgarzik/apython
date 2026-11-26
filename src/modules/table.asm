@@ -50,6 +50,7 @@ extern ssl_module_create
 extern pyexpat_module_create
 extern thread_module_create
 extern posixshmem_module_create
+extern multiprocessing_module_create
 
 section .rodata
 
@@ -83,6 +84,7 @@ bm_n_impcore:  db "_impcore", 0
 bm_n_pyexpat:  db "_pyexpatcore", 0
 bm_n_thread:   db "_threadcore", 0
 bm_n_posixshmem: db "_posixshmemcore", 0
+bm_n_multiprocessing: db "_multiprocessingcore", 0
 
 align 8
 global builtin_module_table
@@ -101,6 +103,7 @@ builtin_module_table:
     dq bm_n_hashlib,  hashlib_module_create
     dq bm_n_impcore,  impcore_module_create
     dq bm_n_io,       io_module_create
+    dq bm_n_multiprocessing, multiprocessing_module_create
     dq bm_n_posixshmem, posixshmem_module_create
     dq bm_n_pyexpat,  pyexpat_module_create
     dq bm_n_socket,   socket_module_create

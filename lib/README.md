@@ -27,7 +27,7 @@ Software Foundation License as well (`LICENSE.python`).
 |---|---|
 | Generated from CPython | `_ast.py` (by `src/compiler/gen_ast.py`) |
 | CPython, modified for apython | `test/` |
-| Written for apython | `_ast_build.py`, `atexit.py`, `audioop.py`, `binascii.py`, `_blake2.py`, `_bz2.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_csv.py`, `_datetime.py`, `_decimal.py`, `faulthandler.py`, `fcntl.py`, `_frozen_importlib.py`, `_frozen_importlib_external.py`, `_importlib_bootstrap.py`, `grp.py`, `_hashlib.py`, `_imp.py`, `_io.py`, `itertools.py`, `_json.py`, `_lsprof.py`, `_lzma.py`, `_md5.py`, `mmap.py`, `_operator.py`, `_pickle.py`, `_posixsubprocess.py`, `pwd.py`, `pyexpat.py`, `_random.py`, `_reduce.py`, `resource.py`, `_runmodule.py`, `select.py`, `_sha1.py`, `_sha2.py`, `_sha3.py`, `_signal.py`, `_socket.py`, `_string.py`, `_struct.py`, `_sysconfigdata__linux_.py`, `syslog.py`, `termios.py`, `_testcapi.py`, `_testinternalcapi.py`, `_thread.py`, `_tokenize.py`, `_typing.py`, `_warnings.py`, `zlib.py` |
+| Written for apython | `_ast_build.py`, `atexit.py`, `audioop.py`, `binascii.py`, `_blake2.py`, `_bz2.py`, `_codecs.py`, `_collections.py`, `_contextvars.py`, `_csv.py`, `_datetime.py`, `_decimal.py`, `faulthandler.py`, `fcntl.py`, `_frozen_importlib.py`, `_frozen_importlib_external.py`, `_importlib_bootstrap.py`, `grp.py`, `_hashlib.py`, `_imp.py`, `_io.py`, `itertools.py`, `_json.py`, `_lsprof.py`, `_lzma.py`, `_md5.py`, `mmap.py`, `_multiprocessing.py`, `_operator.py`, `_pickle.py`, `_posixshmem.py`, `_posixsubprocess.py`, `pwd.py`, `pyexpat.py`, `_random.py`, `_reduce.py`, `resource.py`, `_runmodule.py`, `select.py`, `_sha1.py`, `_sha2.py`, `_sha3.py`, `_signal.py`, `_socket.py`, `_string.py`, `_struct.py`, `_sysconfigdata__linux_.py`, `syslog.py`, `termios.py`, `_testcapi.py`, `_testinternalcapi.py`, `_thread.py`, `_tokenize.py`, `_typing.py`, `_warnings.py`, `zlib.py` |
 
 The table is the licence attribution for this directory, so a file added
 here belongs in it.
@@ -49,6 +49,9 @@ unchanged.
   over `poll()`.  IPv6, `sendmsg`/`recvmsg` and a real resolver are absent:
   `getaddrinfo` answers for dotted quads and for the names in `/etc/hosts`,
   and `Lib/socket.py` guards the rest with `hasattr`.
+- `_posixshmem.py` over `_posixshmemcore`: named shared-memory descriptors.
+- `_multiprocessing.py` over `_multiprocessingcore`: named semaphores,
+  recursive locks, and process-local ownership after fork.
 - `_signal.py` over `_signalcore`: `ItimerError` and `valid_signals()` over
   the handlers and the trampoline.
 - `zlib.py`, `_bz2.py`, `_lzma.py` and `_hashlib.py` over `_zlibcore`,

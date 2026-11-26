@@ -50,6 +50,7 @@ extern str_from_cstr_heap
 extern builtin_func_new
 extern int_from_i64
 extern obj_as_index
+extern set_oserror
 extern set_exception
 extern exc_RuntimeError_type
 extern exc_ValueError_type
@@ -91,6 +92,8 @@ PTHREAD_CREATE_DETACHED equ 1
 SIG_SETMASK             equ 2
 CLOCK_MONOTONIC         equ 1
 EINTR_ERRNO             equ 4
+EAGAIN_ERRNO            equ 11
+ETIMEDOUT_ERRNO         equ 110
 NS_PER_SEC              equ 1000000000
 SEM_SIZE                equ 32          ; sizeof(sem_t) on x86-64 glibc
 TSTATE_ALLOC            equ (ThreadState_size + 63) & ~63
@@ -545,12 +548,33 @@ DEF_FUNC tc_lock_acquire, LA_FRAME
     xor esi, esi
     call tc_int_arg
     ERR_M1 .la_fail
-    mov rbx, rax                ; the semaphore
+    mov rdi, rax
+    mov rsi, [rbp - LA_TMO]
+    call thread_sem_wait
+.la_fail:
+    pop rbx
+    leave
+    ret
+END_FUNC tc_lock_acquire
 
+;; thread_sem_wait(rdi = semaphore, rsi = timeout in ns) -> bool Value or 0
+;;
+;; The caller owns the semaphore across retries and while the GIL is dropped.
+DEF_FUNC thread_sem_wait, LA_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - LA_TMO], rsi
+.la_try:
     mov rdi, rbx
     call sem_trywait
     test eax, eax
     jz .la_taken
+    call __errno_location
+    mov eax, [rax]
+    cmp eax, EINTR_ERRNO
+    je .la_interrupt_try
+    cmp eax, EAGAIN_ERRNO
+    jne .la_oserror
     cmp qword [rbp - LA_TMO], 0
     je .la_not_taken
     jl .la_wait                 ; for ever: no deadline to work out
@@ -559,6 +583,8 @@ DEF_FUNC tc_lock_acquire, LA_FRAME
     mov edi, CLOCK_MONOTONIC
     lea rsi, [rbp - LA_TS]
     call clock_gettime
+    test eax, eax
+    js .la_clock_error
     mov rax, [rbp - LA_TMO]
     xor edx, edx
     mov ecx, NS_PER_SEC
@@ -596,16 +622,33 @@ DEF_FUNC tc_lock_acquire, LA_FRAME
     ALLOW_THREADS_END           ; rax survives
     test eax, eax
     jz .la_taken
-    cmp dword [rbp - LA_ERR], EINTR_ERRNO
-    jne .la_not_taken           ; ETIMEDOUT
+    mov eax, [rbp - LA_ERR]
+    cmp eax, ETIMEDOUT_ERRNO
+    je .la_not_taken
+    cmp eax, EINTR_ERRNO
+    jne .la_oserror
     call signal_run_pending
     test eax, eax
     jz .la_wait
-    xor eax, eax                ; the handler raised: NULL, exception pending
+    jmp .la_fail
+.la_interrupt_try:
+    call signal_run_pending
+    test eax, eax
+    jz .la_try
+    jmp .la_fail
+.la_clock_error:
+    call __errno_location
+    mov eax, [rax]
+.la_oserror:
+    mov edi, eax
+    xor esi, esi
+    call set_oserror
+
+.la_fail:
+    xor eax, eax
     pop rbx
     leave
     ret
-
 .la_taken:
     lea rax, [rel bool_true]
     INCREF rax
@@ -618,12 +661,7 @@ DEF_FUNC tc_lock_acquire, LA_FRAME
     pop rbx
     leave
     ret
-.la_fail:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-END_FUNC tc_lock_acquire
+END_FUNC thread_sem_wait
 
 ;; ============================================================================
 ;; _threadcore.lock_release(handle) -> None
