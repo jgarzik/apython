@@ -241,6 +241,8 @@ _STATUS_INDEX = {
     "CurrentColumnNumber": 2,
     "CurrentByteIndex": 3,
     "buffer_used": 4,
+    "buffer_size": 5,
+    "buffer_text": 6,
 }
 
 _FLAG_INDEX = {
@@ -255,7 +257,7 @@ _FLAG_INDEX = {
 class xmlparser:
     """The parser object, with libexpat's parser held as an integer handle."""
 
-    __slots__ = ("_h", "_handlers", "_intern", "_buffer_text", "_buffer_size",
+    __slots__ = ("_h", "_handlers", "_intern",
                  "_ordered", "_specified", "_nsprefixes", "_reparse")
 
     def __init__(self, encoding=None, namespace_separator=None, intern=None):
@@ -267,8 +269,6 @@ class xmlparser:
         set = object.__setattr__
         set(self, "_handlers", [None] * len(_HANDLER_NAMES))
         set(self, "_intern", intern)
-        set(self, "_buffer_text", False)
-        set(self, "_buffer_size", 8192)
         set(self, "_ordered", False)
         set(self, "_specified", False)
         set(self, "_nsprefixes", False)
@@ -293,10 +293,6 @@ class xmlparser:
             return _core.parser_status(self._h)[index]
         if name == "intern":
             return self._intern
-        if name == "buffer_text":
-            return self._buffer_text
-        if name == "buffer_size":
-            return self._buffer_size
         if name == "ordered_attributes":
             return self._ordered
         if name == "specified_attributes":
@@ -374,7 +370,10 @@ class xmlparser:
             _core.parser_set_handler(self._h, index, value)
             self._handlers[index] = value
             return
-        if name in ("buffer_text", "ordered_attributes",
+        if name == "buffer_text":
+            _core.parser_set_flag(self._h, _FLAG_INDEX[name], int(bool(value)))
+            return
+        if name in ("ordered_attributes",
                     "specified_attributes", "namespace_prefixes"):
             flag = bool(value)
             object.__setattr__(self, _FLAG_SLOT[name], flag)
@@ -385,11 +384,8 @@ class xmlparser:
             _core.parser_set_flag(self._h, _FLAG_INDEX[name], int(flag))
             return
         if name == "buffer_size":
-            if not isinstance(value, int) or isinstance(value, bool):
+            if not isinstance(value, int):
                 raise TypeError("buffer_size must be an integer")
-            if value <= 0:
-                raise ValueError("buffer_size must be greater than zero")
-            object.__setattr__(self, "_buffer_size", value)
             _core.parser_set_flag(self._h, _FLAG_INDEX["buffer_size"], value)
             return
         # Anything else is refused, and that arm is load-bearing:
@@ -416,7 +412,6 @@ class xmlparser:
 
 
 _FLAG_SLOT = {
-    "buffer_text": "_buffer_text",
     "ordered_attributes": "_ordered",
     "specified_attributes": "_specified",
     "namespace_prefixes": "_nsprefixes",

@@ -262,7 +262,7 @@ PC_H      equ 8
 PC_ARGS   equ 16
 PC_NARGS  equ 24
 PC_FN     equ 32
-PC_FRAME  equ 48                ; + 1 push = 56 ... padded below
+PC_INCALL equ 40
 DEF_FUNC px_call, 56
     push rbx
     mov [rbp - PC_H], rdi
@@ -277,9 +277,12 @@ DEF_FUNC px_call, 56
     test rax, rax
     jz .stopped
     mov [rbp - PC_FN], rax
+    INCREF_V rax, rdx
 
     mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rbp - PC_H]
+    mov rdx, [rcx + PxHandle.in_callback]
+    mov [rbp - PC_INCALL], rdx
     mov qword [rcx + PxHandle.in_callback], 1
 
     mov rdi, rax
@@ -287,8 +290,13 @@ DEF_FUNC px_call, 56
     mov rdx, [rbp - PC_NARGS]
     call obj_call_n             ; err: .raised, below
 
+    mov rbx, rax
     mov rcx, [rbp - PC_H]
-    mov qword [rcx + PxHandle.in_callback], 0
+    mov rdx, [rbp - PC_INCALL]
+    mov [rcx + PxHandle.in_callback], rdx
+    mov rdi, [rbp - PC_FN]
+    DECREF_V rdi, rcx
+    mov rax, rbx
     test rax, rax
     jz .raised
     pop rbx
@@ -470,13 +478,33 @@ END_FUNC px_intern
 ;; ============================================================================
 ;; px_flush(rdi = PxHandle*) -> eax = 0 normally, -1 if a handler raised
 ;;
-;; flush_character_buffer.  Nothing to do until buffer_text turns the buffer
-;; on, which is a later commit; the call sites are all here already, because
-;; the ORDER matters -- every other trampoline has to flush before it fires,
-;; or coalesced text arrives after the element that follows it.
+;; Keep the byte count visible during delivery. A setter called from the
+;; handler can change the live buffer without delivering this block again.
 ;; ============================================================================
-DEF_FUNC_BARE px_flush
+DEF_FUNC px_flush, 8
+    push rbx
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .pending
+    cmp qword [rdi + PxHandle.flushing], 0
+    jne .empty
+    mov rdx, [rdi + PxHandle.buffer_used]
+    test rdx, rdx
+    jz .empty
+    mov rbx, rdi
+    mov rsi, [rdi + PxHandle.buffer]
+    mov qword [rdi + PxHandle.flushing], 1
+    call px_deliver_text
+    mov qword [rbx + PxHandle.buffer_used], 0
+    mov qword [rbx + PxHandle.flushing], 0
+    jmp .out
+.empty:
     xor eax, eax
+    jmp .out
+.pending:
+    mov eax, -1
+.out:
+    pop rbx
+    leave
     ret
 END_FUNC px_flush
 
@@ -743,57 +771,95 @@ END_FUNC px_cb_end_element
 ;; ============================================================================
 ;; px_cb_chardata(rdi = userData, rsi = s, edx = len) -> nothing
 ;;
-;; The ONE trampoline that does not flush on entry, because it is what fills
-;; the buffer.  While buffer_text is off -- which is the default, and all
-;; there is until the buffering commit -- each chunk goes straight to the
-;; handler.  `s` is NOT NUL-terminated, which is why this is the only handler
-;; that takes a length.
+;; Buffer sizes and Expat's chunks are measured in bytes.
 ;; ============================================================================
-CD_H      equ 8
-CD_STR    equ 16
-CD_ARGS   equ 24
-CD_FRAME  equ 40                ; + 2 pushes = 56 ... padded below
-DEF_FUNC px_cb_chardata, 48
+CD_FRAME equ 8
+DEF_FUNC px_cb_chardata, CD_FRAME
     push rbx
     push r12
-    mov [rbp - CD_H], rdi
-    mov rbx, rsi
-    movsx r12, edx
-    mov qword [rbp - CD_STR], 0
-
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    movsxd r13, edx
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne .out
     cmp qword [gs:ThreadState.current_exception], 0
     jne .out
-
+.route:
+    cmp qword [rbx + PxHandle.handlers + PX_H_CHARACTER_DATA*8], 0
+    je .out
+    mov rax, [rbx + PxHandle.buffer]
+    test rax, rax
+    jz .direct
+    mov rcx, [rbx + PxHandle.buffer_used]
+    lea rdx, [rcx + r13]
+    cmp rdx, [rbx + PxHandle.buffer_size]
+    jbe .append
+    test rcx, rcx
+    jz .direct
+    mov rdi, rbx
+    call px_flush
+    test eax, eax
+    jns .route                 ; the callback can change the buffer or handler
+    jmp .out
+.append:
+    mov [rbx + PxHandle.buffer_used], rdx
+    lea rdi, [rax + rcx]
+    mov rsi, r12
+    mov rdx, r13
+    extern ap_memcpy
+    call ap_memcpy
+    jmp .out
+.direct:
     mov rdi, rbx
     mov rsi, r12
-    call str_new_heap           ; counted: s is not NUL-terminated
-    test rax, rax
-    jz .out
-    mov [rbp - CD_STR], rax
-    mov [rbp - CD_ARGS], rax
-
-    mov rdi, [rbp - CD_H]
-    mov esi, PX_H_CHARACTER_DATA
-    lea rdx, [rbp - CD_ARGS]
-    mov ecx, 1
-    call px_call
-    test rax, rax
-    jz .out
-    mov rdi, rax
-    DECREF_V rdi, rcx
+    mov rdx, r13
+    call px_deliver_text
 .out:
-    mov rdi, [rbp - CD_STR]
-    test rdi, rdi
-    jz .no_str
-    call obj_decref
-.no_str:
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC px_cb_chardata
+
+;; px_deliver_text(rdi = handle, rsi = bytes, rdx = length) -> 0 or -1
+;; Materialize the string before calling Python, which may resize the buffer.
+PDT_H    equ 8
+PDT_ARG  equ 16
+PDT_FRAME equ 16
+DEF_FUNC_LOCAL px_deliver_text, PDT_FRAME
+    mov [rbp - PDT_H], rdi
+    mov rdi, rsi
+    mov rsi, rdx
+    call str_new_heap           ; counted: s is not NUL-terminated
+    test rax, rax
+    jz .oom
+    mov [rbp - PDT_ARG], rax
+    mov rdi, [rbp - PDT_H]
+    mov esi, PX_H_CHARACTER_DATA
+    lea rdx, [rbp - PDT_ARG]
+    mov ecx, 1
+    call px_call
+    mov rdi, rax
+    XDECREF_V rdi, rcx
+    mov rdi, [rbp - PDT_ARG]
+    call obj_decref
+    xor eax, eax
+    cmp qword [gs:ThreadState.current_exception], 0
+    setne al
+    neg eax
+    leave
+    ret
+.oom:
+    extern exc_MemoryError_type
+    SET_EXC exc_MemoryError_type, ""
+    mov rdi, [rbp - PDT_H]
+    call px_stop
+    mov eax, -1
+    leave
+    ret
+END_FUNC px_deliver_text
 
 ;; ============================================================================
 ;; px_marshal(rdi = PxHandle*, rsi = const char*[], edx = count,

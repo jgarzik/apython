@@ -47,6 +47,8 @@ extern builtin_func_new
 extern ap_malloc
 extern ap_free
 extern ap_memset
+extern malloc
+extern free
 extern obj_as_index
 extern set_exception
 extern exc_TypeError_type
@@ -54,6 +56,8 @@ extern exc_ValueError_type
 extern exc_MemoryError_type
 extern tuple_new
 extern none_singleton
+extern bool_true
+extern bool_false
 extern str_type
 extern dict_type
 
@@ -91,6 +95,7 @@ extern XML_SetSkippedEntityHandler
 extern px_cb_start_element
 extern px_cb_end_element
 extern px_cb_chardata
+extern px_cb_noop_chardata
 extern px_cb_processing_instr
 extern px_cb_unparsed_entity
 extern px_cb_notation_decl
@@ -644,7 +649,7 @@ DEF_FUNC px_parser_free, PF_FRAME
     test rdi, rdi
     jz .no_buffer
     mov qword [rcx + PxHandle.buffer], 0
-    call ap_free
+    call free wrt ..plt
 .no_buffer:
     mov rdi, [rbp - PF_H]
     call ap_free
@@ -673,7 +678,7 @@ END_FUNC px_parser_free
 
 ;; ============================================================================
 ;; _pyexpatcore.parser_status(handle)
-;;     -> (code, lineno, column, byteindex, buffer_used)
+;;     -> (code, lineno, column, byteindex, buffer_used, buffer_size, buffer_text)
 ;;
 ;; ONE entry for seven Python attributes, and not as a shortcut.  expat.h has
 ;;
@@ -703,7 +708,7 @@ DEF_FUNC px_parser_status, PS_FRAME
     ERR_NULL .fail
     mov [rbp - PS_H], rax
 
-    mov edi, 5
+    mov edi, 7
     call tuple_new
     test rax, rax
     jz .oom
@@ -738,6 +743,19 @@ DEF_FUNC px_parser_status, PS_FRAME
     mov rcx, [rbp - PS_H]
     mov rdi, [rcx + PxHandle.buffer_used]
     PX_STORE_INT 4
+
+    mov rcx, [rbp - PS_H]
+    mov rdi, [rcx + PxHandle.buffer_size]
+    PX_STORE_INT 5
+
+    mov rcx, [rbp - PS_H]
+    lea rax, [rel bool_false]
+    lea rdx, [rel bool_true]
+    cmp qword [rcx + PxHandle.buffer], 0
+    cmovne rax, rdx
+    INCREF rax
+    mov rcx, [rbp - PS_ITEMS]
+    mov [rcx + 6*8], rax
 
     mov rax, [rbp - PS_TUP]
     mov rsp, rbx
@@ -926,6 +944,14 @@ DEF_FUNC px_set_handler, 56
 .clearing:
     mov qword [rbp - SH_FN], 0
 .have_fn:
+    ; Deliver buffered data to the old handler before publishing its replacement.
+    cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
+    jne .publish
+    mov rdi, [rbp - SH_H]
+    call px_flush
+    test eax, eax
+    js .fail
+.publish:
 
     ; The handle BORROWS; lib/pyexpat.py's _handlers list owns.
     ;
@@ -946,15 +972,6 @@ DEF_FUNC px_set_handler, 56
     mov rdx, [rbp - SH_FN]
     mov [rcx + PxHandle.handlers + rax*8], rdx
 
-    ; The character-data handler is the one whose REMOVAL has to flush first,
-    ; or text already coalesced is dropped on the floor.
-    cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
-    jne .install
-    mov rdi, [rbp - SH_H]
-    call px_flush               ; it calls the handler, which may raise
-    test eax, eax
-    js .fail
-.install:
     ; A row is two qwords, and x86 has no *16 scale -- only 1, 2, 4 and 8 --
     ; so the index is shifted rather than scaled.
     mov rax, [rbp - SH_IDX]
@@ -975,6 +992,12 @@ DEF_FUNC px_set_handler, 56
     jmp .done
 .uninstall:
     xor esi, esi
+    cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
+    jne .uninstall_call
+    cmp qword [rcx + PxHandle.in_callback], 0
+    je .uninstall_call
+    lea rsi, [rel px_cb_noop_chardata]
+.uninstall_call:
     call rdx
 .done:
     mov rsp, rbx
@@ -1055,6 +1078,8 @@ DEF_FUNC px_parse, PP_FRAME
     call px_handle_at
     ERR_NULL .pending
     mov [rbp - PP_H], rax
+    cmp qword [rax + PxHandle.in_callback], 0
+    jne .reentrant
     mov qword [rax + PxHandle.raised], 0
 
     ; str, bytes or bytearray.  The discrimination is a V_TEST_PTR and three
@@ -1184,6 +1209,9 @@ DEF_FUNC px_parse, PP_FRAME
     xor eax, eax
     leave
     ret
+.reentrant:
+    extern exc_RuntimeError_type
+    FAIL exc_RuntimeError_type, "cannot parse the same parser from a callback", .pending
 .bad_data:
     mov rsp, [rbp - PP_SAVED]
     lea rdi, [rel exc_TypeError_type]
@@ -1213,14 +1241,14 @@ END_FUNC px_parse
 ;; XML_SetReturnNSTriplet makes a namespaced name arrive as
 ;; "uri<sep>local<sep>prefix" instead of "uri<sep>local".
 ;;
-;; buffer_text and buffer_size arrive here too, and land on the handle for the
-;; coalescing commit to use; setting them changes nothing yet.
+;; Buffer changes finish delivery before replacing the handle's storage.
 ;; ============================================================================
 SF_ARGS   equ 8
 SF_H      equ 16
 SF_WHICH  equ 24
 SF_VALUE  equ 32
 SF_SAVED  equ 40
+SF_BUFFER equ 48
 SF_FRAME  equ 48                ; + 0 pushes = 48, 16-aligned
 DEF_FUNC px_set_flag, SF_FRAME
     mov [rbp - SF_SAVED], rsp
@@ -1263,10 +1291,13 @@ DEF_FUNC px_set_flag, SF_FRAME
     je .nsprefix
     cmp rax, PX_F_BUFFERSIZE
     je .buffersize
-    ; PX_F_BUFFERTEXT: the buffer itself arrives with the coalescing commit,
-    ; so for now turning it on changes nothing and the flag lives only on the
-    ; Python side, where it still reads back correctly.
-    jmp .done
+    cmp qword [rbp - SF_VALUE], 0
+    je .disable
+    cmp qword [rcx + PxHandle.buffer], 0
+    jne .done
+    mov rax, [rcx + PxHandle.buffer_size]
+    mov [rbp - SF_VALUE], rax
+    jmp .allocate
 .ordered:
     mov rax, [rbp - SF_VALUE]
     mov [rcx + PxHandle.ordered], rax
@@ -1277,8 +1308,52 @@ DEF_FUNC px_set_flag, SF_FRAME
     jmp .done
 .buffersize:
     mov rax, [rbp - SF_VALUE]
+    test rax, rax
+    jle .small_size
+    cmp rax, 0x7fffffff
+    ja .large_size
+    cmp rax, [rcx + PxHandle.buffer_size]
+    je .done
+.allocate:
+    mov rdi, rax
+    call malloc wrt ..plt
+    test rax, rax
+    jz .oom
+    mov [rbp - SF_BUFFER], rax
+    mov rdi, [rbp - SF_H]
+    call px_flush
+    test eax, eax
+    js .discard_buffer
+    mov rcx, [rbp - SF_H]
+    mov rax, [rbp - SF_VALUE]
     mov [rcx + PxHandle.buffer_size], rax
+    jmp .replace_buffer
+.disable:
+    cmp qword [rcx + PxHandle.buffer], 0
+    je .done
+    mov qword [rbp - SF_BUFFER], 0
+    mov rdi, rcx
+    call px_flush
+    test eax, eax
+    js .fail
+.replace_buffer:
+    mov rcx, [rbp - SF_H]          ; the callback may have changed the buffer
+    mov rax, [rbp - SF_BUFFER]
+    mov rdi, [rcx + PxHandle.buffer]
+    mov [rcx + PxHandle.buffer], rax
+    mov qword [rcx + PxHandle.buffer_used], 0
+    call free wrt ..plt
     jmp .done
+.discard_buffer:
+    mov rdi, [rbp - SF_BUFFER]
+    call free wrt ..plt
+    jmp .fail
+.small_size:
+    FAIL exc_ValueError_type, "buffer_size must be greater than zero", .fail
+.large_size:
+    FAIL exc_ValueError_type, "buffer_size must not be greater than 2147483647", .fail
+.oom:
+    FAIL exc_MemoryError_type, "", .fail
 .nsprefix:
     mov rax, [rbp - SF_VALUE]
     mov [rcx + PxHandle.nsprefixes], rax

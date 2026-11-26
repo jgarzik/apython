@@ -77,6 +77,7 @@ struc PxHandle
     .buffer:      resq 1        ; the coalescing buffer, 0 when buffer_text off
     .buffer_size: resq 1
     .buffer_used: resq 1
+    .flushing:    resq 1        ; the current block is already being delivered
     .ordered:     resq 1
     .specified:   resq 1
     .nsprefixes:  resq 1
