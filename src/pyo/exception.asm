@@ -714,6 +714,16 @@ DEF_FUNC exc_getattr
     call ap_strcmp
     test eax, eax
     jz .eg_import_msg
+    lea rdi, [r12 + PyStrObject.data]
+    extern oserror_is_field
+    call oserror_is_field
+    test eax, eax
+    jz .eg_really_not_found
+    mov rdi, rbx
+    lea rsi, [rel exc_OSError_type]
+    call exc_isinstance         ; err: a static type is never refused
+    test eax, eax
+    jnz .return_none
     jmp .eg_really_not_found
 
 .eg_import_msg:

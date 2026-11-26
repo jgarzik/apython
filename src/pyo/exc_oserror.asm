@@ -304,9 +304,9 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov [rbp - ONW_NARGS], rdx
     mov [rbp - ONW_EFFN], rdx
 
-    ; Everything defaults to None; CPython reports None, not AttributeError,
-    ; for an OSError built with no arguments.
-    lea rax, [rel none_singleton]
+    ; Leave absent fields out of the dict so a subclass's own definition
+    ; can answer. Attribute lookup supplies None when the MRO has no answer.
+    xor eax, eax
     mov [rbp - ONW_ERRNO], rax
     mov [rbp - ONW_STRERR], rax
     mov [rbp - ONW_FNAME], rax
@@ -424,6 +424,8 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov rdi, [rbx]
     test rdi, rdi
     jz .onw_done
+    cmp qword [r12], 0
+    je .onw_next_attr
     call str_from_cstr_heap
     push rax
     mov rdi, [rbp - ONW_EXC]
@@ -433,6 +435,7 @@ DEF_FUNC oserror_new, ONW_FRAME
     call exc_setattr            ; err: none of the five is a field name
     pop rdi
     call obj_decref             ; exc_setattr's dict_set took its own ref
+.onw_next_attr:
     add rbx, 8
     sub r12, 8
     jmp .onw_attr_loop
@@ -445,6 +448,35 @@ DEF_FUNC oserror_new, ONW_FRAME
     leave
     ret
 END_FUNC oserror_new
+
+;; oserror_is_field(rdi = attribute name, NUL-terminated) -> eax = boolean
+DEF_FUNC oserror_is_field, 16
+    push rbx
+    push r12
+    mov r12, rdi
+    lea rbx, [rel oserror_attr_names]
+.next:
+    mov rsi, [rbx]
+    test rsi, rsi
+    jz .missing
+    mov rdi, r12
+    extern ap_strcmp
+    call ap_strcmp
+    test eax, eax
+    jz .found
+    add rbx, 8
+    jmp .next
+.found:
+    mov eax, 1
+    jmp .out
+.missing:
+    xor eax, eax
+.out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_is_field
 
 ;; ============================================================================
 ;; set_oserror(rdi = errno (positive), rsi = filename PyStrObject* or NULL)
