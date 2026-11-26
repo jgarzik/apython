@@ -49,6 +49,7 @@ extern ap_free
 extern ap_memset
 extern malloc
 extern free
+extern dlsym
 extern obj_as_index
 extern set_exception
 extern exc_TypeError_type
@@ -120,6 +121,7 @@ align 8
 px_handles:     dq 0            ; PxHandle*[], grown by doubling
 px_handle_cap:  dq 0
 px_handle_n:    dq 0
+px_set_reparse: dq 0            ; optional before Expat 2.6.0
 
 section .rodata
 align 8
@@ -163,6 +165,7 @@ pn_set_handler:     db "parser_set_handler", 0
 pn_parse:           db "parser_parse", 0
 pn_set_flag:        db "parser_set_flag", 0
 pn_expat_version:   db "EXPAT_VERSION", 0
+px_reparse_symbol:  db "XML_SetReparseDeferralEnabled", 0
 
 px_e_nargs:     db "_pyexpatcore: wrong number of arguments", 0
 px_e_handle:    db "_pyexpatcore: stale or invalid handle", 0
@@ -850,6 +853,11 @@ DEF_FUNC pyexpat_module_create, PM_FRAME
     MODULE_ADD_FUNC px_parse,         pn_parse
     MODULE_ADD_FUNC px_set_flag,      pn_set_flag
 
+    xor edi, edi                ; RTLD_DEFAULT
+    lea rsi, [rel px_reparse_symbol]
+    call dlsym wrt ..plt
+    mov [rel px_set_reparse], rax
+
     ; EXPAT_VERSION comes from the library that is actually linked, not from a
     ; constant compiled in here: `version_info` is parsed out of it in Python,
     ; so a program that logs either sees the truth.
@@ -1304,6 +1312,8 @@ DEF_FUNC px_set_flag, SF_FRAME
     je .nsprefix
     cmp rax, PX_F_BUFFERSIZE
     je .buffersize
+    cmp rax, PX_F_REPARSE
+    je .reparse
     cmp qword [rbp - SF_VALUE], 0
     je .disable
     cmp qword [rcx + PxHandle.buffer], 0
@@ -1380,6 +1390,26 @@ DEF_FUNC px_set_flag, SF_FRAME
 .done:
     mov rsp, [rbp - SF_SAVED]
     lea rax, [rel none_singleton]
+    INCREF rax
+    leave
+    ret
+.reparse:
+    mov rax, [rel px_set_reparse]
+    test rax, rax
+    jz .reparse_disabled
+    mov rdi, [rcx + PxHandle.parser]
+    xor esi, esi
+    cmp qword [rbp - SF_VALUE], 0
+    setne sil
+    call rax
+    cmp qword [rbp - SF_VALUE], 0
+    je .reparse_disabled
+    lea rax, [rel bool_true]
+    jmp .reparse_return
+.reparse_disabled:
+    lea rax, [rel bool_false]
+.reparse_return:
+    mov rsp, [rbp - SF_SAVED]
     INCREF rax
     leave
     ret

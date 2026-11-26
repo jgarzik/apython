@@ -251,6 +251,7 @@ _FLAG_INDEX = {
     "namespace_prefixes": 2,
     "buffer_text": 3,
     "buffer_size": 4,
+    "reparse_deferral": 5,
 }
 
 
@@ -274,7 +275,7 @@ class xmlparser:
         set(self, "_nsprefixes", False)
         # libexpat has no XML_GetReparseDeferralEnabled -- only the setter --
         # so the state is kept here, as CPython keeps it on the object.
-        set(self, "_reparse", True)
+        set(self, "_reparse", version_info >= (2, 6, 0))
         set(self, "_h", _core.parser_new(encoding, namespace_separator, intern))
 
     # -- attributes ---------------------------------------------------------
@@ -306,6 +307,16 @@ class xmlparser:
             "'pyexpat.xmlparser' object has no attribute %r" % (name,))
 
     # -- parsing ------------------------------------------------------------
+
+    def GetReparseDeferralEnabled(self, /):
+        """Return whether Expat defers retrying incomplete tokens."""
+        return self._reparse
+
+    def SetReparseDeferralEnabled(self, enabled, /):
+        """Set whether Expat defers retrying incomplete tokens."""
+        enabled = _core.parser_set_flag(
+            self._h, _FLAG_INDEX["reparse_deferral"], int(bool(enabled)))
+        object.__setattr__(self, "_reparse", enabled)
 
     def Parse(self, data, isfinal=False):
         """Feed a chunk of the document.
@@ -364,6 +375,9 @@ class xmlparser:
                 return 1
 
     def __setattr__(self, name, value):
+        if not isinstance(name, str):
+            raise TypeError("attribute name must be string, not '%s'"
+                            % type(name).__name__)
         if name.startswith("_"):
             # Refused, not forwarded.  `_handlers` owns the references the
             # core BORROWS, and `_h` is the handle it dereferences; rebinding

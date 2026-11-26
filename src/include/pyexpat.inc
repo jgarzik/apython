@@ -51,7 +51,8 @@ PX_F_SPECIFIED   equ 1          ; specified_attributes
 PX_F_NSPREFIX    equ 2          ; namespace_prefixes
 PX_F_BUFFERTEXT  equ 3          ; buffer_text
 PX_F_BUFFERSIZE  equ 4          ; buffer_size
-PX_F_COUNT       equ 5
+PX_F_REPARSE     equ 5          ; SetReparseDeferralEnabled
+PX_F_COUNT       equ 6
 
 ; CPython's default, and the one test_pyexpat's coalescing cases assume.
 PX_BUFFER_DEFAULT equ 8192
