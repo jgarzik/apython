@@ -61,6 +61,7 @@ extern XML_ParserCreate
 extern XML_ParserCreateNS
 extern XML_ParserFree
 extern XML_SetUserData
+extern XML_SetUnknownEncodingHandler
 extern XML_GetErrorCode
 extern XML_GetCurrentLineNumber
 extern XML_GetCurrentColumnNumber
@@ -448,6 +449,12 @@ DEF_FUNC px_parser_new, PN_FRAME
     call XML_SetUserData wrt ..plt
 
     mov rcx, [rbp - PN_H]
+    mov rdi, [rcx + PxHandle.parser]
+    lea rsi, [rel px_latin1_alias]
+    xor edx, edx
+    call XML_SetUnknownEncodingHandler wrt ..plt
+
+    mov rcx, [rbp - PN_H]
     mov qword [rcx + PxHandle.magic], PX_MAGIC
     mov qword [rcx + PxHandle.buffer_size], PX_BUFFER_DEFAULT
     mov rax, [rbp - PN_INTERN]
@@ -528,6 +535,43 @@ DEF_FUNC px_parser_new, PN_FRAME
     leave
     ret
 END_FUNC px_parser_new
+
+;; px_latin1_alias(rdi = unused, rsi = name, rdx = XML_Encoding*) -> XML_Status
+;; Expat recognizes ISO-8859-1 itself; Python also accepts iso8859.
+PX_ENCODING_BYTES equ 256
+PX_ENCODING_DATA equ PX_ENCODING_BYTES * 4
+DEF_FUNC_BARE px_latin1_alias
+    lea rdi, [rel px_iso8859_name]
+    xor ecx, ecx
+.name:
+    mov al, [rsi + rcx]
+    or al, 0x20
+    cmp al, [rdi + rcx]
+    jne .unknown
+    inc ecx
+    cmp ecx, 7
+    jb .name
+    cmp byte [rsi + rcx], 0
+    jne .unknown
+    xor ecx, ecx
+.map:
+    mov [rdx + rcx*4], ecx
+    inc ecx
+    cmp ecx, PX_ENCODING_BYTES
+    jb .map
+    mov qword [rdx + PX_ENCODING_DATA], 0
+    mov qword [rdx + PX_ENCODING_DATA + 8], 0     ; convert
+    mov qword [rdx + PX_ENCODING_DATA + 16], 0    ; release
+    mov eax, XML_STATUS_OK
+    ret
+.unknown:
+    xor eax, eax
+    ret
+END_FUNC px_latin1_alias
+
+section .rodata
+px_iso8859_name: db "iso8859"
+section .text
 
 ;; ============================================================================
 ;; _pyexpatcore.parser_free(handle) -> None
