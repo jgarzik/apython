@@ -16,7 +16,7 @@ pass test_future_stmt 22
 pass test_gdb 0
 pass test_import 87
 pass test_importlib 1061
-pass test_inspect 260
+pass test_inspect 263
 pass test_json 170
 pass test_lib2to3 655
 pass test_module 26

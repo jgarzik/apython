@@ -83,11 +83,11 @@ DEF_FUNC list_iter_new, 8            ; 1 pushes, so rsp is 16-aligned
     ; INCREF the list
     INCREF rbx
 
-    push rax
+    mov rbx, rax
     mov rdi, rax
     extern gc_track
     call gc_track
-    pop rax
+    mov rax, rbx
 
     pop rbx
     leave
