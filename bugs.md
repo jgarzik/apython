@@ -14,22 +14,6 @@ reasoning that chose them and what changing one would cost.
 
 ## Correctness
 
-- **`test.test_module` segfaults in the collector, and `make check-pkg` is
-  red because of it.**  `apython -m unittest test.test_module` over CPython's
-  Lib/ dies inside `gc_collect_gen` at the `tp_traverse` call, during
-  `ModuleTests.test_weakref`'s `gc.collect()`: some tracked object's type
-  pointer is not a type by then.  `test_weakref` passes alone and passes
-  paired with any one other test of the module, so it takes several of the
-  earlier ones together -- the uninitialised-module and module-`__repr__`
-  tests, which also fail, are the likely company.  The shape is the one
-  CLAUDE.md records under "Turning on `TYPE_FLAG_HAVE_GC` without moving
-  every allocation site", or a dealloc that does not untrack; neither has
-  been confirmed.  It predates threads: the floor in `tests/pkg_floor.txt`
-  says 26 of these passed once, and the same run also shows `test_capi`,
-  `test_cext`, `test_cppext` and `test_inspect` below their floors.  The RC
-  sweep cannot see any of it, because it covers `Lib/test/test_*.py` and
-  these are package directories.
-
 - **A relative import with no `__name__` in globals raises the wrong type.**
   `exec("from ... import x", {})` answers `ImportError: attempted relative
   import with no known parent package`; CPython answers
