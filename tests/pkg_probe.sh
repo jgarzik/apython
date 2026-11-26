@@ -16,6 +16,7 @@
 #   CRASH   the process died on a signal
 #   HANG    it did not finish inside the timeout
 #   N/A     the package requires dynamic extension loading
+#           or a multiprocessing start method the runtime cannot offer
 #
 # Compared against tests/pkg_floor.txt, which records the per-directory count
 # of PASSING tests and the crash set.  A directory that passes fewer tests
@@ -35,6 +36,7 @@
 set -u
 
 APYTHON=${APYTHON:-./apython}
+PYTHON=${PYTHON:-python3}
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$TESTDIR")"
 FLOOR="$TESTDIR/pkg_floor.txt"
@@ -109,12 +111,46 @@ mkdir "$WORK/cpython" || exit 1
 ) || exit 1
 CPYTHON_LIB="$WORK/cpython/Lib"
 
-DYNAMIC_LOADING=$(cd "$WORK" && PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" \
-    "$APY" -B -c 'import sysconfig; print(int(bool(sysconfig.get_config_var("HAVE_DYNAMIC_LOADING"))))') || exit 1
+CAPABILITIES=$(cd "$WORK" && PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" \
+    "$APY" -B -c 'import sys, sysconfig
+print(sys.implementation.name, int(bool(sysconfig.get_config_var("HAVE_DYNAMIC_LOADING"))))') || exit 1
+read -r IMPLEMENTATION DYNAMIC_LOADING <<< "$CAPABILITIES"
 case "$DYNAMIC_LOADING" in
     0|1) ;;
     *) echo "Unexpected dynamic loading capability: $DYNAMIC_LOADING" >&2; exit 1 ;;
 esac
+
+# Some upstream tests start an isolated child, which ignores PYTHONPATH.
+# Give an in-tree apython the same library even in those child processes.
+APY_DIR=$(dirname "$(realpath "$APY")")
+if [ "$IMPLEMENTATION" = apython ] && [ -d "$APY_DIR/stdlib" ] && [ -d "$APY_DIR/lib" ]; then
+    mkdir -p "$WORK/runtime/build" || exit 1
+    cp -- "$APY" "$WORK/runtime/apython" || exit 1
+    cp -a -- "$APY_DIR/lib" "$WORK/runtime/lib" || exit 1
+    if [ -f "$APY_DIR/build/_ctypes_test.so" ]; then
+        cp -- "$APY_DIR/build/_ctypes_test.so" "$WORK/runtime/build/" || exit 1
+    fi
+    ln -s -- "$CPYTHON_LIB" "$WORK/runtime/stdlib" || exit 1
+    APY="$WORK/runtime/apython"
+fi
+
+FORKSERVER=$(cd "$WORK" && PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" \
+    "$APY" -B -c 'import multiprocessing
+print(int("forkserver" in multiprocessing.get_all_start_methods()))') || exit 1
+case "$FORKSERVER" in
+    0|1) ;;
+    *) echo "Unexpected forkserver capability: $FORKSERVER" >&2; exit 1 ;;
+esac
+
+# A few tests consume bytecode fixtures. Some intentionally invalid sources
+# in Lib/test make compileall return nonzero, so check a real cache entry.
+if [ ! -f "$CPYTHON_LIB/test/__pycache__/__init__.cpython-312.pyc" ]; then
+    "$PYTHON" -m compileall -q -j "$JOBS" "$CPYTHON_LIB" >/dev/null 2>&1 || true
+    if [ ! -f "$CPYTHON_LIB/test/__pycache__/__init__.cpython-312.pyc" ]; then
+        echo "Could not prepare bytecode with $PYTHON (CPython 3.12 required)" >&2
+        exit 1
+    fi
+fi
 
 # One directory, one process.  Writes a single tab-separated row.
 probe_one() {
@@ -126,6 +162,10 @@ probe_one() {
                 return
                 ;;
         esac
+    fi
+    if [ "$pkg" = test_multiprocessing_forkserver ] && [ "$FORKSERVER" = 0 ]; then
+        printf '%s\tN/A\t0\t0\n' "$pkg" >> "$WORK/results.txt"
+        return
     fi
     out="$WORK/$pkg.txt"
     # A cwd of its own, thrown away afterwards, for the reason rc_sweep.sh
@@ -173,7 +213,7 @@ probe_one() {
         >> "$WORK/results.txt"
 }
 export -f probe_one
-export WORK APY CPYTHON_LIB TIMEOUT VLIMIT DYNAMIC_LOADING
+export WORK APY CPYTHON_LIB TIMEOUT VLIMIT DYNAMIC_LOADING FORKSERVER
 
 : > "$WORK/results.txt"
 NPKG=$(wc -l < "$WORK/selected")
