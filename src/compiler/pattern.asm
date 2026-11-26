@@ -35,6 +35,7 @@ extern par_syntax_error
 extern ast_obj_at
 extern ap_memcmp
 extern par_name_obj
+extern par_label_obj
 extern par_exprlist_stmt
 
 global ps_match
@@ -1292,7 +1293,7 @@ DEF_FUNC_LOCAL par_class_pattern, KP_FRAME
     jz .positional
 
     mov rdi, rbx
-    call par_name_obj
+    call par_label_obj
     test rax, rax
     jz .fail
     mov [rbp - KP_NAME], rax

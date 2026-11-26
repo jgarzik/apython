@@ -131,7 +131,7 @@ DEF_FUNC_LOCAL ar_field, ARF_FRAME
     mov rcx, [rax + Comp.objs + Buf.len]
     cmp rbx, rcx
     jae .arf_none
-    ; The name as it was WRITTEN, when private-name mangling rewrote it.  The
+    ; The canonical spelling before mangling, when it rewrote the name. The
     ; compiler wants `_C__x` and this tree wants `__x`, which is what CPython's
     ; carries -- it mangles later, where the class is still in hand.
     mov rdi, rax

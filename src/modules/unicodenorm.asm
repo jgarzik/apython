@@ -946,6 +946,23 @@ DEF_FUNC_BARE udn_select
     ret
 END_FUNC udn_select
 
+;; udn_normalize_identifier(rdi = str) -> owned NFKC str, or 0 on error
+;; Source identifiers always use the current Unicode tables, including after
+;; a call through unicodedata.ucd_3_2_0.
+DEF_FUNC udn_normalize_identifier, 8
+    push rbx
+    mov rbx, rdi
+    lea rdi, [rel udn_tables_current]
+    call udn_select
+    mov rdi, rbx
+    mov esi, 1
+    mov edx, 1
+    call udn_normalize_str
+    pop rbx
+    leave
+    ret
+END_FUNC udn_normalize_identifier
+
 ;; ============================================================================
 ;; unicodedata_normalize(args, nargs) -> rax = a Value
 ;;   -- unicodedata.normalize(form, unistr)
