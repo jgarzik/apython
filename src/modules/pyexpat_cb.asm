@@ -60,6 +60,8 @@ extern exc_MemoryError_type
 extern exc_RecursionError_type
 extern obj_as_index
 extern tuple_new
+extern bytes_type
+extern ap_memcpy
 
 extern XML_StopParser
 extern XML_FreeContentModel
@@ -83,6 +85,74 @@ extern int_from_i64
 extern list_new_filled
 
 section .text
+
+;; px_cb_encoding(handle, encoding name, XML_Encoding*) -> XML_Status
+;; On failure XML_Parse returns normally and the Python exception stands.
+UE_H     equ 8
+UE_INFO  equ 16
+UE_NAME  equ 24
+UE_MAP   equ 32
+UE_FRAME equ 32
+DEF_FUNC px_cb_encoding, UE_FRAME
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .error
+    cmp qword [rdi + PxHandle.magic], PX_MAGIC
+    jne .error
+    mov [rbp - UE_H], rdi
+    mov [rbp - UE_INFO], rdx
+    mov rdi, rsi
+    call str_from_cstr_heap
+    test rax, rax
+    jz .oom
+    mov [rbp - UE_NAME], rax
+
+    mov rcx, [rbp - UE_H]
+    mov rdi, [rcx + PxHandle.encoding_map]
+    lea rsi, [rbp - UE_NAME]
+    mov edx, 1
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    call obj_call_n             ; err: check after releasing the name
+    mov [rbp - UE_MAP], rax
+    mov rdi, [rbp - UE_NAME]
+    call obj_decref
+    mov rax, [rbp - UE_MAP]
+    test rax, rax
+    jz .error
+    V_TEST_PTR rax, rcx
+    ja .bad_map
+    lea rcx, [rel bytes_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .bad_map
+    cmp qword [rax + PyBytesObject.ob_size], PX_ENCODING_DATA
+    jne .bad_map
+
+    mov rdi, [rbp - UE_INFO]
+    lea rsi, [rax + PyBytesObject.data]
+    mov edx, PX_ENCODING_DATA
+    call ap_memcpy
+    mov rdi, [rbp - UE_INFO]
+    mov qword [rdi + PX_ENCODING_DATA], 0
+    mov qword [rdi + PX_ENCODING_DATA + 8], 0    ; convert
+    mov qword [rdi + PX_ENCODING_DATA + 16], 0   ; release
+    mov rdi, [rbp - UE_MAP]
+    call obj_decref
+    mov eax, XML_STATUS_OK
+    leave
+    ret
+.bad_map:
+    mov rdi, rax
+    DECREF_V rdi, rcx
+    SET_EXC exc_TypeError_type, "Expat encoding mapper must return 1024 bytes"
+    jmp .error
+.oom:
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .error
+    SET_EXC exc_MemoryError_type, ""
+.error:
+    xor eax, eax
+    leave
+    ret
+END_FUNC px_cb_encoding
 
 ; The common frame every macro-built trampoline uses.  One layout rather than
 ; one per handler, because the bodies differ only in how many strings arrive
@@ -856,7 +926,6 @@ DEF_FUNC px_cb_chardata, CD_FRAME
     lea rdi, [rax + rcx]
     mov rsi, r12
     mov rdx, r13
-    extern ap_memcpy
     call ap_memcpy
     jmp .out
 .direct:

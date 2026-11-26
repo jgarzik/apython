@@ -623,6 +623,7 @@ test_pyexpat_module
 test_pyexpat_latin1
 test_pyexpat_buffer
 test_pyexpat_buffer_file
+test_pyexpat_codec_registry
 test_pyexpat_handlers
 test_pyexpat_external_dtd
 test_pyexpat_parse_isfinal

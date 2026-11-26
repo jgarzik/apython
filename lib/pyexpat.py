@@ -38,6 +38,16 @@ import _pyexpatcore as _core
 
 EXPAT_VERSION = _core.EXPAT_VERSION
 native_encoding = "UTF-8"
+_ENCODING_BYTES = bytes(range(256))
+
+
+def _encoding_map(name):
+    """Build the 256 signed int32 entries Expat reads for an unknown encoding."""
+    decoded = _ENCODING_BYTES.decode(name, "replace")
+    if len(decoded) != 256:
+        raise ValueError("multi-byte encodings are not supported")
+    return b"".join((-1 if char == "\ufffd" else ord(char)).to_bytes(
+        4, "little", signed=True) for char in decoded)
 
 
 def _parse_version(text):
@@ -291,7 +301,8 @@ class xmlparser:
         # libexpat has no XML_GetReparseDeferralEnabled -- only the setter --
         # so the state is kept here, as CPython keeps it on the object.
         set(self, "_reparse", version_info >= (2, 6, 0))
-        set(self, "_h", _core.parser_new(encoding, namespace_separator, intern))
+        set(self, "_h", _core.parser_new(encoding, namespace_separator, intern,
+                                        _encoding_map))
 
     # -- attributes ---------------------------------------------------------
     #
