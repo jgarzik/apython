@@ -49,6 +49,8 @@ extern buf_push_u8
 extern bytes_from_data
 extern str_new_heap
 extern comp_intern
+extern comp_source_ident
+extern obj_decref
 extern ap_strlen
 extern par_for_target
 extern par_fstring_pieces
@@ -1342,6 +1344,120 @@ DEF_FUNC pf_const, PFN_FRAME
     ret
 END_FUNC pf_const
 
+;; ============================================================================
+;; par_dotted_name(Comp *c) -> rax = obj index of the joined name, 0 on error
+;; Normalize each component before joining the module name for IMPORT_NAME.
+;; ============================================================================
+PDN_BUF   equ 48         ; a Buf lives here
+PDN_FRAME equ 48         ; + 4 pushes = 80
+DEF_FUNC par_dotted_name, PDN_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    mov rbx, rdi
+    lea rdi, [rbp - PDN_BUF]
+    mov esi, 1
+    call buf_init
+.loop:
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_NAME
+    jne .need_name
+    mov rdi, rbx
+    call par_peek
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call comp_source_ident
+    ERR_NULL .fail
+    mov r14, rax
+    lea r12, [rax + PyStrObject.data]
+    mov r13, [rax + PyStrObject.ob_size]
+.copy:
+    test r13, r13
+    jz .copied
+    movzx esi, byte [r12]
+    lea rdi, [rbp - PDN_BUF]
+    call buf_push_u8
+    inc r12
+    dec r13
+    jmp .copy
+.copied:
+    mov rdi, r14
+    call obj_decref
+    mov rdi, rbx
+    call par_advance
+    mov rdi, rbx
+    call par_kind
+    cmp eax, TOK_DOT
+    jne .done
+    mov rdi, rbx
+    call par_advance
+    lea rdi, [rbp - PDN_BUF]
+    mov esi, '.'
+    call buf_push_u8
+    jmp .loop
+.done:
+    mov rdi, [rbp - PDN_BUF + Buf.data]
+    mov rsi, [rbp - PDN_BUF + Buf.len]
+    call comp_intern
+    test rax, rax
+    jz .fail
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov r12, rax
+    lea rdi, [rbp - PDN_BUF]
+    call buf_free
+    mov rax, r12
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.need_name:
+    mov rdi, rbx
+    CSTRING rsi, "invalid syntax"
+    call par_syntax_error
+.fail:
+    lea rdi, [rbp - PDN_BUF]
+    call buf_free
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC par_dotted_name
+
+;; par_label_obj(Comp *c) -> arena index for the current NAME, 0 on failure
+;; Like a call keyword, a class-pattern attribute label uses the canonical
+;; identifier without applying the enclosing class's private-name prefix.
+PLO_IDX equ 8
+PLO_FRAME equ 8
+DEF_FUNC par_label_obj, PLO_FRAME
+    push rbx
+    mov rbx, rdi
+    call par_peek
+    mov rdi, [rax + Token.start]
+    mov esi, [rax + Token.len]
+    call comp_source_ident
+    ERR_NULL .out
+    mov rdi, rbx
+    mov rsi, rax
+    call ast_obj
+    mov [rbp - PLO_IDX], rax
+    mov rdi, rbx
+    call par_advance
+    mov rax, [rbp - PLO_IDX]
+.out:
+    pop rbx
+    leave
+    ret
+END_FUNC par_label_obj
+
 ;; pf_name(Comp *c) -> node
 PFM_LINE  equ 16
 PFM_TOK   equ 24
@@ -2393,9 +2509,8 @@ DEF_FUNC in_call, ICL_FRAME
     mov [rbp - ICL_KWLINE], rcx
     mov rdi, [rax + Token.start]
     mov esi, [rax + Token.len]
-    call comp_intern
-    test rax, rax
-    jz .fail
+    call comp_source_ident
+    ERR_NULL .fail
     mov rdi, rbx
     mov rsi, rax
     call ast_obj
