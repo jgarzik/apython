@@ -3,8 +3,8 @@
 ; A signal arrives at a moment the interpreter cannot run Python in: the
 ; handler is a C frame on some other stack, with no frame, no value stack and
 ; no idea what half-finished operation it interrupted.  So the C handler here
-; does the only thing that is safe -- it records that signal N arrived and
-; sets one flag -- and the eval loop runs the Python handler at a point of its
+; records that signal N arrived and optionally writes a wakeup byte.
+; The eval loop runs the Python handler at a point of its
 ; own choosing.  That is CPython's design, and the point it chooses is the
 ; same one: a backward jump, which is the top of every loop, so a program that
 ; is computing rather than blocking still notices.
@@ -56,6 +56,10 @@ SIG_SA_SIZE   equ 152          ; sizeof(struct sigaction) on x86-64 glibc
 SIG_SA_MASK   equ 8            ; sa_mask, 128 bytes
 SIG_SA_FLAGS  equ 136
 SIG_SA_RESTART equ 0x10000000
+SIG_WAKEUP_ERRORS equ 16
+SIG_WAKEUP_WARN equ 1
+SIG_EAGAIN equ 11
+SIG_F_GETFL equ 3
 
 section .bss
 ;; The Python handler for each signal, as a Value, or 0 for "not ours" --
@@ -70,7 +74,9 @@ signal_default_handler: resq 1   ; owned for the life of the interpreter
 ;; runs.  A byte rather than a counter: a signal that arrives twice before the
 ;; handler runs is delivered once, as CPython's is.
 signal_pending: resb SIG_NSIG
-    align 8
+    alignb 4
+signal_wakeup_errors: resd SIG_WAKEUP_ERRORS
+    alignb 8
 
 ;; Scratch for building a `struct sigaction`.  Only ever touched with signals
 ;; that are about to be reinstalled, so a handler cannot see it half-written.
@@ -79,6 +85,10 @@ sig_old: resb SIG_SA_SIZE
 
 section .data
 align 8
+; One atomic snapshot. The low dword is a signed descriptor, the high
+; dword controls whether an EAGAIN write is reported.
+signal_wakeup_config: dq (SIG_WAKEUP_WARN << 32) | 0xffffffff
+
 ;; "At least one signal is waiting to be delivered" is the EB_SIGNAL bit of
 ;; eval_breaker (src/gil.asm), the one word the eval loop's checkpoints test,
 ;; so the check it pays on every backward jump is one load and one branch.
@@ -91,13 +101,49 @@ section .text
 ;; signal_trampoline(rdi = the signal number) -> void
 ;;
 ;; The C-level handler.  Everything it does has to be safe to do from a signal:
-;; two stores and a return, no allocation, no lock, no libc.
+;; stores and a raw nonblocking write, with no allocation, lock or libc.
 ;; ============================================================================
-DEF_FUNC_LOCAL signal_trampoline
+ST_BYTE   equ 8
+ST_CONFIG equ 16
+ST_FRAME  equ 16
+DEF_FUNC_LOCAL signal_trampoline, ST_FRAME
     cmp rdi, SIG_NSIG
     jae .st_out
     lea rax, [rel signal_pending]
     mov byte [rax + rdi], 1
+    lock or qword [rel eval_breaker], EB_SIGNAL
+
+    mov rax, [rel signal_wakeup_config]
+    cmp eax, -1
+    je .st_out
+    mov [rbp - ST_CONFIG], rax
+    mov [rbp - ST_BYTE], dil
+    mov edi, eax
+    lea rsi, [rbp - ST_BYTE]
+    mov edx, 1
+    extern sys_write
+    call sys_write
+    test eax, eax
+    jns .st_out
+    cmp eax, -SIG_EAGAIN
+    jne .st_record
+    cmp dword [rbp - ST_CONFIG + 4], 0
+    je .st_out
+.st_record:
+    mov edx, eax
+    neg edx
+    lea rsi, [rel signal_wakeup_errors]
+    mov ecx, SIG_WAKEUP_ERRORS
+.st_slot:
+    xor eax, eax
+    lock cmpxchg [rsi], edx
+    je .st_error_pending
+    add rsi, 4
+    dec ecx
+    jnz .st_slot
+.st_error_pending:
+    ; The main thread may have consumed the signal flag before the error
+    ; was published by a worker's interrupt_main.
     lock or qword [rel eval_breaker], EB_SIGNAL
 .st_out:
     leave
@@ -113,10 +159,76 @@ END_FUNC signal_trampoline
 ;; ============================================================================
 global signal_mark_pending
 DEF_FUNC signal_mark_pending
+    test rdi, rdi
+    jz .smp_done
+    cmp rdi, SIG_NSIG
+    jae .smp_done
+    lea rax, [rel signal_handlers]
+    mov rax, [rax + rdi*8]
+    test rax, rax
+    jz .smp_done
+    V_TEST_PTR rax, rcx
+    ja .smp_done
     call signal_trampoline
+.smp_done:
     leave
     ret
 END_FUNC signal_mark_pending
+
+;; signal_after_fork_child() -> void
+;; Pending work belongs to the parent. The child's fork hooks may reset its
+;; inherited descriptor independently of the signal state.
+DEF_FUNC_BARE signal_after_fork_child
+    xor eax, eax
+    lea rdi, [rel signal_pending]
+    mov ecx, SIG_NSIG
+    rep stosb
+    lea rdi, [rel signal_wakeup_errors]
+    mov ecx, SIG_WAKEUP_ERRORS
+    rep stosd
+    lock and qword [rel eval_breaker], ~EB_SIGNAL
+    ret
+END_FUNC signal_after_fork_child
+
+;; signal_report_wakeup_error(rdi = errno) -> void
+;; Runs under the GIL with the original exception out of the way.
+SWE_ERR   equ 8
+SWE_SAVED equ 16
+SWE_EXC   equ 24
+SWE_MSG   equ 32
+SWE_FRAME equ 32
+DEF_FUNC_LOCAL signal_report_wakeup_error, SWE_FRAME
+    mov [rbp - SWE_ERR], rdi
+    extern exc_fetch
+    call exc_fetch
+    mov [rbp - SWE_SAVED], rax
+    mov rdi, [rbp - SWE_ERR]
+    xor esi, esi
+    xor edx, edx
+    extern oserror_build
+    call oserror_build
+    test rax, rax
+    jz .swe_restore
+    mov [rbp - SWE_EXC], rax
+    CSTRING rdi, "Exception ignored when trying to write to the signal wakeup fd"
+    call str_from_cstr_heap
+    mov [rbp - SWE_MSG], rax
+    mov rdi, [rbp - SWE_EXC]
+    xor esi, esi
+    mov rdx, rax
+    extern traceback_print_unraisable_msg
+    call traceback_print_unraisable_msg
+    mov rdi, [rbp - SWE_MSG]
+    call obj_decref
+    mov rdi, [rbp - SWE_EXC]
+    call obj_decref
+.swe_restore:
+    mov rdi, [rbp - SWE_SAVED]
+    extern exc_restore
+    call exc_restore
+    leave
+    ret
+END_FUNC signal_report_wakeup_error
 
 ;; ============================================================================
 ;; signal_install(rdi = signum, rsi = the C handler to install) -> rax = 0 ok
@@ -185,6 +297,20 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     cmp rax, [rel tstate_main_ptr]
     jne .srp_not_main
     lock and qword [rel eval_breaker], ~EB_SIGNAL
+    xor ebx, ebx
+.srp_wakeup_errors:
+    lea rdx, [rel signal_wakeup_errors]
+    cmp dword [rdx + rbx*4], 0
+    je .srp_wakeup_next
+    xor edi, edi
+    xchg [rdx + rbx*4], edi
+    test edi, edi
+    jz .srp_wakeup_next
+    call signal_report_wakeup_error
+.srp_wakeup_next:
+    inc ebx
+    cmp ebx, SIG_WAKEUP_ERRORS
+    jb .srp_wakeup_errors
     mov ebx, 1
 .srp_loop:
     cmp rbx, SIG_NSIG
@@ -248,6 +374,7 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     leave
     ret
 .srp_raised:
+    lock or qword [rel eval_breaker], EB_SIGNAL
     mov eax, 1
     pop rbx
     leave
@@ -441,6 +568,84 @@ DEF_FUNC signal_method_getsignal, 16
     leave
     ret
 END_FUNC signal_method_getsignal
+
+;; _signalcore.set_wakeup_fd(fd, warn_on_full_buffer) -> previous fd
+;; Fails: 0
+;; The Python wrapper supplies the default and accepts the keyword.
+SWF_ARGS  equ 8
+SWF_FD    equ 16
+SWF_WARN  equ 24
+SWF_MSG   equ 80
+SWF_FRAME equ 80
+DEF_FUNC_LOCAL signal_set_wakeup_fd, SWF_FRAME
+    cmp rsi, 2
+    jne .swf_args
+    mov [rbp - SWF_ARGS], rdi
+    mov rdi, [rdi]
+    extern posix_int32_arg
+    call posix_int32_arg
+    ERR_M1 .swf_fail
+    mov [rbp - SWF_FD], rax
+    mov rdi, [rbp - SWF_ARGS]
+    mov rdi, [rdi + 8]
+    extern obj_is_true
+    call obj_is_true
+    ERR_M1 .swf_fail
+    mov [rbp - SWF_WARN], rax
+
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .swf_thread
+    mov rdi, [rbp - SWF_FD]
+    cmp edi, -1
+    je .swf_publish
+    mov esi, SIG_F_GETFL
+    xor edx, edx
+    extern sys_fcntl
+    call sys_fcntl
+    test rax, rax
+    js .swf_oserror
+    test eax, O_NONBLOCK
+    jz .swf_blocking
+
+.swf_publish:
+    mov rax, [rel signal_wakeup_config]
+    mov rcx, [rbp - SWF_WARN]
+    shl rcx, 32
+    mov edx, [rbp - SWF_FD]
+    or rcx, rdx
+    mov [rel signal_wakeup_config], rcx
+    movsxd rax, eax
+    V_PACK_I64 rax, rcx
+    leave
+    ret
+.swf_oserror:
+    neg rax
+    mov rdi, rax
+    xor esi, esi
+    call set_oserror
+    jmp .swf_fail
+.swf_args:
+    FAIL exc_TypeError_type, "set_wakeup_fd() takes exactly 2 arguments", .swf_fail
+.swf_thread:
+    FAIL exc_ValueError_type, \
+        "set_wakeup_fd only works in main thread of the main interpreter", .swf_fail
+.swf_blocking:
+    lea rdi, [rbp - SWF_MSG]
+    mov esi, SWF_MSG - SWF_WARN
+    CSTRING rdx, "the fd %i must be in non-blocking mode"
+    mov ecx, [rbp - SWF_FD]
+    xor eax, eax
+    extern snprintf
+    call snprintf wrt ..plt
+    lea rdi, [rel exc_ValueError_type]
+    lea rsi, [rbp - SWF_MSG]
+    call set_exception
+.swf_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC signal_set_wakeup_fd
 
 ;; ============================================================================
 ;; signal_method_default_int_handler(args, nargs) -> rax = 0, always
@@ -688,6 +893,7 @@ DEF_FUNC signal_module_create, SM_FRAME
 .sm_funcs:
     MODULE_ADD_FUNC signal_method_signal,   signal_s_signal
     MODULE_ADD_FUNC signal_method_getsignal, signal_s_getsignal
+    MODULE_ADD_FUNC signal_set_wakeup_fd, signal_s_set_wakeup_fd
 
     ; Runner checks whether the installed SIGINT handler is this exact
     ; builtin before replacing it with its task cancellation handler.
@@ -998,6 +1204,7 @@ section .rodata
 signal_s_name:      db "_signalcore", 0
 signal_s_signal:    db "signal", 0
 signal_s_getsignal: db "getsignal", 0
+signal_s_set_wakeup_fd: db "set_wakeup_fd", 0
 signal_s_default_int_handler: db "default_int_handler", 0
 signal_s_raise_signal: db "raise_signal", 0
 signal_s_alarm:     db "alarm", 0

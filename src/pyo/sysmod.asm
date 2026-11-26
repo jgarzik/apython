@@ -2862,6 +2862,7 @@ UNH_EXC   equ 8
 UNH_KEY   equ 16
 UNH_ARG   equ 24
 UNH_OBJ   equ 32
+UNH_MSG   equ 40
 UNH_FRAME equ 48            ; + 0 pushes = 48
 DEF_FUNC sys_unraisablehook_func, UNH_FRAME
     mov qword [rbp - UNH_OBJ], 0
@@ -2913,12 +2914,31 @@ DEF_FUNC sys_unraisablehook_func, UNH_FRAME
     jz .suh_done
     V_TEST_PTR rax, rcx
     ja .suh_drop
-    ; The whole report, object line included -- the same one the interpreter
-    ; prints when nothing has replaced this hook.
-    mov rdi, rax
+    CSTRING rdi, "err_msg"
+    call str_from_cstr_heap
+    mov [rbp - UNH_KEY], rax
+    mov rdi, [rbp - UNH_ARG]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - UNH_MSG], rax
+    mov rdi, [rbp - UNH_KEY]
+    call obj_decref
+    xor edx, edx
+    mov rax, [rbp - UNH_MSG]
+    test rax, rax
+    jz .suh_report
+    V_TEST_PTR rax, rcx
+    ja .suh_report
+    lea rcx, [rel str_type]
+    cmp [rax + PyObject.ob_type], rcx
+    cmove rdx, rax
+.suh_report:
+    mov rdi, [rbp - UNH_EXC]
     mov rsi, [rbp - UNH_OBJ]
-    extern traceback_unraisable_default
-    call traceback_unraisable_default
+    extern traceback_unraisable_default_msg
+    call traceback_unraisable_default_msg
+    mov rdi, [rbp - UNH_MSG]
+    XDECREF_V rdi, rcx
 .suh_drop:
     mov rdi, [rbp - UNH_EXC]
     XDECREF_V rdi, rcx

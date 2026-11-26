@@ -100,6 +100,7 @@ struc ThreadState
     .comp_inherit_future: resq 1  ; PEP 563 inherited by the next compile
     .tb_seen_n:           resq 1  ; traceback printing: cycle guard count
     .tb_chain_suppress:   resq 1  ;   print no __cause__/__context__ chain
+    .tb_output_sink:      resq 1  ;   redirected stream for a contextual report
     .tb_seen:             resq TB_SEEN_MAX  ; the exceptions already printed
     ; ---- asyncio: the running loop and its backend's state ----------------
     .eventloop:           resb TS_EVENTLOOP_SIZE
