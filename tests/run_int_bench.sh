@@ -24,6 +24,8 @@
 # Usage: bash tests/run_int_bench.sh
 set -u
 cd "$(dirname "$0")/.."
+APYTHON=${APYTHON:-./apython}
+PYTHON=${PYTHON:-python3}
 BD=${TMPDIR:-/tmp}/apython-int-bench
 mkdir -p "$BD"
 mk() { cat > "$BD/$1.py"; }
@@ -345,7 +347,7 @@ BENCHES="i_add i_sub i_mul i_floordiv i_truediv i_mod i_cmp i_inplace i_neg \
          i_boundary i_big i_huge i_factorial i_str i_parse i_bigstr i_hash \
          i_sum i_listidx i_dictkey"
 
-for b in $BENCHES empty; do python3 -m py_compile "$BD/$b.py"; done
+for b in $BENCHES empty; do "$PYTHON" -m py_compile "$BD/$b.py"; done
 
 timeit() {
     local best=999999 t
@@ -357,12 +359,12 @@ timeit() {
 }
 
 EPYC=$(ls "$BD/__pycache__/empty."*.pyc)
-SA=$(timeit ./apython "$EPYC"); SC=$(timeit python3 "$EPYC")
+SA=$(timeit "$APYTHON" "$EPYC"); SC=$(timeit "$PYTHON" "$EPYC")
 
 echo "=== agreement ==="
 for b in $BENCHES; do
     PYC=$(ls "$BD/__pycache__/$b."*.pyc)
-    e=$(python3 "$PYC" 2>&1); a=$(./apython "$PYC" 2>&1)
+    e=$("$PYTHON" "$PYC" 2>&1); a=$("$APYTHON" "$PYC" 2>&1)
     [ "$e" == "$a" ] || echo "  DIFF $b: cpython=[$e] apython=[$a]"
 done
 echo "  (nothing above means all agree)"
@@ -372,11 +374,11 @@ printf "%-13s %9s %9s %8s\n" "benchmark" "apython" "cpython" "speedup"
 TA=0; TC=0
 for b in $BENCHES; do
     PYC=$(ls "$BD/__pycache__/$b."*.pyc)
-    a=$(timeit ./apython "$PYC"); c=$(timeit python3 "$PYC")
+    a=$(timeit "$APYTHON" "$PYC"); c=$(timeit "$PYTHON" "$PYC")
     a=$((a-SA)); c=$((c-SC)); [ "$a" -lt 1 ] && a=1; [ "$c" -lt 1 ] && c=1
     TA=$((TA+a)); TC=$((TC+c))
-    printf "%-13s %9s %9s %8s\n" "$b" "$a" "$c" "$(python3 -c "print('%.2fx'%($c/$a))")"
+    printf "%-13s %9s %9s %8s\n" "$b" "$a" "$c" "$("$PYTHON" -c "print('%.2fx'%($c/$a))")"
 done
 echo
 printf "TOTAL apython=%sms cpython=%sms overall=%s\n" "$TA" "$TC" \
-       "$(python3 -c "print('%.2fx'%($TC/$TA))")"
+       "$("$PYTHON" -c "print('%.2fx'%($TC/$TA))")"
