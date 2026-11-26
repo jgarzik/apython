@@ -64,6 +64,7 @@ section .bss
 ;; interpreter does.
 global signal_handlers
 signal_handlers: resq SIG_NSIG
+signal_default_handler: resq 1   ; owned for the life of the interpreter
 
 ;; One byte per signal, set by the C handler and cleared when the Python one
 ;; runs.  A byte rather than a counter: a signal that arrives twice before the
@@ -584,6 +585,25 @@ DEF_FUNC signal_method_strsignal, 16
 END_FUNC signal_method_strsignal
 
 ;; ============================================================================
+;; signal_default_handler_get() -> borrowed default SIGINT handler
+;;
+;; Import initialization can build _signalcore before installing SIGINT.
+;; Both paths share this object, regardless of which gets to it first.
+;; ============================================================================
+DEF_FUNC_LOCAL signal_default_handler_get
+    mov rax, [rel signal_default_handler]
+    test rax, rax
+    jnz .done
+    lea rdi, [rel signal_method_default_int_handler]
+    lea rsi, [rel signal_s_default_int_handler]
+    call builtin_func_new
+    mov [rel signal_default_handler], rax
+.done:
+    leave
+    ret
+END_FUNC signal_default_handler_get
+
+;; ============================================================================
 ;; signal_default_init() -> void
 ;;
 ;; Called once at start-up: SIGINT gets default_int_handler, so Ctrl-C raises
@@ -600,11 +620,10 @@ END_FUNC signal_method_strsignal
 SDI_FRAME equ 16            ; + 0 pushes = 16
 global signal_default_init
 DEF_FUNC signal_default_init, SDI_FRAME
-    lea rdi, [rel signal_method_default_int_handler]
-    lea rsi, [rel signal_s_default_int_handler]
-    call builtin_func_new
+    call signal_default_handler_get
     test rax, rax
     jz .sdi_done
+    inc qword [rax + PyObject.ob_refcnt]   ; the SIGINT table owns a reference too
     lea rcx, [rel signal_handlers]
     mov [rcx + 2*8], rax                    ; SIGINT
     mov edi, 2
@@ -669,7 +688,20 @@ DEF_FUNC signal_module_create, SM_FRAME
 .sm_funcs:
     MODULE_ADD_FUNC signal_method_signal,   signal_s_signal
     MODULE_ADD_FUNC signal_method_getsignal, signal_s_getsignal
-    MODULE_ADD_FUNC signal_method_default_int_handler, signal_s_default_int_handler
+
+    ; Runner checks whether the installed SIGINT handler is this exact
+    ; builtin before replacing it with its task cancellation handler.
+    lea rdi, [rel signal_s_default_int_handler]
+    call str_from_cstr_heap
+    mov rbx, rax
+    call signal_default_handler_get
+    mov rdx, rax
+    mov rdi, r12
+    mov rsi, rbx
+    call dict_set_str
+    mov rdi, rbx
+    call obj_decref
+
     MODULE_ADD_FUNC signal_method_raise_signal, signal_s_raise_signal
     MODULE_ADD_FUNC signal_method_alarm,    signal_s_alarm
     MODULE_ADD_FUNC signal_method_pause,    signal_s_pause
