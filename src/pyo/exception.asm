@@ -111,6 +111,14 @@ DEF_FUNC exc_new, EN_FRAME
     mov qword [rax + PyExceptionObject.exc_args], 0
     mov qword [rax + PyExceptionObject.exc_dict], 0
     mov qword [rax + PyExceptionObject.exc_suppress], 0
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .init_args
+    mov r13, rax
+    mov rdi, rax
+    extern oserror_zero_fields
+    call oserror_zero_fields
+    mov rax, r13
+.init_args:
 
     ; INCREF the message
     INCREF_V r12, r13
@@ -355,6 +363,13 @@ DEF_FUNC exc_dealloc, ED_FRAME
     jz .no_dict
     call obj_decref
 .no_dict:
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .save_type
+    mov rdi, rbx
+    extern oserror_clear
+    call oserror_clear
+.save_type:
 
     ; Save ob_type before freeing: gc_dealloc reads it, then frees.  A frame
     ; slot rather than a push, so both calls below stay 16-aligned.
@@ -378,7 +393,15 @@ END_FUNC exc_dealloc
 ;; exc_getattr(PyExceptionObject *exc, PyStrObject *name) -> PyObject* or NULL
 ;; Handle attribute access on exception objects: args, __context__, __cause__, etc.
 ;; ============================================================================
-DEF_FUNC exc_getattr
+DEF_FUNC_BARE exc_getattr
+    xor edx, edx
+    xor ecx, ecx
+    jmp exc_getattr_where
+END_FUNC exc_getattr
+
+;; exc_getattr_where(rdi = exception, rsi = name, rdx = origin out or 0,
+;;                   rcx = allow unbound methods) -> Value, or 0
+DEF_FUNC exc_getattr_where
     push rbx
     push r12
     push r13
@@ -386,7 +409,30 @@ DEF_FUNC exc_getattr
 
     mov rbx, rdi            ; exc
     mov r12, rsi            ; name str
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .exc_attr
+    mov r13, rcx
+    mov r14, rdx
+    lea rdi, [r12 + PyStrObject.data]
+    extern oserror_is_field
+    call oserror_is_field
+    test eax, eax
+    jz .exc_attr
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r14
+    mov rcx, r13
+    extern instance_getattr_default
+    call instance_getattr_default ; err: forward the result
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.exc_attr:
     ; Compare attribute name
     lea rdi, [r12 + PyStrObject.data]
 
@@ -986,7 +1032,7 @@ DEF_FUNC exc_getattr
     leave
     V_PACK rax, rdx             ; return one Value
     ret
-END_FUNC exc_getattr
+END_FUNC exc_getattr_where
 
 ;; ============================================================================
 ;; exc_setattr(PyExceptionObject *exc, PyStrObject *name, PyObject *value, int value_tag)
@@ -1008,6 +1054,23 @@ DEF_FUNC exc_setattr, ESA_FRAME
     mov r12, rsi            ; the name
     mov [rbp - ESA_VAL], rdx
     mov [rbp - ESA_TAG], rcx
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .esa_exception
+    lea rdi, [r12 + PyStrObject.data]
+    call oserror_is_field
+    test eax, eax
+    jz .esa_exception
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, [rbp - ESA_VAL]
+    extern instance_setattr
+    call instance_setattr      ; err: forward the result
+    pop r12
+    pop rbx
+    leave
+    ret
+.esa_exception:
 
     ; A NULL value is a DELETE: op_delete_attr calls tp_setattr(obj, name,
     ; NULL).  Writing that straight into the dict left an entry whose key was
@@ -1462,7 +1525,14 @@ DEF_FUNC exc_method_init, EMI_FRAME
     test rax, rax
     jz .emi_none
     mov [rbp - EMI_SELF], rax
+    mov rcx, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    test rcx, rcx
+    jz .emi_args
+    cmp qword [rcx + PyTupleObject.ob_size], 0
+    jne .emi_keywords
 
+.emi_args:
     ; args = the tuple of everything after self
     lea rbx, [rdi + 8]
     dec rsi
@@ -1497,6 +1567,15 @@ DEF_FUNC exc_method_init, EMI_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.emi_keywords:
+    mov rax, [rax + PyObject.ob_type]
+    mov rsi, [rax + PyTypeObject.tp_name]
+    xor edi, edi
+    call exc_set_bad_keyword
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC exc_method_init
 
@@ -1610,6 +1689,8 @@ DEF_FUNC exc_method_new, EMN_FRAME
     call type_is_subtype
     test eax, eax
     jz .emn_not_an_exc
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jnz .emn_oserror
 
     ; A group is BaseExceptionGroup's to build, not this one's: eg_new fills
     ; eg_exceptions and nothing here would.  `super().__new__(cls, msg, excs)`
@@ -1714,6 +1795,11 @@ DEF_FUNC exc_method_new, EMN_FRAME
     CSTRING rdi, \
         `BaseException.__new__(\x01): \x01 is not a subtype of BaseException`
     extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .emn_fail
+.emn_oserror:
+    mov rsi, rbx
+    CSTRING rdi, `BaseException.__new__(\x01) is not safe, use OSError.__new__()`
     call set_type_error_with_typename
     jmp .emn_fail
 END_FUNC exc_method_new
@@ -1934,12 +2020,6 @@ EIM_FRAME equ 40            ; + 1 push = 48, 16-aligned
 ;; which names the class and stops.  The args tuple is exactly what the
 ;; constructor takes back, so this is the whole reduction.
 ;;
-;; OSError does NOT get its own here, and the difference is recorded in
-;; bugs.md beside its cause: its errno, strerror, filename and filename2 live
-;; in the instance dict rather than in fields, so they come back as a STATE
-;; where CPython, which keeps them as C members, answers a two-tuple and
-;; re-packs the filename into the args instead.  Every value survives the
-;; round trip either way; the tuple's shape differs.
 ;; ============================================================================
 ERD_SELF  equ 8
 ERD_ARGS  equ 16
@@ -2032,20 +2112,21 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     ; what CPython makes __new__, and it is what stops both.
     EXC_ADD_STATIC exc_method_new, "__new__"
 
-    ; OSError keeps one method of its own, because its reduction is not the
-    ; general one: the filename goes back into the ARGUMENTS and the four
-    ; named attributes must not go out as a state.  A dict of one entry on
-    ; exc_OSError_type is all it takes -- everything else still resolves along
-    ; the MRO to BaseException's.
     call dict_new
     test rax, rax
     jz .eim_out
     mov rbx, rax
     mov [rel exc_OSError_type + PyTypeObject.tp_dict], rbx
     extern oserror_reduce
+    extern oserror_method_init, oserror_method_new
     EXC_ADD_METHOD oserror_reduce, "__reduce__"
+    EXC_ADD_METHOD oserror_method_init, "__init__"
     lea rdi, [rel exc_OSError_type]
     call type_stamp_methods
+    EXC_ADD_STATIC oserror_method_new, "__new__"
+    mov rdi, rbx
+    extern oserror_install_members
+    call oserror_install_members
 .eim_out:
     pop rbx
     leave
@@ -2151,7 +2232,15 @@ DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
     extern builtin_func_type
     lea rdx, [rel builtin_func_type]
     cmp rcx, rdx
-    je .eui_none                ; a builtin: the default, not a definition
+    jne .eui_found
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .eui_none
+    ; A subclass can explicitly use another builtin initializer, such as
+    ; BaseException.__init__. Only OSError's own initializer is the default.
+    lea rdx, [rel oserror_method_init]
+    cmp [rax + PyBuiltinObject.func_ptr], rdx
+    je .eui_none
+.eui_found:
     pop rbx
     leave
     ret
@@ -2443,7 +2532,7 @@ ERB_NAME  equ 8
 ERB_TYPE  equ 16
 ERB_BUF   equ 192
 ERB_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-DEF_FUNC_LOCAL exc_set_bad_keyword, ERB_FRAME
+DEF_FUNC exc_set_bad_keyword, ERB_FRAME
     mov [rbp - ERB_NAME], rdi
     mov [rbp - ERB_TYPE], rsi
     lea rdi, [rbp - ERB_BUF]
@@ -2748,14 +2837,18 @@ exc_new_name:  db "__new__", 0
 
 ; Macro to define an exception type singleton
 ; %1 = label, %2 = name string, %3 = tp_base (or 0)
-%macro DEF_EXC_TYPE 3
+%macro DEF_EXC_TYPE 3-4 0
 align 8
 global %1
 %1:
     dq 1                    ; ob_refcnt (immortal)
     dq exc_metatype         ; ob_type (metatype with tp_call)
     dq %2                   ; tp_name
-    dq PyExceptionObject_size ; tp_basicsize
+    %if %4
+    dq PyOSErrorObject_size
+    %else
+    dq PyExceptionObject_size
+    %endif
     dq exc_dealloc          ; tp_dealloc
     dq exc_repr             ; tp_repr
     dq exc_str              ; tp_str
@@ -2774,7 +2867,11 @@ global %1
     dq %3                   ; tp_base
     dq 0                    ; tp_dict
     dq 0                    ; tp_mro
-    dq TYPE_FLAG_HAVE_GC    ; tp_flags
+    %if %4
+    dq TYPE_FLAG_HAVE_GC | TYPE_FLAG_OSERROR_SUBCLASS | TYPE_FLAG_MRO_HAS_DATA_DESCR
+    %else
+    dq TYPE_FLAG_HAVE_GC
+    %endif
     dq 0                    ; tp_bases
     dq exc_traverse         ; tp_traverse
     dq exc_clear_gc         ; tp_clear
@@ -2813,8 +2910,8 @@ DEF_EXC_TYPE exc_StopIteration_type, exc_name_StopIteration, exc_Exception_type
 DEF_EXC_TYPE exc_ZeroDivisionError_type, exc_name_ZeroDivisionError, exc_ArithmeticError_type
 DEF_EXC_TYPE exc_ImportError_type, exc_name_ImportError, exc_Exception_type
 DEF_EXC_TYPE exc_NotImplementedError_type, exc_name_NotImplementedError, exc_RuntimeError_type
-DEF_EXC_TYPE exc_FileNotFoundError_type, exc_name_FileNotFoundError, exc_OSError_type
-DEF_EXC_TYPE exc_FileExistsError_type, exc_name_FileExistsError, exc_OSError_type
+DEF_EXC_TYPE exc_FileNotFoundError_type, exc_name_FileNotFoundError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_FileExistsError_type, exc_name_FileExistsError, exc_OSError_type, 1
 DEF_EXC_TYPE exc_UnicodeTranslateError_type, exc_name_UnicodeTranslateError, exc_UnicodeError_type
 DEF_EXC_TYPE exc_OverflowError_type, exc_name_OverflowError, exc_ArithmeticError_type
 DEF_EXC_TYPE exc_AssertionError_type, exc_name_AssertionError, exc_Exception_type
@@ -2822,7 +2919,7 @@ DEF_EXC_TYPE exc_KeyboardInterrupt_type, exc_name_KeyboardInterrupt, exc_BaseExc
 DEF_EXC_TYPE exc_MemoryError_type, exc_name_MemoryError, exc_Exception_type
 DEF_EXC_TYPE exc_RecursionError_type, exc_name_RecursionError, exc_RuntimeError_type
 DEF_EXC_TYPE exc_SystemExit_type, exc_name_SystemExit, exc_BaseException_type
-DEF_EXC_TYPE exc_OSError_type, exc_name_OSError, exc_Exception_type
+DEF_EXC_TYPE exc_OSError_type, exc_name_OSError, exc_Exception_type, 1
 DEF_EXC_TYPE exc_LookupError_type, exc_name_LookupError, exc_Exception_type
 DEF_EXC_TYPE exc_ArithmeticError_type, exc_name_ArithmeticError, exc_Exception_type
 DEF_EXC_TYPE exc_UnicodeError_type, exc_name_UnicodeError, exc_ValueError_type
@@ -2833,7 +2930,7 @@ DEF_EXC_TYPE exc_CancelledError_type, exc_name_CancelledError, exc_BaseException
 DEF_EXC_TYPE exc_StopAsyncIteration_type, exc_name_StopAsyncIteration, exc_Exception_type
 ; CPython 3.12: TimeoutError is an OSError, and the errno map sends ETIMEDOUT
 ; here.  It was parented on Exception, so `except OSError` missed it.
-DEF_EXC_TYPE exc_TimeoutError_type, exc_name_TimeoutError, exc_OSError_type
+DEF_EXC_TYPE exc_TimeoutError_type, exc_name_TimeoutError, exc_OSError_type, 1
 DEF_EXC_TYPE exc_GeneratorExit_type, exc_name_GeneratorExit, exc_BaseException_type
 DEF_EXC_TYPE exc_ModuleNotFoundError_type, exc_name_ModuleNotFoundError, exc_ImportError_type
 DEF_EXC_TYPE exc_SyntaxError_type, exc_name_SyntaxError, exc_Exception_type
@@ -2842,18 +2939,18 @@ DEF_EXC_TYPE exc_TabError_type, exc_name_TabError, exc_IndentationError_type
 DEF_EXC_TYPE exc_EOFError_type, exc_name_EOFError, exc_Exception_type
 DEF_EXC_TYPE exc_UnicodeDecodeError_type, exc_name_UnicodeDecodeError, exc_UnicodeError_type
 DEF_EXC_TYPE exc_UnicodeEncodeError_type, exc_name_UnicodeEncodeError, exc_UnicodeError_type
-DEF_EXC_TYPE exc_ConnectionError_type, exc_name_ConnectionError, exc_OSError_type
-DEF_EXC_TYPE exc_ConnectionResetError_type, exc_name_ConnectionResetError, exc_ConnectionError_type
-DEF_EXC_TYPE exc_ConnectionRefusedError_type, exc_name_ConnectionRefusedError, exc_ConnectionError_type
-DEF_EXC_TYPE exc_ConnectionAbortedError_type, exc_name_ConnectionAbortedError, exc_ConnectionError_type
-DEF_EXC_TYPE exc_BrokenPipeError_type, exc_name_BrokenPipeError, exc_ConnectionError_type
-DEF_EXC_TYPE exc_PermissionError_type, exc_name_PermissionError, exc_OSError_type
-DEF_EXC_TYPE exc_IsADirectoryError_type, exc_name_IsADirectoryError, exc_OSError_type
-DEF_EXC_TYPE exc_NotADirectoryError_type, exc_name_NotADirectoryError, exc_OSError_type
-DEF_EXC_TYPE exc_ProcessLookupError_type, exc_name_ProcessLookupError, exc_OSError_type
-DEF_EXC_TYPE exc_ChildProcessError_type, exc_name_ChildProcessError, exc_OSError_type
-DEF_EXC_TYPE exc_BlockingIOError_type, exc_name_BlockingIOError, exc_OSError_type
-DEF_EXC_TYPE exc_InterruptedError_type, exc_name_InterruptedError, exc_OSError_type
+DEF_EXC_TYPE exc_ConnectionError_type, exc_name_ConnectionError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_ConnectionResetError_type, exc_name_ConnectionResetError, exc_ConnectionError_type, 1
+DEF_EXC_TYPE exc_ConnectionRefusedError_type, exc_name_ConnectionRefusedError, exc_ConnectionError_type, 1
+DEF_EXC_TYPE exc_ConnectionAbortedError_type, exc_name_ConnectionAbortedError, exc_ConnectionError_type, 1
+DEF_EXC_TYPE exc_BrokenPipeError_type, exc_name_BrokenPipeError, exc_ConnectionError_type, 1
+DEF_EXC_TYPE exc_PermissionError_type, exc_name_PermissionError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_IsADirectoryError_type, exc_name_IsADirectoryError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_NotADirectoryError_type, exc_name_NotADirectoryError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_ProcessLookupError_type, exc_name_ProcessLookupError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_ChildProcessError_type, exc_name_ChildProcessError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_BlockingIOError_type, exc_name_BlockingIOError, exc_OSError_type, 1
+DEF_EXC_TYPE exc_InterruptedError_type, exc_name_InterruptedError, exc_OSError_type, 1
 DEF_EXC_TYPE exc_FloatingPointError_type, exc_name_FloatingPointError, exc_ArithmeticError_type
 DEF_EXC_TYPE exc_BufferError_type, exc_name_BufferError, exc_Exception_type
 DEF_EXC_TYPE exc_ReferenceError_type, exc_name_ReferenceError, exc_Exception_type
@@ -2940,6 +3037,13 @@ DEF_FUNC exc_traverse, 8        ; rsp 16-aligned at the call the macros below ex
     ; POP_EXCEPT.
     mov rdi, [rbx + PyExceptionObject.exc_dict]
     VISIT_PTR rdi
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .done
+    mov rdi, rbx
+    extern oserror_traverse
+    call oserror_traverse
+.done:
 
     pop rbx
     leave
@@ -2989,6 +3093,12 @@ DEF_FUNC exc_clear_gc, 8            ; 1 pushes, so rsp is 16-aligned
     jz .no_dict_gc
     call obj_decref
 .no_dict_gc:
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .done
+    mov rdi, rbx
+    call oserror_clear
+.done:
 
     pop rbx
     leave

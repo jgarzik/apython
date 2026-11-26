@@ -519,9 +519,17 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; used to invoke it.
     extern instance_getattr
     extern instance_getattr_where
+    lea r10, [rel instance_getattr_where]
     lea rdx, [rel instance_getattr]
     cmp rax, rdx
+    je .la_call_where
+    extern exc_getattr
+    extern exc_getattr_where
+    lea rdx, [rel exc_getattr]
+    cmp rax, rdx
     jne .la_call_getattr
+    lea r10, [rel exc_getattr_where]
+.la_call_where:
     lea rdx, [rbp - LA_FROMINST]
     ; Ask for a method UNBOUND.  .la_unwrap_bound_method below takes a bound
     ; method apart into [func, self] two instructions later, so building one
@@ -529,7 +537,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; nothing.  obj_getattr_opt shares this entry and asks for 0, because
     ; getattr(c, 'm') must still answer a bound method.
     mov ecx, 1
-    call instance_getattr_where
+    call r10
     GETATTR_HOOK_SKIP .la_getattr_done_v
     ERR_PENDING_JUMP
     jmp .la_getattr_done_v
@@ -2312,13 +2320,19 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     ; The same question op_load_attr asks, and it has to get the same answer:
     ; tests/test_getattr_descriptors.py pins the two together.
     lea rdx, [rel instance_getattr]
+    lea r10, [rel instance_getattr_where]
+    cmp rcx, rdx
+    je .ga_call_where
+    lea rdx, [rel exc_getattr]
     cmp rcx, rdx
     jne .ga_call_getattr
+    lea r10, [rel exc_getattr_where]
+.ga_call_where:
     mov rdi, [rbp - GA_OBJ]
     mov rsi, [rbp - GA_NAME]
     lea rdx, [rbp - GA_FROMINST]
     xor ecx, ecx                ; getattr() wants the bound method itself
-    call instance_getattr_where
+    call r10
     GETATTR_HOOK_SKIP .ga_where_answered
     ERR_PENDING_JUMP
 .ga_where_answered:

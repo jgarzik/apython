@@ -395,6 +395,13 @@ DEF_FUNC super_lookup, SL_FRAME
     lea rdx, [rel property_type]
     cmp rcx, rdx
     je .sl_property
+    extern member_descr_type, getset_descr_type
+    lea rdx, [rel member_descr_type]
+    cmp rcx, rdx
+    je .sl_member
+    lea rdx, [rel getset_descr_type]
+    cmp rcx, rdx
+    je .sl_getset
     lea rdx, [rel func_type]
     cmp rcx, rdx
     je .sl_bind_obj
@@ -465,6 +472,25 @@ DEF_FUNC super_lookup, SL_FRAME
     je .sl_plain
     mov rdi, rax
     call property_descr_get     ; -> (rax, rdx), owned  ; err: (0, 0) is the caller's, as it stands
+    jmp .sl_release_descriptor
+
+.sl_member:
+    extern member_descr_get
+    lea rcx, [rel member_descr_get]
+    jmp .sl_native
+.sl_getset:
+    extern getset_descr_get
+    lea rcx, [rel getset_descr_get]
+.sl_native:
+    mov rsi, [rbp - SL_OBJ]
+    test rsi, rsi
+    jz .sl_plain
+    cmp rsi, [rbp - SL_OBJTYPE]
+    je .sl_plain
+    mov rdi, rax
+    call rcx
+    V_UNPACK rax, rdx
+.sl_release_descriptor:
     mov [rbp - SL_BIND], rax
     mov [rbp - SL_TYPE], rdx    ; SL_TYPE is spent; reuse it for the tag
     mov rdi, [rbp - SL_ATTR]

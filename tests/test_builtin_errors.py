@@ -1,10 +1,11 @@
 # The error paths of the builtin functions: wrong counts, wrong types, bad
 # keywords, and callbacks that raise.
 #
-# Each case runs 200 times with sys.getallocatedblocks() read before and
-# after, and prints the exception's type and whether the count stayed put.
-# A builtin that raises by jumping out of its own frame gets the exception
-# right and leaves behind whatever that frame held; only the count shows it.
+# Each case prints the exception type for comparison with CPython. On
+# apython it also checks sys.getallocatedblocks() across 200 calls. A builtin
+# that jumps out of its own frame can raise the right exception while
+# leaving behind references. CPython's allocation counts depend on its own
+# caches and are independent of whether apython releases those references.
 #
 # Messages are not printed: the wording is tests/arity_probe.sh's business,
 # and half of it differs from CPython's on purpose.
@@ -14,6 +15,9 @@ import sys
 import time
 import types
 import warnings
+
+
+CHECK_ALLOCATIONS = sys.implementation.name == "apython"
 
 
 class Boom(Exception):
@@ -40,12 +44,15 @@ def check(name, fn):
     # leak does not stop.
     for _ in range(4):
         attempt(fn)
-    gc.collect()
-    before = sys.getallocatedblocks()
+    if CHECK_ALLOCATIONS:
+        gc.collect()
+        before = sys.getallocatedblocks()
     seen = attempt(fn)
-    gc.collect()
-    after = sys.getallocatedblocks()
-    print(name, seen, after - before < 50)
+    if CHECK_ALLOCATIONS:
+        gc.collect()
+        growth = sys.getallocatedblocks() - before
+        assert growth < 50, "%s retained %d allocated blocks" % (name, growth)
+    print(name, seen)
 
 
 # --- str() -----------------------------------------------------------------

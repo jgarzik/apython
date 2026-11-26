@@ -834,6 +834,7 @@ DEF_FUNC member_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov [rax + PyMemberDescrObject.md_offset], rbx
     mov [rax + PyMemberDescrObject.md_name], r12
     mov [rax + PyMemberDescrObject.md_owner], r13
+    mov qword [rax + PyMemberDescrObject.md_nullable], 0
 
     pop r13
     pop r12
@@ -1696,6 +1697,13 @@ DEF_FUNC member_descr_get, MDG_FRAME
     ret
 
 .mdg_unset:
+    mov rcx, [rbp - MDG_SELF]
+    cmp qword [rcx + PyMemberDescrObject.md_nullable], 0
+    je .mdg_missing
+    LOAD_NONE rax
+    leave
+    ret
+.mdg_missing:
     ; CPython names the type and the attribute, exactly as an ordinary missing
     ; attribute does -- this is the same absence.
     mov rdi, [rbp - MDG_RECV]
@@ -1722,9 +1730,7 @@ END_FUNC member_descr_get
 MDS_SELF  equ 8
 MDS_RECV  equ 16
 MDS_VAL   equ 24
-MDS_ADDR  equ 32            ; the slot's address, across the release below
-MDS_OLD   equ 40            ; and what was in it
-MDS_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+MDS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
 global member_descr_set
 DEF_FUNC member_descr_set, MDS_FRAME
     mov [rbp - MDS_SELF], rdi
@@ -1742,23 +1748,18 @@ DEF_FUNC member_descr_set, MDS_FRAME
     test rcx, rcx
     jnz .mds_store
     test rax, rax
-    jz .mds_unset               ; deleting what was never there
+    jnz .mds_store
+    mov rdi, [rbp - MDS_SELF]
+    cmp qword [rdi + PyMemberDescrObject.md_nullable], 0
+    je .mds_unset               ; deleting an unset T_OBJECT_EX
 
 .mds_store:
     ; The new value is counted BEFORE the old one is released: they may be the
     ; same object, and `o.x = o.x` would otherwise free it between the two.
-    ; The slot's ADDRESS and the old Value go into frame slots rather than onto
-    ; the machine stack: XDECREF_V expands to `call obj_dealloc`, which runs
-    ; __del__, and a lone `pop` before it left that call eight bytes out.
-    mov [rbp - MDS_ADDR], rdx
-    mov [rbp - MDS_OLD], rax
     mov rdi, [rbp - MDS_VAL]
     INCREF_V rdi, rcx
-    mov rdi, [rbp - MDS_OLD]    ; the old Value
-    XDECREF_V rdi, rcx
-    mov rdx, [rbp - MDS_ADDR]
-    mov rcx, [rbp - MDS_VAL]
-    mov [rdx], rcx
+    mov [rdx], rdi
+    XDECREF_V rax, rcx
     xor eax, eax
     leave
     ret

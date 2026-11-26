@@ -1453,7 +1453,8 @@ TFP_RSP   equ 40 + 88
              TYPE_FLAG_LIST_SUBCLASS | TYPE_FLAG_TUPLE_SUBCLASS | \
              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
              TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS | \
-             TYPE_FLAG_BYTEARRAY_SUBCLASS | TYPE_FLAG_BYTES_SUBCLASS
+             TYPE_FLAG_BYTEARRAY_SUBCLASS | TYPE_FLAG_BYTES_SUBCLASS | \
+             TYPE_FLAG_OSERROR_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
     ; A class deriving from `type` is a metatype: its instances are classes,
