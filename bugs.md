@@ -220,17 +220,6 @@ reasoning that chose them and what changing one would cost.
   `co_nlocals` agree with CPython for every function shape tested
   (`tests/test_code_localsplus.py`); these two are what is left.
 
-- **PEP 3131's NFKC normalisation of identifiers is absent.**  `class T: µ = 1`
-  then `T.µ` works and `T.μ` is an AttributeError: CPython normalises every
-  identifier to NFKC, so the MICRO SIGN U+00B5 and GREEK SMALL LETTER MU
-  U+03BC are the same name there and two names here.  The XID_Start /
-  XID_Continue half of the rule is checked now (`src/compiler/lex.asm`, over
-  the flags `gen_unicodecase.py` emits), which is what stopped an invisible
-  NBSP from being a variable; normalisation is the other half and wants the
-  decomposition and composition tables, which are a generated artefact an
-  order of magnitude larger than the case mappings.  It is the one thing
-  CPython's `test_unicode_identifiers` still fails on.
-
 - **Seven syntax errors differ from CPython in a POSITION rather than in the
   message**, recorded in `tests/syntax_floor.txt` as differing and shown by
   `bash tests/syntax_probe.sh --show`:
