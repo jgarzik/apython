@@ -18,9 +18,8 @@ in for: MethInstance exists to exercise the C-level vectorcall protocol,
 which this interpreter does not have.  What is here is only what
 test.support itself reads, so the modules that merely IMPORT it survive.
 
-Every name answers a true fact about this interpreter or raises
-NotImplementedError when called.  Nothing here pretends to exercise a C API
-that is not there.
+These helpers expose the corresponding apython behavior where it exists.
+They do not exercise the CPython extension ABI.
 """
 
 # test.support.requires_limited_api decorates with skipUnless(this), so False
@@ -278,3 +277,59 @@ def get_feature_macros():
         "Py_REF_DEBUG": False,
         "USE_STACKCHECK": False,
     }
+
+
+# The abstract-object tests also exercise Python-visible attribute access:
+# descriptor invocation, name validation, and exception propagation.
+def object_getattr(obj, name, /):
+    return getattr(obj, name)
+
+
+def _attribute_name(text):
+    if isinstance(text, str):
+        text = str.encode(text)
+    if not isinstance(text, bytes):
+        raise TypeError("attribute name must be str or bytes")
+    # The String variants take a NUL-terminated UTF-8 name.
+    return bytes.split(text, b"\0", 1)[0].decode("utf-8")
+
+
+def object_getattrstring(obj, name, /):
+    return getattr(obj, _attribute_name(name))
+
+
+def object_hasattr(obj, name, /):
+    try:
+        getattr(obj, name)
+    except BaseException:
+        return 0
+    return 1
+
+
+def object_hasattrstring(obj, name, /):
+    try:
+        name = _attribute_name(name)
+    except UnicodeDecodeError:
+        return 0
+    return object_hasattr(obj, name)
+
+
+def object_setattr(obj, name, value, /):
+    # The upstream adapter reserves None as the spelling of C NULL.
+    if value is None:
+        return object_delattr(obj, name)
+    setattr(obj, name, value)
+    return 0
+
+
+def object_setattrstring(obj, name, value, /):
+    return object_setattr(obj, _attribute_name(name), value)
+
+
+def object_delattr(obj, name, /):
+    delattr(obj, name)
+    return 0
+
+
+def object_delattrstring(obj, name, /):
+    return object_delattr(obj, _attribute_name(name))
