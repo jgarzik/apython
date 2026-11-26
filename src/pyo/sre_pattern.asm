@@ -28,7 +28,6 @@ extern builtin_func_new
 extern method_new
 extern func_type
 extern method_type
-extern builtin_func_type
 extern bool_true
 extern bool_false
 ; SRE engine functions
@@ -954,9 +953,8 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     lea rcx, [rel method_type]
     cmp rax, rcx
     je .sub_is_callable
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    je .sub_is_callable
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .sub_is_callable
     lea rcx, [rel type_type]
     cmp rax, rcx
     je .sub_is_callable
@@ -1558,9 +1556,8 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     lea rcx, [rel method_type]
     cmp rax, rcx
     je .subn_is_callable
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    je .subn_is_callable
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .subn_is_callable
     lea rcx, [rel type_type]
     cmp rax, rcx
     je .subn_is_callable

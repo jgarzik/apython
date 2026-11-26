@@ -53,7 +53,6 @@
 ASM_INIT
 
 extern obj_call_n
-extern builtin_func_type
 extern method_type
 extern obj_decref
 extern none_singleton
@@ -390,9 +389,8 @@ DEF_FUNC_BARE systrace_c_callable
     V_TEST_PTR rdi, rcx
     ja .scc_no
     mov rcx, [rdi + PyObject.ob_type]
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .scc_yes
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .scc_yes
     lea rdx, [rel method_type]
     cmp rcx, rdx
     jne .scc_no
@@ -402,9 +400,8 @@ DEF_FUNC_BARE systrace_c_callable
     V_TEST_PTR rdi, rcx
     ja .scc_no
     mov rcx, [rdi + PyObject.ob_type]
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .scc_no
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .scc_no
 .scc_yes:
     mov rax, rdi
 .scc_no:

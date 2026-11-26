@@ -73,9 +73,8 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     mov [rbp - BFG_NAME], rsi
 
     ; __get__ is answered here rather than from the type's dict, because it is
-    ; a per-OBJECT question: CPython's method_descriptor and wrapper_descriptor
-    ; have one and its builtin_function_or_method does not, and this tree has
-    ; a single type for all three.  The stdlib asks hasattr(f, '__get__') to
+    ; a per-object question while type_stamp_methods installs descriptors.
+    ; The stdlib asks hasattr(f, '__get__') to
     ; decide whether something is a descriptor -- inspect, enum and dataclasses
     ; all do -- so a shared tp_dict entry answered True for `len`.
     lea rdi, [rsi + PyStrObject.data]
@@ -156,14 +155,13 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     ; without it every protocol-0 and protocol-1 reduction was an
     ; AttributeError -- which is `copy.copy` and every old pickle.
     ;
-    ; CPython's method_descriptor and wrapper_descriptor have no __self__ at
-    ; all -- only a bound method does, and it is the receiver -- and that
-    ; difference cannot be expressed here: __self__ is published as a getset
-    ; on the ONE type that stands for CPython's three kinds, so "absent"
-    ; would have to be a per-object answer from a per-type descriptor.
-    ; DIVERGENCES.md records it, beside the entry for a bound builtin being a
-    ; `method`.  What depended on it is fixed elsewhere: builtin_func_reduce
-    ; reads func_kind directly rather than inferring the kind from __self__.
+    ; builtin_func_reduce uses func_kind directly rather than inferring the
+    ; kind from __self__.
+    mov rcx, [rbx + PyBuiltinObject.func_kind]
+    cmp rcx, BUILTIN_KIND_METHOD
+    je .bfg_absent
+    cmp rcx, BUILTIN_KIND_WRAPPER
+    je .bfg_absent
     mov rax, [rbx + PyBuiltinObject.func_owner]
     test rax, rax
     jz .bfg_missing
@@ -515,6 +513,15 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
     mov rcx, [rbp - TSM_TYPE]
     mov [rdx + PyBuiltinObject.func_owner], rcx
     mov [rdx + PyBuiltinObject.func_kind], rax
+    cmp rax, BUILTIN_KIND_METHOD
+    je .tsm_descriptor
+    cmp rax, BUILTIN_KIND_WRAPPER
+    jne .tsm_stamped
+.tsm_descriptor:
+    extern builtin_descr_type
+    lea rax, [rel builtin_descr_type]
+    mov [rdx + PyObject.ob_type], rax
+.tsm_stamped:
     pop r8
     pop rcx
     mov r12, [rbx + PyDictObject.entries]

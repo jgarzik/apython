@@ -645,10 +645,8 @@ DEF_FUNC method_reduce, MTR_FRAME
     mov rsi, [rax + PyFuncObject.func_name]
     jmp .mtr_have_name
 .mtr_builtin:
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .mtr_unnamed
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .mtr_unnamed
     mov rsi, [rax + PyBuiltinObject.func_name]
 .mtr_have_name:
     test rsi, rsi

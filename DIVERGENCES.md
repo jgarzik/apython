@@ -138,15 +138,12 @@ the reasoning rather than from scratch.
   an allocation per call -- worth threading a (pointer, length) pair through
   the bodies if bytearray ever becomes hot.
 
-- **One builtin function type where CPython has four.**  CPython separates
-  `builtin_function_or_method`, `method_descriptor`, `wrapper_descriptor` and
-  a classmethod's bound form; here they are one type with a `func_kind` field,
-  which is enough to repr all four the way CPython does but not enough to
-  answer `type()` the way CPython does.  `type(int.from_bytes)` is `method`
-  rather than `builtin_function_or_method`, and `type(list.append)` is
-  `builtin_function_or_method` rather than `method_descriptor`.  Everything
-  that asks *what* a descriptor is -- `hasattr(f, '__get__')`, `__set__`,
-  the repr -- gets CPython's answer; only the type's name differs.
+- **Unbound builtin wrappers share the `method_descriptor` type.**
+  CPython distinguishes `wrapper_descriptor` from `method_descriptor`.
+  apython uses the same descriptor type for `list.append` and
+  `list.__len__`. Each carries its owning class and implements the same
+  binding and reduction protocol. Module-level builtin functions have
+  their own type, so multiprocessing can register a descriptor reducer.
 
 - **A class's `__dict__` does not carry `__dict__`, `__weakref__` or
   `__doc__`, and does carry `__qualname__`.**  CPython's `type_new` adds the
@@ -478,8 +475,7 @@ function.
 
 Changing it means a `func_self` field on `PyBuiltinObject`, a bound/unbound
 distinction in `builtin_func_call`, and a second repr; the gain is the name
-`type()` prints.  This is the same choice recorded above about having one
-builtin callable type where CPython has four.
+`type()` prints.
 
 ## `subprocess` cannot change the child's credentials, and says so
 

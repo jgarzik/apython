@@ -840,10 +840,8 @@ DEF_FUNC exc_getattr_where
     lea rdx, [rel func_type]
     cmp rcx, rdx
     je .fit_bind
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .fit_bind
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .fit_bind
     mov edx, TAG_PTR
 .fit_raw:
     INCREF_VAL rax, rdx     ; tag-aware INCREF (rdx = tag from dict_get)
@@ -2176,9 +2174,8 @@ DEF_FUNC exc_user_new, 8            ; 1 push, so rsp is 16-aligned
     test rax, rax
     jz .eun_none
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .eun_none                ; a builtin: the default, not a definition
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .eun_none                ; a builtin: the default, not a definition
     ; A staticmethod wrapping a builtin is the same default: BaseException's
     ; own __new__ is registered that way, and unwrapping is how to see it.
     extern staticmethod_type
@@ -2191,9 +2188,8 @@ DEF_FUNC exc_user_new, 8            ; 1 push, so rsp is 16-aligned
     V_TEST_PTR rcx, rdx
     ja .eun_out
     mov rcx, [rcx + PyObject.ob_type]
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .eun_none
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .eun_none
 .eun_out:
     pop rbx
     leave
@@ -2229,10 +2225,8 @@ DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
     test rax, rax
     jz .eui_none
     mov rcx, [rax + PyObject.ob_type]
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .eui_found
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .eui_found
     test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
     jz .eui_none
     ; A subclass can explicitly use another builtin initializer, such as

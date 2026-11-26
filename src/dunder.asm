@@ -115,7 +115,6 @@ align 8
 dunder_cache_keys: resq DUNDER_CACHE_SLOTS
 dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 
-extern builtin_func_type
 extern value_type
 extern type_is_subtype
 
@@ -322,10 +321,8 @@ DEF_FUNC dunder_bind, DB_FRAME
     lea rcx, [rel func_type]
     cmp rax, rcx
     je .db_unbound
-    extern builtin_func_type
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    je .db_unbound              ; its own convention is args[0] = self
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .db_unbound              ; its own convention is args[0] = self
 
     ; Anything else: bind it if its type says how, and otherwise take it
     ; exactly as it stands.
@@ -1343,9 +1340,8 @@ DEF_FUNC builtin_should_bind, BSB_FRAME
     lea rcx, [rel func_type]
     cmp rax, rcx
     je .bsb_yes
-    lea rcx, [rel builtin_func_type]
-    cmp rax, rcx
-    jne .bsb_no
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .bsb_no
 
     ; A module-level builtin -- len, os.unlink -- is not a descriptor, and
     ; `class C: f = len` must leave it alone.  That was 219 failures in

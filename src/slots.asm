@@ -1494,10 +1494,8 @@ DEF_FUNC type_install_slots, TIS_FRAME
     jne .own_definition
     mov rax, [rbp - TIS_FOUND]
     mov rcx, [rax + PyObject.ob_type]
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .own_definition
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .own_definition
     mov rcx, [rax + PyBuiltinObject.func_owner]
     test rcx, rcx
     jz .own_definition

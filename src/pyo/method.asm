@@ -30,7 +30,6 @@ extern rbt_append_cstr
 extern str_from_cstr
 extern str_new_heap
 extern func_type
-extern builtin_func_type
 extern type_type
 extern none_singleton
 extern exc_TypeError_type
@@ -436,9 +435,8 @@ DEF_FUNC method_repr, MR_FRAME
     test rax, rax
     jz .mr_ordinary
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .mr_ordinary
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .mr_ordinary
     cmp qword [rax + PyBuiltinObject.func_kind], BUILTIN_KIND_ON_TYPE
     je mr_builtin_classmethod
     ; A builtin bound to an INSTANCE is CPython's third form:

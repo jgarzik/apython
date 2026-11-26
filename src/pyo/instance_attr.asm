@@ -37,7 +37,6 @@ extern sub_list_for_type
 extern object_method_getattribute
 extern dunder_lookup
 extern dunder_call_2
-extern builtin_func_type
 extern dict_type
 extern tuple_type
 extern int_type
@@ -159,9 +158,8 @@ DEF_FUNC instance_getattr, IGA_FRAME
     ; object's own is a builtin wrapping object_method_getattribute.  Anything
     ; else is a definition, and definitions run.
     mov rcx, [rax + PyObject.ob_type]
-    lea r8, [rel builtin_func_type]
-    cmp rcx, r8
-    jne .iga_call
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .iga_call
     extern object_method_getattribute
     lea r8, [rel object_method_getattribute]
     cmp [rax + PyBuiltinObject.func_ptr], r8
@@ -461,9 +459,8 @@ DEF_FUNC type_refresh_attr_flags
     ; object's own is a builtin wrapping object_method_getattribute; anything
     ; else is a definition.  The same test instance_getattr makes.
     mov rcx, [rax + PyObject.ob_type]
-    lea r8, [rel builtin_func_type]
-    cmp rcx, r8
-    jne .trg_set
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .trg_set
     lea r8, [rel object_method_getattribute]
     cmp [rax + PyBuiltinObject.func_ptr], r8
     je .trg_clear
@@ -1078,10 +1075,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     cmp edx, TAG_PTR
     jne .base_getattr_done
     mov rcx, [rax + PyObject.ob_type]
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    jne .base_getattr_ptr
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .base_getattr_ptr
     mov rdi, rax
     mov rsi, rbx
     push rax

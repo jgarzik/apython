@@ -48,6 +48,7 @@ extern user_type_metatype
 extern exc_metatype
 extern func_type
 extern builtin_func_type
+extern builtin_descr_type
 extern method_type
 extern gen_type
 extern coro_type
@@ -768,6 +769,7 @@ weakref_allowed_types:
     dq exc_metatype
     dq func_type
     dq builtin_func_type
+    dq builtin_descr_type
     dq method_type
     dq gen_type
     dq coro_type

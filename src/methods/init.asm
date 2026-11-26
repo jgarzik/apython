@@ -2148,6 +2148,18 @@ DEF_FUNC methods_init
     mov rdi, rax
     call type_stamp_methods
 
+    extern builtin_descr_type
+    extern builtin_func_dunder_get
+    call dict_new
+    mov rbx, rax
+    ADD_FN mn___call__, builtin_func_dunder_call
+    ADD_FN_N mn___get__, builtin_func_dunder_get, 2, 3
+    ADD_FN_N mn___reduce__, builtin_func_reduce, 1, 1
+    lea rax, [rel builtin_descr_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
     ;; --- int, complex and float, in init_num.asm ---
     ;; Moved when this file reached the 100k cap for a hand-written file.
     ;; The seam is the one src/methods/num.asm already uses: the numeric

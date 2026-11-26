@@ -433,4 +433,5 @@ attr_type_table:
     ATTR_ROW frame_object_type,      frameobj_getattr,    frame_attr_names,   FRAME_ATTR_COUNT
     ATTR_ROW code_type,              code_getattr,        code_attr_names,    CODE_ATTR_COUNT
     ATTR_ROW builtin_func_type,      builtin_func_getattr, builtin_attr_names, BUILTIN_ATTR_COUNT
+    ATTR_ROW builtin_descr_type,     builtin_func_getattr, builtin_attr_names, BUILTIN_ATTR_COUNT - 1
 ATTR_TYPE_COUNT equ ($ - attr_type_table) / ATTR_ROW_SIZE

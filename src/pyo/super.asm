@@ -35,7 +35,6 @@ extern property_type
 extern staticmethod_type
 extern classmethod_type
 extern func_type
-extern builtin_func_type
 extern gc_alloc
 extern gc_track
 extern gc_dealloc
@@ -405,9 +404,8 @@ DEF_FUNC super_lookup, SL_FRAME
     lea rdx, [rel func_type]
     cmp rcx, rdx
     je .sl_bind_obj
-    lea rdx, [rel builtin_func_type]
-    cmp rcx, rdx
-    je .sl_bind_obj
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jnz .sl_bind_obj
 
 .sl_plain:
     mov rax, [rbp - SL_ATTR]

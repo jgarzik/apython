@@ -3213,6 +3213,7 @@ global build_class_obj
 build_class_obj: dq 0
 
 builtin_func_name_str: db "builtin_function_or_method", 0
+builtin_descr_name_str: db "method_descriptor", 0
 
 ; Builtin function type object
 align 8
@@ -3240,7 +3241,39 @@ builtin_func_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    dq 0                        ; tp_flags
+    dq TYPE_FLAG_BUILTIN_CALLABLE ; tp_flags
+    dq 0                        ; tp_bases
+    dq 0                        ; tp_traverse
+    dq 0                        ; tp_clear
+    dq 0 ; tp_dictoffset
+    dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer
+
+global builtin_descr_type
+builtin_descr_type:
+    dq 1                        ; ob_refcnt (immortal)
+    dq type_type                ; ob_type
+    dq builtin_descr_name_str    ; tp_name
+    dq PyBuiltinObject_size     ; tp_basicsize
+    dq builtin_func_dealloc     ; tp_dealloc
+    dq builtin_func_repr        ; tp_repr
+    dq builtin_func_repr        ; tp_str
+    dq 0                        ; tp_hash
+    dq builtin_func_call        ; tp_call
+    dq builtin_func_getattr     ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq 0                        ; tp_iter
+    dq 0                        ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_BUILTIN_CALLABLE | TYPE_FLAG_FINAL ; tp_flags
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear

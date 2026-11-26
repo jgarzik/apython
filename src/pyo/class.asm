@@ -35,7 +35,6 @@ extern dunder_get
 extern dunder_call_3
 extern dunder_lookup
 extern dunder_call_2
-extern builtin_func_type
 extern dict_type
 extern tuple_type
 extern int_type
@@ -580,13 +579,11 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     test edx, edx
     jz .ir_no_dunder
     extern object_method_repr
-    extern builtin_func_type
     cmp edx, TAG_PTR
     jne .ir_call_dunder
     mov rcx, [rax + PyObject.ob_type]
-    lea r8, [rel builtin_func_type]
-    cmp rcx, r8
-    jne .ir_call_dunder
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .ir_call_dunder
     mov rcx, [rax + PyBuiltinObject.func_ptr]
     lea r8, [rel object_method_repr]
     cmp rcx, r8
@@ -823,9 +820,8 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     cmp edx, TAG_PTR
     jne .is_call_dunder
     mov rcx, [rax + PyObject.ob_type]
-    lea r8, [rel builtin_func_type]
-    cmp rcx, r8
-    jne .is_call_dunder
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .is_call_dunder
     mov rcx, [rax + PyBuiltinObject.func_ptr]
     lea r8, [rel object_method_str]
     cmp rcx, r8
@@ -1694,10 +1690,8 @@ DEF_FUNC type_call
     ; what answers it: a method or a wrapper binds, a module-level function
     ; does not -- which is CPython's rule, where the first two have a
     ; tp_descr_get and builtin_function_or_method has none.
-    extern builtin_func_type
-    lea rdx, [rel builtin_func_type]
-    cmp rax, rdx
-    jne .init_ask_type_get
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BUILTIN_CALLABLE
+    jz .init_ask_type_get
     mov qword [rbp - TC_NO_SELF], 1     ; either way, no manual prepend
     mov rdi, rbx
     xor esi, esi                        ; the receiver check is type_call's own
