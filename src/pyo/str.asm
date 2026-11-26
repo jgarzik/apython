@@ -924,9 +924,8 @@ DEF_FUNC codec_id, CI_FRAME
     test rdi, rdi
     jz .ci_utf8
     mov rax, [rdi + PyObject.ob_type]
-    lea rcx, [rel str_type]
-    cmp rax, rcx
-    jne .ci_unknown
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .ci_unknown
     mov rcx, [rdi + PyStrObject.ob_size]
     ; The EMPTY string is not utf-8, it is an unknown encoding: only the
     ; absence of an argument means the default.  `"a".encode("")` came back

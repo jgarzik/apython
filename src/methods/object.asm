@@ -2993,3 +2993,35 @@ NEW_THUNK float_dunder_new,     float_type,     scalar_dunder_new, "float() take
 NEW_THUNK complex_dunder_new,   complex_type,   scalar_dunder_new
 NEW_THUNK module_dunder_new,    module_type,    module_method_new
 
+;; bytes_dunder_new(rdi = args including cls, rsi = total count) -> Value
+;; The native constructor binds the keyword tail after the class is removed.
+DEF_FUNC bytes_dunder_new
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    mov rdx, rsi
+    mov rax, [gs:ThreadState.kw_names_pending]
+    test rax, rax
+    jz .validate
+    sub rdx, [rax + PyTupleObject.ob_size]
+.validate:
+    extern bytes_type, bytes_type_call
+    lea rdi, [rel bytes_type]
+    mov rsi, rbx
+    call new_check_class
+    ERR_NULL .failed
+    mov rdi, rax
+    lea rsi, [rbx + 8]
+    lea rdx, [r12 - 1]
+    call bytes_type_call        ; err: its 0 is also this wrapper's failure
+    jmp .out
+.failed:
+    mov qword [gs:ThreadState.kw_names_pending], 0
+.out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_dunder_new
+

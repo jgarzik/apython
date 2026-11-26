@@ -189,19 +189,6 @@ reasoning that chose them and what changing one would cost.
   `__getitem__` on a dict subclass used as `exec()` locals is not consulted.
   Fixing that means `dict_subscript` reporting a miss by returning.
 
-- **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
-  Every other variable-size builtin publishes one -- `str` and `tuple` do --
-  and `bytes_type.tp_new` is 0 with nothing in its `tp_dict`, so
-  `B.__new__` resolves along the MRO to `object.__new__`, which refuses a
-  variable-size type: `object.__new__(B) is not safe, use B.__new__()`.
-  `copy.copy` and `copy.deepcopy` of a bytes subclass both end there, and so
-  would a pickle.  `bytes.__getnewargs__` is in place, so the arguments are
-  ready for the day the constructor is; what is missing is the constructor,
-  which has to allocate the subclass's own `tp_basicsize` plus the data and
-  then copy it inline, the way `instance_alloc` does for a str subclass.
-  `bytearray` is not affected -- its data is out of line and it has a
-  constructor of its own.
-
 - **The attribute lookup order is instance-dict-first unless the MRO holds a
   data descriptor**, which is observable when user code mutates the class
   DURING the lookup.  CPython always consults the type first and keeps what it

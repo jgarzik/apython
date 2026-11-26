@@ -10,6 +10,7 @@
 #
 # CPython supplies all of these in C.  Everything below is measured against it.
 import copy
+import pickle
 
 # --- __getnewargs__ ---------------------------------------------------------
 
@@ -116,13 +117,8 @@ print("OSError args 3:", OSError(2, "no", "f1").args)
 
 # --- what the whole thing is for --------------------------------------------
 
-# B(b"hi") is deliberately absent: a bytes SUBCLASS cannot be rebuilt, because
-# bytes has no __new__ in its dict at all and the reduction reaches
-# object.__new__, which refuses a variable-size type.  That predates the
-# reduction protocol and is recorded in bugs.md; __getnewargs__ is in place
-# for the day it is closed.
 for v in ({1, 2, 3}, frozenset({1, 2}), bytearray(b"ab"), ValueError("x"),
-          OSError(2, "no"), St({4, 5}), BA(b"cd"), S("hi"), T((1, 2))):
+          OSError(2, "no"), St({4, 5}), BA(b"cd"), S("hi"), T((1, 2)), B(b"hi")):
     c = copy.copy(v)
     d = copy.deepcopy(v)
     def content(x):
@@ -136,6 +132,30 @@ for v in ({1, 2, 3}, frozenset({1, 2}), bytearray(b"ab"), ValueError("x"),
     print("%-12s copy %-12s deep %-12s contents %r/%r"
           % (type(v).__name__, type(c).__name__, type(d).__name__,
              content(c), content(d)))
+
+b = B(b"a\x00b\xff")
+nested_b = B(b"\x00")
+nested_b.tag = "inner"
+b.items = [nested_b]
+
+
+def check_bytes_clone(clone):
+    assert clone is not b and type(clone) is B and clone == b"a\x00b\xff"
+    assert vars(clone) == {"items": [b"\x00"]}
+    child = clone.items[0]
+    assert type(child) is B and vars(child) == {"tag": "inner"}
+
+
+shallow = copy.copy(b)
+check_bytes_clone(shallow)
+assert shallow.items is b.items
+deep_copy = copy.deepcopy(b)
+check_bytes_clone(deep_copy)
+assert deep_copy.items is not b.items and deep_copy.items[0] is not nested_b
+for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+    result = pickle.loads(pickle.dumps(b, protocol=protocol))
+    check_bytes_clone(result)
+    assert result.items is not b.items and result.items[0] is not nested_b
 
 # Nested, which is where a silent empty is worst: the loss is not at the top.
 nested = {"a": [1, {2, 3}], "b": (4, frozenset({5})), "c": ValueError("deep")}
