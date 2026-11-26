@@ -1027,7 +1027,7 @@ DEF_FUNC px_set_handler, 56
 END_FUNC px_set_handler
 
 ;; ============================================================================
-;; _pyexpatcore.parser_parse(handle, data, isfinal) -> 1, 0, or NULL
+;; _pyexpatcore.parser_parse(handle, data, isfinal[, flush]) -> 1, 0, or NULL
 ;;
 ;; THREE return values, and they are three different things.  This is the one
 ;; place the zlib precedent -- core raises ValueError, Python converts to
@@ -1059,6 +1059,7 @@ PP_LEN    equ 32
 PP_FINAL  equ 40
 PP_SAVED  equ 48            ; rsp before `and rsp, -16`
 PP_STATUS equ 56            ; what XML_Parse answered
+PP_FLUSH  equ 64            ; ParseFile defers delivery between its reads
 PP_FRAME  equ 64            ; + 0 pushes = 64, 16-aligned
 DEF_FUNC px_parse, PP_FRAME
     ; The saved rsp goes in a FRAME SLOT, not in a callee-saved register: the
@@ -1068,8 +1069,17 @@ DEF_FUNC px_parse, PP_FRAME
     mov [rbp - PP_SAVED], rsp
     and rsp, -16
     mov [rbp - PP_ARGS], rdi
+    mov qword [rbp - PP_FLUSH], 1
     cmp rsi, 3
+    je .handle
+    cmp rsi, 4
     jne .nargs
+    mov rdi, [rdi + 24]
+    call obj_is_true
+    ERR_M1 .pending
+    mov [rbp - PP_FLUSH], rax
+.handle:
+    mov rdi, [rbp - PP_ARGS]
 
     xor esi, esi
     call px_arg_int
@@ -1186,11 +1196,14 @@ DEF_FUNC px_parse, PP_FRAME
     cmp dword [rbp - PP_STATUS], 0
     je .expat_error
 
+    cmp qword [rbp - PP_FLUSH], 0
+    je .success
     mov rdi, [rbp - PP_H]
     call px_flush               ; the post-parse flush can itself raise
     test eax, eax
     js .pending
 
+.success:
     mov edi, 1
     call int_from_i64
     jmp .ret_int

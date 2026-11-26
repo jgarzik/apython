@@ -30,18 +30,6 @@ reasoning that chose them and what changing one would cost.
   sweep cannot see any of it, because it covers `Lib/test/test_*.py` and
   these are package directories.
 
-- **`pyexpat`'s `buffer_text` reads back `True` and does nothing.**  Setting
-  it is accepted, the attribute answers `True`, and `CharacterDataHandler`
-  still receives one call per fragment: `<a>hello &amp; goodbye world</a>`
-  calls it three times -- `['hello ', '&', ' goodbye world']` -- where CPython
-  coalesces them into one.  The buffer and `buffer_used` exist on the handle
-  and `buffer_size` is validated and stored; what is missing is the
-  accumulate-and-flush in `px_cb_chardata`, and the flush-before-every-other-
-  callback that goes with it (the call sites are already in place, so the
-  ORDER will be right when the body arrives).  Until then a caller has no way
-  to detect the no-op, which is the shape
-  [[half-implemented-is-worse]] is about.
-
 - **Six of pyexpat's twenty-two handlers are stored, read back, and never
   fire.**  `DefaultHandler`, `DefaultHandlerExpand`, `NotStandaloneHandler`,
   `ExternalEntityRefHandler`, `EntityDeclHandler` and `ElementDeclHandler`

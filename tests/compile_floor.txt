@@ -618,6 +618,7 @@ test_pyexpat_decl
 test_pyexpat_module
 test_pyexpat_latin1
 test_pyexpat_buffer
+test_pyexpat_buffer_file
 test_pyexpat_parse_isfinal
 test_pyexpat_parse
 test_raise_cause

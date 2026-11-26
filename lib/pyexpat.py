@@ -325,28 +325,42 @@ class xmlparser:
         status = _core.parser_parse(self._h, data, isfinal)
         if status == 1:
             return 1
-        # status is 0: libexpat's own error, and it is ours to raise.
+        self._raise_parse_error()
+
+    def _raise_parse_error(self):
         code, lineno, column = _core.parser_status(self._h)[:3]
         raise _expat_error(code, lineno, column)
 
     def ParseFile(self, file):
         """Parse a whole file-like object, a chunk at a time.
 
-        In Python rather than in the core: CPython uses XML_GetBuffer and
-        XML_ParseBuffer to save one copy per chunk, and the copy is not worth
-        an entry point -- while `readinst`'s two error messages are much
-        easier to match here.
+        Keep Expat's character buffer between reads and deliver it at EOF.
         """
+        try:
+            read = file.read
+        except AttributeError:
+            raise TypeError("argument must have 'read' attribute") from None
         while True:
-            chunk = file.read(2048)
+            chunk = read(2048)
             if not isinstance(chunk, (bytes, bytearray)):
-                if isinstance(chunk, str):
-                    raise TypeError("read() did not return a bytes object "
-                                    "(type=str)")
                 raise TypeError("read() did not return a bytes object (type=%s)"
                                 % type(chunk).__name__)
-            self.Parse(chunk, not chunk)
-            if not chunk:
+            if type(chunk) is bytes:
+                size = len(chunk)
+            else:
+                view = memoryview(chunk)
+                size = view.nbytes
+                # Own a stable snapshot across callbacks for mutable input.
+                if isinstance(chunk, bytearray) and size <= 2048:
+                    chunk = bytes(view)
+                view.release()
+            if size > 2048:
+                raise ValueError("read() returned too much data: "
+                                 "2048 bytes requested, %d returned" % size)
+            final = size == 0
+            if _core.parser_parse(self._h, chunk, final, final) == 0:
+                self._raise_parse_error()
+            if final:
                 return 1
 
     def __setattr__(self, name, value):
