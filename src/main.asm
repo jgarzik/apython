@@ -583,6 +583,18 @@ DEF_FUNC main, 8
     pop rdi
     call obj_decref
 
+    ; multiprocessing.spawn reads __main__.__spec__ directly even when the
+    ; main program was executed from a script instead of loaded by importlib.
+    lea rdi, [rel __spec__cstr]
+    call str_from_cstr_heap
+    push rax
+    mov rdi, [rsp + 8]
+    mov rsi, rax
+    lea rdx, [rel none_singleton]
+    call dict_set_str
+    pop rdi
+    call obj_decref
+
     ; Set __builtins__ in globals
     extern builtins_dict_global
     lea rdi, [rel __builtins__cstr]
@@ -1462,6 +1474,7 @@ __name__cstr: db "__name__", 0
 __doc__cstr: db "__doc__", 0
 __main__cstr: db "__main__", 0
 __package__cstr: db "__package__", 0
+__spec__cstr: db "__spec__", 0
 __file__cstr: db "__file__", 0
 __builtins__cstr: db "__builtins__", 0
 newline_char: db 10

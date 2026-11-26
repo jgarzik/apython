@@ -82,6 +82,8 @@ def _find(name):
 
 def run():
     """Execute the module named by sys.argv[0] in __main__'s namespace."""
+    from importlib.util import spec_from_file_location
+
     name = sys.argv[0]
     path, pkg = _find(name)
 
@@ -97,6 +99,12 @@ def run():
     g = main.__dict__
     g["__file__"] = path
     g["__package__"] = pkg
+    # A spawned child imports the original module by this name.
+    spec_name = name + ".__main__" if pkg == name else name
+    spec = spec_from_file_location(spec_name, path)
+    g["__spec__"] = spec
+    g["__loader__"] = spec.loader
+    g["__cached__"] = spec.cached
     # __name__ is already "__main__" and __builtins__ is already there:
     # main.asm built this namespace before anything here ran.
     exec(code, g)
