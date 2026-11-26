@@ -1733,9 +1733,9 @@ bytes_mapping_methods:
 section .text
 
 ;; ============================================================================
-;; bytes_concat(left Value, right Value) -> Value
-;; bytes had neither sq_concat nor nb_add, so `x + y` on two bytes variables
-;; raised TypeError; only the constant-folded form worked.
+;; bytes_concat(left Value, right Value) -> new exact bytes
+;;
+;; PyBUF_SIMPLE semantics: the right operand supplies a contiguous buffer.
 ;; Fails: 0
 ;; ============================================================================
 DEF_FUNC bytes_concat
@@ -1747,70 +1747,30 @@ DEF_FUNC bytes_concat
     mov rbx, rdi
     mov r12, rsi
 
-    V_TEST_PTR rbx, rax
-    ja .bc_type_error
-    V_TEST_PTR r12, rax
-    ja .bc_type_error
-    mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel bytes_type]
-    cmp rax, rcx
-    je .bc_left_ok
-    ; A subclass instance has bytes' layout, which is all the copies below
-    ; need; BINOP_REQUIRE_LEFT above already let it through.
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jz .bc_type_error
-.bc_left_ok:
-    ; The right operand may be any bytes-like: `b"ab" + bytearray(b"cd")` is
-    ; b'abcd' in CPython -- bytes, from the left operand -- and requiring an
-    ; exact bytes on the right refused it.  r14 carries the right side's
-    ; length and r12 becomes its DATA pointer, so the copies below read one
-    ; layout whichever type arrived.
-    mov rax, [r12 + PyObject.ob_type]
-    cmp rax, rcx
-    je .bc_right_bytes
-    ; A bytes subclass on the right has bytes' layout too.
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTES_SUBCLASS
-    jz .bc_right_bytearray
-.bc_right_bytes:
-    mov r14, [r12 + PyBytesObject.ob_size]
-    lea r12, [r12 + PyBytesObject.data]
-    jmp .bc_right_done
-.bc_right_bytearray:
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    je .bc_right_ba
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
-    jz .bc_type_error
-.bc_right_ba:
-    mov r14, [r12 + PyByteArrayObject.ob_size]
     mov rdi, r12
-    call bytearray_data
+    call bytes_like_ptr_len
+    test ecx, ecx
+    jz .type_error
     mov r12, rax
-.bc_right_done:
+    mov r14, r10
 
-    mov r13, [rbx + PyBytesObject.ob_size]
-    add r13, r14
-    lea rdi, [r13 + PyBytesObject.data + 8]
-    call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
-    lea rcx, [rel bytes_type]
-    mov [rax + PyObject.ob_type], rcx
-    mov [rax + PyBytesObject.ob_size], r13
-
-    push rax
+    mov rdi, [rbx + PyBytesObject.ob_size]
+    add rdi, r14
+    call bytes_new
+    mov r13, rax
     lea rdi, [rax + PyBytesObject.data]
     lea rsi, [rbx + PyBytesObject.data]
     mov rdx, [rbx + PyBytesObject.ob_size]
     call ap_memcpy
-    mov rax, [rsp]
+
     mov rdi, [rbx + PyBytesObject.ob_size]
-    lea rdi, [rax + PyBytesObject.data + rdi]
+    lea rdi, [r13 + PyBytesObject.data + rdi]
     mov rsi, r12
     mov rdx, r14
     call ap_memcpy
-    pop rax
-    mov qword [rax + PyBytesObject.data + r13], 0
+    mov rax, r13
     mov edx, TAG_PTR
+.out:
     pop r14
     pop r13
     pop r12
@@ -1818,17 +1778,12 @@ DEF_FUNC bytes_concat
     leave
     ret
 
-.bc_type_error:
+.type_error:
     mov rsi, r12
     CSTRING rdi, `can't concat \x01 to bytes`
     call set_type_error_with_name
     RET_NULL
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+    jmp .out
 END_FUNC bytes_concat
 
 ;; ============================================================================
