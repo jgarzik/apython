@@ -2489,9 +2489,8 @@ extern str_set_length
     test rax, rax
     jz .bls_enc_bad_encoding
     mov rcx, [rax + PyObject.ob_type]
-    lea rdx, [rel str_type]
-    cmp rcx, rdx
-    jne .bls_enc_bad_encoding
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bls_enc_bad_encoding
     mov rdi, [rdi]
     V_TEST_PTR rdi, rax
     ja .bls_enc_no_str
@@ -2591,6 +2590,286 @@ extern str_set_length
     ret
 END_FUNC byteslike_source
 
+;; bytes_bind_args(rdi = input Values, rsi = total count, rdx = 3 output slots)
+;;   -> rax = positional count after binding, or -1 with an exception pending
+;; Values are borrowed. Zero marks an omitted argument, distinct from None.
+BBA_TOTAL equ 8
+BBA_NKW   equ 16
+BBA_SLOT  equ 24
+BBA_BAD   equ 32
+BBA_DUP   equ 40
+BBA_FRAME equ 56
+DEF_FUNC_LOCAL bytes_bind_args, BBA_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    mov r12, rdi
+    mov [rbp - BBA_TOTAL], rsi
+    mov rbx, rdx
+    mov r14, rsi
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    mov qword [rbp - BBA_NKW], 0
+    test rax, rax
+    jz .count
+    mov rcx, [rax + PyTupleObject.ob_size]
+    mov [rbp - BBA_NKW], rcx
+    sub r14, rcx
+    mov r13, [rax + PyTupleObject.ob_item]
+.count:
+    cmp rsi, 3
+    ja .too_many
+    mov qword [rbx], 0
+    mov qword [rbx + 8], 0
+    mov qword [rbx + 16], 0
+    xor ecx, ecx
+.copy_positional:
+    cmp rcx, r14
+    jae .keywords
+    mov rax, [r12 + rcx*8]
+    mov [rbx + rcx*8], rax
+    inc rcx
+    jmp .copy_positional
+.keywords:
+    mov qword [rbp - BBA_BAD], 0
+    mov qword [rbp - BBA_DUP], 3
+    xor r15d, r15d
+.next_keyword:
+    cmp r15, [rbp - BBA_NKW]
+    jae .bound
+    mov qword [rbp - BBA_SLOT], 0
+.match:
+    lea rax, [rel bytes_keywords]
+    mov rcx, [rbp - BBA_SLOT]
+    shl rcx, 4
+    mov rdx, [r13 + r15*8]
+    mov rdi, [rdx + PyStrObject.ob_size]
+    cmp rdi, [rax + rcx + 8]
+    jne .next_slot
+    mov rsi, [rax + rcx]
+    lea rdi, [rdx + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .matched
+.next_slot:
+    inc qword [rbp - BBA_SLOT]
+    cmp qword [rbp - BBA_SLOT], 3
+    jb .match
+    cmp qword [rbp - BBA_BAD], 0
+    jne .advance
+    mov rax, [r13 + r15*8]
+    mov [rbp - BBA_BAD], rax
+    jmp .advance
+.matched:
+    mov rcx, [rbp - BBA_SLOT]
+    cmp rcx, r14
+    jb .duplicate
+    lea rax, [r14 + r15]
+    mov rax, [r12 + rax*8]
+    mov [rbx + rcx*8], rax
+    jmp .advance
+.duplicate:
+    cmp rcx, [rbp - BBA_DUP]
+    jae .advance
+    mov [rbp - BBA_DUP], rcx
+.advance:
+    inc r15
+    jmp .next_keyword
+
+.bound:
+    mov rcx, [rbp - BBA_DUP]
+    cmp rcx, 3
+    jb .duplicate_error
+    mov rdi, [rbp - BBA_BAD]
+    test rdi, rdi
+    jnz .bad_keyword
+    mov rdi, [rbx + 8]
+    CSTRING rsi, `bytes() argument 'encoding' must be str, not \x02`
+    call bytes_check_codec_name
+    ERR_M1 .failed
+    mov rdi, [rbx + 16]
+    CSTRING rsi, `bytes() argument 'errors' must be str, not \x02`
+    call bytes_check_codec_name
+    ERR_M1 .failed
+
+    cmp qword [rbx + 8], 0
+    je .without_encoding
+    cmp qword [rbx], 0
+    je .no_source
+    mov eax, 2
+    cmp qword [rbx + 16], 0
+    je .out
+    inc eax
+    jmp .out
+.without_encoding:
+    cmp qword [rbx + 16], 0
+    jne .errors_only
+    xor eax, eax
+    cmp qword [rbx], 0
+    setne al
+    jmp .out
+.errors_only:
+    mov rdi, [rbx]
+    extern value_type
+    call value_type
+    test rax, rax
+    jz .no_source_for_errors
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .no_source_for_errors
+    FAIL exc_TypeError_type, "string argument without an encoding", .failed
+.no_source_for_errors:
+    FAIL exc_TypeError_type, "errors without a string argument", .failed
+.no_source:
+    FAIL exc_TypeError_type, "encoding without a string argument", .failed
+.too_many:
+    mov rsi, [rbp - BBA_TOTAL]
+    CSTRING rdi, "bytes() takes at most 3 arguments ("
+    test r14, r14
+    jnz .arity
+    CSTRING rdi, "bytes() takes at most 3 keyword arguments ("
+.arity:
+    CSTRING rdx, " given)"
+    call set_type_error_counted
+    jmp .failed
+.duplicate_error:
+    lea rax, [rel bytes_duplicate_keywords]
+    mov rsi, [rax + rcx*8]
+    lea rdi, [rel exc_TypeError_type]
+    call set_exception
+    jmp .failed
+.bad_keyword:
+    call bytes_bad_keyword
+.failed:
+    mov rax, -1
+.out:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_bind_args
+
+;; bytes_check_codec_name(rdi = optional Value, rsi = type error template)
+;;   -> rax = 0 on success or -1 with an exception pending
+BCK_ARG equ 8
+BCK_FRAME equ 16
+DEF_FUNC_LOCAL bytes_check_codec_name, BCK_FRAME
+    test rdi, rdi
+    jz .ok
+    mov [rbp - BCK_ARG], rdi
+    V_TEST_PTR rdi, rax
+    ja .bad_type
+    mov rax, [rdi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .bad_type
+    mov rcx, [rdi + PyStrObject.ob_size]
+    cmp rcx, [rdi + PyStrObject.ob_length]
+    je .check_nul
+    ; Python strings can hold surrogate code points. The clinic converts the
+    ; name to strict UTF-8 before checking its NULs. Find the surrogate lead
+    ; byte and use the existing encoder to raise with the right span.
+    add rdi, PyStrObject.data
+    mov al, 0xed
+.scan:
+    test rcx, rcx
+    jz .check_nul
+    repne scasb
+    jne .check_nul
+    test rcx, rcx
+    jz .check_nul
+    mov dl, [rdi]
+    and dl, 0xe0
+    cmp dl, 0xa0
+    jne .scan
+    lea rdi, [rbp - BCK_ARG]
+    mov esi, 1
+    call str_method_encode
+    ERR_NULL .failed
+    mov rdi, rax
+    call obj_decref
+.check_nul:
+    mov rdi, [rbp - BCK_ARG]
+    mov rsi, [rdi + PyStrObject.ob_size]
+    add rdi, PyStrObject.data
+    xor edx, edx
+    extern ap_memchr
+    call ap_memchr
+    test rax, rax
+    jnz .nul
+.ok:
+    xor eax, eax
+    leave
+    ret
+.bad_type:
+    xchg rdi, rsi
+    call set_type_error_with_name
+    jmp .failed
+.nul:
+    FAIL exc_ValueError_type, "embedded null character", .failed
+.failed:
+    mov rax, -1
+    leave
+    ret
+END_FUNC bytes_check_codec_name
+
+;; bytes_bad_keyword(rdi = name Value) -> void with an exception pending
+;; Format as a Python string so long names and embedded NULs fit.
+DEF_FUNC_LOCAL bytes_bad_keyword
+    push rbx
+    push r12
+    mov r12, rdi
+    CSTRING rdi, "'%s' is an invalid keyword argument for bytes()"
+    call str_from_cstr_heap
+    mov rbx, rax
+    mov rdi, rax
+    mov rsi, r12
+    xor edx, edx
+    mov ecx, 1
+    extern str_mod_impl
+    call str_mod_impl           ; err: release the format before checking
+    mov r12, rax
+    mov rdi, rbx
+    call obj_decref
+    test r12, r12
+    jz .out
+    lea rdi, [rel exc_TypeError_type]
+    mov rsi, r12
+    mov edx, TAG_PTR
+    call exc_new
+    mov rbx, rax
+    mov rdi, r12
+    call obj_decref
+    mov rdi, rbx
+    extern exc_install
+    call exc_install
+.out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC bytes_bad_keyword
+
+section .rodata
+align 8
+bytes_keywords:
+    dq bytes_source_keyword, 6
+    dq bytes_encoding_keyword, 8
+    dq bytes_errors_keyword, 6
+bytes_source_keyword: db "source", 0
+bytes_encoding_keyword: db "encoding", 0
+bytes_errors_keyword: db "errors", 0
+align 8
+bytes_duplicate_keywords:
+    dq bytes_duplicate_source, bytes_duplicate_encoding, bytes_duplicate_errors
+bytes_duplicate_source: db "argument for bytes() given by name ('source') and position (1)", 0
+bytes_duplicate_encoding: db "argument for bytes() given by name ('encoding') and position (2)", 0
+bytes_duplicate_errors: db "argument for bytes() given by name ('errors') and position (3)", 0
+section .text
+
 ;; ============================================================================
 ;; bytes_type_call(type, args, nargs) -> (rax, edx) = a PyBytesObject*, TAG_PTR
 ;; Fails: 0
@@ -2600,11 +2879,25 @@ END_FUNC byteslike_source
 BTC_TYPE  equ 8
 BTC_BUF   equ 16
 BTC_LEN   equ 24
-BTC_FRAME equ 40            ; + 1 push = 48, 16-aligned
+BTC_BOUND equ 48            ; source, encoding, errors
+BTC_FRAME equ 56            ; + 1 push = 64, 16-aligned
 DEF_FUNC bytes_type_call, BTC_FRAME
     ; rdi=type, rsi=args, rdx=nargs
     push rbx
     mov [rbp - BTC_TYPE], rdi
+    cmp rdx, 2
+    jae .btc_bind
+    cmp qword [gs:ThreadState.kw_names_pending], 0
+    je .btc_bound
+.btc_bind:
+    mov rdi, rsi
+    mov rsi, rdx
+    lea rdx, [rbp - BTC_BOUND]
+    call bytes_bind_args
+    ERR_M1 .btc_propagate
+    mov rdx, rax
+    lea rsi, [rbp - BTC_BOUND]
+.btc_bound:
 
     ; CPython asks the object for __bytes__ before it tries a buffer, an
     ; index or an iterable, and this asked nothing -- so `bytes(headers)` on
@@ -2619,6 +2912,14 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     V_TEST_PTR rax, rcx
     ja .btc_no_dunder
     mov rcx, [rax + PyObject.ob_type]
+    lea rdi, [rel bytes_type]
+    cmp rcx, rdi
+    jne .btc_heap_dunder
+    cmp [rbp - BTC_TYPE], rdi
+    jne .btc_no_dunder
+    INCREF rax
+    jmp .btc_return_bytes
+.btc_heap_dunder:
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .btc_no_dunder
     mov [rbp - BTC_BUF], rsi            ; args, across the call
@@ -2647,6 +2948,8 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     lea rcx, [rel bytes_type]
     cmp rdx, rcx
     jne .btc_dunder_adopt
+.btc_return_bytes:
+    mov edx, TAG_PTR
     pop rbx
     leave
     ret

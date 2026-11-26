@@ -1853,7 +1853,9 @@ DEF_FUNC str_method_encode, SE_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .se_bad_enc
+    je .se_have_enc
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .se_bad_enc
 .se_have_enc:
     ; args[2] = errors.  It was never read at all: SE_ERRS stayed 0, so every
     ; failure was strict whatever was asked for.
