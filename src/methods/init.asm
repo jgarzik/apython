@@ -2297,6 +2297,11 @@ DEF_FUNC methods_init
     extern bytes_method_getnewargs
     ADD_FN_N mn___getnewargs__, bytes_method_getnewargs, 1, 1
 
+    extern bytes_dunder_new
+    mov rdi, rbx
+    lea rsi, [rel bytes_dunder_new]
+    call add_new_staticmethod
+
     lea rax, [rel bytes_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
