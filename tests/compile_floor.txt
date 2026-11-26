@@ -77,6 +77,7 @@ test_bytearray_repeat
 test_bytes_affix_range
 test_bytes_bytearray_args
 test_bytes_bytearray_repr
+test_bytes_concat_buffers
 test_bytes_dunder
 test_bytes_hash_tuple_cmp
 test_bytes_keywords
@@ -127,6 +128,7 @@ test_codecs_registry
 test_codec_surrogates
 test_code_gc
 test_code_lines_scaling
+test_code_location_iterators
 test_code_lnotab
 test_code_localsplus
 test_code_replace
@@ -326,6 +328,7 @@ test_float_repr_ties
 test_fmtspec
 test_for_iter_list_reuse
 test_for_loops
+test_fork_process_pool
 test_format_fields
 test_format_float_spec
 test_format_grouping
@@ -489,6 +492,7 @@ test_load_from_dict_or_globals
 test_long_name_error
 test_lzma
 test_maketrans
+test_main_spec
 test_map_multi
 test_mappingproxy_call
 test_marshal_dumps_interned
@@ -541,6 +545,7 @@ test_module_repr_long_path
 test_module_type_new
 test_mro_entries
 test_multiple_inheritance
+test_multiprocessing_semlock
 test_namespace_packages
 test_nanbox_float
 test_nanbox_int
@@ -599,6 +604,7 @@ test_posix_process
 test_posix_putenv
 test_posix
 test_posix_scandir
+test_posixshmem
 test_pow_dunder
 test_pow
 test_prepare_namespace

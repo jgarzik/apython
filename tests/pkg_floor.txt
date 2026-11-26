@@ -6,7 +6,7 @@ pass test_ast 87
 pass test_asyncio 2520
 pass test_capi 115
 pass test_cext 5
-pass test_concurrent_futures 0
+pass test_concurrent_futures 194
 pass test_cppext 5
 pass test_ctypes 0
 pass test_dataclasses 228
@@ -20,7 +20,7 @@ pass test_inspect 263
 pass test_json 170
 pass test_lib2to3 655
 pass test_module 26
-pass test_multiprocessing_fork 4
+pass test_multiprocessing_fork 351
 pass test_multiprocessing_forkserver 4
 pass test_multiprocessing_spawn 4
 pass test_peg_generator 65
