@@ -52,7 +52,9 @@ PX_F_NSPREFIX    equ 2          ; namespace_prefixes
 PX_F_BUFFERTEXT  equ 3          ; buffer_text
 PX_F_BUFFERSIZE  equ 4          ; buffer_size
 PX_F_REPARSE     equ 5          ; SetReparseDeferralEnabled
-PX_F_COUNT       equ 6
+PX_F_PARAM_ENTITY equ 6         ; SetParamEntityParsing
+PX_F_FOREIGN_DTD equ 7          ; UseForeignDTD
+PX_F_COUNT       equ 8
 
 ; CPython's default, and the one test_pyexpat's coalescing cases assume.
 PX_BUFFER_DEFAULT equ 8192
@@ -83,6 +85,8 @@ struc PxHandle
                                 ;   frees its own with its own allocator, so
                                 ;   there is no struct here to align and the
                                 ;   magic can sit first, unlike ZHandle's
+    .parent:      resq 1        ; retained while Expat's child parser is live
+    .refs:        resq 1        ; one for the wrapper and one per child
     .handlers:    resq PX_H_COUNT   ; owned Values, or 0 for unset
     .intern:      resq 1        ; owned dict, or 0
     .buffer:      resq 1        ; the coalescing buffer, 0 when buffer_text off

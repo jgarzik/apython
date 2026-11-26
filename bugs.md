@@ -30,21 +30,6 @@ reasoning that chose them and what changing one would cost.
   sweep cannot see any of it, because it covers `Lib/test/test_*.py` and
   these are package directories.
 
-- **Six of pyexpat's twenty-two handlers are stored, read back, and never
-  fire.**  `DefaultHandler`, `DefaultHandlerExpand`, `NotStandaloneHandler`,
-  `ExternalEntityRefHandler`, `EntityDeclHandler` and `ElementDeclHandler`
-  have `dq 0, 0` rows in `px_installers`, so setting one registers the
-  attribute and installs nothing.  Measured: `DefaultHandler`,
-  `EntityDeclHandler` and `ElementDeclHandler` all fire in CPython over a
-  document with an internal subset and none of them fire here.  `ElementDecl`
-  is the one with real work behind it -- its `model` argument is a nested
-  `(type, quant, name, children)` tuple walked out of libexpat's
-  `XML_Content` tree, which must then be released with
-  `XML_FreeContentModel` on every path including the raising ones.
-  `xml.sax` is the one consumer still blocked, on `ExternalEntityRefHandler`
-  plus `SetParamEntityParsing` and `ExternalEntityParserCreate`, which are
-  also absent.
-
 - **A relative import with no `__name__` in globals raises the wrong type.**
   `exec("from ... import x", {})` answers `ImportError: attempted relative
   import with no known parent package`; CPython answers

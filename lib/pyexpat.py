@@ -252,7 +252,22 @@ _FLAG_INDEX = {
     "buffer_text": 3,
     "buffer_size": 4,
     "reparse_deferral": 5,
+    "param_entity_parsing": 6,
+    "foreign_dtd": 7,
 }
+
+_ENCODING_OMITTED = object()
+
+
+def _check_expat_string(value, method, argument, optional=False):
+    if optional and value is None:
+        return
+    if not isinstance(value, str):
+        expected = "str or None" if optional else "str"
+        raise TypeError("%s() argument %s must be %s, not %s"
+                        % (method, argument, expected, type(value).__name__))
+    if str.__contains__(value, "\0"):
+        raise ValueError("embedded null character")
 
 
 class xmlparser:
@@ -318,6 +333,49 @@ class xmlparser:
             self._h, _FLAG_INDEX["reparse_deferral"], int(bool(enabled)))
         object.__setattr__(self, "_reparse", enabled)
 
+    def SetParamEntityParsing(self, flag, /):
+        """Select whether Expat parses external parameter entities."""
+        return _core.parser_set_flag(
+            self._h, _FLAG_INDEX["param_entity_parsing"], flag)
+
+    def UseForeignDTD(self, flag=True, /):
+        """Let the external-entity handler supply a default DTD."""
+        code = _core.parser_set_flag(self._h, _FLAG_INDEX["foreign_dtd"],
+                                     int(bool(flag)))
+        if code:
+            self._raise_parse_error(code)
+
+    def SetBase(self, base, /):
+        """Set the base URL passed to entity callbacks."""
+        _check_expat_string(base, "SetBase", "1")
+        _core.parser_base(self._h, base)
+
+    def GetBase(self, /):
+        """Return the parser's base URL."""
+        return _core.parser_base(self._h)
+
+    def ExternalEntityParserCreate(self, context, encoding=_ENCODING_OMITTED, /):
+        """Create a child parser for an external entity."""
+        method = "ExternalEntityParserCreate"
+        _check_expat_string(context, method, "1", optional=True)
+        if encoding is _ENCODING_OMITTED:
+            encoding = None
+        else:
+            _check_expat_string(encoding, method, "2")
+
+        child = object.__new__(xmlparser)
+        handlers = [None] * len(_HANDLER_NAMES)
+        set = object.__setattr__
+        set(child, "_handlers", handlers)
+        set(child, "_intern", self._intern)
+        set(child, "_ordered", self._ordered)
+        set(child, "_specified", self._specified)
+        set(child, "_nsprefixes", self._nsprefixes)
+        set(child, "_reparse", self._reparse)
+        handle = _core.parser_child(self._h, context, encoding, handlers)
+        set(child, "_h", handle)
+        return child
+
     def Parse(self, data, isfinal=False):
         """Feed a chunk of the document.
 
@@ -338,8 +396,10 @@ class xmlparser:
             return 1
         self._raise_parse_error()
 
-    def _raise_parse_error(self):
-        code, lineno, column = _core.parser_status(self._h)[:3]
+    def _raise_parse_error(self, code=None):
+        current_code, lineno, column = _core.parser_status(self._h)[:3]
+        if code is None:
+            code = current_code
         raise _expat_error(code, lineno, column)
 
     def ParseFile(self, file):
