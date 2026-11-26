@@ -3,6 +3,7 @@ import fcntl
 import io
 import os
 import signal
+import socket
 import threading
 import time
 
@@ -96,6 +97,26 @@ def view_readinto():
         os.close(write_fd)
 
 
+def socket_readinto():
+    receiver, sender = socket.socketpair()
+    with receiver, sender:
+        while_reading(receiver.recv_into, lambda: sender.shutdown(socket.SHUT_WR))
+
+    receiver, sender = socket.socketpair()
+    with receiver, sender:
+        receiver.setblocking(False)
+        buffer = bytearray(1)
+        for nbytes, expected in ((2, ValueError), (1, BlockingIOError)):
+            try:
+                receiver.recv_into(buffer, nbytes)
+            except expected:
+                pass
+            else:
+                raise AssertionError("recv_into unexpectedly returned")
+            buffer.append(0)
+
+
 file_readinto()
 view_readinto()
+socket_readinto()
 print("readinto releases its buffer")

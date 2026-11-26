@@ -950,8 +950,9 @@ SRI_FD    equ 8
 SRI_PTR   equ 16
 SRI_CAP   equ 24
 SRI_N     equ 32
-SRI_FRAME equ 48            ; + 1 push = 56... padded below
-DEF_FUNC sock_recv_into_fn, 40
+SRI_BUF   equ 40
+SRI_FRAME equ 40            ; + 1 push = 48, 16-aligned
+DEF_FUNC sock_recv_into_fn, SRI_FRAME
     push rbx
     cmp rsi, 4
     jl .sri_args
@@ -961,13 +962,17 @@ DEF_FUNC sock_recv_into_fn, 40
     ERR_M1 .sri_fail
     mov [rbp - SRI_FD], rax
     mov rdi, [rbx + 8]
+    mov [rbp - SRI_BUF], rdi
     call sk_wbuf_arg            ; rax = data, r10 = length
     ERR_PENDING .sri_fail
     mov [rbp - SRI_PTR], rax
     mov [rbp - SRI_CAP], r10
+    mov rdi, [rbp - SRI_BUF]
+    extern writable_buffer_acquire
+    call writable_buffer_acquire
     mov rdi, [rbx + 16]
     call sk_int_arg
-    ERR_M1 .sri_fail
+    ERR_M1 .sri_release_fail
     mov [rbp - SRI_N], rax
     test rax, rax
     js .sri_negative
@@ -980,7 +985,7 @@ DEF_FUNC sock_recv_into_fn, 40
     ja .sri_toobig
     mov rdi, [rbx + 24]
     call sk_int_arg
-    ERR_M1 .sri_fail
+    ERR_M1 .sri_release_fail
     mov rcx, rax
     mov rdi, [rbp - SRI_FD]
     mov rsi, [rbp - SRI_PTR]
@@ -988,15 +993,24 @@ DEF_FUNC sock_recv_into_fn, 40
     xor r8d, r8d
     xor r9d, r9d
     BLOCKING_CALL sys_recvfrom
+    mov [rbp - SRI_PTR], rax
+    mov rdi, [rbp - SRI_BUF]
+    extern writable_buffer_release
+    call writable_buffer_release
+    mov rax, [rbp - SRI_PTR]
     SOCK_CHECK_RET rax, .sri_fail
     mov rdi, rax
     pop rbx
     leave
     jmp sk_ret_int
 .sri_negative:
-    FAIL exc_ValueError_type, "negative buffersize in recv_into", .sri_fail
+    FAIL exc_ValueError_type, "negative buffersize in recv_into", .sri_release_fail
 .sri_toobig:
-    FAIL exc_ValueError_type, "nbytes is greater than the length of the buffer", .sri_fail
+    FAIL exc_ValueError_type, "nbytes is greater than the length of the buffer", .sri_release_fail
+.sri_release_fail:
+    mov rdi, [rbp - SRI_BUF]
+    call writable_buffer_release
+    jmp .sri_fail
 .sri_args:
     FAIL exc_TypeError_type, "recv_into() takes exactly 4 arguments", .sri_fail
 .sri_fail:
