@@ -47,20 +47,29 @@ extern builtin_func_new
 extern ap_malloc
 extern ap_free
 extern ap_memset
+extern malloc
+extern free
+extern dlsym
 extern obj_as_index
 extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_MemoryError_type
+extern exc_OverflowError_type
 extern tuple_new
 extern none_singleton
+extern bool_true
+extern bool_false
 extern str_type
 extern dict_type
+extern list_type
 
 extern XML_ParserCreate
 extern XML_ParserCreateNS
+extern XML_ExternalEntityParserCreate
 extern XML_ParserFree
 extern XML_SetUserData
+extern XML_SetUnknownEncodingHandler
 extern XML_GetErrorCode
 extern XML_GetCurrentLineNumber
 extern XML_GetCurrentColumnNumber
@@ -69,6 +78,10 @@ extern XML_ErrorString
 extern XML_ExpatVersion
 extern XML_Parse
 extern XML_SetEncoding
+extern XML_SetParamEntityParsing
+extern XML_UseForeignDTD
+extern XML_GetBase
+extern XML_SetBase
 extern XML_SetStartElementHandler
 extern XML_SetEndElementHandler
 extern XML_SetCharacterDataHandler
@@ -81,15 +94,22 @@ extern XML_SetEndNamespaceDeclHandler
 extern XML_SetCommentHandler
 extern XML_SetStartCdataSectionHandler
 extern XML_SetEndCdataSectionHandler
+extern XML_SetDefaultHandler
+extern XML_SetDefaultHandlerExpand
+extern XML_SetNotStandaloneHandler
+extern XML_SetExternalEntityRefHandler
 extern XML_SetStartDoctypeDeclHandler
 extern XML_SetEndDoctypeDeclHandler
+extern XML_SetEntityDeclHandler
 extern XML_SetXmlDeclHandler
+extern XML_SetElementDeclHandler
 extern XML_SetAttlistDeclHandler
 extern XML_SetSkippedEntityHandler
 
 extern px_cb_start_element
 extern px_cb_end_element
 extern px_cb_chardata
+extern px_cb_noop_chardata
 extern px_cb_processing_instr
 extern px_cb_unparsed_entity
 extern px_cb_notation_decl
@@ -98,9 +118,15 @@ extern px_cb_end_ns
 extern px_cb_comment
 extern px_cb_start_cdata
 extern px_cb_end_cdata
+extern px_cb_default
+extern px_cb_default_expand
+extern px_cb_not_standalone
+extern px_cb_external_entity
 extern px_cb_start_doctype
 extern px_cb_end_doctype
+extern px_cb_entity_decl
 extern px_cb_xml_decl
+extern px_cb_element_decl
 extern px_cb_attlist_decl
 extern px_cb_skipped_entity
 extern px_flush
@@ -114,15 +140,13 @@ align 8
 px_handles:     dq 0            ; PxHandle*[], grown by doubling
 px_handle_cap:  dq 0
 px_handle_n:    dq 0
+px_set_reparse: dq 0            ; optional before Expat 2.6.0
 
 section .rodata
 align 8
 global px_installers
-; One row per handler index: the libexpat setter, and our trampoline.  A ZERO
-; row means the C side is not written yet -- the reference is still kept on the
-; handle and read back from Python, so a later commit fills the row in and
-; nothing else changes.  The order is PX_H_* from pyexpat.inc, which is
-; CPython's handler_info[] order.
+; One row per handler index: the libexpat setter and our trampoline.
+; PX_H_* in pyexpat.inc follows CPython's handler_info[] order.
 px_installers:
     dq XML_SetStartElementHandler,   px_cb_start_element    ; 0  StartElement
     dq XML_SetEndElementHandler,     px_cb_end_element      ; 1  EndElement
@@ -135,28 +159,31 @@ px_installers:
     dq XML_SetCommentHandler,           px_cb_comment            ; 8  Comment
     dq XML_SetStartCdataSectionHandler, px_cb_start_cdata        ; 9  StartCdata
     dq XML_SetEndCdataSectionHandler,   px_cb_end_cdata          ; 10 EndCdata
-    dq 0, 0                                                 ; 11 Default
-    dq 0, 0                                                 ; 12 DefaultExpand
-    dq 0, 0                                                 ; 13 NotStandalone
-    dq 0, 0                                                 ; 14 ExternalEntity
+    dq XML_SetDefaultHandler,           px_cb_default            ; 11 Default
+    dq XML_SetDefaultHandlerExpand,     px_cb_default_expand     ; 12 DefaultExpand
+    dq XML_SetNotStandaloneHandler,     px_cb_not_standalone     ; 13 NotStandalone
+    dq XML_SetExternalEntityRefHandler, px_cb_external_entity    ; 14 ExternalEntity
     dq XML_SetStartDoctypeDeclHandler,  px_cb_start_doctype      ; 15 StartDoctype
     dq XML_SetEndDoctypeDeclHandler,    px_cb_end_doctype        ; 16 EndDoctype
-    dq 0, 0                                                 ; 17 EntityDecl
+    dq XML_SetEntityDeclHandler,        px_cb_entity_decl        ; 17 EntityDecl
     dq XML_SetXmlDeclHandler,           px_cb_xml_decl           ; 18 XmlDecl
-    dq 0, 0                                                 ; 19 ElementDecl
+    dq XML_SetElementDeclHandler,       px_cb_element_decl       ; 19 ElementDecl
     dq XML_SetAttlistDeclHandler,       px_cb_attlist_decl       ; 20 AttlistDecl
     dq XML_SetSkippedEntityHandler,     px_cb_skipped_entity     ; 21 SkippedEntity
 
 px_modname:     db "_pyexpatcore", 0
 
 pn_parser_new:      db "parser_new", 0
+pn_parser_child:    db "parser_child", 0
 pn_parser_free:     db "parser_free", 0
 pn_parser_status:   db "parser_status", 0
 pn_error_string:    db "ErrorString", 0
 pn_set_handler:     db "parser_set_handler", 0
 pn_parse:           db "parser_parse", 0
 pn_set_flag:        db "parser_set_flag", 0
+pn_parser_base:     db "parser_base", 0
 pn_expat_version:   db "EXPAT_VERSION", 0
+px_reparse_symbol:  db "XML_SetReparseDeferralEnabled", 0
 
 px_e_nargs:     db "_pyexpatcore: wrong number of arguments", 0
 px_e_handle:    db "_pyexpatcore: stale or invalid handle", 0
@@ -304,6 +331,7 @@ END_FUNC px_arg_int
 ;; argument array is the interpreter's and outlives the call.
 ;; ============================================================================
 PAS_MSG   equ 8
+PAS_VALUE equ 16
 PAS_FRAME equ 16                ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL px_arg_str_or_none, PAS_FRAME
     mov [rbp - PAS_MSG], rsi
@@ -317,7 +345,15 @@ DEF_FUNC_LOCAL px_arg_str_or_none, PAS_FRAME
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .bad
+    je .string
+    mov [rbp - PAS_VALUE], rdi
+    mov rdi, rax
+    mov rsi, rcx
+    call type_is_subtype
+    test eax, eax
+    jz .bad
+    mov rdi, [rbp - PAS_VALUE]     ; str subclasses retain the inline layout
+.string:
     lea rax, [rdi + PyStrObject.data]
     leave
     ret
@@ -448,7 +484,14 @@ DEF_FUNC px_parser_new, PN_FRAME
     call XML_SetUserData wrt ..plt
 
     mov rcx, [rbp - PN_H]
+    mov rdi, [rcx + PxHandle.parser]
+    lea rsi, [rel px_latin1_alias]
+    xor edx, edx
+    call XML_SetUnknownEncodingHandler wrt ..plt
+
+    mov rcx, [rbp - PN_H]
     mov qword [rcx + PxHandle.magic], PX_MAGIC
+    mov qword [rcx + PxHandle.refs], 1
     mov qword [rcx + PxHandle.buffer_size], PX_BUFFER_DEFAULT
     mov rax, [rbp - PN_INTERN]
     mov [rcx + PxHandle.intern], rax
@@ -471,17 +514,8 @@ DEF_FUNC px_parser_new, PN_FRAME
     ret
 
 .slot_failed:
-    mov rcx, [rbp - PN_H]
-    mov rdi, [rcx + PxHandle.parser]
-    call XML_ParserFree wrt ..plt
-    mov rcx, [rbp - PN_H]
-    mov rdi, [rcx + PxHandle.intern]
-    test rdi, rdi
-    jz .slot_no_intern
-    call obj_decref
-.slot_no_intern:
     mov rdi, [rbp - PN_H]
-    call ap_free
+    call px_handle_release
     jmp .oom
 .create_failed:
     mov rdi, [rbp - PN_H]
@@ -529,18 +563,259 @@ DEF_FUNC px_parser_new, PN_FRAME
     ret
 END_FUNC px_parser_new
 
+;; px_latin1_alias(rdi = unused, rsi = name, rdx = XML_Encoding*) -> XML_Status
+;; Expat recognizes ISO-8859-1 itself; Python also accepts iso8859.
+PX_ENCODING_BYTES equ 256
+PX_ENCODING_DATA equ PX_ENCODING_BYTES * 4
+DEF_FUNC_BARE px_latin1_alias
+    lea rdi, [rel px_iso8859_name]
+    xor ecx, ecx
+.name:
+    mov al, [rsi + rcx]
+    or al, 0x20
+    cmp al, [rdi + rcx]
+    jne .unknown
+    inc ecx
+    cmp ecx, 7
+    jb .name
+    cmp byte [rsi + rcx], 0
+    jne .unknown
+    xor ecx, ecx
+.map:
+    mov [rdx + rcx*4], ecx
+    inc ecx
+    cmp ecx, PX_ENCODING_BYTES
+    jb .map
+    mov qword [rdx + PX_ENCODING_DATA], 0
+    mov qword [rdx + PX_ENCODING_DATA + 8], 0     ; convert
+    mov qword [rdx + PX_ENCODING_DATA + 16], 0    ; release
+    mov eax, XML_STATUS_OK
+    ret
+.unknown:
+    xor eax, eax
+    ret
+END_FUNC px_latin1_alias
+
+section .rodata
+px_iso8859_name: db "iso8859"
+section .text
+
+;; ============================================================================
+;; px_handle_release(handle) -> nothing
+;;
+;; Expat keeps a native parent pointer for child parsing and shares the DTD
+;; with parameter-entity children. A Python wrapper can die first, so hold
+;; the native chain until its last child is freed.
+;; ============================================================================
+DEF_FUNC_LOCAL px_handle_release
+    push rbx
+    push r12
+    mov rbx, rdi
+.release:
+    dec qword [rbx + PxHandle.refs]
+    jnz .done
+    mov r12, [rbx + PxHandle.parent]
+    mov rdi, [rbx + PxHandle.parser]
+    call XML_ParserFree wrt ..plt
+    mov rdi, [rbx + PxHandle.buffer]
+    call free wrt ..plt
+    mov rdi, [rbx + PxHandle.intern]
+    test rdi, rdi
+    jz .free_handle
+    call obj_decref
+.free_handle:
+    mov rdi, rbx
+    call ap_free
+    mov rbx, r12
+    test rbx, rbx
+    jnz .release
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC px_handle_release
+
+;; ============================================================================
+;; _pyexpatcore.parser_child(parent, context, encoding, handlers) -> index
+;;
+;; Expat inherits the parsing context and callbacks. Attach fresh user data
+;; and a fresh text buffer. Fill the child's Python-owned list and native
+;; borrowed slots together so handler replacement on the parent cannot leave
+;; a dangling reference on the child.
+;; ============================================================================
+EC_ARGS   equ 8
+EC_PARENT equ 16
+EC_H      equ 24
+EC_LIST   equ 32
+EC_CONTEXT equ 40
+EC_ENCODING equ 48
+EC_SAVED  equ 56
+EC_INDEX  equ 64
+EC_SLOT   equ 72
+EC_FRAME  equ 80
+DEF_FUNC px_parser_child, EC_FRAME
+    mov [rbp - EC_SAVED], rsp
+    and rsp, -16
+    mov [rbp - EC_ARGS], rdi
+    cmp rsi, 4
+    jne .nargs
+
+    xor esi, esi
+    call px_arg_int
+    ERR_M1 .fail
+    mov rdi, rax
+    call px_handle_at
+    ERR_NULL .fail
+    mov [rbp - EC_PARENT], rax
+
+    mov rdi, [rbp - EC_ARGS]
+    mov rdi, [rdi + 8]
+    CSTRING rsi, "context must be a string or None"
+    call px_arg_str_or_none
+    ERR_PENDING .fail
+    mov [rbp - EC_CONTEXT], rax
+    mov rdi, [rbp - EC_ARGS]
+    mov rdi, [rdi + 16]
+    lea rsi, [rel px_e_encoding]
+    call px_arg_str_or_none
+    ERR_PENDING .fail
+    mov [rbp - EC_ENCODING], rax
+
+    mov rcx, [rbp - EC_ARGS]
+    mov rcx, [rcx + 24]
+    V_TEST_PTR rcx, rax
+    ja .bad_list
+    test rcx, rcx
+    jz .bad_list
+    lea rax, [rel list_type]
+    cmp [rcx + PyObject.ob_type], rax
+    jne .bad_list
+    cmp qword [rcx + PyListObject.ob_size], PX_H_COUNT
+    jne .bad_list
+    mov rcx, [rcx + PyListObject.ob_item]
+    mov [rbp - EC_LIST], rcx
+    lea rax, [rel none_singleton]
+    xor edx, edx
+.check_list:
+    cmp [rcx + rdx*8], rax
+    jne .bad_list
+    inc edx
+    cmp edx, PX_H_COUNT
+    jb .check_list
+
+    mov edi, PxHandle_size
+    call ap_malloc
+    test rax, rax
+    jz .oom
+    mov [rbp - EC_H], rax
+    mov rdi, rax
+    xor esi, esi
+    mov edx, PxHandle_size
+    call ap_memset
+
+    mov rcx, [rbp - EC_PARENT]
+    mov rdi, [rcx + PxHandle.parser]
+    mov rsi, [rbp - EC_CONTEXT]
+    mov rdx, [rbp - EC_ENCODING]
+    call XML_ExternalEntityParserCreate wrt ..plt
+    test rax, rax
+    jz .create_failed
+    mov rdx, [rbp - EC_H]
+    mov [rdx + PxHandle.parser], rax
+    mov qword [rdx + PxHandle.refs], 1
+    mov qword [rdx + PxHandle.magic], PX_MAGIC
+    mov rcx, [rbp - EC_PARENT]
+    mov [rdx + PxHandle.parent], rcx
+    inc qword [rcx + PxHandle.refs]
+    mov rdi, [rcx + PxHandle.intern]
+    mov [rdx + PxHandle.intern], rdi
+    test rdi, rdi
+    jz .copy_options
+    INCREF rdi
+.copy_options:
+    mov rax, [rcx + PxHandle.ordered]
+    mov [rdx + PxHandle.ordered], rax
+    mov rax, [rcx + PxHandle.specified]
+    mov [rdx + PxHandle.specified], rax
+    mov rax, [rcx + PxHandle.nsprefixes]
+    mov [rdx + PxHandle.nsprefixes], rax
+    mov rdi, [rcx + PxHandle.buffer_size]
+    mov [rdx + PxHandle.buffer_size], rdi
+    cmp qword [rcx + PxHandle.buffer], 0
+    je .register
+    call malloc wrt ..plt
+    test rax, rax
+    jz .release
+    mov rdx, [rbp - EC_H]
+    mov [rdx + PxHandle.buffer], rax
+.register:
+    mov rsi, [rbp - EC_H]
+    mov rdi, [rsi + PxHandle.parser]
+    call XML_SetUserData wrt ..plt
+    mov rdi, [rbp - EC_H]
+    call px_handle_alloc
+    cmp rax, -1
+    je .release
+    mov [rbp - EC_SLOT], rax
+
+    mov qword [rbp - EC_INDEX], 0
+.copy_handler:
+    mov rax, [rbp - EC_INDEX]
+    mov rcx, [rbp - EC_PARENT]
+    mov rdx, [rcx + PxHandle.handlers + rax*8]
+    test rdx, rdx
+    jz .next_handler
+    INCREF_V rdx, rcx
+    mov rcx, [rbp - EC_LIST]
+    mov [rcx + rax*8], rdx
+    dec qword [rel none_singleton + PyObject.ob_refcnt]
+    mov rcx, [rbp - EC_H]
+    mov [rcx + PxHandle.handlers + rax*8], rdx
+    mov rdi, [rcx + PxHandle.parser]
+    shl rax, 4
+    lea rcx, [rel px_installers]
+    mov rsi, [rcx + rax + 8]
+    call [rcx + rax]              ; same setter order as CPython's child
+.next_handler:
+    inc qword [rbp - EC_INDEX]
+    cmp qword [rbp - EC_INDEX], PX_H_COUNT
+    jb .copy_handler
+    mov rdi, [rbp - EC_SLOT]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rsp, [rbp - EC_SAVED]
+    leave
+    ret
+.release:
+    mov rdi, [rbp - EC_H]
+    call px_handle_release
+    jmp .oom
+.create_failed:
+    mov rdi, [rbp - EC_H]
+    call ap_free
+.oom:
+    FAIL exc_MemoryError_type, "", .fail
+.bad_list:
+    FAIL exc_TypeError_type, "parser_child requires an empty handler list", .fail
+.nargs:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel px_e_nargs]
+    call set_exception
+.fail:
+    mov rsp, [rbp - EC_SAVED]
+    xor eax, eax
+    leave
+    ret
+END_FUNC px_parser_child
+
 ;; ============================================================================
 ;; _pyexpatcore.parser_free(handle) -> None
 ;;
-;; Freeing twice is not an error: `__del__` runs on a path the collector
-;; chooses and lib/pyexpat.py cannot always know whether it has already run.
-;; The magic is zeroed first, so a stale index cannot be revived even if the
-;; block is handed straight back out.
+;; Tolerate a missing handle when a finalizer runs on a partial construction.
+;; Remove the table slot before releasing resources that may run Python.
 ;; ============================================================================
-PF_IDX    equ 8
-PF_H      equ 16
-PF_I      equ 24
-PF_FRAME  equ 40                ; + 1 push = 48, 16-aligned
+PF_FRAME equ 8                 ; + 1 push = 16, 16-aligned
 DEF_FUNC px_parser_free, PF_FRAME
     push rbx
     mov rbx, rsp
@@ -550,64 +825,26 @@ DEF_FUNC px_parser_free, PF_FRAME
     xor esi, esi
     call px_arg_int
     ERR_M1 .fail
-    mov [rbp - PF_IDX], rax
-    ; Not px_handle_at: that refuses, and this must tolerate a stale index.
     test rax, rax
     js .done
     cmp rax, [rel px_handle_n]
     jae .done
-    mov rcx, [rel px_handles]
-    mov rcx, [rcx + rax*8]
+    mov rdx, [rel px_handles]
+    mov rcx, [rdx + rax*8]
     test rcx, rcx
     jz .done
     cmp qword [rcx + PxHandle.magic], PX_MAGIC
     jne .done
+    cmp qword [rcx + PxHandle.parsing], 0
+    jne .done
+    cmp qword [rcx + PxHandle.in_callback], 0
+    jne .done
+    cmp qword [rcx + PxHandle.flushing], 0
+    jne .done
     mov qword [rcx + PxHandle.magic], 0
-    mov [rbp - PF_H], rcx
-
-    mov rdi, [rcx + PxHandle.parser]
-    test rdi, rdi
-    jz .no_parser
-    ; XML_ParserFree on a parser left mid-parse is well defined, which is what
-    ; makes the abandoned-parse case after a handler raised safe to clean up.
-    call XML_ParserFree wrt ..plt
-.no_parser:
-
-    ; The handler slots are BORROWED -- see parser_set_handler -- so they are
-    ; only cleared, never released.  The intern dict below IS the handle's own,
-    ; because a child parser from ExternalEntityParserCreate shares it and
-    ; nothing on the Python side is guaranteed to outlive both.
-    mov qword [rbp - PF_I], 0
-.drop_handlers:
-    mov rax, [rbp - PF_I]
-    cmp rax, PX_H_COUNT
-    jae .handlers_done
-    mov rcx, [rbp - PF_H]
-    mov qword [rcx + PxHandle.handlers + rax*8], 0
-    inc qword [rbp - PF_I]
-    jmp .drop_handlers
-.handlers_done:
-
-    mov rcx, [rbp - PF_H]
-    mov rdi, [rcx + PxHandle.intern]
-    test rdi, rdi
-    jz .no_intern
-    mov qword [rcx + PxHandle.intern], 0
-    call obj_decref
-.no_intern:
-    mov rcx, [rbp - PF_H]
-    mov rdi, [rcx + PxHandle.buffer]
-    test rdi, rdi
-    jz .no_buffer
-    mov qword [rcx + PxHandle.buffer], 0
-    call ap_free
-.no_buffer:
-    mov rdi, [rbp - PF_H]
-    call ap_free
-    ; Clear the slot so it can be reused.
-    mov rax, [rbp - PF_IDX]
-    mov rcx, [rel px_handles]
-    mov qword [rcx + rax*8], 0
+    mov qword [rdx + rax*8], 0
+    mov rdi, rcx
+    call px_handle_release
 .done:
     mov rsp, rbx
     pop rbx
@@ -629,7 +866,7 @@ END_FUNC px_parser_free
 
 ;; ============================================================================
 ;; _pyexpatcore.parser_status(handle)
-;;     -> (code, lineno, column, byteindex, buffer_used)
+;;     -> (code, lineno, column, byteindex, buffer_used, buffer_size, buffer_text)
 ;;
 ;; ONE entry for seven Python attributes, and not as a shortcut.  expat.h has
 ;;
@@ -659,7 +896,7 @@ DEF_FUNC px_parser_status, PS_FRAME
     ERR_NULL .fail
     mov [rbp - PS_H], rax
 
-    mov edi, 5
+    mov edi, 7
     call tuple_new
     test rax, rax
     jz .oom
@@ -694,6 +931,19 @@ DEF_FUNC px_parser_status, PS_FRAME
     mov rcx, [rbp - PS_H]
     mov rdi, [rcx + PxHandle.buffer_used]
     PX_STORE_INT 4
+
+    mov rcx, [rbp - PS_H]
+    mov rdi, [rcx + PxHandle.buffer_size]
+    PX_STORE_INT 5
+
+    mov rcx, [rbp - PS_H]
+    lea rax, [rel bool_false]
+    lea rdx, [rel bool_true]
+    cmp qword [rcx + PxHandle.buffer], 0
+    cmovne rax, rdx
+    INCREF rax
+    mov rcx, [rbp - PS_ITEMS]
+    mov [rcx + 6*8], rax
 
     mov rax, [rbp - PS_TUP]
     mov rsp, rbx
@@ -781,12 +1031,19 @@ DEF_FUNC pyexpat_module_create, PM_FRAME
     mov r12, rax                ; MODULE_ADD_FUNC reads the dict from r12
 
     MODULE_ADD_FUNC px_parser_new,    pn_parser_new
+    MODULE_ADD_FUNC px_parser_child,  pn_parser_child
     MODULE_ADD_FUNC px_parser_free,   pn_parser_free
     MODULE_ADD_FUNC px_parser_status, pn_parser_status
     MODULE_ADD_FUNC px_error_string,  pn_error_string
     MODULE_ADD_FUNC px_set_handler,   pn_set_handler
     MODULE_ADD_FUNC px_parse,         pn_parse
     MODULE_ADD_FUNC px_set_flag,      pn_set_flag
+    MODULE_ADD_FUNC px_parser_base,   pn_parser_base
+
+    xor edi, edi                ; RTLD_DEFAULT
+    lea rsi, [rel px_reparse_symbol]
+    call dlsym wrt ..plt
+    mov [rel px_set_reparse], rax
 
     ; EXPAT_VERSION comes from the library that is actually linked, not from a
     ; constant compiled in here: `version_info` is parsed out of it in Python,
@@ -836,9 +1093,7 @@ END_FUNC pyexpat_module_create
 ;;
 ;; Installing the trampoline is what makes libexpat call us, and it is done
 ;; per handler rather than all at once so that a document with no comments
-;; pays nothing for CommentHandler.  A handler with no row in px_installers
-;; yet is still stored, so the attribute reads back correctly and a later
-;; commit only has to fill the row in.
+;; pays nothing for CommentHandler.
 ;; ============================================================================
 SH_ARGS   equ 8
 SH_H      equ 16
@@ -882,6 +1137,14 @@ DEF_FUNC px_set_handler, 56
 .clearing:
     mov qword [rbp - SH_FN], 0
 .have_fn:
+    ; Deliver buffered data to the old handler before publishing its replacement.
+    cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
+    jne .publish
+    mov rdi, [rbp - SH_H]
+    call px_flush
+    test eax, eax
+    js .fail
+.publish:
 
     ; The handle BORROWS; lib/pyexpat.py's _handlers list owns.
     ;
@@ -902,15 +1165,6 @@ DEF_FUNC px_set_handler, 56
     mov rdx, [rbp - SH_FN]
     mov [rcx + PxHandle.handlers + rax*8], rdx
 
-    ; The character-data handler is the one whose REMOVAL has to flush first,
-    ; or text already coalesced is dropped on the floor.
-    cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
-    jne .install
-    mov rdi, [rbp - SH_H]
-    call px_flush               ; it calls the handler, which may raise
-    test eax, eax
-    js .fail
-.install:
     ; A row is two qwords, and x86 has no *16 scale -- only 1, 2, 4 and 8 --
     ; so the index is shifted rather than scaled.
     mov rax, [rbp - SH_IDX]
@@ -918,8 +1172,6 @@ DEF_FUNC px_set_handler, 56
     lea rcx, [rel px_installers]
     add rcx, rax
     mov rdx, [rcx]                  ; the libexpat setter
-    test rdx, rdx
-    jz .done                        ; no C side yet; the reference is kept
     mov [rbp - SH_ROW], rcx
     mov rcx, [rbp - SH_H]
     mov rdi, [rcx + PxHandle.parser]
@@ -931,6 +1183,12 @@ DEF_FUNC px_set_handler, 56
     jmp .done
 .uninstall:
     xor esi, esi
+    cmp qword [rbp - SH_IDX], PX_H_CHARACTER_DATA
+    jne .uninstall_call
+    cmp qword [rcx + PxHandle.in_callback], 0
+    je .uninstall_call
+    lea rsi, [rel px_cb_noop_chardata]
+.uninstall_call:
     call rdx
 .done:
     mov rsp, rbx
@@ -960,7 +1218,7 @@ DEF_FUNC px_set_handler, 56
 END_FUNC px_set_handler
 
 ;; ============================================================================
-;; _pyexpatcore.parser_parse(handle, data, isfinal) -> 1, 0, or NULL
+;; _pyexpatcore.parser_parse(handle, data, isfinal[, flush]) -> 1, 0, or NULL
 ;;
 ;; THREE return values, and they are three different things.  This is the one
 ;; place the zlib precedent -- core raises ValueError, Python converts to
@@ -992,6 +1250,7 @@ PP_LEN    equ 32
 PP_FINAL  equ 40
 PP_SAVED  equ 48            ; rsp before `and rsp, -16`
 PP_STATUS equ 56            ; what XML_Parse answered
+PP_FLUSH  equ 64            ; ParseFile defers delivery between its reads
 PP_FRAME  equ 64            ; + 0 pushes = 64, 16-aligned
 DEF_FUNC px_parse, PP_FRAME
     ; The saved rsp goes in a FRAME SLOT, not in a callee-saved register: the
@@ -1001,8 +1260,23 @@ DEF_FUNC px_parse, PP_FRAME
     mov [rbp - PP_SAVED], rsp
     and rsp, -16
     mov [rbp - PP_ARGS], rdi
+    mov qword [rbp - PP_FLUSH], 1
     cmp rsi, 3
+    je .final_arg
+    cmp rsi, 4
     jne .nargs
+    mov rdi, [rdi + 24]
+    call obj_is_true
+    ERR_M1 .pending
+    mov [rbp - PP_FLUSH], rax
+.final_arg:
+    ; Truth testing may call Python. Resolve it before borrowing any pointers.
+    mov rdi, [rbp - PP_ARGS]
+    mov rdi, [rdi + 16]
+    call obj_is_true
+    ERR_M1 .pending
+    mov [rbp - PP_FINAL], rax
+    mov rdi, [rbp - PP_ARGS]
 
     xor esi, esi
     call px_arg_int
@@ -1011,6 +1285,12 @@ DEF_FUNC px_parse, PP_FRAME
     call px_handle_at
     ERR_NULL .pending
     mov [rbp - PP_H], rax
+    cmp qword [rax + PxHandle.parsing], 0
+    jne .reentrant
+    cmp qword [rax + PxHandle.in_callback], 0
+    jne .reentrant
+    cmp qword [rax + PxHandle.flushing], 0
+    jne .reentrant
     mov qword [rax + PxHandle.raised], 0
 
     ; str, bytes or bytearray.  The discrimination is a V_TEST_PTR and three
@@ -1088,27 +1368,16 @@ DEF_FUNC px_parse, PP_FRAME
     mov [rbp - PP_DATA], rax
 
 .feed:
-    ; isfinal is any object at all -- CPython runs it through the ordinary
-    ; truth test -- and obj_is_true takes a VALUE.  This used to V_UNPACK
-    ; first, which handed it the raw payload: a bool, None and a str are
-    ; pointers and a pointer is its own Value, so those worked, while an int
-    ; immediate's payload is the number and `Parse(data, 0)` dereferenced
-    ; address 0.  Every caller in the stdlib passes a bool, which is why it
-    ; took a hand-written int to find it.
-    mov rdi, [rbp - PP_ARGS]
-    mov rdi, [rdi + 16]
-    call obj_is_true
-    ; A __bool__ that raised: nothing is fed to a parser with that pending.
-    ERR_M1 .pending
-    mov [rbp - PP_FINAL], rax
-
     mov rcx, [rbp - PP_H]
+    mov qword [rcx + PxHandle.parsing], 1
     mov rdi, [rcx + PxHandle.parser]
     mov rsi, [rbp - PP_DATA]
     mov edx, [rbp - PP_LEN]
     mov ecx, [rbp - PP_FINAL]
     call XML_Parse wrt ..plt
     mov [rbp - PP_STATUS], rax
+    mov rcx, [rbp - PP_H]
+    mov qword [rcx + PxHandle.parsing], 0
 
     ; The order is pyexpat.c's get_parse_result: a pending exception wins over
     ; whatever libexpat thought of the document.
@@ -1117,11 +1386,14 @@ DEF_FUNC px_parse, PP_FRAME
     cmp dword [rbp - PP_STATUS], 0
     je .expat_error
 
+    cmp qword [rbp - PP_FLUSH], 0
+    je .success
     mov rdi, [rbp - PP_H]
     call px_flush               ; the post-parse flush can itself raise
     test eax, eax
     js .pending
 
+.success:
     mov edi, 1
     call int_from_i64
     jmp .ret_int
@@ -1140,6 +1412,9 @@ DEF_FUNC px_parse, PP_FRAME
     xor eax, eax
     leave
     ret
+.reentrant:
+    extern exc_RuntimeError_type
+    FAIL exc_RuntimeError_type, "cannot parse the same parser from a callback", .pending
 .bad_data:
     mov rsp, [rbp - PP_SAVED]
     lea rdi, [rel exc_TypeError_type]
@@ -1169,14 +1444,14 @@ END_FUNC px_parse
 ;; XML_SetReturnNSTriplet makes a namespaced name arrive as
 ;; "uri<sep>local<sep>prefix" instead of "uri<sep>local".
 ;;
-;; buffer_text and buffer_size arrive here too, and land on the handle for the
-;; coalescing commit to use; setting them changes nothing yet.
+;; Buffer changes finish delivery before replacing the handle's storage.
 ;; ============================================================================
 SF_ARGS   equ 8
 SF_H      equ 16
 SF_WHICH  equ 24
 SF_VALUE  equ 32
 SF_SAVED  equ 40
+SF_BUFFER equ 48
 SF_FRAME  equ 48                ; + 0 pushes = 48, 16-aligned
 DEF_FUNC px_set_flag, SF_FRAME
     mov [rbp - SF_SAVED], rsp
@@ -1219,10 +1494,19 @@ DEF_FUNC px_set_flag, SF_FRAME
     je .nsprefix
     cmp rax, PX_F_BUFFERSIZE
     je .buffersize
-    ; PX_F_BUFFERTEXT: the buffer itself arrives with the coalescing commit,
-    ; so for now turning it on changes nothing and the flag lives only on the
-    ; Python side, where it still reads back correctly.
-    jmp .done
+    cmp rax, PX_F_REPARSE
+    je .reparse
+    cmp rax, PX_F_PARAM_ENTITY
+    je .param_entity
+    cmp rax, PX_F_FOREIGN_DTD
+    je .foreign_dtd
+    cmp qword [rbp - SF_VALUE], 0
+    je .disable
+    cmp qword [rcx + PxHandle.buffer], 0
+    jne .done
+    mov rax, [rcx + PxHandle.buffer_size]
+    mov [rbp - SF_VALUE], rax
+    jmp .allocate
 .ordered:
     mov rax, [rbp - SF_VALUE]
     mov [rcx + PxHandle.ordered], rax
@@ -1233,8 +1517,52 @@ DEF_FUNC px_set_flag, SF_FRAME
     jmp .done
 .buffersize:
     mov rax, [rbp - SF_VALUE]
+    test rax, rax
+    jle .small_size
+    cmp rax, 0x7fffffff
+    ja .large_size
+    cmp rax, [rcx + PxHandle.buffer_size]
+    je .done
+.allocate:
+    mov rdi, rax
+    call malloc wrt ..plt
+    test rax, rax
+    jz .oom
+    mov [rbp - SF_BUFFER], rax
+    mov rdi, [rbp - SF_H]
+    call px_flush
+    test eax, eax
+    js .discard_buffer
+    mov rcx, [rbp - SF_H]
+    mov rax, [rbp - SF_VALUE]
     mov [rcx + PxHandle.buffer_size], rax
+    jmp .replace_buffer
+.disable:
+    cmp qword [rcx + PxHandle.buffer], 0
+    je .done
+    mov qword [rbp - SF_BUFFER], 0
+    mov rdi, rcx
+    call px_flush
+    test eax, eax
+    js .fail
+.replace_buffer:
+    mov rcx, [rbp - SF_H]          ; the callback may have changed the buffer
+    mov rax, [rbp - SF_BUFFER]
+    mov rdi, [rcx + PxHandle.buffer]
+    mov [rcx + PxHandle.buffer], rax
+    mov qword [rcx + PxHandle.buffer_used], 0
+    call free wrt ..plt
     jmp .done
+.discard_buffer:
+    mov rdi, [rbp - SF_BUFFER]
+    call free wrt ..plt
+    jmp .fail
+.small_size:
+    FAIL exc_ValueError_type, "buffer_size must be greater than zero", .fail
+.large_size:
+    FAIL exc_ValueError_type, "buffer_size must not be greater than 2147483647", .fail
+.oom:
+    FAIL exc_MemoryError_type, "", .fail
 .nsprefix:
     mov rax, [rbp - SF_VALUE]
     mov [rcx + PxHandle.nsprefixes], rax
@@ -1251,6 +1579,50 @@ DEF_FUNC px_set_flag, SF_FRAME
     INCREF rax
     leave
     ret
+.reparse:
+    mov rax, [rel px_set_reparse]
+    test rax, rax
+    jz .reparse_disabled
+    mov rdi, [rcx + PxHandle.parser]
+    xor esi, esi
+    cmp qword [rbp - SF_VALUE], 0
+    setne sil
+    call rax
+    cmp qword [rbp - SF_VALUE], 0
+    je .reparse_disabled
+    lea rax, [rel bool_true]
+    jmp .reparse_return
+.reparse_disabled:
+    lea rax, [rel bool_false]
+.reparse_return:
+    mov rsp, [rbp - SF_SAVED]
+    INCREF rax
+    leave
+    ret
+.param_entity:
+    mov rax, [rbp - SF_VALUE]
+    movsxd rdx, eax
+    cmp rax, rdx
+    jne .param_overflow
+    mov esi, eax
+    mov rdi, [rcx + PxHandle.parser]
+    call XML_SetParamEntityParsing wrt ..plt
+    jmp .return_int
+.foreign_dtd:
+    mov rdi, [rcx + PxHandle.parser]
+    xor esi, esi
+    cmp qword [rbp - SF_VALUE], 0
+    setne sil
+    call XML_UseForeignDTD wrt ..plt
+.return_int:
+    movsxd rdi, eax
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rsp, [rbp - SF_SAVED]
+    leave
+    ret
+.param_overflow:
+    FAIL exc_OverflowError_type, "Python int too large to convert to C int", .fail
 .bad_flag:
     mov rsp, [rbp - SF_SAVED]
     lea rdi, [rel exc_ValueError_type]
@@ -1268,3 +1640,75 @@ DEF_FUNC px_set_flag, SF_FRAME
     leave
     ret
 END_FUNC px_set_flag
+
+;; _pyexpatcore.parser_base(handle[, base]) -> URL string or None
+;; Expat copies the base URL for use in later entity callbacks.
+PB_SAVED equ 8
+PB_ARGS  equ 16
+PB_NARGS equ 24
+PB_H     equ 32
+PB_FRAME equ 32
+DEF_FUNC px_parser_base, PB_FRAME
+    mov [rbp - PB_SAVED], rsp
+    and rsp, -16
+    mov [rbp - PB_ARGS], rdi
+    mov [rbp - PB_NARGS], rsi
+    cmp rsi, 1
+    je .handle
+    cmp rsi, 2
+    jne .nargs
+.handle:
+    xor esi, esi
+    call px_arg_int
+    ERR_M1 .fail
+    mov rdi, rax
+    call px_handle_at
+    ERR_NULL .fail
+    mov [rbp - PB_H], rax
+    cmp qword [rbp - PB_NARGS], 1
+    je .get
+    mov rdi, [rbp - PB_ARGS]
+    mov rdi, [rdi + 8]
+    CSTRING rsi, "base must be a string"
+    call px_arg_str_or_none
+    ERR_PENDING .fail
+    test rax, rax
+    jz .bad_base
+    mov rsi, rax
+    mov rdi, [rbp - PB_H]
+    mov rdi, [rdi + PxHandle.parser]
+    call XML_SetBase wrt ..plt
+    test eax, eax
+    jz .oom
+    jmp .none
+.get:
+    mov rdi, [rax + PxHandle.parser]
+    call XML_GetBase wrt ..plt
+    test rax, rax
+    jz .none
+    mov rdi, rax
+    call str_from_cstr_heap
+    test rax, rax
+    jz .oom
+    jmp .done
+.none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+.done:
+    mov rsp, [rbp - PB_SAVED]
+    leave
+    ret
+.oom:
+    FAIL exc_MemoryError_type, "", .fail
+.bad_base:
+    FAIL exc_TypeError_type, "base must be a string", .fail
+.nargs:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel px_e_nargs]
+    call set_exception
+.fail:
+    mov rsp, [rbp - PB_SAVED]
+    xor eax, eax
+    leave
+    ret
+END_FUNC px_parser_base

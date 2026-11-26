@@ -241,6 +241,8 @@ _STATUS_INDEX = {
     "CurrentColumnNumber": 2,
     "CurrentByteIndex": 3,
     "buffer_used": 4,
+    "buffer_size": 5,
+    "buffer_text": 6,
 }
 
 _FLAG_INDEX = {
@@ -249,13 +251,29 @@ _FLAG_INDEX = {
     "namespace_prefixes": 2,
     "buffer_text": 3,
     "buffer_size": 4,
+    "reparse_deferral": 5,
+    "param_entity_parsing": 6,
+    "foreign_dtd": 7,
 }
+
+_ENCODING_OMITTED = object()
+
+
+def _check_expat_string(value, method, argument, optional=False):
+    if optional and value is None:
+        return
+    if not isinstance(value, str):
+        expected = "str or None" if optional else "str"
+        raise TypeError("%s() argument %s must be %s, not %s"
+                        % (method, argument, expected, type(value).__name__))
+    if str.__contains__(value, "\0"):
+        raise ValueError("embedded null character")
 
 
 class xmlparser:
     """The parser object, with libexpat's parser held as an integer handle."""
 
-    __slots__ = ("_h", "_handlers", "_intern", "_buffer_text", "_buffer_size",
+    __slots__ = ("_h", "_handlers", "_intern",
                  "_ordered", "_specified", "_nsprefixes", "_reparse")
 
     def __init__(self, encoding=None, namespace_separator=None, intern=None):
@@ -267,14 +285,12 @@ class xmlparser:
         set = object.__setattr__
         set(self, "_handlers", [None] * len(_HANDLER_NAMES))
         set(self, "_intern", intern)
-        set(self, "_buffer_text", False)
-        set(self, "_buffer_size", 8192)
         set(self, "_ordered", False)
         set(self, "_specified", False)
         set(self, "_nsprefixes", False)
         # libexpat has no XML_GetReparseDeferralEnabled -- only the setter --
         # so the state is kept here, as CPython keeps it on the object.
-        set(self, "_reparse", True)
+        set(self, "_reparse", version_info >= (2, 6, 0))
         set(self, "_h", _core.parser_new(encoding, namespace_separator, intern))
 
     # -- attributes ---------------------------------------------------------
@@ -293,10 +309,6 @@ class xmlparser:
             return _core.parser_status(self._h)[index]
         if name == "intern":
             return self._intern
-        if name == "buffer_text":
-            return self._buffer_text
-        if name == "buffer_size":
-            return self._buffer_size
         if name == "ordered_attributes":
             return self._ordered
         if name == "specified_attributes":
@@ -310,6 +322,59 @@ class xmlparser:
             "'pyexpat.xmlparser' object has no attribute %r" % (name,))
 
     # -- parsing ------------------------------------------------------------
+
+    def GetReparseDeferralEnabled(self, /):
+        """Return whether Expat defers retrying incomplete tokens."""
+        return self._reparse
+
+    def SetReparseDeferralEnabled(self, enabled, /):
+        """Set whether Expat defers retrying incomplete tokens."""
+        enabled = _core.parser_set_flag(
+            self._h, _FLAG_INDEX["reparse_deferral"], int(bool(enabled)))
+        object.__setattr__(self, "_reparse", enabled)
+
+    def SetParamEntityParsing(self, flag, /):
+        """Select whether Expat parses external parameter entities."""
+        return _core.parser_set_flag(
+            self._h, _FLAG_INDEX["param_entity_parsing"], flag)
+
+    def UseForeignDTD(self, flag=True, /):
+        """Let the external-entity handler supply a default DTD."""
+        code = _core.parser_set_flag(self._h, _FLAG_INDEX["foreign_dtd"],
+                                     int(bool(flag)))
+        if code:
+            self._raise_parse_error(code)
+
+    def SetBase(self, base, /):
+        """Set the base URL passed to entity callbacks."""
+        _check_expat_string(base, "SetBase", "1")
+        _core.parser_base(self._h, base)
+
+    def GetBase(self, /):
+        """Return the parser's base URL."""
+        return _core.parser_base(self._h)
+
+    def ExternalEntityParserCreate(self, context, encoding=_ENCODING_OMITTED, /):
+        """Create a child parser for an external entity."""
+        method = "ExternalEntityParserCreate"
+        _check_expat_string(context, method, "1", optional=True)
+        if encoding is _ENCODING_OMITTED:
+            encoding = None
+        else:
+            _check_expat_string(encoding, method, "2")
+
+        child = object.__new__(xmlparser)
+        handlers = [None] * len(_HANDLER_NAMES)
+        set = object.__setattr__
+        set(child, "_handlers", handlers)
+        set(child, "_intern", self._intern)
+        set(child, "_ordered", self._ordered)
+        set(child, "_specified", self._specified)
+        set(child, "_nsprefixes", self._nsprefixes)
+        set(child, "_reparse", self._reparse)
+        handle = _core.parser_child(self._h, context, encoding, handlers)
+        set(child, "_h", handle)
+        return child
 
     def Parse(self, data, isfinal=False):
         """Feed a chunk of the document.
@@ -329,31 +394,50 @@ class xmlparser:
         status = _core.parser_parse(self._h, data, isfinal)
         if status == 1:
             return 1
-        # status is 0: libexpat's own error, and it is ours to raise.
-        code, lineno, column = _core.parser_status(self._h)[:3]
+        self._raise_parse_error()
+
+    def _raise_parse_error(self, code=None):
+        current_code, lineno, column = _core.parser_status(self._h)[:3]
+        if code is None:
+            code = current_code
         raise _expat_error(code, lineno, column)
 
     def ParseFile(self, file):
         """Parse a whole file-like object, a chunk at a time.
 
-        In Python rather than in the core: CPython uses XML_GetBuffer and
-        XML_ParseBuffer to save one copy per chunk, and the copy is not worth
-        an entry point -- while `readinst`'s two error messages are much
-        easier to match here.
+        Keep Expat's character buffer between reads and deliver it at EOF.
         """
+        try:
+            read = file.read
+        except AttributeError:
+            raise TypeError("argument must have 'read' attribute") from None
         while True:
-            chunk = file.read(2048)
+            chunk = read(2048)
             if not isinstance(chunk, (bytes, bytearray)):
-                if isinstance(chunk, str):
-                    raise TypeError("read() did not return a bytes object "
-                                    "(type=str)")
                 raise TypeError("read() did not return a bytes object (type=%s)"
                                 % type(chunk).__name__)
-            self.Parse(chunk, not chunk)
-            if not chunk:
+            if type(chunk) is bytes:
+                size = len(chunk)
+            else:
+                view = memoryview(chunk)
+                size = view.nbytes
+                # Own a stable snapshot across callbacks for mutable input.
+                if isinstance(chunk, bytearray) and size <= 2048:
+                    chunk = bytes(view)
+                view.release()
+            if size > 2048:
+                raise ValueError("read() returned too much data: "
+                                 "2048 bytes requested, %d returned" % size)
+            final = size == 0
+            if _core.parser_parse(self._h, chunk, final, final) == 0:
+                self._raise_parse_error()
+            if final:
                 return 1
 
     def __setattr__(self, name, value):
+        if not isinstance(name, str):
+            raise TypeError("attribute name must be string, not '%s'"
+                            % type(name).__name__)
         if name.startswith("_"):
             # Refused, not forwarded.  `_handlers` owns the references the
             # core BORROWS, and `_h` is the handle it dereferences; rebinding
@@ -374,7 +458,10 @@ class xmlparser:
             _core.parser_set_handler(self._h, index, value)
             self._handlers[index] = value
             return
-        if name in ("buffer_text", "ordered_attributes",
+        if name == "buffer_text":
+            _core.parser_set_flag(self._h, _FLAG_INDEX[name], int(bool(value)))
+            return
+        if name in ("ordered_attributes",
                     "specified_attributes", "namespace_prefixes"):
             flag = bool(value)
             object.__setattr__(self, _FLAG_SLOT[name], flag)
@@ -385,11 +472,8 @@ class xmlparser:
             _core.parser_set_flag(self._h, _FLAG_INDEX[name], int(flag))
             return
         if name == "buffer_size":
-            if not isinstance(value, int) or isinstance(value, bool):
+            if not isinstance(value, int):
                 raise TypeError("buffer_size must be an integer")
-            if value <= 0:
-                raise ValueError("buffer_size must be greater than zero")
-            object.__setattr__(self, "_buffer_size", value)
             _core.parser_set_flag(self._h, _FLAG_INDEX["buffer_size"], value)
             return
         # Anything else is refused, and that arm is load-bearing:
@@ -416,7 +500,6 @@ class xmlparser:
 
 
 _FLAG_SLOT = {
-    "buffer_text": "_buffer_text",
     "ordered_attributes": "_ordered",
     "specified_attributes": "_specified",
     "namespace_prefixes": "_nsprefixes",

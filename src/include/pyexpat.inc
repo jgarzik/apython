@@ -51,7 +51,10 @@ PX_F_SPECIFIED   equ 1          ; specified_attributes
 PX_F_NSPREFIX    equ 2          ; namespace_prefixes
 PX_F_BUFFERTEXT  equ 3          ; buffer_text
 PX_F_BUFFERSIZE  equ 4          ; buffer_size
-PX_F_COUNT       equ 5
+PX_F_REPARSE     equ 5          ; SetReparseDeferralEnabled
+PX_F_PARAM_ENTITY equ 6         ; SetParamEntityParsing
+PX_F_FOREIGN_DTD equ 7          ; UseForeignDTD
+PX_F_COUNT       equ 8
 
 ; CPython's default, and the one test_pyexpat's coalescing cases assume.
 PX_BUFFER_DEFAULT equ 8192
@@ -66,20 +69,34 @@ XML_STATUS_ERROR     equ 0
 XML_STATUS_OK        equ 1
 XML_STATUS_SUSPENDED equ 2
 
+; XML_Content, from expat.h, with UTF-8 XML_Char and the SysV C layout.
+struc PxContent
+    .type:        resd 1
+    .quant:       resd 1
+    .name:        resq 1
+    .numchildren: resd 1
+    .padding:     resd 1
+    .children:    resq 1
+endstruc
+
 struc PxHandle
     .magic:       resq 1
     .parser:      resq 1        ; XML_Parser, opaque: libexpat allocates and
                                 ;   frees its own with its own allocator, so
                                 ;   there is no struct here to align and the
                                 ;   magic can sit first, unlike ZHandle's
+    .parent:      resq 1        ; retained while Expat's child parser is live
+    .refs:        resq 1        ; one for the wrapper and one per child
     .handlers:    resq PX_H_COUNT   ; owned Values, or 0 for unset
     .intern:      resq 1        ; owned dict, or 0
     .buffer:      resq 1        ; the coalescing buffer, 0 when buffer_text off
     .buffer_size: resq 1
     .buffer_used: resq 1
+    .flushing:    resq 1        ; the current block is already being delivered
     .ordered:     resq 1
     .specified:   resq 1
     .nsprefixes:  resq 1
+    .parsing:     resq 1        ; XML_Parse has native frames on the stack
     .in_callback: resq 1
     .raised:      resq 1        ; a handler raised; Parse reports it in band
 endstruc

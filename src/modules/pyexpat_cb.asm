@@ -56,8 +56,13 @@ extern dict_new
 extern none_singleton
 extern set_exception
 extern exc_TypeError_type
+extern exc_MemoryError_type
+extern exc_RecursionError_type
+extern obj_as_index
+extern tuple_new
 
 extern XML_StopParser
+extern XML_FreeContentModel
 extern XML_SetCharacterDataHandler
 extern px_installers
 extern XML_GetSpecifiedAttributeCount
@@ -262,7 +267,7 @@ PC_H      equ 8
 PC_ARGS   equ 16
 PC_NARGS  equ 24
 PC_FN     equ 32
-PC_FRAME  equ 48                ; + 1 push = 56 ... padded below
+PC_INCALL equ 40
 DEF_FUNC px_call, 56
     push rbx
     mov [rbp - PC_H], rdi
@@ -277,9 +282,12 @@ DEF_FUNC px_call, 56
     test rax, rax
     jz .stopped
     mov [rbp - PC_FN], rax
+    INCREF_V rax, rdx
 
     mov qword [gs:ThreadState.kw_names_pending], 0
     mov rcx, [rbp - PC_H]
+    mov rdx, [rcx + PxHandle.in_callback]
+    mov [rbp - PC_INCALL], rdx
     mov qword [rcx + PxHandle.in_callback], 1
 
     mov rdi, rax
@@ -287,8 +295,13 @@ DEF_FUNC px_call, 56
     mov rdx, [rbp - PC_NARGS]
     call obj_call_n             ; err: .raised, below
 
+    mov rbx, rax
     mov rcx, [rbp - PC_H]
-    mov qword [rcx + PxHandle.in_callback], 0
+    mov rdx, [rbp - PC_INCALL]
+    mov [rcx + PxHandle.in_callback], rdx
+    mov rdi, [rbp - PC_FN]
+    DECREF_V rdi, rcx
+    mov rax, rbx
     test rax, rax
     jz .raised
     pop rbx
@@ -353,9 +366,7 @@ DEF_FUNC px_stop, PST_FRAME
     shl rax, 4                  ; two qwords a row; x86 has no *16 scale
     lea rcx, [rel px_installers]
     add rcx, rax
-    mov rdx, [rcx]              ; the libexpat setter, or 0 for no C side
-    test rdx, rdx
-    jz .strip_next
+    mov rdx, [rcx]
     mov rcx, [rbp - PST_H]
     mov rdi, [rcx + PxHandle.parser]
     xor esi, esi
@@ -364,13 +375,58 @@ DEF_FUNC px_stop, PST_FRAME
     lea rsi, [rel px_cb_noop_chardata]
 .strip_call:
     call rdx
-.strip_next:
     inc qword [rbp - PST_I]
     jmp .strip
 .out:
     leave
     ret
 END_FUNC px_stop
+
+;; px_prepare_callback(handle, handler index) -> 1 to call, 0 to skip, -1 on error
+;; A buffered text callback can change the handler while it is being flushed.
+DEF_FUNC_LOCAL px_prepare_callback
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12d, esi
+    xor eax, eax
+    cmp qword [rbx + PxHandle.magic], PX_MAGIC
+    jne .out
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .pending
+    cmp qword [rbx + PxHandle.handlers + r12*8], 0
+    je .out
+    call px_flush
+    test eax, eax
+    js .out
+    cmp qword [rbx + PxHandle.handlers + r12*8], 0
+    setne al
+    jmp .out
+.pending:
+    mov eax, -1
+.out:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC px_prepare_callback
+
+;; px_callback_error(handle) -> nothing
+;; Preserve an exception from argument construction, or report allocation
+;; failure if the constructor returned NULL without setting one.
+DEF_FUNC_LOCAL px_callback_error, 8
+    push rbx
+    mov rbx, rdi
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .stop
+    SET_EXC exc_MemoryError_type, ""
+.stop:
+    mov rdi, rbx
+    call px_stop
+    pop rbx
+    leave
+    ret
+END_FUNC px_callback_error
 
 ;; ============================================================================
 ;; px_cb_noop_chardata(userData, s, len) -> nothing
@@ -470,13 +526,34 @@ END_FUNC px_intern
 ;; ============================================================================
 ;; px_flush(rdi = PxHandle*) -> eax = 0 normally, -1 if a handler raised
 ;;
-;; flush_character_buffer.  Nothing to do until buffer_text turns the buffer
-;; on, which is a later commit; the call sites are all here already, because
-;; the ORDER matters -- every other trampoline has to flush before it fires,
-;; or coalesced text arrives after the element that follows it.
+;; Keep the byte count visible during delivery. A setter called from the
+;; handler can change the live buffer without delivering this block again.
 ;; ============================================================================
-DEF_FUNC_BARE px_flush
+DEF_FUNC px_flush, 8
+    push rbx
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .pending
+    cmp qword [rdi + PxHandle.flushing], 0
+    jne .empty
+    mov rdx, [rdi + PxHandle.buffer_used]
+    test rdx, rdx
+    jz .empty
+    mov rbx, rdi
+    mov rsi, [rdi + PxHandle.buffer]
+    mov qword [rdi + PxHandle.flushing], 1
+    mov ecx, PX_H_CHARACTER_DATA
+    call px_deliver_text
+    mov qword [rbx + PxHandle.buffer_used], 0
+    mov qword [rbx + PxHandle.flushing], 0
+    jmp .out
+.empty:
     xor eax, eax
+    jmp .out
+.pending:
+    mov eax, -1
+.out:
+    pop rbx
+    leave
     ret
 END_FUNC px_flush
 
@@ -743,57 +820,96 @@ END_FUNC px_cb_end_element
 ;; ============================================================================
 ;; px_cb_chardata(rdi = userData, rsi = s, edx = len) -> nothing
 ;;
-;; The ONE trampoline that does not flush on entry, because it is what fills
-;; the buffer.  While buffer_text is off -- which is the default, and all
-;; there is until the buffering commit -- each chunk goes straight to the
-;; handler.  `s` is NOT NUL-terminated, which is why this is the only handler
-;; that takes a length.
+;; Buffer sizes and Expat's chunks are measured in bytes.
 ;; ============================================================================
-CD_H      equ 8
-CD_STR    equ 16
-CD_ARGS   equ 24
-CD_FRAME  equ 40                ; + 2 pushes = 56 ... padded below
-DEF_FUNC px_cb_chardata, 48
+CD_FRAME equ 8
+DEF_FUNC px_cb_chardata, CD_FRAME
     push rbx
     push r12
-    mov [rbp - CD_H], rdi
-    mov rbx, rsi
-    movsx r12, edx
-    mov qword [rbp - CD_STR], 0
-
+    push r13
+    mov rbx, rdi
+    mov r12, rsi
+    movsxd r13, edx
     cmp qword [rdi + PxHandle.magic], PX_MAGIC
     jne .out
     cmp qword [gs:ThreadState.current_exception], 0
     jne .out
-
+.route:
+    cmp qword [rbx + PxHandle.handlers + PX_H_CHARACTER_DATA*8], 0
+    je .out
+    mov rax, [rbx + PxHandle.buffer]
+    test rax, rax
+    jz .direct
+    mov rcx, [rbx + PxHandle.buffer_used]
+    lea rdx, [rcx + r13]
+    cmp rdx, [rbx + PxHandle.buffer_size]
+    jbe .append
+    test rcx, rcx
+    jz .direct
+    mov rdi, rbx
+    call px_flush
+    test eax, eax
+    jns .route                 ; the callback can change the buffer or handler
+    jmp .out
+.append:
+    mov [rbx + PxHandle.buffer_used], rdx
+    lea rdi, [rax + rcx]
+    mov rsi, r12
+    mov rdx, r13
+    extern ap_memcpy
+    call ap_memcpy
+    jmp .out
+.direct:
     mov rdi, rbx
     mov rsi, r12
-    call str_new_heap           ; counted: s is not NUL-terminated
-    test rax, rax
-    jz .out
-    mov [rbp - CD_STR], rax
-    mov [rbp - CD_ARGS], rax
-
-    mov rdi, [rbp - CD_H]
-    mov esi, PX_H_CHARACTER_DATA
-    lea rdx, [rbp - CD_ARGS]
-    mov ecx, 1
-    call px_call
-    test rax, rax
-    jz .out
-    mov rdi, rax
-    DECREF_V rdi, rcx
+    mov rdx, r13
+    mov ecx, PX_H_CHARACTER_DATA
+    call px_deliver_text
 .out:
-    mov rdi, [rbp - CD_STR]
-    test rdi, rdi
-    jz .no_str
-    call obj_decref
-.no_str:
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC px_cb_chardata
+
+;; px_deliver_text(handle, bytes, length, handler index) -> 0 or -1
+;; Materialize the string before calling Python, which may resize the buffer.
+PDT_H    equ 8
+PDT_ARG  equ 16
+PDT_INDEX equ 24
+PDT_FRAME equ 32
+DEF_FUNC_LOCAL px_deliver_text, PDT_FRAME
+    mov [rbp - PDT_H], rdi
+    mov [rbp - PDT_INDEX], ecx
+    mov rdi, rsi
+    mov rsi, rdx
+    call str_new_heap           ; counted: s is not NUL-terminated
+    test rax, rax
+    jz .oom
+    mov [rbp - PDT_ARG], rax
+    mov rdi, [rbp - PDT_H]
+    mov esi, [rbp - PDT_INDEX]
+    lea rdx, [rbp - PDT_ARG]
+    mov ecx, 1
+    call px_call
+    mov rdi, rax
+    XDECREF_V rdi, rcx
+    mov rdi, [rbp - PDT_ARG]
+    call obj_decref
+    xor eax, eax
+    cmp qword [gs:ThreadState.current_exception], 0
+    setne al
+    neg eax
+    leave
+    ret
+.oom:
+    mov rdi, [rbp - PDT_H]
+    call px_callback_error
+    mov eax, -1
+    leave
+    ret
+END_FUNC px_deliver_text
 
 ;; ============================================================================
 ;; px_marshal(rdi = PxHandle*, rsi = const char*[], edx = count,
@@ -894,6 +1010,346 @@ DEF_FUNC px_release, PR_FRAME
     leave
     ret
 END_FUNC px_release
+
+;; px_cb_default / px_cb_default_expand(handle, text, len) -> nothing
+;; Expat shares one native slot between the two setters, while Python retains
+;; both attributes. Each setter chooses the matching trampoline.
+DEF_FUNC_BARE px_cb_default
+    mov ecx, PX_H_DEFAULT
+    jmp px_cb_default_text
+END_FUNC px_cb_default
+
+;; px_cb_default_expand(handle, text, len) -> nothing
+DEF_FUNC_BARE px_cb_default_expand
+    mov ecx, PX_H_DEFAULT_EXPAND
+    jmp px_cb_default_text
+END_FUNC px_cb_default_expand
+
+;; px_cb_default_text(handle, text, len, handler index) -> nothing
+DEF_FUNC_LOCAL px_cb_default_text, CB_FRAME
+    mov [rbp - CB_H], rdi
+    mov [rbp - CB_RAW], rsi
+    mov [rbp - CB_INT], edx
+    mov [rbp - CB_ARGS], ecx
+    mov esi, ecx
+    call px_prepare_callback
+    test eax, eax
+    jle .out
+    mov rdi, [rbp - CB_H]
+    mov rsi, [rbp - CB_RAW]
+    movsxd rdx, dword [rbp - CB_INT]
+    mov ecx, [rbp - CB_ARGS]
+    call px_deliver_text
+.out:
+    leave
+    ret
+END_FUNC px_cb_default_text
+
+;; px_call_int(handle, handler index, args, nargs) -> Expat's integer result
+;; A conversion failure must stop the parse just like a raising callback.
+CI_H     equ 8
+CI_RESULT equ 16
+CI_STATUS equ 24
+CI_FRAME equ 32
+DEF_FUNC_LOCAL px_call_int, CI_FRAME
+    mov [rbp - CI_H], rdi
+    call px_call
+    test rax, rax
+    jz .refused
+    mov [rbp - CI_RESULT], rax
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    call obj_as_index           ; err: check after releasing the result
+    mov [rbp - CI_STATUS], eax
+    mov rdi, [rbp - CI_RESULT]
+    DECREF_V rdi, rcx
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .raised
+    mov eax, [rbp - CI_STATUS]
+    leave
+    ret
+.raised:
+    mov rdi, [rbp - CI_H]
+    call px_stop
+.refused:
+    xor eax, eax
+    leave
+    ret
+END_FUNC px_call_int
+
+;; px_cb_not_standalone(handle) -> nonzero to continue the parse
+DEF_FUNC px_cb_not_standalone, CB_FRAME
+    mov [rbp - CB_H], rdi
+    mov esi, PX_H_NOT_STANDALONE
+    call px_prepare_callback
+    test eax, eax
+    jle .refused
+    mov rdi, [rbp - CB_H]
+    mov esi, PX_H_NOT_STANDALONE
+    xor edx, edx
+    xor ecx, ecx
+    call px_call_int
+    leave
+    ret
+.refused:
+    xor eax, eax
+    leave
+    ret
+END_FUNC px_cb_not_standalone
+
+;; px_cb_external_entity(parser, context, base, system, public) -> nonzero on success
+DEF_FUNC px_cb_external_entity, CB_FRAME
+    mov rdi, [rdi]              ; XML_GetUserData(parser) is an Expat macro
+    mov [rbp - CB_H], rdi
+    PX_SAVE_RAW 4
+    mov esi, PX_H_EXTERNAL_ENTITY_REF
+    call px_prepare_callback
+    test eax, eax
+    jle .refused
+    mov rdi, [rbp - CB_H]
+    lea rsi, [rbp - CB_RAW]
+    mov edx, 4
+    mov ecx, 0xE                ; context is opaque and need not be interned
+    lea r8, [rbp - CB_ARGS]
+    call px_marshal
+    test eax, eax
+    js .error
+    mov rdi, [rbp - CB_H]
+    mov esi, PX_H_EXTERNAL_ENTITY_REF
+    lea rdx, [rbp - CB_ARGS]
+    mov ecx, 4
+    call px_call_int
+    mov [rbp - CB_INT], eax
+    lea rdi, [rbp - CB_ARGS]
+    mov esi, 4
+    call px_release
+    mov eax, [rbp - CB_INT]
+    leave
+    ret
+.error:
+    mov rdi, [rbp - CB_H]
+    call px_callback_error
+.refused:
+    xor eax, eax
+    leave
+    ret
+END_FUNC px_cb_external_entity
+
+;; px_cb_entity_decl(handle, name, is_parameter, value, len, base,
+;;                   system, public, notation) -> nothing
+;; The internal entity's replacement text is counted, unlike other strings.
+ED_VALUE equ 128
+ED_LEN   equ 16                 ; last slot in CB_RAW
+ED_SYSTEM equ 16               ; three arguments arrived on the C stack
+ED_PUBLIC equ 24
+ED_NOTATION equ 32
+DEF_FUNC px_cb_entity_decl, CB_FRAME
+    mov [rbp - CB_H], rdi
+    mov [rbp - CB_INT], edx
+    mov [rbp - ED_VALUE], rcx
+    mov [rbp - ED_LEN], r8d
+    mov [rbp - CB_RAW], rsi
+    mov [rbp - CB_RAW + 8], r9
+    mov rax, [rbp + ED_SYSTEM]
+    mov [rbp - CB_RAW + 16], rax
+    mov rax, [rbp + ED_PUBLIC]
+    mov [rbp - CB_RAW + 24], rax
+    mov rax, [rbp + ED_NOTATION]
+    mov [rbp - CB_RAW + 32], rax
+    mov esi, PX_H_ENTITY_DECL
+    call px_prepare_callback
+    test eax, eax
+    jle .out
+    mov rdi, [rbp - CB_H]
+    lea rsi, [rbp - CB_RAW]
+    mov edx, 5
+    mov ecx, 0x1F
+    lea r8, [rbp - CB_ARGS]
+    call px_marshal
+    test eax, eax
+    js .error
+    ; Open slots 1 and 2 for the flag and replacement text.
+    mov rax, [rbp - CB_ARGS + 32]
+    mov [rbp - CB_ARGS + 48], rax
+    mov rax, [rbp - CB_ARGS + 24]
+    mov [rbp - CB_ARGS + 40], rax
+    mov rax, [rbp - CB_ARGS + 16]
+    mov [rbp - CB_ARGS + 32], rax
+    mov rax, [rbp - CB_ARGS + 8]
+    mov [rbp - CB_ARGS + 24], rax
+    movsxd rdi, dword [rbp - CB_INT]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov [rbp - CB_ARGS + 8], rax
+    mov rdi, [rbp - ED_VALUE]
+    test rdi, rdi
+    jz .no_value
+    mov esi, [rbp - ED_LEN]
+    call str_new_heap
+    jmp .value
+.no_value:
+    lea rax, [rel none_singleton]
+    INCREF rax
+.value:
+    mov [rbp - CB_ARGS + 16], rax
+    test rax, rax
+    jz .release_error
+    mov rdi, [rbp - CB_H]
+    mov esi, PX_H_ENTITY_DECL
+    lea rdx, [rbp - CB_ARGS]
+    mov ecx, 7
+    call px_call
+    mov rdi, rax
+    XDECREF_V rdi, rcx
+    lea rdi, [rbp - CB_ARGS]
+    mov esi, 7
+    call px_release
+    jmp .out
+.release_error:
+    lea rdi, [rbp - CB_ARGS]
+    mov esi, 7
+    call px_release
+.error:
+    mov rdi, [rbp - CB_H]
+    call px_callback_error
+.out:
+    leave
+    ret
+END_FUNC px_cb_entity_decl
+
+;; px_content_model(model, depth) -> owned (type, quant, name, children) or NULL
+;; A partial tuple owns any children already converted, so it can be dropped
+;; on error. The root's Expat model is freed by px_cb_element_decl.
+CM_DEPTH equ 8
+CM_ITEMS equ 16
+CM_CHILDREN equ 24
+CM_FRAME equ 24
+DEF_FUNC_LOCAL px_content_model, CM_FRAME
+    push rbx
+    push r12
+    push r13
+    cmp esi, PX_MODEL_DEPTH
+    jae .deep
+    mov rbx, rdi
+    mov [rbp - CM_DEPTH], esi
+    mov edi, 4
+    call tuple_new
+    test rax, rax
+    jz .out
+    mov r12, rax
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rbp - CM_ITEMS], rax
+    mov edi, [rbx + PxContent.type]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - CM_ITEMS]
+    mov [rcx], rax
+    mov edi, [rbx + PxContent.quant]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov rcx, [rbp - CM_ITEMS]
+    mov [rcx + 8], rax
+    mov rdi, [rbx + PxContent.name]
+    test rdi, rdi
+    jz .no_name
+    call str_from_cstr_heap
+    test rax, rax
+    jz .drop
+    jmp .name
+.no_name:
+    lea rax, [rel none_singleton]
+    INCREF rax
+.name:
+    mov rcx, [rbp - CM_ITEMS]
+    mov [rcx + 16], rax
+    mov edi, [rbx + PxContent.numchildren]
+    call tuple_new
+    test rax, rax
+    jz .drop
+    mov rcx, [rbp - CM_ITEMS]
+    mov [rcx + 24], rax
+    mov rax, [rax + PyTupleObject.ob_item]
+    mov [rbp - CM_CHILDREN], rax
+    xor r13d, r13d
+.child:
+    cmp r13d, [rbx + PxContent.numchildren]
+    jae .done
+    imul rdi, r13, PxContent_size
+    add rdi, [rbx + PxContent.children]
+    mov esi, [rbp - CM_DEPTH]
+    inc esi
+    call px_content_model
+    test rax, rax
+    jz .drop
+    mov rcx, [rbp - CM_CHILDREN]
+    mov [rcx + r13*8], rax
+    inc r13d
+    jmp .child
+.done:
+    mov rax, r12
+    jmp .out
+.drop:
+    mov rdi, r12
+    call obj_decref
+    jmp .fail
+.deep:
+    SET_EXC exc_RecursionError_type, "maximum recursion depth exceeded in XML content model"
+.fail:
+    xor eax, eax
+.out:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC px_content_model
+
+;; px_cb_element_decl(handle, name, XML_Content*) -> nothing
+DEF_FUNC px_cb_element_decl, CB_FRAME
+    mov [rbp - CB_H], rdi
+    mov [rbp - CB_RAW], rsi
+    mov [rbp - CB_INT], rdx
+    mov esi, PX_H_ELEMENT_DECL
+    call px_prepare_callback
+    test eax, eax
+    jle .free_model
+    mov rdi, [rbp - CB_INT]
+    xor esi, esi
+    call px_content_model
+    test rax, rax
+    jz .error
+    mov [rbp - CB_ARGS + 8], rax
+    mov rdi, [rbp - CB_H]
+    mov rsi, [rbp - CB_RAW]
+    call px_intern
+    test rax, rax
+    jz .drop_model
+    mov [rbp - CB_ARGS], rax
+    mov rdi, [rbp - CB_H]
+    mov esi, PX_H_ELEMENT_DECL
+    lea rdx, [rbp - CB_ARGS]
+    mov ecx, 2
+    call px_call
+    mov rdi, rax
+    XDECREF_V rdi, rcx
+    lea rdi, [rbp - CB_ARGS]
+    mov esi, 2
+    call px_release
+    jmp .free_model
+.drop_model:
+    mov rdi, [rbp - CB_ARGS + 8]
+    call obj_decref
+.error:
+    mov rdi, [rbp - CB_H]
+    call px_callback_error
+.free_model:
+    mov rdi, [rbp - CB_H]
+    mov rdi, [rdi + PxHandle.parser]
+    mov rsi, [rbp - CB_INT]
+    call XML_FreeContentModel wrt ..plt
+    leave
+    ret
+END_FUNC px_cb_element_decl
 
 ;; ============================================================================
 ;; The uniform trampolines.
