@@ -617,8 +617,7 @@ DEF_FUNC_BARE ast_typeparams_at
 END_FUNC ast_typeparams_at
 
 ;; ============================================================================
-;; ast_rawname_at(Comp *c, uint32_t idx) -> rax = the obj index of the name as
-;; it was written, or 0
+;; ast_rawname_at(Comp *c, uint32_t idx) -> rax = the unmangled name index or 0
 ;; ============================================================================
 global ast_rawname_at
 DEF_FUNC_BARE ast_rawname_at

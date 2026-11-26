@@ -402,81 +402,100 @@ END_FUNC comp_intern
 ;;
 ;; The same, without the identifier-shaped test: a NAME is interned whatever
 ;; it is written in, as CPython interns every identifier including a non-ASCII
-;; one.  `comp_intern_name` is the only caller, and names are the whole point.
+;; one. Also used for identifiers supplied as AST objects.
 ;; ============================================================================
 DEF_FUNC_BARE comp_intern_forced
     jmp str_intern_bytes
 END_FUNC comp_intern_forced
 
 
-;; ============================================================================
-;; comp_name_obj(Comp *c, const char *s, int64_t len) -> rax = obj index, 0 on
-;; failure
-;;
-;; Every identifier in the tree goes through here: intern it with private-name
-;; mangling applied, hand it to the object arena, and -- when the mangling
-;; actually rewrote it -- record the name as it was WRITTEN alongside.
-;;
-;; The compiler wants the mangled name and the AST wants the source one.
-;; CPython gets both by mangling later, in the symbol table and the code
-;; generator; here the class is only in hand while the parser is inside its
-;; body, so the mangling has to happen now and the other half is kept rather
-;; than recomputed.  Without it `self.__x` inside `class C` read back from
-;; ast.parse as `_C__x`.
-;;
-;; Mangling always lengthens -- it prepends `_` and at least one character of
-;; the class name -- so the two are told apart by the length alone.
-;; ============================================================================
-CNO_COMP  equ 8
-CNO_STR   equ 16
-CNO_LEN   equ 24
-CNO_IDX   equ 32
-CNO_FRAME equ 48            ; + 0 pushes = 48
-global comp_name_obj
-DEF_FUNC comp_name_obj, CNO_FRAME
-    mov [rbp - CNO_COMP], rdi
-    mov [rbp - CNO_STR], rsi
-    mov [rbp - CNO_LEN], rdx
-
-    call comp_intern_name
-    test rax, rax
-    jz .cno_fail
-    mov rsi, rax
-    mov rdi, [rbp - CNO_COMP]
-    call ast_obj                ; takes ownership
-    test rax, rax
-    jz .cno_fail
-    mov [rbp - CNO_IDX], rax
-
-    ; Did it mangle?  The interned string is longer than the source text
-    ; exactly when it did.
-    mov rdi, [rbp - CNO_COMP]
-    mov esi, eax
-    call ast_obj_at             ; borrowed
-    mov rcx, [rax + PyStrObject.ob_size]
-    cmp rcx, [rbp - CNO_LEN]
-    je .cno_done
-
-    mov rdi, [rbp - CNO_STR]
-    mov rsi, [rbp - CNO_LEN]
-    call comp_intern
-    test rax, rax
-    jz .cno_done                ; the mangled name alone is still usable
-    mov rsi, rax
-    mov rdi, [rbp - CNO_COMP]
-    call ast_obj
-    test rax, rax
-    jz .cno_done
-    mov rdx, [rbp - CNO_COMP]
-    mov rcx, [rdx + Comp.rawnames + Buf.data]
-    mov rdx, [rbp - CNO_IDX]
-    mov [rcx + rdx*4], eax
-
-.cno_done:
-    mov rax, [rbp - CNO_IDX]
+;; comp_source_ident(rdi = source bytes, rsi = length) -> owned interned str
+;; Fails: 0
+;; The lexer already checked XID. Apply NFKC to non-ASCII NAME spellings
+;; here, after token classification and before interning.
+CSI_LEN equ 8
+CSI_NORMALIZED equ 16
+CSI_FRAME equ 24
+DEF_FUNC comp_source_ident, CSI_FRAME
+    push rbx
+    mov rbx, rdi
+    mov [rbp - CSI_LEN], rsi
+    call str_all_name_chars
+    mov rdi, rbx
+    mov rsi, [rbp - CSI_LEN]
+    test eax, eax
+    jz .normalize
+    call str_intern_bytes
+    jmp .out
+.normalize:
+    call str_new_heap
+    mov rbx, rax
+    mov rdi, rax
+    extern udn_normalize_identifier
+    call udn_normalize_identifier
+    mov [rbp - CSI_NORMALIZED], rax
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, [rbp - CSI_NORMALIZED]
+    test rdi, rdi
+    jz .failed
+    extern str_intern_steal
+    call str_intern_steal
+    jmp .out
+.failed:
+    xor eax, eax
+.out:
+    pop rbx
     leave
     ret
-.cno_fail:
+END_FUNC comp_source_ident
+
+;; comp_name_obj(Comp *c, const char *s, int64_t len) -> arena index or 0
+;; Use the mangled name for compilation and retain the canonical unmangled
+;; spelling for ast.parse when mangling changes it.
+CNO_COMP  equ 8
+CNO_NAME  equ 16
+CNO_IDX   equ 24
+CNO_FRAME equ 32
+DEF_FUNC comp_name_obj, CNO_FRAME
+    mov [rbp - CNO_COMP], rdi
+    mov rdi, rsi
+    mov rsi, rdx
+    call comp_source_ident
+    ERR_NULL .failed
+    mov [rbp - CNO_NAME], rax
+
+    mov rdi, [rbp - CNO_COMP]
+    mov rsi, rax
+    cmp qword [rdi + Comp.private], 0
+    je .plain
+    call comp_mangle_name
+    test rax, rax
+    jz .release
+    mov rsi, rax
+    mov rdi, [rbp - CNO_COMP]
+    cmp rax, [rbp - CNO_NAME]
+    je .plain
+    call ast_obj
+    mov [rbp - CNO_IDX], rax
+    mov rdi, [rbp - CNO_COMP]
+    mov rsi, [rbp - CNO_NAME]
+    call ast_obj
+    mov rcx, [rbp - CNO_COMP]
+    mov rcx, [rcx + Comp.rawnames + Buf.data]
+    mov rdx, [rbp - CNO_IDX]
+    mov [rcx + rdx*4], eax
+    mov rax, rdx
+    leave
+    ret
+.plain:
+    call ast_obj
+    leave
+    ret
+.release:
+    mov rdi, [rbp - CNO_NAME]
+    call obj_decref
+.failed:
     xor eax, eax
     leave
     ret
@@ -1350,8 +1369,8 @@ DEF_FUNC comp_intern_cstr, 16
 END_FUNC comp_intern_cstr
 
 ;; ============================================================================
-;; comp_intern_name(Comp *c, const char *s, int64_t len)
-;;   -> rax = owned PyStrObject*, the identifier after private-name mangling
+;; comp_mangle_name(Comp *c, PyStrObject *canonical)
+;;   -> rax = canonical (borrowed) or the mangled name (owned), 0 on failure
 ;;
 ;; An identifier of the form __spam written inside `class C` is _C__spam --
 ;; which is what keeps a base's private attribute from colliding with a
@@ -1359,20 +1378,20 @@ END_FUNC comp_intern_cstr
 ;; the same slot.  CPython's rule: two leading underscores, not two trailing
 ;; ones, and a class name with its own leading underscores stripped off.
 ;; ============================================================================
-CIN_COMP  equ 8
+CIN_NAME  equ 8
 CIN_P     equ 16
 CIN_LEN   equ 24
 CIN_BUF   equ 56
-DEF_FUNC comp_intern_name, 80
+DEF_FUNC_LOCAL comp_mangle_name, 80
     push rbx
     push r12
-    mov [rbp - CIN_COMP], rdi
+    mov [rbp - CIN_NAME], rsi
+    mov rdx, [rsi + PyStrObject.ob_size]
+    add rsi, PyStrObject.data
     mov [rbp - CIN_P], rsi
     mov [rbp - CIN_LEN], rdx
 
     mov rax, [rdi + Comp.private]
-    test rax, rax
-    jz .plain
     cmp rdx, 2
     jl .plain
     cmp byte [rsi], '_'
@@ -1447,14 +1466,12 @@ DEF_FUNC comp_intern_name, 80
     ret
 
 .plain:
-    mov rdi, [rbp - CIN_P]
-    mov rsi, [rbp - CIN_LEN]
-    call comp_intern_forced
+    mov rax, [rbp - CIN_NAME]
     pop r12
     pop rbx
     leave
     ret
-END_FUNC comp_intern_name
+END_FUNC comp_mangle_name
 
 ;; ============================================================================
 ;; comp_keep(Comp *c, Value v) -> rax = the same value, now arena-owned

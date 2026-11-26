@@ -159,6 +159,7 @@ test_compile_fstring
 test_compile_func
 test_compile_global_closure
 test_compile_identifier_chars
+test_compile_nfkc_names
 test_compile_import_dotted
 test_compile_import_scope
 test_compile_import_star
