@@ -1914,6 +1914,8 @@ DEF_FUNC type_call
     call exc_type_call
     ; rax = exception object (PyExceptionObject)
     mov r14, rax                ; r14 = instance
+    test r14, r14
+    jz .exc_sub_new_failed
     jmp .exc_sub_have_instance
 
 .exc_sub_user_new:
@@ -1967,7 +1969,7 @@ DEF_FUNC type_call
     ; slot: it is inherited, and `class F(E): pass` runs E's.  tp_init is set
     ; only from the class's OWN body, so a subclass of a subclass ran none.
     extern exc_user_init
-    mov rdi, rbx
+    mov rdi, [r14 + PyObject.ob_type]
     call exc_user_init
     mov [rbp - TC_EXCINIT], rax
     test rax, rax
@@ -2000,6 +2002,8 @@ DEF_FUNC type_call
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .exc_sub_init_cleanup
+    mov rcx, [rbp - TC_KWNAMES]
+    mov [gs:ThreadState.kw_names_pending], rcx
     mov rdi, [rbp - TC_EXCINIT]
     mov rsi, r15
     lea rdx, [r13 + 1]

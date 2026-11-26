@@ -1525,7 +1525,14 @@ DEF_FUNC exc_method_init, EMI_FRAME
     test rax, rax
     jz .emi_none
     mov [rbp - EMI_SELF], rax
+    mov rcx, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    test rcx, rcx
+    jz .emi_args
+    cmp qword [rcx + PyTupleObject.ob_size], 0
+    jne .emi_keywords
 
+.emi_args:
     ; args = the tuple of everything after self
     lea rbx, [rdi + 8]
     dec rsi
@@ -1560,6 +1567,15 @@ DEF_FUNC exc_method_init, EMI_FRAME
     pop rbx
     leave
     V_PACK rax, rdx
+    ret
+.emi_keywords:
+    mov rax, [rax + PyObject.ob_type]
+    mov rsi, [rax + PyTypeObject.tp_name]
+    xor edi, edi
+    call exc_set_bad_keyword
+    xor eax, eax
+    pop rbx
+    leave
     ret
 END_FUNC exc_method_init
 
@@ -1673,6 +1689,8 @@ DEF_FUNC exc_method_new, EMN_FRAME
     call type_is_subtype
     test eax, eax
     jz .emn_not_an_exc
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jnz .emn_oserror
 
     ; A group is BaseExceptionGroup's to build, not this one's: eg_new fills
     ; eg_exceptions and nothing here would.  `super().__new__(cls, msg, excs)`
@@ -1777,6 +1795,11 @@ DEF_FUNC exc_method_new, EMN_FRAME
     CSTRING rdi, \
         `BaseException.__new__(\x01): \x01 is not a subtype of BaseException`
     extern set_type_error_with_typename
+    call set_type_error_with_typename
+    jmp .emn_fail
+.emn_oserror:
+    mov rsi, rbx
+    CSTRING rdi, `BaseException.__new__(\x01) is not safe, use OSError.__new__()`
     call set_type_error_with_typename
     jmp .emn_fail
 END_FUNC exc_method_new
@@ -2095,9 +2118,12 @@ DEF_FUNC exc_install_methods, EIM_FRAME
     mov rbx, rax
     mov [rel exc_OSError_type + PyTypeObject.tp_dict], rbx
     extern oserror_reduce
+    extern oserror_method_init, oserror_method_new
     EXC_ADD_METHOD oserror_reduce, "__reduce__"
+    EXC_ADD_METHOD oserror_method_init, "__init__"
     lea rdi, [rel exc_OSError_type]
     call type_stamp_methods
+    EXC_ADD_STATIC oserror_method_new, "__new__"
     mov rdi, rbx
     extern oserror_install_members
     call oserror_install_members
@@ -2206,7 +2232,15 @@ DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
     extern builtin_func_type
     lea rdx, [rel builtin_func_type]
     cmp rcx, rdx
-    je .eui_none                ; a builtin: the default, not a definition
+    jne .eui_found
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .eui_none
+    ; A subclass can explicitly use another builtin initializer, such as
+    ; BaseException.__init__. Only OSError's own initializer is the default.
+    lea rdx, [rel oserror_method_init]
+    cmp [rax + PyBuiltinObject.func_ptr], rdx
+    je .eui_none
+.eui_found:
     pop rbx
     leave
     ret
@@ -2498,7 +2532,7 @@ ERB_NAME  equ 8
 ERB_TYPE  equ 16
 ERB_BUF   equ 192
 ERB_FRAME equ 192           ; + 0 pushes = 192, 16-aligned
-DEF_FUNC_LOCAL exc_set_bad_keyword, ERB_FRAME
+DEF_FUNC exc_set_bad_keyword, ERB_FRAME
     mov [rbp - ERB_NAME], rdi
     mov [rbp - ERB_TYPE], rsi
     lea rdi, [rbp - ERB_BUF]

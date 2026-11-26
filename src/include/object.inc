@@ -1387,7 +1387,7 @@ TYPE_FLAG_OWNS_MAPPING  equ 0x10000000
 TYPE_FLAG_OSERROR_SUBCLASS equ 0x20000000
 
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
-; above leave free -- they stop at bit 25.  It is a stamp from one global
+; above leave free. It is a stamp from one global
 ; counter, so a version identifies a particular type in a particular state of
 ; its dict, and comparing one is both "the same class" and "nothing has been
 ; added to it or to anything in its MRO since".
@@ -1596,6 +1596,7 @@ struc PyOSErrorObject
     .strerror:  resq 1
     .filename:  resq 1
     .filename2: resq 1
+    .written:   resq 1  ; normalized integer Value, or NULL when unset
 endstruc
 
 ; Exception group object (extends PyExceptionObject with eg_exceptions)

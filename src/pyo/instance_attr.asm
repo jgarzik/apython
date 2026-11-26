@@ -881,7 +881,22 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     mov rsi, rbx
     extern getset_descr_get
     call getset_descr_get       ; err: its 0, exception pending, is ours
+    test rax, rax
+    jnz .getset_value
+    cmp qword [gs:ThreadState.attr_error_pending], 0
+    je .getset_value
+    mov rdi, rbx
+    mov rsi, [rbp - IG_NAME]
+    call attr_getattr_hook
+    jmp .getset_result
+.getset_value:
     V_UNPACK rax, rdx
+.getset_result:
+    mov rcx, [rbp - IG_WHERE]
+    test rcx, rcx
+    jz .getset_out
+    mov qword [rcx], 1          ; the getter or hook already resolved the value
+.getset_out:
     IG_RELEASE_HELD
     pop r13
     pop r12

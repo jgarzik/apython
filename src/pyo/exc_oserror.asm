@@ -184,7 +184,7 @@ DEF_FUNC oserror_install_members, OIM_FRAME
 .next:
     mov rdi, [r12]
     test rdi, rdi
-    jz .done
+    jz .written
     call str_from_cstr_heap
     mov [rbp - OIM_NAME], rax
     mov rdi, r13
@@ -206,7 +206,26 @@ DEF_FUNC oserror_install_members, OIM_FRAME
     add r12, 8
     add r13, 8
     jmp .next
-.done:
+.written:
+    lea rdi, [rel oserror_n_written]
+    call str_from_cstr_heap
+    mov r12, rax
+    lea rdi, [rel oserror_written_get]
+    lea rsi, [rel oserror_written_set]
+    mov rdx, r12
+    extern getset_descr_new
+    call getset_descr_new
+    mov r13, rax
+    lea rcx, [rel exc_OSError_type]
+    mov [r13 + PyGetSetDescrObject.gs_owner], rcx
+    mov rdi, rbx
+    mov rsi, r12
+    mov rdx, r13
+    call dict_set_str
+    mov rdi, r13
+    call obj_decref
+    mov rdi, r12
+    call obj_decref
     pop r13
     pop r12
     pop rbx
@@ -214,169 +233,506 @@ DEF_FUNC oserror_install_members, OIM_FRAME
     ret
 END_FUNC oserror_install_members
 
-;; ============================================================================
+;; oserror_use_init(rdi = type) -> eax = 1 when parsing belongs in __init__
+;; A Python __init__ can take unrelated arguments. If __new__ is overridden
+;; too, its call to OSError.__new__ supplies the arguments for native parsing.
+DEF_FUNC_LOCAL oserror_use_init, 8
+    push rbx
+    test qword [rdi + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jz .native_new
+    mov rbx, rdi
+    extern exc_user_init
+    call exc_user_init
+    test rax, rax
+    jz .native_new
+    mov rdi, rbx
+    extern exc_user_new
+    call exc_user_new
+    test rax, rax
+    jnz .native_new
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.native_new:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_use_init
+
 ;; oserror_new(rdi = type, rsi = args, rdx = nargs) -> fat pair (rax, rdx)
-;;
-;; OSError's constructor, installed as tp_new on exc_OSError_type only.
-;; exc_type_call consults tp_new before its own default path, and DEF_EXC_TYPE
-;; leaves the slot 0 on the subclasses -- which is what CPython wants too: the
-;; errno-to-subclass remapping applies only when the type is exactly OSError.
-;;
-;; From CPython's oserror_parse_args/oserror_init: for 2 <= nargs <= 5 the
-;; arguments are (errno, strerror, filename, winerror, filename2); when a
-;; filename is given and is not None it is stored and `.args` is truncated to
-;; its first two items, which is why `OSError(2, "x", "/f").args` is a 2-tuple.
-;;
-;; ============================================================================
+DEF_FUNC oserror_new
+    push rdi
+    push rsi
+    push rdx
+    sub rsp, 8
+    call oserror_use_init
+    add rsp, 8
+    pop rdx
+    pop rsi
+    pop rdi
+    test eax, eax
+    jz .parse
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    mov edx, TAG_PTR
+    leave
+    ret
+.parse:
+    xor ecx, ecx
+    call oserror_parse
+    leave
+    ret
+END_FUNC oserror_new
+
+;; oserror_parse(rdi = type, rsi = args, rdx = nargs, rcx = instance or 0)
+;;   -> fat pair (instance, TAG_PTR), or (0, 0) with an exception pending
+;; A supplied instance is initialized in place and returned borrowed.
 ONW_TYPE   equ 8
 ONW_ARGS   equ 16
-ONW_NARGS  equ 24
-ONW_EXC    equ 32
-ONW_ERRNO  equ 40           ; the four attributes, as Values
-ONW_STRERR equ 48
+ONW_EFFN   equ 24
+ONW_WRITTEN equ 40
+ONW_FNAME2 equ 48
 ONW_FNAME  equ 56
-ONW_FNAME2 equ 64
-ONW_EFFN   equ 72           ; the effective argument count for .args
-ONW_FRAME  equ 80           ; + 2 pushes = 96
-DEF_FUNC oserror_new, ONW_FRAME
+ONW_STRERR equ 64
+ONW_ERRNO  equ 72
+ONW_FRAME  equ 80
+DEF_FUNC_LOCAL oserror_parse, ONW_FRAME
     push rbx
     push r12
+    mov rbx, rcx
     mov [rbp - ONW_TYPE], rdi
     mov [rbp - ONW_ARGS], rsi
-    mov [rbp - ONW_NARGS], rdx
     mov [rbp - ONW_EFFN], rdx
 
-    ; An absent field remains NULL so reduction can distinguish an explicit None.
     xor eax, eax
+    mov [rbp - ONW_WRITTEN], rax
     mov [rbp - ONW_ERRNO], rax
     mov [rbp - ONW_STRERR], rax
     mov [rbp - ONW_FNAME], rax
     mov [rbp - ONW_FNAME2], rax
-
     cmp rdx, 2
-    jl .onw_build
+    jl .allocate
     cmp rdx, 5
-    jg .onw_build
+    jg .allocate
 
-    mov rax, [rbp - ONW_ARGS]
-    mov rcx, [rax]
-    mov [rbp - ONW_ERRNO], rcx
-    mov rcx, [rax + 8]
-    mov [rbp - ONW_STRERR], rcx
-    cmp qword [rbp - ONW_NARGS], 3
-    jl .onw_subclass
-    mov rcx, [rax + 16]
-    lea rsi, [rel none_singleton]
-    cmp rcx, rsi
-    je .onw_subclass
-    mov [rbp - ONW_FNAME], rcx
-    mov qword [rbp - ONW_EFFN], 2
-    cmp qword [rbp - ONW_NARGS], 5
-    jl .onw_subclass
-    mov rcx, [rax + 32]         ; args[4]; args[3] is Windows-only winerror
-    cmp rcx, rsi
-    je .onw_subclass
-    mov [rbp - ONW_FNAME2], rcx
-
-.onw_subclass:
-    ; Remap to a subclass by errno, but only for OSError itself.
-    mov rax, [rbp - ONW_TYPE]
-    lea rcx, [rel exc_OSError_type]
-    cmp rax, rcx
-    jne .onw_build
-    ; int_is_integer, not V_IS_INT: under INT_STRESS=1 -- and for any errno
-    ; past the immediate range -- the number arrives as a heap PyIntObject, and
-    ; testing only for an immediate silently skipped the remapping.
-    mov rdi, [rbp - ONW_ERRNO]
-    V_UNPACK rdi, rdx
-    push rdi
-    push rdx
-    call int_is_integer
-    pop rdx
-    pop rdi
-    test eax, eax
-    jz .onw_build
-    call int_to_i64             ; rdi = payload, edx = tag
-    mov rdi, rax
-    lea rsi, [rel oserror_errnomap]
-.onw_scan:
     mov rax, [rsi]
-    test rax, rax
-    jz .onw_build               ; end of table
-    cmp rax, rdi
-    je .onw_mapped
+    mov [rbp - ONW_ERRNO], rax
+    mov rax, [rsi + 8]
+    mov [rbp - ONW_STRERR], rax
+
+    ; Remap before interpreting the third argument. Only exact OSError may
+    ; turn into BlockingIOError and treat that argument as a write count.
+    lea rcx, [rel exc_OSError_type]
+    cmp rdi, rcx
+    jne .third
+    mov r12, [rbp - ONW_ERRNO]
+    mov rdi, r12
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz .third
+    mov rdi, r12
+    V_UNPACK rdi, rdx
+    extern int_fits_i64
+    call int_fits_i64
+    test eax, eax
+    jz .third
+    mov rdi, r12
+    V_UNPACK rdi, rdx
+    call int_to_i64
+    lea rsi, [rel oserror_errnomap]
+.find_errno:
+    cmp qword [rsi], 0
+    je .third
+    cmp [rsi], rax
+    je .mapped
     add rsi, 16
-    jmp .onw_scan
-.onw_mapped:
+    jmp .find_errno
+.mapped:
     mov rax, [rsi + 8]
     mov [rbp - ONW_TYPE], rax
 
-.onw_build:
-    ; exc_new(type, args[0] or NULL) gives the instance and a 0-or-1 tuple.
+.third:
+    cmp qword [rbp - ONW_EFFN], 3
+    jl .allocate
+    mov rax, [rbp - ONW_ARGS]
+    mov r12, [rax + 16]
+    lea rsi, [rel none_singleton]
+    cmp r12, rsi
+    je .allocate
+    lea rcx, [rel exc_BlockingIOError_type]
+    cmp [rbp - ONW_TYPE], rcx
+    jne .filename
+    mov rdi, r12
+    call oserror_is_number
+    test eax, eax
+    jz .filename
+    mov rdi, r12
+    call oserror_as_written
+    test rax, rax
+    jz .fail
+    mov [rbp - ONW_WRITTEN], rax
+    jmp .allocate
+
+.filename:
+    mov [rbp - ONW_FNAME], r12
+    cmp qword [rbp - ONW_EFFN], 5
+    jne .trim
+    mov rax, [rbp - ONW_ARGS]
+    mov rcx, [rax + 32]         ; args[3] is the Windows-only winerror
+    lea rsi, [rel none_singleton]
+    cmp rcx, rsi
+    je .trim
+    mov [rbp - ONW_FNAME2], rcx
+.trim:
+    mov qword [rbp - ONW_EFFN], 2
+
+.allocate:
+    test rbx, rbx
+    jnz .args
     mov rdi, [rbp - ONW_TYPE]
     xor esi, esi
-    xor edx, edx
-    cmp qword [rbp - ONW_NARGS], 0
-    je .onw_created
+    cmp qword [rbp - ONW_EFFN], 0
+    je .allocate_new
     mov rax, [rbp - ONW_ARGS]
     mov rsi, [rax]
-    mov edx, TAG_PTR
-.onw_created:
-    call exc_new
-    mov [rbp - ONW_EXC], rax
-
-    ; Replace .args when the effective count is not the 0-or-1 exc_new made.
-    mov rcx, [rbp - ONW_EFFN]
-    cmp rcx, 2
-    jl .onw_attrs
-    mov rdi, rcx
-    call tuple_new
-    mov r12, rax
+.allocate_new:
     xor edx, edx
-.onw_copy:
-    cmp rdx, [rbp - ONW_EFFN]
-    jge .onw_replace
+    call exc_new
+    mov rbx, rax
+    cmp qword [rbp - ONW_EFFN], 1
+    jbe .fields                 ; exc_new already supplied the args tuple
+.args:
+    mov rdi, [rbp - ONW_EFFN]
+    call tuple_new
+    mov r8, [rax + PyTupleObject.ob_item]
     mov rsi, [rbp - ONW_ARGS]
+    xor edx, edx
+.copy_args:
+    cmp rdx, [rbp - ONW_EFFN]
+    jge .install_args
     mov rdi, [rsi + rdx*8]
-    INCREF_V rdi, r8
-    mov r9, [r12 + PyTupleObject.ob_item]
-    mov [r9 + rdx*8], rdi
+    INCREF_V rdi, rcx
+    mov [r8 + rdx*8], rdi
     inc rdx
-    jmp .onw_copy
-.onw_replace:
-    mov rdi, [rbp - ONW_EXC]
-    mov rax, [rdi + PyExceptionObject.exc_args]
+    jmp .copy_args
+.install_args:
+    mov rdi, [rbx + PyExceptionObject.exc_args]
+    mov [rbx + PyExceptionObject.exc_args], rax
+    XDECREF_V rdi, rcx
+
+.fields:
+    xor r12d, r12d
+.store_field:
+    mov rax, [rbp - ONW_ERRNO + r12]
     test rax, rax
-    jz .onw_set_args
-    mov rdi, rax
-    call obj_decref
-.onw_set_args:
-    mov rdi, [rbp - ONW_EXC]
-    mov [rdi + PyExceptionObject.exc_args], r12
-
-.onw_attrs:
-    mov rax, [rbp - ONW_EXC]
-    mov rdx, [rbp - ONW_ERRNO]
-    INCREF_V rdx, rcx
-    mov [rax + PyOSErrorObject.errno], rdx
-    mov rdx, [rbp - ONW_STRERR]
-    INCREF_V rdx, rcx
-    mov [rax + PyOSErrorObject.strerror], rdx
-    mov rdx, [rbp - ONW_FNAME]
-    INCREF_V rdx, rcx
-    mov [rax + PyOSErrorObject.filename], rdx
-    mov rdx, [rbp - ONW_FNAME2]
-    INCREF_V rdx, rcx
-    mov [rax + PyOSErrorObject.filename2], rdx
-
-.onw_done:
-    mov rax, [rbp - ONW_EXC]
+    jnz .install_field
+    cmp r12, 16
+    jae .next_field            ; absent filenames leave the old fields alone
+.install_field:
+    INCREF_V rax, rcx
+    mov rdi, [rbx + PyOSErrorObject.errno + r12]
+    mov [rbx + PyOSErrorObject.errno + r12], rax
+    XDECREF_V rdi, rcx
+.next_field:
+    add r12, 8
+    cmp r12, 32
+    jb .store_field
+    mov rax, [rbp - ONW_WRITTEN]
+    test rax, rax
+    jz .done
+    mov rdi, rbx
+    call oserror_install_written
+.done:
+    mov rax, rbx
     mov edx, TAG_PTR
+    jmp .return
+.fail:
+    xor eax, eax
+    xor edx, edx
+.return:
     pop r12
     pop rbx
     leave
     ret
-END_FUNC oserror_new
+END_FUNC oserror_parse
+
+;; oserror_method_new(rdi = args, rsi = total count) -> Value or 0 on error
+DEF_FUNC oserror_method_new, 8
+    push rbx
+    mov rbx, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    test rbx, rbx
+    jz .positional
+    mov rbx, [rbx + PyTupleObject.ob_size]
+    sub rsi, rbx
+.positional:
+    test rsi, rsi
+    jz .no_type
+    mov rax, [rdi]
+    V_TEST_PTR rax, rcx
+    ja .not_type
+    mov rcx, [rax + PyObject.ob_type]
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .not_type
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
+    jz .not_oserror
+    lea rdx, [rsi - 1]
+    lea rsi, [rdi + 8]
+    mov rdi, rax
+    test rbx, rbx
+    jz .construct
+    push rdi
+    sub rsp, 8
+    call oserror_use_init
+    add rsp, 8
+    pop rdi
+    test eax, eax
+    jnz .deferred
+    jmp .no_keywords
+.deferred:
+    xor esi, esi
+    xor edx, edx
+    call exc_new
+    mov edx, TAG_PTR
+    jmp .pack
+.construct:
+    call oserror_new
+.pack:
+    V_PACK rax, rdx
+    jmp .return
+.no_keywords:
+    mov rsi, [rdi + PyTypeObject.tp_name]
+    xor edi, edi
+    extern exc_set_bad_keyword
+    call exc_set_bad_keyword
+    jmp .failed
+.no_type:
+    extern exc_TypeError_type
+    FAIL exc_TypeError_type, "OSError.__new__(): not enough arguments", .failed
+.not_type:
+    mov rsi, rax
+    CSTRING rdi, `OSError.__new__(X): X is not a type object (\x01)`
+    extern set_type_error_with_name
+    call set_type_error_with_name
+    jmp .failed
+.not_oserror:
+    mov rsi, rax
+    CSTRING rdi, `OSError.__new__(\x01): \x01 is not a subtype of OSError`
+    extern set_type_error_with_typename
+    call set_type_error_with_typename
+.failed:
+    xor eax, eax
+.return:
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_method_new
+
+;; oserror_method_init(rdi = args, rsi = total count) -> None or 0 on error
+OMI_ARGS equ 8
+OMI_NARGS equ 16
+OMI_KW equ 24
+OMI_FRAME equ 40
+DEF_FUNC oserror_method_init, OMI_FRAME
+    push rbx
+    mov [rbp - OMI_ARGS], rdi
+    mov [rbp - OMI_NARGS], rsi
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    mov [rbp - OMI_KW], rax
+    mov rax, [rdi]
+    mov rbx, [rax + PyObject.ob_type]
+    mov rdi, rbx
+    call oserror_use_init
+    test eax, eax
+    jz .done
+    mov rax, [rbp - OMI_KW]
+    test rax, rax
+    jz .parse
+    cmp qword [rax + PyTupleObject.ob_size], 0
+    jnz .no_keywords
+.parse:
+    mov rdi, rbx
+    mov rsi, [rbp - OMI_ARGS]
+    mov rcx, [rsi]
+    add rsi, 8
+    mov rdx, [rbp - OMI_NARGS]
+    dec rdx
+    call oserror_parse
+    test rax, rax
+    jz .return
+.done:
+    LOAD_NONE rax
+    jmp .return
+.no_keywords:
+    mov rsi, [rbx + PyTypeObject.tp_name]
+    xor edi, edi
+    call exc_set_bad_keyword
+    xor eax, eax
+.return:
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_method_init
+
+;; oserror_is_number(rdi = Value) -> eax = boolean, as in PyNumber_Check
+DEF_FUNC_LOCAL oserror_is_number
+    extern value_type
+    call value_type
+    test qword [rax + PyTypeObject.tp_flags], \
+        TYPE_FLAG_INT_SUBCLASS | TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS
+    jnz .yes
+    mov rcx, [rax + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .no
+    mov rax, [rcx + PyNumberMethods.nb_index]
+    or rax, [rcx + PyNumberMethods.nb_int]
+    or rax, [rcx + PyNumberMethods.nb_float]
+    setnz al
+    movzx eax, al
+    leave
+    ret
+.yes:
+    mov eax, 1
+    leave
+    ret
+.no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC oserror_is_number
+
+;; oserror_as_written(rdi = Value) -> owned int Value, or 0 with error pending
+OAW_ARG equ 8
+OAW_INT equ 16
+OAW_RESULT equ 24
+OAW_FRAME equ 32
+DEF_FUNC_LOCAL oserror_as_written, OAW_FRAME
+    mov [rbp - OAW_ARG], rdi
+    V_UNPACK rdi, rdx
+    extern obj_as_index_object
+    call obj_as_index_object
+    ERR_NULL .return
+    mov [rbp - OAW_INT], rax
+    mov rdi, rax
+    V_UNPACK rdi, rdx
+    call int_is_integer
+    test eax, eax
+    jz .bad_index
+    mov rdi, [rbp - OAW_INT]
+    V_UNPACK rdi, rdx
+    call int_fits_i64
+    test eax, eax
+    jz .overflow
+    mov rdi, [rbp - OAW_INT]
+    V_UNPACK rdi, rdx
+    call int_to_i64
+    V_PACK_I64 rax, rcx
+    mov [rbp - OAW_RESULT], rax
+    mov rdi, [rbp - OAW_INT]
+    DECREF_V rdi, rcx
+    mov rax, [rbp - OAW_RESULT]
+.return:
+    leave
+    ret
+.bad_index:
+    mov rsi, [rbp - OAW_INT]
+    CSTRING rdi, `__index__ returned non-int (type \x01)`
+    call set_type_error_with_name
+    mov rdi, [rbp - OAW_INT]
+    DECREF_V rdi, rcx
+    xor eax, eax
+    leave
+    ret
+.overflow:
+    mov rdi, [rbp - OAW_INT]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - OAW_ARG]
+    call value_type
+    mov rsi, rax
+    CSTRING rdi, `cannot fit '\x01' into an index-sized integer`
+    extern type_name_message
+    call type_name_message
+    mov rsi, rax
+    extern exc_ValueError_type, set_exception
+    lea rdi, [rel exc_ValueError_type]
+    call set_exception
+    xor eax, eax
+    leave
+    ret
+END_FUNC oserror_as_written
+
+;; oserror_install_written(rdi = exception, rax = owned count or 0) -> void
+DEF_FUNC_LOCAL oserror_install_written
+    mov rcx, V_INT(-1)
+    cmp rax, rcx
+    jne .store
+    xor eax, eax
+.store:
+    mov rcx, [rdi + PyOSErrorObject.written]
+    mov [rdi + PyOSErrorObject.written], rax
+    XDECREF_V rcx, rdx
+    leave
+    ret
+END_FUNC oserror_install_written
+
+;; oserror_written_get(rdi = exception) -> owned int Value or 0 on error
+DEF_FUNC_LOCAL oserror_written_get
+    mov rax, [rdi + PyOSErrorObject.written]
+    test rax, rax
+    jz .unset
+    INCREF_V rax, rcx
+    leave
+    ret
+.unset:
+    call oserror_written_missing
+    mov qword [gs:ThreadState.attr_error_pending], 1
+    xor eax, eax
+    leave
+    ret
+END_FUNC oserror_written_get
+
+;; oserror_written_set(rdi = exception, rsi = Value or 0) -> 0 or -1 on error
+DEF_FUNC_LOCAL oserror_written_set, 8
+    push rbx
+    mov rbx, rdi
+    test rsi, rsi
+    jz .delete
+    mov rdi, rsi
+    call oserror_as_written
+    test rax, rax
+    jz .failed
+    jmp .install
+.delete:
+    cmp qword [rbx + PyOSErrorObject.written], 0
+    je .unset
+    xor eax, eax
+.install:
+    mov rdi, rbx
+    call oserror_install_written
+    xor eax, eax
+    jmp .return
+.unset:
+    call oserror_written_missing
+.failed:
+    mov rax, -1
+.return:
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_written_set
+
+;; oserror_written_missing() -> 0 with AttributeError pending
+DEF_FUNC_BARE oserror_written_missing
+    extern exc_AttributeError_type
+    lea rdi, [rel exc_AttributeError_type]
+    lea rsi, [rel oserror_n_written]
+    jmp set_exception
+END_FUNC oserror_written_missing
 
 ;; oserror_is_field(rdi = attribute name, NUL-terminated) -> eax = boolean
 DEF_FUNC oserror_is_field, 16
@@ -387,7 +743,7 @@ DEF_FUNC oserror_is_field, 16
 .next:
     mov rsi, [rbx]
     test rsi, rsi
-    jz .missing
+    jz .written
     mov rdi, r12
     extern ap_strcmp
     call ap_strcmp
@@ -398,8 +754,13 @@ DEF_FUNC oserror_is_field, 16
 .found:
     mov eax, 1
     jmp .out
-.missing:
-    xor eax, eax
+.written:
+    mov rdi, r12
+    lea rsi, [rel oserror_n_written]
+    call ap_strcmp
+    test eax, eax
+    setz al
+    movzx eax, al
 .out:
     pop r12
     pop rbx
@@ -608,6 +969,7 @@ oserror_n_errno:     db "errno", 0
 oserror_n_strerror:  db "strerror", 0
 oserror_n_filename:  db "filename", 0
 oserror_n_filename2: db "filename2", 0
+oserror_n_written:   db "characters_written", 0
 
 
 section .text
@@ -616,7 +978,7 @@ section .text
 ;; oserror_reduce(rdi = the argument array, rsi = the count) -> rax = a Value
 ;;   -- OSError.__reduce__(self)
 ;;
-;; CPython's OSError_reduce, and the only method OSError keeps of its own.
+;; CPython's OSError_reduce.
 ;; Two things make it differ from BaseException's:
 ;;
 ;;   * a filename is re-packed INTO the arguments, because the constructor
