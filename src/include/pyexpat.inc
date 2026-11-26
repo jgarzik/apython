@@ -58,6 +58,8 @@ PX_F_COUNT       equ 8
 
 ; CPython's default, and the one test_pyexpat's coalescing cases assume.
 PX_BUFFER_DEFAULT equ 8192
+PX_ENCODING_BYTES equ 256
+PX_ENCODING_DATA  equ PX_ENCODING_BYTES * 4
 
 ; The recursion cap on the XML_Content walk.  The nesting is attacker-supplied
 ; DTD, and CPython recurses unguarded there; a cap is the smaller divergence
@@ -89,6 +91,7 @@ struc PxHandle
     .refs:        resq 1        ; one for the wrapper and one per child
     .handlers:    resq PX_H_COUNT   ; owned Values, or 0 for unset
     .intern:      resq 1        ; owned dict, or 0
+    .encoding_map: resq 1       ; owned Python callable, or 0
     .buffer:      resq 1        ; the coalescing buffer, 0 when buffer_text off
     .buffer_size: resq 1
     .buffer_used: resq 1

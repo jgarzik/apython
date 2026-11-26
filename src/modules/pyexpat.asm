@@ -41,6 +41,7 @@ extern module_new
 extern str_from_cstr_heap
 extern str_new_heap
 extern obj_decref
+extern obj_dealloc
 extern obj_incref
 extern int_from_i64
 extern builtin_func_new
@@ -109,6 +110,7 @@ extern XML_SetSkippedEntityHandler
 extern px_cb_start_element
 extern px_cb_end_element
 extern px_cb_chardata
+extern px_cb_encoding
 extern px_cb_noop_chardata
 extern px_cb_processing_instr
 extern px_cb_unparsed_entity
@@ -370,7 +372,7 @@ DEF_FUNC_LOCAL px_arg_str_or_none, PAS_FRAME
 END_FUNC px_arg_str_or_none
 
 ;; ============================================================================
-;; _pyexpatcore.parser_new(encoding, namespace_separator, intern) -> int
+;; _pyexpatcore.parser_new(encoding, namespace_separator, intern[, mapper]) -> int
 ;;
 ;; encoding is a str or None; namespace_separator is a one-character str or
 ;; None, and its PRESENCE is what chooses XML_ParserCreateNS over
@@ -387,15 +389,25 @@ PN_H      equ 16
 PN_ENC    equ 24
 PN_SEP    equ 32
 PN_INTERN equ 40
+PN_MAPPER equ 48
 PN_FRAME  equ 56                ; + 1 push = 64, 16-aligned
 DEF_FUNC px_parser_new, PN_FRAME
     push rbx
     mov rbx, rsp
     and rsp, -16
     mov [rbp - PN_ARGS], rdi
+    mov qword [rbp - PN_MAPPER], 0
     cmp rsi, 3
+    je .encoding
+    cmp rsi, 4
     jne .nargs
+    mov rax, [rdi + 24]
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .encoding
+    mov [rbp - PN_MAPPER], rax
 
+.encoding:
     mov rdi, [rdi]
     lea rsi, [rel px_e_encoding]
     call px_arg_str_or_none
@@ -484,15 +496,12 @@ DEF_FUNC px_parser_new, PN_FRAME
     call XML_SetUserData wrt ..plt
 
     mov rcx, [rbp - PN_H]
-    mov rdi, [rcx + PxHandle.parser]
-    lea rsi, [rel px_latin1_alias]
-    xor edx, edx
-    call XML_SetUnknownEncodingHandler wrt ..plt
-
-    mov rcx, [rbp - PN_H]
     mov qword [rcx + PxHandle.magic], PX_MAGIC
     mov qword [rcx + PxHandle.refs], 1
     mov qword [rcx + PxHandle.buffer_size], PX_BUFFER_DEFAULT
+    mov rax, [rbp - PN_MAPPER]
+    mov [rcx + PxHandle.encoding_map], rax
+    INCREF_V rax, rdx
     mov rax, [rbp - PN_INTERN]
     mov [rcx + PxHandle.intern], rax
     test rax, rax
@@ -500,6 +509,8 @@ DEF_FUNC px_parser_new, PN_FRAME
     mov rdi, rax
     call obj_incref             ; the handle owns its reference
 .no_intern_ref:
+    mov rdi, [rbp - PN_H]
+    call px_register_encoding
 
     mov rdi, [rbp - PN_H]
     call px_handle_alloc
@@ -563,10 +574,25 @@ DEF_FUNC px_parser_new, PN_FRAME
     ret
 END_FUNC px_parser_new
 
+;; px_register_encoding(handle) -> nothing
+;; External parsers can inherit the callback address without its data, so
+;; register both explicitly on every parser.
+DEF_FUNC_LOCAL px_register_encoding
+    xor edx, edx
+    lea rsi, [rel px_latin1_alias]
+    cmp qword [rdi + PxHandle.encoding_map], 0
+    je .register
+    mov rdx, rdi
+    lea rsi, [rel px_cb_encoding]
+.register:
+    mov rdi, [rdi + PxHandle.parser]
+    call XML_SetUnknownEncodingHandler wrt ..plt
+    leave
+    ret
+END_FUNC px_register_encoding
+
 ;; px_latin1_alias(rdi = unused, rsi = name, rdx = XML_Encoding*) -> XML_Status
-;; Expat recognizes ISO-8859-1 itself; Python also accepts iso8859.
-PX_ENCODING_BYTES equ 256
-PX_ENCODING_DATA equ PX_ENCODING_BYTES * 4
+;; Private callers of parser_new can still omit the Python mapper.
 DEF_FUNC_BARE px_latin1_alias
     lea rdi, [rel px_iso8859_name]
     xor ecx, ecx
@@ -621,9 +647,11 @@ DEF_FUNC_LOCAL px_handle_release
     call free wrt ..plt
     mov rdi, [rbx + PxHandle.intern]
     test rdi, rdi
-    jz .free_handle
+    jz .release_map
     call obj_decref
-.free_handle:
+.release_map:
+    mov rdi, [rbx + PxHandle.encoding_map]
+    XDECREF_V rdi, rcx
     mov rdi, rbx
     call ap_free
     mov rbx, r12
@@ -728,6 +756,9 @@ DEF_FUNC px_parser_child, EC_FRAME
     mov rcx, [rbp - EC_PARENT]
     mov [rdx + PxHandle.parent], rcx
     inc qword [rcx + PxHandle.refs]
+    mov rax, [rcx + PxHandle.encoding_map]
+    mov [rdx + PxHandle.encoding_map], rax
+    INCREF_V rax, rdi
     mov rdi, [rcx + PxHandle.intern]
     mov [rdx + PxHandle.intern], rdi
     test rdi, rdi
@@ -753,6 +784,8 @@ DEF_FUNC px_parser_child, EC_FRAME
     mov rsi, [rbp - EC_H]
     mov rdi, [rsi + PxHandle.parser]
     call XML_SetUserData wrt ..plt
+    mov rdi, [rbp - EC_H]
+    call px_register_encoding
     mov rdi, [rbp - EC_H]
     call px_handle_alloc
     cmp rax, -1

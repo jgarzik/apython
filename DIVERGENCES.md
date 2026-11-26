@@ -369,14 +369,12 @@ CPython's `ceval_gil.c`), and CPython's own `threading.py`, `queue.py` and
   recursion in a secondary thread falls back to the general frame pool
   sooner.  It is slower there, not different.
 
-## The CJK codecs are deferred
+## The CJK codecs are Python shims
 
-`_multibytecodec` and the six codec modules over it -- the Chinese, Japanese
-and Korean multi-byte encodings -- are absent.  They are a large generated
-table apiece and a shared state machine, and nothing in this tree's own
-corpus needs them; `encodings/` answers for every single-byte codec and
-`_codecs` for the tableless ones.  `test_codecencodings_*` and
-`test_multibytecodec` are what they would unblock.
+The multibyte codec modules use Python state machines and lazy maps generated
+from CPython 3.12.9. The standard-library encoding wrappers use their existing
+codec, incremental and stream interfaces. The CPython internals that pass
+mapping and codec capsules between C extensions are specific to that ABI.
 
 ## sys.monitoring is absent
 
@@ -550,15 +548,8 @@ CPython's two hundred modules, and it answers for every codec that is a flat
 256-entry mapping: the cpNNN and iso8859-N pages, koi8, the mac_* family,
 tis-620, the EBCDIC cp037 group.  `_codecs` answers for the ones that are a
 state machine instead -- utf-8 and its BOM'd form, ascii, latin-1, the six
-fixed-width UTF-16 and UTF-32 forms, utf-7, the two escape codecs.  Between
-them that is every text encoding CPython ships except three groups:
-
-- **The multi-byte CJK codecs** -- cp932, cp949, cp950, big5, big5hkscs,
-  gbk, gb2312, gb18030, euc_jp, euc_kr, shift_jis and their variants, and the
-  iso2022 family.  CPython implements these in C over megabytes of generated
-  mapping tables; expressing them here would mean generating the same tables
-  as Python source, which is a far larger artefact than the rest of this tree
-  put together, for codecs nothing in the test corpus asks for.
+fixed-width UTF-16 and UTF-32 forms, utf-7, the two escape codecs.  The multibyte CJK codecs use their own mapping data and state machines.
+The remaining differences include:
 - **The transform codecs** -- base64_codec, hex_codec, quopri_codec,
   uu_codec, rot_13, zlib_codec, bz2_codec.  These are bytes-to-bytes and are
   not text encodings: CPython refuses `"x".encode("base64")` too.  Reaching

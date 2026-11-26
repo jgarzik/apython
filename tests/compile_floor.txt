@@ -100,6 +100,9 @@ test_call_kwargs_errors
 test_call_recursion
 test_call_spec
 test_cell_contents
+test_cjk_codec_runtime
+test_cjk_codec_state
+test_cjk_codec_tables
 test_class_annotations
 test_classcell_not_a_cell
 test_class_doc_entry
@@ -367,6 +370,7 @@ test_generator_close_throw
 test_generator_frame_back
 test_generator_frame
 test_generator_introspection
+test_generator_reentry
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor
@@ -619,6 +623,7 @@ test_pyexpat_module
 test_pyexpat_latin1
 test_pyexpat_buffer
 test_pyexpat_buffer_file
+test_pyexpat_codec_registry
 test_pyexpat_handlers
 test_pyexpat_external_dtd
 test_pyexpat_parse_isfinal
