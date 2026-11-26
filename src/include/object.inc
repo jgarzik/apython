@@ -484,6 +484,7 @@ struc PyMemberDescrObject
     ; The class it was built for, borrowed -- the type owns the dict that
     ; owns this.  Only the repr reads it: "<member 'x' of 'S' objects>".
     .md_owner:  resq 1  ; +32
+    .md_nullable: resq 1 ; unset reads as None for a T_OBJECT member
 endstruc
 
 ; Class instance object
@@ -1383,6 +1384,7 @@ TYPE_FLAG_HEAP_DATA_DESCR equ 0x2000000
 TYPE_FLAG_OWNS_NUMBER   equ 0x4000000
 TYPE_FLAG_OWNS_SEQUENCE equ 0x8000000
 TYPE_FLAG_OWNS_MAPPING  equ 0x10000000
+TYPE_FLAG_OSERROR_SUBCLASS equ 0x20000000
 
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free -- they stop at bit 25.  It is a stamp from one global
@@ -1585,6 +1587,15 @@ struc PyExceptionObject
     .exc_args:      resq 1  ; +56: ptr to args tuple or NULL
     .exc_dict:      resq 1  ; +64: ptr to instance dict or NULL (for custom attrs)
     .exc_suppress:  resq 1  ; +72: __suppress_context__ (set by `raise .. from`)
+endstruc
+
+; OSError's native fields follow the BaseException header.
+struc PyOSErrorObject
+    .base:      resb PyExceptionObject_size
+    .errno:     resq 1
+    .strerror:  resq 1
+    .filename:  resq 1
+    .filename2: resq 1
 endstruc
 
 ; Exception group object (extends PyExceptionObject with eg_exceptions)

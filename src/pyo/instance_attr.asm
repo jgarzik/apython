@@ -859,7 +859,11 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     SLOT_ADDR rdx, rbx, rcx
     mov rax, [rdx]             ; slot Value
     test rax, rax
-    jz .slot_not_set            ; 0 = slot not set → AttributeError
+    jnz .found_slot_value
+    cmp qword [r13 + PyMemberDescrObject.md_nullable], 0
+    je .slot_not_set
+    lea rax, [rel none_singleton]
+.found_slot_value:
     INCREF_V rax, rdx
     V_UNPACK rax, rdx
     IG_RELEASE_HELD
@@ -1335,51 +1339,17 @@ DEF_FUNC instance_setattr
     jmp .sa_ok
 
 .sa_member:
-    ; The offset is into an instance of the descriptor's OWN class, and a
-    ; descriptor borrowed into another class body would otherwise store at
-    ; that offset in an object of a different layout -- a wild write.
-    push r9
-    push r9                     ; and a pad: the call below stays aligned
     mov rdi, r9
     mov rsi, rbx
-    extern member_check_receiver
-    call member_check_receiver
-    pop r9
-    pop r9
-    ERR_NULL .sa_fail
-
-    ; Member descriptor! Write the value into the slot
-    mov rcx, [r9 + PyMemberDescrObject.md_offset]
-    SLOT_ADDR rdx, rbx, rcx
-
-    ; A DELETE of a slot that was never assigned is an AttributeError naming
-    ; the slot -- CPython's PyMember_SetOne for T_OBJECT_EX.  This stored 0
-    ; over 0 and reported success, so `del o.x` twice worked and the slot's
-    ; absence could not be told from its presence.
-    test r13, r13
-    jnz .sa_member_store
-    cmp qword [rdx], 0
-    je .sa_member_unset
-.sa_member_store:
-
-    ; XDECREF old value at slot
-    push rdx
-    mov rdi, [rdx]             ; old Value
-    XDECREF_V rdi, rsi
-    pop rdx
-
-    ; INCREF the new value and store it
-    INCREF_V r13, r14
-    mov [rdx], r13
-    jmp .sa_ok
-
-.sa_member_unset:
-    mov rsi, [r9 + PyMemberDescrObject.md_name]
-    lea rsi, [rsi + PyStrObject.data]
-    extern exc_AttributeError_type
-    lea rdi, [rel exc_AttributeError_type]
-    call set_exception
-    jmp .sa_fail
+    mov rdx, r13
+    extern member_descr_set
+    call member_descr_set       ; err: forward the result
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 
 .sa_no_slot:
     ; __dict__ and __weakref__ are the two names that reach here and must NOT

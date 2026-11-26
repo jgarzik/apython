@@ -189,20 +189,6 @@ reasoning that chose them and what changing one would cost.
   `__getitem__` on a dict subclass used as `exec()` locals is not consulted.
   Fixing that means `dict_subscript` reporting a miss by returning.
 
-- **OSError's four named attributes are in its instance `__dict__`.**
-  `errno`, `strerror`, `filename` and `filename2` are C fields in CPython and
-  do not appear in `vars(e)`; here `exc_oserror` writes them into `exc_dict`,
-  so `OSError(2, 'x').__dict__` has four entries CPython's has none of.  Every
-  read of them agrees, `args` agrees, and `__reduce__` agrees -- OSError has
-  one of its own now, which re-packs the filename into the arguments and
-  strips the four names out of the state, so a pickle and a deepcopy of every
-  shape round-trip identically.  What is LEFT is what `__dict__`, `vars()` and
-  `__getstate__` report.  Closing it means four more fields on
-  PyExceptionObject, a getattr and a setattr arm for each, and a positive
-  marker -- a type flag, not a `tp_basicsize` comparison, because a
-  `__slots__` subclass of any other exception has a larger basicsize too and
-  those words are its slots.
-
 - **`bytes` has no `__new__`, so a bytes SUBCLASS cannot be reconstructed.**
   Every other variable-size builtin publishes one -- `str` and `tuple` do --
   and `bytes_type.tp_new` is 0 with nothing in its `tp_dict`, so

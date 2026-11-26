@@ -560,6 +560,7 @@ test_operator_messages
 test_ordereddict
 test_ordering_typeerror
 test_oserror
+test_oserror_layout
 test_oserror_subclass_errno
 test_os_write_buffer
 test_path_arg_refusals

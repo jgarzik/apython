@@ -1,38 +1,22 @@
 ; exc_oserror.asm - what OSError does that no other exception does.
 ;
-; Split out of exception.asm, which reached the 100k cap that
-; src/compiler/lint.py enforces.  The seam is a real one: OSError is the only
-; exception with a constructor that rewrites its own class from its first
-; argument, the only one with four named attributes beside .args, and the only
-; one whose str() assembles a message from them rather than printing what it
-; was handed.  Nothing here is reachable for any other exception type, and
-; nothing else in exception.asm calls into it except exc_str, for the one line
-; that asks whether this is an OSError.
-;
-; The errno -> subclass table is CPython's ADD_ERRNO list and belongs with the
-; constructor that reads it.
+; OSError remaps errno to a subclass and uses native fields for formatting
+; and reduction. The errno table follows CPython's ADD_ERRNO list.
 
 %include "macros.inc"
 %include "object.inc"
 
 ; --- objects ---
-extern dict_get_quiet
 extern obj_decref
-extern obj_repr
-extern obj_str
+extern obj_dealloc
 extern int_from_i64
 extern int_to_i64
 extern int_is_integer
 extern str_from_cstr_heap
-extern str_new_heap
 extern tuple_new
-extern dict_get
-extern ap_memcpy
-extern obj_dealloc
 
 ; --- exceptions ---
 extern exc_new
-extern exc_setattr
 extern exc_OSError_type
 extern none_singleton
 
@@ -57,215 +41,178 @@ extern strerror
 
 section .text
 
-;; ============================================================================
-;; oserror_str(rdi = exc) -> rax = PyStrObject*, 0 to fall through, or -1 when
-;; a field's repr()/str() raised.  The third answer is not the second: falling
-;; through on a raise rendered the args tuple and left the exception pending.
-;;
-;; "[Errno N] strerror: 'file' -> 'file2'", with the tail dropped as the parts
-;; run out, exactly as CPython's OSError_str does.  Returns 0 when there is not
-;; even an errno and a strerror, so exc_str falls back to the generic rendering
-;; -- which is what makes str(OSError()) empty and str(OSError("boom")) "boom".
-;;
-;; The attributes are read out of exc_dict, where oserror_new put them.
-;; ============================================================================
-OSS_EXC    equ 8
-OSS_DICT   equ 16
-OSS_TMP    equ 24           ; a borrowed str being copied out
-OSS_CUR    equ 32           ; write cursor
-OSS_BUF    equ 544          ; 512 bytes of assembly space
-OSS_FRAME  equ 544          ; + 2 pushes = 560
-DEF_FUNC oserror_str, OSS_FRAME
+;; oserror_str(rdi = exception) -> str, 0 to use BaseException's text,
+;; or -1 when conversion raised.
+OSF_FRAME equ 8
+DEF_FUNC oserror_str, OSF_FRAME
     push rbx
     push r12
-    mov [rbp - OSS_EXC], rdi
-    mov rax, [rdi + PyExceptionObject.exc_dict]
+    push r13
+    mov rbx, rdi
+    mov edi, 2
+    CSTRING r12, "[Errno %s] %s"
+    cmp qword [rbx + PyOSErrorObject.filename], 0
+    jne .with_file
+    cmp qword [rbx + PyOSErrorObject.errno], 0
+    je .fallback
+    cmp qword [rbx + PyOSErrorObject.strerror], 0
+    je .fallback
+    jmp .arguments
+.with_file:
+    mov edi, 3
+    CSTRING r12, "[Errno %s] %s: %r"
+    cmp qword [rbx + PyOSErrorObject.filename2], 0
+    je .arguments
+    mov edi, 4
+    CSTRING r12, "[Errno %s] %s: %r -> %r"
+.arguments:
+    ; Hold all fields in a tuple before a user conversion can mutate them.
+    call tuple_new
+    mov r13, rax
+    mov r8, [rax + PyTupleObject.ob_item]
+    mov r9, [rax + PyTupleObject.ob_size]
+    xor ecx, ecx
+.copy:
+    mov rax, [rbx + PyOSErrorObject.errno + rcx*8]
     test rax, rax
-    jz .oss_none
-    mov [rbp - OSS_DICT], rax
+    jnz .store
+    lea rax, [rel none_singleton]
+.store:
+    INCREF_V rax, rdx
+    mov [r8 + rcx*8], rax
+    inc rcx
+    cmp rcx, r9
+    jb .copy
 
-    lea rbx, [rbp - OSS_BUF]        ; rbx = cursor
-
-    ; errno and strerror are both required for any of the forms.
-    lea rdi, [rel oserror_n_errno]
-    call oserror_field
-    test rax, rax
-    jz .oss_none
-    mov r12, rax                    ; r12 = errno Value
-    lea rdi, [rel oserror_n_strerror]
-    call oserror_field
-    test rax, rax
-    jz .oss_none
-
-    ; "[Errno " <repr(errno)> "] "
-    mov dword [rbx], '[Err'
-    mov dword [rbx + 4], 'no  '
-    add rbx, 7
     mov rdi, r12
-    call obj_repr                   ; an int's repr is its digits
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-    mov word [rbx], ' ' * 256 + ']'
-    add rbx, 2
-
-    ; str(strerror)
-    lea rdi, [rel oserror_n_strerror]
-    call oserror_field
+    call str_from_cstr_heap
+    mov r12, rax
     mov rdi, rax
-    call obj_str
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
+    mov rsi, r13
+    mov ecx, 1                      ; return on a failing conversion
+    xor edx, edx                    ; str format
+    extern str_mod_impl
+    call str_mod_impl               ; err: checked after releasing both args
     mov rbx, rax
-
-    ; ": " repr(filename), then " -> " repr(filename2)
-    lea rdi, [rel oserror_n_filename]
-    call oserror_field
-    test rax, rax
-    jz .oss_finish
-    mov r12, rax
-    mov word [rbx], ' ' * 256 + ':'
-    add rbx, 2
+    mov rdi, r13
+    call obj_decref
     mov rdi, r12
-    call obj_repr
+    call obj_decref
+    mov rax, rbx
     test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-
-    lea rdi, [rel oserror_n_filename2]
-    call oserror_field
-    test rax, rax
-    jz .oss_finish
-    mov r12, rax
-    mov dword [rbx], ' -> '
-    add rbx, 4
-    mov rdi, r12
-    call obj_repr
-    test rax, rax
-    jz .oss_raised                  ; the repr/str raised
-    V_UNPACK rax, rdx
-    mov rdi, rbx
-    call oserror_append
-    mov rbx, rax
-
-.oss_finish:
-    lea rdi, [rbp - OSS_BUF]
-    mov rsi, rbx
-    sub rsi, rdi
-    extern str_new_heap
-    call str_new_heap
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.oss_none:
-    xor eax, eax
-    pop r12
-    pop rbx
-    leave
-    ret
-
-.oss_raised:
-    ; A field's repr() or str() raised.  Those four returns went unchecked, so
-    ; a filename with a raising __repr__ produced a truncated message and left
-    ; the exception to fire at some later, unrelated point.
+    jnz .done
     mov rax, -1
+    jmp .done
+.fallback:
+    xor eax, eax
+.done:
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC oserror_str
 
-;; ============================================================================
-;; oserror_field(rdi = name cstr) -> rax = the Value, or 0 when absent or None
-;; Reads [rbp - OSS_DICT] from oserror_str's frame, so it is local to it.
-;; ============================================================================
-DEF_FUNC_LOCAL oserror_field, 8            ; 1 pushes, so rsp is 16-aligned
-    push rbx
-    mov rbx, [rbp]                  ; oserror_str's rbp
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rbx - OSS_DICT]
-    mov rsi, rax
-    call dict_get_quiet
-    mov rcx, rax
-    pop rdi
-    push rcx
-    call obj_decref                 ; the temporary key
-    pop rax
-    test rax, rax
-    jz .osf_no
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .osf_no
-    pop rbx
-    leave
-    ret
-.osf_no:
+;; oserror_zero_fields(rdi = exception) -> void
+;; The OSError extension and the heap subclass slots above it hold Values.
+DEF_FUNC_BARE oserror_zero_fields
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_basicsize]
+    sub rcx, PyExceptionObject_size
+    shr rcx, 3
+    add rdi, PyExceptionObject_size
     xor eax, eax
+    rep stosq
+    ret
+END_FUNC oserror_zero_fields
+
+;; oserror_traverse(rdi = exception, r14 = visitor) -> void
+DEF_FUNC oserror_traverse
+    push rbx
+    push r12
+    mov rax, [rdi + PyObject.ob_type]
+    mov r12, [rax + PyTypeObject.tp_basicsize]
+    add r12, rdi
+    lea rbx, [rdi + PyExceptionObject_size]
+.next:
+    cmp rbx, r12
+    jae .done
+    mov rdi, [rbx]
+    VISIT_V rdi, rsi
+    add rbx, 8
+    jmp .next
+.done:
+    pop r12
     pop rbx
     leave
     ret
-END_FUNC oserror_field
+END_FUNC oserror_traverse
 
-;; ============================================================================
-;; oserror_append(rdi = cursor, rax = PyStrObject*) -> rax = new cursor
-;; Copies the string's bytes and drops the reference.  Bounded: the caller's
-;; buffer is 512 bytes and a single field is truncated rather than overrunning.
-;; ============================================================================
-OSA_CUR   equ 8
-OSA_STR   equ 16
-OSA_LEN   equ 24
-OSA_FRAME equ 32            ; + 0 pushes = 32
-DEF_FUNC_LOCAL oserror_append, OSA_FRAME
-    mov [rbp - OSA_CUR], rdi
-    mov [rbp - OSA_STR], rax
-    test rax, rax
-    jz .osa_nothing
-    mov rdx, [rax + PyStrObject.ob_size]
-    cmp rdx, 120
-    jle .osa_len_ok
-    mov edx, 120                    ; one field cannot fill the buffer
-    ; Back off to a character boundary: cutting at 120 bytes landed in the
-    ; middle of a UTF-8 sequence and left the message ending in a lone
-    ; continuation byte, which is not a str at all.
-.osa_back_off:
-    test rdx, rdx
-    jz .osa_len_ok
-    movzx ecx, byte [rax + PyStrObject.data + rdx]
-    and ecx, 0xc0
-    cmp ecx, 0x80                   ; a continuation byte: the cut is inside
-    jne .osa_len_ok
-    dec rdx
-    jmp .osa_back_off
-.osa_len_ok:
-    mov [rbp - OSA_LEN], rdx
-    mov rdi, [rbp - OSA_CUR]
-    lea rsi, [rax + PyStrObject.data]
-    extern ap_memcpy
-    call ap_memcpy
-    mov rdi, [rbp - OSA_STR]
+;; oserror_clear(rdi = exception) -> void
+DEF_FUNC oserror_clear
+    push rbx
+    push r12
+    mov rax, [rdi + PyObject.ob_type]
+    mov r12, [rax + PyTypeObject.tp_basicsize]
+    add r12, rdi
+    lea rbx, [rdi + PyExceptionObject_size]
+.next:
+    cmp rbx, r12
+    jae .done
+    mov rdi, [rbx]
+    mov qword [rbx], 0
+    XDECREF_V rdi, rcx
+    add rbx, 8
+    jmp .next
+.done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC oserror_clear
+
+;; oserror_install_members(rdi = OSError type dict) -> void
+OIM_NAME equ 8
+OIM_FRAME equ 8
+DEF_FUNC oserror_install_members, OIM_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    lea r12, [rel oserror_attr_names]
+    mov r13d, PyOSErrorObject.errno
+.next:
+    mov rdi, [r12]
+    test rdi, rdi
+    jz .done
+    call str_from_cstr_heap
+    mov [rbp - OIM_NAME], rax
+    mov rdi, r13
+    mov rsi, rax
+    lea rdx, [rel exc_OSError_type]
+    extern member_descr_new
+    call member_descr_new
+    mov qword [rax + PyMemberDescrObject.md_nullable], 1
+    mov rdx, rax
+    mov rsi, [rbp - OIM_NAME]
+    mov rdi, rbx
+    push rax
+    push rax
+    extern dict_set_str
+    call dict_set_str
+    pop rdi
+    pop rax
     call obj_decref
-    mov rax, [rbp - OSA_CUR]
-    add rax, [rbp - OSA_LEN]
+    add r12, 8
+    add r13, 8
+    jmp .next
+.done:
+    pop r13
+    pop r12
+    pop rbx
     leave
     ret
-.osa_nothing:
-    mov rax, [rbp - OSA_CUR]
-    leave
-    ret
-END_FUNC oserror_append
-
+END_FUNC oserror_install_members
 
 ;; ============================================================================
 ;; oserror_new(rdi = type, rsi = args, rdx = nargs) -> fat pair (rax, rdx)
@@ -280,11 +227,6 @@ END_FUNC oserror_append
 ;; filename is given and is not None it is stored and `.args` is truncated to
 ;; its first two items, which is why `OSError(2, "x", "/f").args` is a 2-tuple.
 ;;
-;; The four attributes live in the instance's exc_dict rather than in new
-;; struct fields.  exc_getattr already falls through to exc_dict, so `.errno`
-;; and friends need no arm of their own; and PyExceptionObject stays the size
-;; it was, which matters because exc_new allocates a compile-time constant and
-;; every exception in the process would otherwise have paid for these.
 ;; ============================================================================
 ONW_TYPE   equ 8
 ONW_ARGS   equ 16
@@ -304,8 +246,7 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov [rbp - ONW_NARGS], rdx
     mov [rbp - ONW_EFFN], rdx
 
-    ; Leave absent fields out of the dict so a subclass's own definition
-    ; can answer. Attribute lookup supplies None when the MRO has no answer.
+    ; An absent field remains NULL so reduction can distinguish an explicit None.
     xor eax, eax
     mov [rbp - ONW_ERRNO], rax
     mov [rbp - ONW_STRERR], rax
@@ -323,21 +264,19 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov rcx, [rax + 8]
     mov [rbp - ONW_STRERR], rcx
     cmp qword [rbp - ONW_NARGS], 3
-    jl .onw_have_fields
+    jl .onw_subclass
     mov rcx, [rax + 16]
-    mov [rbp - ONW_FNAME], rcx
-    cmp qword [rbp - ONW_NARGS], 5
-    jl .onw_have_fields
-    mov rcx, [rax + 32]         ; args[4]; args[3] is Windows-only winerror
-    mov [rbp - ONW_FNAME2], rcx
-
-.onw_have_fields:
-    ; A filename that is present and not None truncates .args to two items.
-    mov rax, [rbp - ONW_FNAME]
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
+    lea rsi, [rel none_singleton]
+    cmp rcx, rsi
     je .onw_subclass
+    mov [rbp - ONW_FNAME], rcx
     mov qword [rbp - ONW_EFFN], 2
+    cmp qword [rbp - ONW_NARGS], 5
+    jl .onw_subclass
+    mov rcx, [rax + 32]         ; args[4]; args[3] is Windows-only winerror
+    cmp rcx, rsi
+    je .onw_subclass
+    mov [rbp - ONW_FNAME2], rcx
 
 .onw_subclass:
     ; Remap to a subclass by errno, but only for OSError itself.
@@ -416,29 +355,19 @@ DEF_FUNC oserror_new, ONW_FRAME
     mov [rdi + PyExceptionObject.exc_args], r12
 
 .onw_attrs:
-    lea rbx, [rel oserror_attr_names]
-    ; The four Values sit at rbp-40, -48, -56, -64: a larger ONW_ constant is a
-    ; LOWER address, so the walk subtracts.
-    lea r12, [rbp - ONW_ERRNO]
-.onw_attr_loop:
-    mov rdi, [rbx]
-    test rdi, rdi
-    jz .onw_done
-    cmp qword [r12], 0
-    je .onw_next_attr
-    call str_from_cstr_heap
-    push rax
-    mov rdi, [rbp - ONW_EXC]
-    mov rsi, rax
-    mov rdx, [r12]
-    mov ecx, TAG_PTR
-    call exc_setattr            ; err: none of the five is a field name
-    pop rdi
-    call obj_decref             ; exc_setattr's dict_set took its own ref
-.onw_next_attr:
-    add rbx, 8
-    sub r12, 8
-    jmp .onw_attr_loop
+    mov rax, [rbp - ONW_EXC]
+    mov rdx, [rbp - ONW_ERRNO]
+    INCREF_V rdx, rcx
+    mov [rax + PyOSErrorObject.errno], rdx
+    mov rdx, [rbp - ONW_STRERR]
+    INCREF_V rdx, rcx
+    mov [rax + PyOSErrorObject.strerror], rdx
+    mov rdx, [rbp - ONW_FNAME]
+    INCREF_V rdx, rcx
+    mov [rax + PyOSErrorObject.filename], rdx
+    mov rdx, [rbp - ONW_FNAME2]
+    INCREF_V rdx, rcx
+    mov [rax + PyOSErrorObject.filename2], rdx
 
 .onw_done:
     mov rax, [rbp - ONW_EXC]
@@ -684,48 +613,6 @@ oserror_n_filename2: db "filename2", 0
 section .text
 
 ;; ============================================================================
-;; oserror_named(rdi = the exception, rsi = the attribute name as a C string)
-;;   -> rax = the value as a Value, borrowed, or 0
-;;
-;; 0 both when the dict has no such key and when the value is None: CPython
-;; keeps these as C fields, its test is `self->filename`, and a NULL field and
-;; a None are the same absence to it.
-;; ============================================================================
-ONM_DICT  equ 8
-ONM_KEY   equ 16
-ONM_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
-extern str_intern_cstr
-DEF_FUNC_LOCAL oserror_named, ONM_FRAME
-    mov rdi, [rdi + PyExceptionObject.exc_dict]
-    test rdi, rdi
-    jz .onm_none
-    mov [rbp - ONM_DICT], rdi
-    mov rdi, rsi
-    call str_intern_cstr
-    test rax, rax
-    jz .onm_none
-    mov [rbp - ONM_KEY], rax
-    mov rdi, [rbp - ONM_DICT]
-    mov rsi, rax
-    call dict_get_quiet                       ; a borrowed Value, or 0 for a miss
-    mov [rbp - ONM_DICT], rax           ; ONM_DICT is spent; hold the answer
-    mov rdi, [rbp - ONM_KEY]
-    call obj_decref                     ; str_intern_cstr's own reference
-    mov rax, [rbp - ONM_DICT]
-    test rax, rax
-    jz .onm_none
-    lea rcx, [rel none_singleton]
-    cmp rax, rcx
-    je .onm_none
-    leave
-    ret
-.onm_none:
-    xor eax, eax
-    leave
-    ret
-END_FUNC oserror_named
-
-;; ============================================================================
 ;; oserror_reduce(rdi = the argument array, rsi = the count) -> rax = a Value
 ;;   -- OSError.__reduce__(self)
 ;;
@@ -738,22 +625,15 @@ END_FUNC oserror_named
 ;;     when there are two: the fourth is the Windows-only winerror, which has
 ;;     to be present as None for the fifth to land where the constructor reads
 ;;     it.
-;;   * the state is the instance dict WITHOUT the four named attributes.  They
-;;     are C fields in CPython, so its dict never has them; here they live in
-;;     exc_dict (bugs.md carries why), and handing them on as a state would
-;;     make the reduction a three-tuple where CPython's is a two-tuple.  The
-;;     filter is what keeps the two answers identical.
+;;   * the state is the real instance dict, if one has been allocated.
 ;; ============================================================================
 ORD_SELF   equ 8
 ORD_ARGS   equ 16           ; the args tuple to hand over, owned
-ORD_STATE  equ 24           ; the filtered dict, owned, or 0
 ORD_FNAME  equ 32
 ORD_FNAME2 equ 40
 ORD_ORIG   equ 48           ; the original args tuple, borrowed
 ORD_FRAME  equ 64           ; + 2 pushes = 80, 16-aligned
 extern obj_incref
-extern dict_copy_shallow
-extern dict_del_opt
 extern ir_reduce_tuple
 global oserror_reduce
 DEF_FUNC oserror_reduce, ORD_FRAME
@@ -761,18 +641,10 @@ DEF_FUNC oserror_reduce, ORD_FRAME
     push r12
     mov rax, [rdi]                      ; self, always a pointer
     mov [rbp - ORD_SELF], rax
-    mov qword [rbp - ORD_STATE], 0
-
-    mov rdi, rax
-    lea rsi, [rel oserror_n_filename]
-    call oserror_named
-    mov [rbp - ORD_FNAME], rax
-    mov rdi, [rbp - ORD_SELF]
-    lea rsi, [rel oserror_n_filename2]
-    call oserror_named
-    mov [rbp - ORD_FNAME2], rax
-
-    mov rax, [rbp - ORD_SELF]
+    mov rcx, [rax + PyOSErrorObject.filename]
+    mov [rbp - ORD_FNAME], rcx
+    mov rcx, [rax + PyOSErrorObject.filename2]
+    mov [rbp - ORD_FNAME2], rcx
     mov rax, [rax + PyExceptionObject.exc_args]
     mov [rbp - ORD_ORIG], rax
     test rax, rax
@@ -831,56 +703,13 @@ DEF_FUNC oserror_reduce, ORD_FRAME
 
 .ord_state:
     mov rdi, [rbp - ORD_SELF]
-    mov rdi, [rdi + PyExceptionObject.exc_dict]
-    test rdi, rdi
-    jz .ord_build
-    call dict_copy_shallow
-    test rax, rax
-    jz .ord_build
-    mov rbx, rax
-    lea r12, [rel oserror_attr_names]
-.ord_strip:
-    mov rdi, [r12]
-    test rdi, rdi
-    jz .ord_stripped
-    call str_intern_cstr
-    test rax, rax
-    jz .ord_stripped
-    mov [rbp - ORD_ORIG], rax           ; ORD_ORIG is spent; hold the key
-    mov rdi, rbx
-    mov rsi, rax
-    call dict_del_opt                   ; -1 when it was never there -- err: the key is an interned attribute name
-    mov rdi, [rbp - ORD_ORIG]
-    call obj_decref
-    add r12, 8
-    jmp .ord_strip
-.ord_stripped:
-    cmp qword [rbx + PyDictObject.ob_size], 0
-    jne .ord_keep_state
-    mov rdi, rbx
-    call obj_decref
-    jmp .ord_build
-.ord_keep_state:
-    mov [rbp - ORD_STATE], rbx
-
-.ord_build:
-    mov rdi, [rbp - ORD_SELF]
-    mov rdi, [rdi + PyObject.ob_type]   ; type(self), borrowed
-    mov rsi, [rbp - ORD_ARGS]           ; the reference goes with it
-    mov rdx, [rbp - ORD_STATE]
+    mov rdx, [rdi + PyExceptionObject.exc_dict]
+    mov rdi, [rdi + PyObject.ob_type]
+    mov rsi, [rbp - ORD_ARGS]
     xor ecx, ecx
     test rdx, rdx
-    jz .ord_call
-    mov ecx, 1
-.ord_call:
+    setnz cl
     call ir_reduce_tuple
-    mov [rbp - ORD_ARGS], rax           ; spent; hold the answer
-    mov rdi, [rbp - ORD_STATE]
-    test rdi, rdi
-    jz .ord_done
-    call obj_decref                     ; ir_reduce_tuple took its own
-.ord_done:
-    mov rax, [rbp - ORD_ARGS]
     pop r12
     pop rbx
     leave
