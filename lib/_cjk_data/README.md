@@ -6,7 +6,8 @@ See the Python Software Foundation license and CPython notices in
 `stdlib/LICENSE`.
 
 Each map is a zlib-compressed marshal v2 record of canonical encodings,
-decoded byte units, paired JIS encodings, Korean make-up sequences, and
-GB18030 ranges. The interpreter loads the requested map on its first use.
+decoded byte units, paired JIS encodings, Korean make-up sequences,
+GB18030 ranges, and malformed-input spans. ISO-2022 maps store decoded
+units per designation and the canonical designation for each encoded unit. The interpreter loads the requested map on its first use.
 Regeneration uses a CPython build as a development tool. The installed
 interpreter uses its own codec implementation and the checked-in maps.

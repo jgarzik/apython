@@ -16,7 +16,11 @@ def _text(value):
 def _bytes(value):
     if isinstance(value, bytes):
         return value
-    view = memoryview(value)
+    try:
+        view = memoryview(value)
+    except TypeError:
+        raise TypeError("a bytes-like object is required, not '%s'"
+                        % type(value).__name__) from None
     if not view.c_contiguous:
         raise BufferError("memoryview: underlying buffer is not C-contiguous")
     return view.tobytes()
@@ -54,18 +58,24 @@ class _Codec:
     @property
     def impl(self):
         if self._impl is None:
-            from _cjk import Legacy
-            self._impl = Legacy(self.name)
+            from _cjk import HZ, ISO2022, Legacy
+            if self.name == "hz":
+                self._impl = HZ()
+            elif self.name.startswith("iso2022_"):
+                self._impl = ISO2022(self.name)
+            else:
+                self._impl = Legacy(self.name)
         return self._impl
 
     def encode(self, text, errors="strict", /):
-        text = _text(text)
+        if not isinstance(text, str):
+            text = str(text)
         output, count, _ = self.encode_run(text, _error_name(errors), self.impl.initial(), True)
         return output, count
 
     def decode(self, data, errors="strict", /):
         data = _bytes(data)
-        output, count, _ = self.decode_run(data, _error_name(errors), self.impl.initial(), True)
+        output, count, _ = self.decode_run(data, _error_name(errors), self.impl.initial_decode(), True)
         return output, count
 
     def encode_run(self, text, errors, state, final, reset=True):
@@ -154,7 +164,9 @@ class MultibyteIncrementalEncoder(_Stateful):
     _empty = ""
 
     def encode(self, input, final=False):
-        data = self._pending + _text(input)
+        if not isinstance(input, str):
+            input = str(input)
+        data = self._pending + input
         out, consumed, state = self.codec.encode_run(data, self.errors, self._state, final)
         self._state = state
         self._pending = data[consumed:]
@@ -177,6 +189,14 @@ class MultibyteIncrementalEncoder(_Stateful):
 
 class MultibyteIncrementalDecoder(_Stateful):
     _empty = b""
+
+    def reset(self):
+        self._pending = b""
+        impl = self.codec.impl
+        if hasattr(self, "_state"):
+            self._state = impl.reset_decode(self._state)
+        else:
+            self._state = impl.initial_decode()
 
     def decode(self, input, final=False):
         data = self._pending + _bytes(input)

@@ -101,6 +101,7 @@ test_call_recursion
 test_call_spec
 test_cell_contents
 test_cjk_codec_runtime
+test_cjk_codec_state
 test_cjk_codec_tables
 test_class_annotations
 test_classcell_not_a_cell
