@@ -165,9 +165,9 @@ DEF_FUNC posix_fcntl, PFC_FRAME
     ret
 END_FUNC posix_fcntl
 
-;; posix_blocking_fd(rdi = descriptor Value) -> signed C int
+;; posix_int32_arg(rdi = a Value) -> signed C int
 ;; Fails: -1
-DEF_FUNC_LOCAL posix_blocking_fd
+DEF_FUNC posix_int32_arg
     V_UNPACK rdi, rdx
     extern obj_as_index_clamped
     call obj_as_index_clamped
@@ -183,7 +183,7 @@ DEF_FUNC_LOCAL posix_blocking_fd
     mov rax, -1
     leave
     ret
-END_FUNC posix_blocking_fd
+END_FUNC posix_int32_arg
 
 ;; posix.set_blocking(fd, blocking) -> None
 ;; Fails: 0
@@ -197,7 +197,7 @@ DEF_FUNC posix_set_blocking, PSB_FRAME
     jne .args
     mov [rbp - PSB_ARGS], rdi
     mov rdi, [rdi]
-    call posix_blocking_fd
+    call posix_int32_arg
     ERR_M1 .fail
     mov [rbp - PSB_FD], rax
     mov rdi, [rbp - PSB_ARGS]
@@ -237,7 +237,7 @@ DEF_FUNC posix_get_blocking
     cmp rsi, 1
     jne .args
     mov rdi, [rdi]
-    call posix_blocking_fd
+    call posix_int32_arg
     ERR_M1 .fail
     mov rdi, rax
     mov esi, F_GETFL

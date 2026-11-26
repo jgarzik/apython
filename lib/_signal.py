@@ -17,7 +17,7 @@ What is added here is what is easier said in Python than in assembly:
 
 What is still missing is the thread-mask family -- pthread_sigmask,
 sigpending, sigwait, sigwaitinfo, sigtimedwait, pthread_kill -- plus
-set_wakeup_fd, siginterrupt and pidfd_send_signal.  Lib/signal.py guards each
+pidfd_send_signal.  Lib/signal.py guards each
 with `if 'x' in _globals`, so their absence is what a platform without them
 looks like rather than an error.
 """
@@ -59,6 +59,12 @@ def valid_signals():
     return {n for n in range(1, NSIG) if n not in (32, 33)}
 
 
+def set_wakeup_fd(fd, /, *, warn_on_full_buffer=True):
+    """Write signal numbers to a nonblocking fd and return the previous fd."""
+    return _c.set_wakeup_fd(fd, warn_on_full_buffer)
+
+
 # CPython's signal.py defines these in Python itself, so they report the
 # signal module; test_signal checks every Python-level routine it exports.
 setitimer.__module__ = getitimer.__module__ = valid_signals.__module__ = "signal"
+set_wakeup_fd.__module__ = "signal"

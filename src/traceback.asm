@@ -487,11 +487,48 @@ END_FUNC traceback_here
 ;; tb_write(rdi = buf, rsi = len) -- stderr
 ;; ============================================================================
 DEF_FUNC_BARE tb_write
+    mov rax, [gs:ThreadState.tb_output_sink]
+    test rax, rax
+    jnz tb_write_stream
     mov rdx, rsi
     mov rsi, rdi
     mov edi, 2
     jmp sys_write
 END_FUNC tb_write
+
+;; tb_write_stream(rdi = bytes, rsi = length, rax = owned-by-caller sink) -> void
+;; A custom write may run Python. Keep nested reports off this sink and
+;; restore the pending exception even if the write failed.
+TWS_BUF   equ 8
+TWS_LEN   equ 16
+TWS_SINK  equ 24
+TWS_EXC   equ 32
+TWS_FRAME equ 32
+DEF_FUNC_LOCAL tb_write_stream, TWS_FRAME
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .tws_done
+    mov [rbp - TWS_BUF], rdi
+    mov [rbp - TWS_LEN], rsi
+    mov [rbp - TWS_SINK], rax
+    mov qword [gs:ThreadState.tb_output_sink], 0
+    extern exc_fetch
+    call exc_fetch
+    mov [rbp - TWS_EXC], rax
+    mov rdi, [rbp - TWS_SINK]
+    mov rsi, [rbp - TWS_BUF]
+    mov rdx, [rbp - TWS_LEN]
+    extern print_sink_write
+    call print_sink_write
+    mov rdi, [rbp - TWS_EXC]
+    extern exc_restore
+    call exc_restore
+    mov rax, [rbp - TWS_SINK]
+    mov [gs:ThreadState.tb_output_sink], rax
+.tws_done:
+    leave
+    ret
+END_FUNC tb_write_stream
 
 ;; ============================================================================
 ;; tb_write_cstr(rdi = NUL-terminated string)
@@ -1604,25 +1641,86 @@ END_FUNC tb_print_repeated
 ;; ============================================================================
 TPU_EXC   equ 8
 TPU_OBJ   equ 16
-TPU_FRAME equ 32            ; + 0 pushes = 32
+TPU_MSG   equ 24
+TPU_NAME  equ 32
+TPU_SINK  equ 40
+TPU_PRIOR equ 48
+TPU_FRAME equ 48
 
+;; traceback_unraisable_default(rdi = exception, rsi = object) -> void
 global traceback_unraisable_default
-DEF_FUNC traceback_unraisable_default, TPU_FRAME
+DEF_FUNC_BARE traceback_unraisable_default
+    xor edx, edx
+    jmp traceback_unraisable_default_msg
+END_FUNC traceback_unraisable_default
+
+;; traceback_unraisable_default_msg(rdi = exception, rsi = object or 0,
+;;                                  rdx = message str or 0) -> void
+DEF_FUNC traceback_unraisable_default_msg, TPU_FRAME
     mov [rbp - TPU_EXC], rdi
     mov [rbp - TPU_OBJ], rsi
+    mov [rbp - TPU_MSG], rdx
 
+    test rdx, rdx
+    jnz .message
     CSTRING rdi, "Exception ignored in: "
     call tb_write_cstr
+    jmp .name
+.message:
+    mov rax, [gs:ThreadState.tb_output_sink]
+    mov [rbp - TPU_PRIOR], rax
+    mov qword [rbp - TPU_SINK], 0
+    extern sys_module_obj
+    cmp qword [rel sys_module_obj], 0
+    je .message_text
+    CSTRING rdi, "stderr"
+    extern str_from_cstr_heap
+    call str_from_cstr_heap
+    mov [rbp - TPU_NAME], rax
+    mov rdi, [rel sys_module_obj]
+    mov rsi, rax
+    extern obj_getattr_opt
+    call obj_getattr_opt
+    mov [rbp - TPU_SINK], rax
+    mov [gs:ThreadState.tb_output_sink], rax
+    mov rdi, [rbp - TPU_NAME]
+    call obj_decref
+.message_text:
+    mov rdi, [rbp - TPU_MSG]
+    call tb_write_str
+    CSTRING rdi, ":"
+    call tb_write_cstr
+    mov rax, [rbp - TPU_OBJ]
+    test rax, rax
+    jz .message_line
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .message_line
+    CSTRING rdi, " "
+    call tb_write_cstr
+.name:
     mov rdi, [rbp - TPU_EXC]
     mov rsi, [rbp - TPU_OBJ]
     call tb_unraisable_name
+    jmp .print
+.message_line:
+    CSTRING rdi, `\n`
+    call tb_write_cstr
+.print:
     mov rdi, [rbp - TPU_EXC]
     mov qword [gs:ThreadState.tb_chain_suppress], 1
     call traceback_print
     mov qword [gs:ThreadState.tb_chain_suppress], 0
+    cmp qword [rbp - TPU_MSG], 0
+    je .done
+    mov rax, [rbp - TPU_PRIOR]
+    mov [gs:ThreadState.tb_output_sink], rax
+    mov rdi, [rbp - TPU_SINK]
+    XDECREF_V rdi, rcx
+.done:
     leave
     ret
-END_FUNC traceback_unraisable_default
+END_FUNC traceback_unraisable_default_msg
 
 ;; tb_unraisable_name(rdi = the exception being reported, rsi = the object to
 ;; name, or 0) -- writes "<repr>\n", or a stand-in when there is no repr to
@@ -1699,14 +1797,23 @@ TPH_OBJ   equ 16
 TPH_HOOK  equ 24
 TPH_ARG   equ 32
 TPH_SAVED equ 40
+TPH_MSG   equ 48
 TPH_ARGV  equ 56            ; one Value
 TPH_FRAME equ 72            ; + 1 push = 80, 16-aligned
 
 global traceback_print_unraisable
-DEF_FUNC traceback_print_unraisable, TPH_FRAME
+DEF_FUNC_BARE traceback_print_unraisable
+    xor edx, edx
+    jmp traceback_print_unraisable_msg
+END_FUNC traceback_print_unraisable
+
+;; traceback_print_unraisable_msg(rdi = exception, rsi = object or 0,
+;;                                rdx = message str or 0) -> void
+DEF_FUNC traceback_print_unraisable_msg, TPH_FRAME
     push rbx
     mov [rbp - TPH_EXC], rdi
     mov [rbp - TPH_OBJ], rsi
+    mov [rbp - TPH_MSG], rdx
     mov qword [rbp - TPH_ARG], 0
 
     ; sys.unraisablehook, if sys is loaded and something replaced it.
@@ -1778,7 +1885,11 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
     call structseq_set
     mov rdi, [rbp - TPH_ARG]
     mov esi, 3
+    mov rdx, [rbp - TPH_MSG]
+    test rdx, rdx
+    jnz .tph_have_msg
     LOAD_NONE rdx
+.tph_have_msg:
     INCREF rdx
     call structseq_set
     mov rdi, [rbp - TPH_ARG]
@@ -1852,11 +1963,12 @@ DEF_FUNC traceback_print_unraisable, TPH_FRAME
 .tph_print:
     mov rdi, [rbp - TPH_EXC]
     mov rsi, [rbp - TPH_OBJ]
-    call traceback_unraisable_default
+    mov rdx, [rbp - TPH_MSG]
+    call traceback_unraisable_default_msg
     pop rbx
     leave
     ret
-END_FUNC traceback_print_unraisable
+END_FUNC traceback_print_unraisable_msg
 
 ;; ============================================================================
 ;; traceback_print(rdi = exception)

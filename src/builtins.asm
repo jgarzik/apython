@@ -611,7 +611,7 @@ PSW_NAME  equ 40            ; the attribute name, in a slot rather than pushed:
                             ; a lone push around a call misaligns it, and lint
                             ; counts only the pushes in a prologue
 PSW_FRAME equ 56            ; + 1 push = 64, 16-aligned
-DEF_FUNC_LOCAL print_sink_write, PSW_FRAME
+DEF_FUNC print_sink_write, PSW_FRAME
     push rbx
     test rdi, rdi
     jz .psw_ok                  ; nothing to write to: produce nothing

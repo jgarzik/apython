@@ -124,6 +124,8 @@ DEF_FUNC posix_fork, 24                 ; + 1 push = 32, 16-aligned
     mov rdi, [rel pm_atfork_parent]
     test rax, rax
     jnz .pfk_have_list
+    extern signal_after_fork_child
+    call signal_after_fork_child
     mov rdi, [rel pm_atfork_child]
 .pfk_have_list:
     xor esi, esi
