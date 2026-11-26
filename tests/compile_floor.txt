@@ -367,6 +367,7 @@ test_generator_close_throw
 test_generator_frame_back
 test_generator_frame
 test_generator_introspection
+test_generator_reentry
 test_generators
 test_generator_throw_delegation
 test_generic_alias_ctor

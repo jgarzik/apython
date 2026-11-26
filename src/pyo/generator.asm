@@ -25,8 +25,8 @@ extern ap_strcmp
 extern set_exception
 extern exc_new
 extern exc_TypeError_type
+extern exc_ValueError_type
 extern exc_StopIteration_type
-extern set_exception
 extern exc_RuntimeError_type
 extern exc_GeneratorExit_type
 extern sys_write
@@ -331,12 +331,35 @@ DEF_FUNC gen_iternext
     ret
 
 .running_error:
+    mov rdi, rbx
+    call gen_running_error
     RET_NULL
     pop r12
     pop rbx
     leave
     ret
 END_FUNC gen_iternext
+
+;; gen_running_error(self) -> NULL with ValueError pending
+DEF_FUNC_LOCAL gen_running_error
+    mov rax, [rdi + PyObject.ob_type]
+    CSTRING rsi, "generator already executing"
+    lea rcx, [rel coro_type]
+    cmp rax, rcx
+    jne .async
+    CSTRING rsi, "coroutine already executing"
+    jmp .raise
+.async:
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .raise
+    CSTRING rsi, "async generator already executing"
+.raise:
+    lea rdi, [rel exc_ValueError_type]
+    call set_exception
+    leave
+    ret
+END_FUNC gen_running_error
 
 ;; ============================================================================
 ;; async_gen_init_hooks(rdi = an async generator) -> nothing
@@ -840,6 +863,8 @@ DEF_FUNC gen_send
     ret
 
 .gs_error:
+    mov rdi, rbx
+    call gen_running_error
     RET_NULL
     pop r14
     pop r13
@@ -1263,6 +1288,8 @@ DEF_FUNC gen_throw, GT_FRAME
     ret
 
 .gt_error:
+    mov rdi, rbx
+    call gen_running_error
     RET_NULL
     pop r13
     pop r12
