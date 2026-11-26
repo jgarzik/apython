@@ -1,6 +1,6 @@
 #!/bin/bash
 # Macro benchmarks: whole programs, not loops.  apython against CPython on the
-# same .pyc, startup subtracted, best of five.  Reported, not gated.
+# same .pyc, startup subtracted, median of five.
 #
 # The other four harnesses (int, float, str, core) each measure one path in
 # isolation, and between them they can all read above 1.00x while a real
@@ -30,13 +30,15 @@
 # reporting itself as ten macro benchmarks all disagreeing at once.  m_repr is
 # the one case that measures repr on purpose.
 #
-# Usage: bash tests/run_macro_bench.sh
-set -u
+# Usage: bash tests/run_macro_bench.sh [case ...]
+# PYTHON selects the CPython control. BASELINE optionally adds a second
+# apython build to compare against APYTHON in the same timed run.
+set -eu
 cd "$(dirname "$0")/.."
 APYTHON=${APYTHON:-./apython}
 PYTHON=${PYTHON:-python3}
-BD=${TMPDIR:-/tmp}/apython-macro-bench
-mkdir -p "$BD"
+BD=$(mktemp -d)
+trap 'rm -rf "$BD"' EXIT
 mk() { cat > "$BD/$1.py"; }
 echo "pass" > "$BD/empty.py"
 
@@ -426,42 +428,98 @@ def run(n):
 print(run(300000))
 EOF
 
-BENCHES="m_nbody m_binary_trees m_fannkuch m_spectral_norm m_nqueens \
-         m_text m_oo m_index m_call m_repr"
+"$PYTHON" - "$BD" "$APYTHON" "$@" <<'PYBENCH'
+import os
+from pathlib import Path
+import py_compile
+import statistics
+import subprocess
+import sys
+import time
 
-for b in $BENCHES empty; do "$PYTHON" -m py_compile "$BD/$b.py"; done
 
-timeit() {
-    local best=999999 t
-    for i in 1 2 3 4 5; do
-        local s=$(date +%s%N); "$@" >/dev/null 2>&1; local e=$(date +%s%N)
-        t=$(( (e-s)/1000000 )); [ "$t" -lt "$best" ] && best=$t
-    done
-    echo "$best"
-}
+work = Path(sys.argv[1])
+runners = {"cpython": sys.executable, "apython": sys.argv[2]}
+if os.getenv("BASELINE"):
+    runners["baseline"] = os.environ["BASELINE"]
 
-EPYC=$(ls "$BD/__pycache__/empty."*.pyc)
-SA=$(timeit "$APYTHON" "$EPYC"); SC=$(timeit "$PYTHON" "$EPYC")
+cases = (
+    "m_nbody", "m_binary_trees", "m_fannkuch", "m_spectral_norm", "m_nqueens",
+    "m_text", "m_oo", "m_index", "m_call", "m_repr",
+)
+selected = tuple(dict.fromkeys(sys.argv[3:])) or cases
+for case in selected:
+    if case not in cases:
+        sys.exit(f"unknown macro benchmark: {case}")
 
-echo "=== agreement ==="
-bad=0
-for b in $BENCHES; do
-    PYC=$(ls "$BD/__pycache__/$b."*.pyc)
-    e=$("$PYTHON" "$PYC" 2>&1); a=$("$APYTHON" "$PYC" 2>&1)
-    if [ "$e" != "$a" ]; then echo "  DIFF $b: cpython=[$e] apython=[$a]"; bad=1; fi
-done
-[ "$bad" -eq 0 ] && echo "  (nothing above means all agree)"
-echo
-echo "=== whole programs (startup-subtracted ms; >1.00x = apython faster) ==="
-printf "%-18s %9s %9s %8s\n" "benchmark" "apython" "cpython" "speedup"
-TA=0; TC=0
-for b in $BENCHES; do
-    PYC=$(ls "$BD/__pycache__/$b."*.pyc)
-    a=$(timeit "$APYTHON" "$PYC"); c=$(timeit "$PYTHON" "$PYC")
-    a=$((a-SA)); c=$((c-SC)); [ "$a" -lt 1 ] && a=1; [ "$c" -lt 1 ] && c=1
-    TA=$((TA+a)); TC=$((TC+c))
-    printf "%-18s %9s %9s %8s\n" "$b" "$a" "$c" "$("$PYTHON" -c "print('%.2fx'%($c/$a))")"
-done
-echo
-printf "TOTAL apython=%sms cpython=%sms overall=%s\n" "$TA" "$TC" \
-       "$("$PYTHON" -c "print('%.2fx'%($TC/$TA))")"
+runs = int(os.environ.get("BENCH_RUNS", "5"))
+if runs < 1:
+    sys.exit("BENCH_RUNS must be positive")
+
+for case in ("empty", *selected):
+    py_compile.compile(
+        str(work / f"{case}.py"), cfile=str(work / f"{case}.pyc"), doraise=True
+    )
+
+
+def execute(name, case, capture=False):
+    options = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+    if not capture:
+        options["stdout"] = subprocess.DEVNULL
+    start = time.perf_counter_ns()
+    result = subprocess.run([runners[name], work / f"{case}.pyc"], **options)
+    elapsed = time.perf_counter_ns() - start
+    if result.returncode:
+        sys.exit(f"{case}: {name} exited {result.returncode}\n"
+                 f"{result.stderr.decode(errors='replace')}")
+    if capture:
+        return result.stdout, result.stderr
+    return elapsed
+
+
+def timings(case):
+    samples = {name: [] for name in runners}
+    order = tuple(runners)
+    for repeat in range(runs):
+        for name in order if repeat % 2 == 0 else reversed(order):
+            samples[name].append(execute(name, case))
+    return {name: statistics.median(values) for name, values in samples.items()}
+
+
+print("=== agreement ===", flush=True)
+for case in selected:
+    expected = execute("cpython", case, capture=True)
+    for name in runners.keys() - {"cpython"}:
+        actual = execute(name, case, capture=True)
+        if actual != expected:
+            sys.exit(f"DIFF {case}: cpython={expected!r} {name}={actual!r}")
+print("all outputs agree", flush=True)
+
+startup = timings("empty")
+names = ("apython", "cpython")
+has_baseline = "baseline" in runners
+if has_baseline:
+    names += ("baseline",)
+print("=== whole programs (startup-subtracted median ms) ===")
+print(f"{'benchmark':18}" + "".join(f"{name:>10}" for name in names)
+      + f"{'vs CPython':>12}" + (f"{'vs baseline':>13}" if has_baseline else ""))
+
+ratios = []
+baseline_ratios = []
+for case in selected:
+    times = {name: elapsed - startup[name]
+             for name, elapsed in timings(case).items()}
+    if min(times.values()) <= 0:
+        sys.exit(f"{case}: median runtime did not exceed startup")
+    ratios.append(times["cpython"] / times["apython"])
+    row = f"{case:18}" + "".join(f"{times[name] / 1e6:10.3f}" for name in names)
+    row += f"{ratios[-1]:11.3f}x"
+    if has_baseline:
+        baseline_ratios.append(times["baseline"] / times["apython"])
+        row += f"{baseline_ratios[-1]:12.3f}x"
+    print(row, flush=True)
+
+print(f"GEOMEAN vs CPython {statistics.geometric_mean(ratios):.4f}x")
+if has_baseline:
+    print(f"GEOMEAN vs baseline {statistics.geometric_mean(baseline_ratios):.4f}x")
+PYBENCH
