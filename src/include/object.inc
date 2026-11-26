@@ -1639,15 +1639,13 @@ endstruc
 struc PyBuiltinObject
     .ob_refcnt:   resq 1  ; +0
     .ob_type:     resq 1  ; +8
-    .func_id:     resq 1  ; +16: builtin function ID
+    .func_module: resq 1  ; +16: owned module name for a module-level function
     .func_name:   resq 1  ; +24: ptr to name string
     .func_ptr:    resq 1  ; +32: ptr to C implementation
     .min_args:    resq 1  ; +40: minimum nargs (including self), 0 = no check
     .max_args:    resq 1  ; +48: maximum nargs, -1 = no max check
-    ; The two below are what a repr needs and nothing else reads.  CPython
-    ; has three distinct types here -- builtin_function_or_method,
-    ; method_descriptor and wrapper_descriptor -- reprd three ways; this tree
-    ; has one, so the type it belongs to and which kind it is are fields.
+    ; The owner and kind distinguish bound forms and descriptor kinds with
+    ; the same storage layout.
     .func_owner:  resq 1  ; +56: the type whose method this is, or 0
     .func_kind:   resq 1  ; +64: 0 plain function, 1 method, 2 slot wrapper
 endstruc

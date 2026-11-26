@@ -1,5 +1,8 @@
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
+import os
+import pickle
+import posix
 
 
 def child_error(message):
@@ -25,6 +28,10 @@ if __name__ == "__main__":
 
     with ProcessPoolExecutor(max_workers=2, mp_context=context) as pool:
         assert pool.submit(pow, 2, 8).result(5) == 256
+        assert os.getpid.__self__ is posix
+        assert os.getpid.__module__ == "posix"
+        assert pickle.loads(pickle.dumps(os.getpid)) is os.getpid
+        assert pool.submit(os.getpid).result(5) != os.getpid()
         assert list(pool.map(abs, (-3, -1, 2), timeout=5)) == [3, 1, 2]
         try:
             pool.submit(child_error, "from worker").result(5)

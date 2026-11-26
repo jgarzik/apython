@@ -284,6 +284,10 @@ DEF_FUNC import_init
     mov rdi, rbx
     mov rsi, r12
     call sys_module_init
+    extern sys_module_obj
+    extern builtin_stamp_module
+    mov rdi, [rel sys_module_obj]
+    call builtin_stamp_module
 
     ; Register builtins module in sys.modules
     lea rdi, [rel im_builtins]
@@ -335,6 +339,8 @@ DEF_FUNC import_init
     push rdi                                ; the frame register; save it here
     call rbx
     mov rbx, rax                            ; the module, owned
+    mov rdi, rbx
+    call builtin_stamp_module
     pop rdi
     call str_from_cstr_heap
     push rax                                ; the key

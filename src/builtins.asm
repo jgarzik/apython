@@ -166,7 +166,7 @@ DEF_FUNC builtin_func_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov [rax + PyObject.ob_type], rcx
 
     ; Fill builtin-specific fields
-    mov qword [rax + PyBuiltinObject.func_id], 0   ; not used for func_ptr dispatch
+    mov qword [rax + PyBuiltinObject.func_module], 0
     mov [rax + PyBuiltinObject.func_name], r13
     mov [rax + PyBuiltinObject.func_ptr], rbx
     mov qword [rax + PyBuiltinObject.min_args], 0  ; 0 = no check

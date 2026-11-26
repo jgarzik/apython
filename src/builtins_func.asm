@@ -170,11 +170,9 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     leave
     ret
 .bfg_missing:
-    ; A module-level builtin is bound to its MODULE, which for everything here
-    ; is builtins: CPython's `len.__self__` is <module 'builtins'>, and its
-    ; meth_reduce reads it to decide between a bare name and a getattr pair.
-    ; The comment that used to sit here said CPython had no __self__ for one,
-    ; and it does.
+    mov rsi, [rbx + PyBuiltinObject.func_module]
+    test rsi, rsi
+    jnz .bfg_registered_module
     extern builtins_module_obj
     mov rax, [rel builtins_module_obj]
     test rax, rax
@@ -183,6 +181,17 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     pop rbx
     leave
     ret
+.bfg_registered_module:
+    extern sys_modules_dict
+    extern dict_get
+    mov rdi, [rel sys_modules_dict]
+    call dict_get
+    ERR_DICT_GET .bfg_absent
+    V_TEST_PTR rax, rcx
+    ja .bfg_none
+    test rax, rax
+    jz .bfg_none
+    jmp .bfg_hold
 .bfg_no_module:
     ; Before the module exists -- during start-up -- there is nothing to name.
     xor eax, eax
@@ -251,9 +260,12 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     ret
 
 .bfg_module:
-    ; CPython gives a plain builtin "builtins" and a method None.
+    ; pickle resolves a module function through the module that published it.
     cmp qword [rbx + PyBuiltinObject.func_owner], 0
     jne .bfg_none
+    mov rax, [rbx + PyBuiltinObject.func_module]
+    test rax, rax
+    jnz .bfg_hold
     CSTRING rdi, "builtins"
     call str_from_cstr_heap
     pop rbx
@@ -262,6 +274,7 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
 
 .bfg_none:
     lea rax, [rel none_singleton]
+.bfg_hold:
     INCREF rax
     pop rbx
     leave
@@ -307,6 +320,11 @@ DEF_FUNC builtin_func_dealloc, 8            ; 1 push, so rsp is 16-aligned
     jz .no_name
     call obj_decref
 .no_name:
+    mov rdi, [rbx + PyBuiltinObject.func_module]
+    test rdi, rdi
+    jz .free
+    call obj_decref
+.free:
 
     ; Free the object
     mov rdi, rbx
@@ -316,6 +334,42 @@ DEF_FUNC builtin_func_dealloc, 8            ; 1 push, so rsp is 16-aligned
     leave
     ret
 END_FUNC builtin_func_dealloc
+
+;; builtin_stamp_module(rdi = newly created native module) -> void
+;;
+;; Store names instead of links to module objects so a module and its
+;; functions can be released independently.
+DEF_FUNC_BARE builtin_stamp_module
+    test rdi, rdi
+    jz .out
+    mov rcx, [rdi + PyModuleObject.mod_name]
+    mov rdi, [rdi + PyModuleObject.mod_dict]
+    mov rax, [rdi + PyDictObject.entries]
+    mov r8, [rdi + PyDictObject.dk_nentries]
+    lea r9, [rel builtin_func_type]
+.next:
+    test r8, r8
+    jz .out
+    mov rsi, [rax + DictEntry.value]
+    V_TEST_PTR rsi, rdx
+    ja .advance
+    test rsi, rsi
+    jz .advance
+    cmp [rsi + PyObject.ob_type], r9
+    jne .advance
+    cmp qword [rsi + PyBuiltinObject.func_kind], BUILTIN_KIND_FUNCTION
+    jne .advance
+    cmp qword [rsi + PyBuiltinObject.func_module], 0
+    jne .advance
+    INCREF rcx
+    mov [rsi + PyBuiltinObject.func_module], rcx
+.advance:
+    add rax, DictEntry_size
+    dec r8
+    jmp .next
+.out:
+    ret
+END_FUNC builtin_stamp_module
 
 ;; ============================================================================
 ;; builtin_func_repr(PyObject *self) -> PyObject*
