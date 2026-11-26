@@ -17,7 +17,7 @@ What is added here is what is easier said in Python than in assembly:
 
 What is still missing is the thread-mask family -- pthread_sigmask,
 sigpending, sigwait, sigwaitinfo, sigtimedwait, pthread_kill -- plus
-siginterrupt and pidfd_send_signal.  Lib/signal.py guards each
+pidfd_send_signal.  Lib/signal.py guards each
 with `if 'x' in _globals`, so their absence is what a platform without them
 looks like rather than an error.
 """

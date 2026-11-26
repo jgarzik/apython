@@ -647,6 +647,70 @@ DEF_FUNC_LOCAL signal_set_wakeup_fd, SWF_FRAME
     ret
 END_FUNC signal_set_wakeup_fd
 
+;; signal.siginterrupt(signum, flag) -> None
+;; Fails: 0
+;; Change only SA_RESTART in the action already installed for this signal.
+SIR_NUM    equ 8
+SIR_FLAG   equ 16
+SIR_ACTION equ 176
+SIR_FRAME  equ 176
+DEF_FUNC_LOCAL signal_method_siginterrupt, SIR_FRAME
+    cmp rsi, 2
+    jne .sir_args
+    mov [rbp - SIR_FLAG], rdi          ; argument array until flag conversion
+    mov rdi, [rdi]
+    call posix_int32_arg
+    ERR_M1 .sir_fail
+    mov [rbp - SIR_NUM], rax
+    mov rdi, [rbp - SIR_FLAG]
+    mov rdi, [rdi + 8]
+    call posix_int32_arg
+    ERR_M1 .sir_fail
+    mov [rbp - SIR_FLAG], rax
+    mov rdi, [rbp - SIR_NUM]
+    test edi, edi
+    jz .sir_range
+    cmp edi, SIG_NSIG
+    jae .sir_range
+    xor esi, esi
+    lea rdx, [rbp - SIR_ACTION]
+    call sigaction
+    test eax, eax
+    js .sir_oserror
+
+    lea rsi, [rbp - SIR_ACTION]
+    mov ecx, [rsi + SIG_SA_FLAGS]
+    mov eax, ecx
+    and ecx, ~SIG_SA_RESTART
+    or eax, SIG_SA_RESTART
+    cmp qword [rbp - SIR_FLAG], 0
+    cmove ecx, eax
+    mov [rsi + SIG_SA_FLAGS], ecx
+    mov rdi, [rbp - SIR_NUM]
+    xor edx, edx
+    call sigaction
+    test eax, eax
+    js .sir_oserror
+    LOAD_NONE rax
+    leave
+    ret
+.sir_oserror:
+    extern __errno_location
+    call __errno_location
+    mov edi, [rax]
+    xor esi, esi
+    call set_oserror
+    jmp .sir_fail
+.sir_args:
+    FAIL exc_TypeError_type, "siginterrupt expected 2 arguments", .sir_fail
+.sir_range:
+    FAIL exc_ValueError_type, "signal number out of range", .sir_fail
+.sir_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC signal_method_siginterrupt
+
 ;; ============================================================================
 ;; signal_method_default_int_handler(args, nargs) -> rax = 0, always
 ;; Fails: 0
@@ -894,6 +958,7 @@ DEF_FUNC signal_module_create, SM_FRAME
     MODULE_ADD_FUNC signal_method_signal,   signal_s_signal
     MODULE_ADD_FUNC signal_method_getsignal, signal_s_getsignal
     MODULE_ADD_FUNC signal_set_wakeup_fd, signal_s_set_wakeup_fd
+    MODULE_ADD_FUNC signal_method_siginterrupt, signal_s_siginterrupt
 
     ; Runner checks whether the installed SIGINT handler is this exact
     ; builtin before replacing it with its task cancellation handler.
@@ -1205,6 +1270,7 @@ signal_s_name:      db "_signalcore", 0
 signal_s_signal:    db "signal", 0
 signal_s_getsignal: db "getsignal", 0
 signal_s_set_wakeup_fd: db "set_wakeup_fd", 0
+signal_s_siginterrupt: db "siginterrupt", 0
 signal_s_default_int_handler: db "default_int_handler", 0
 signal_s_raise_signal: db "raise_signal", 0
 signal_s_alarm:     db "alarm", 0

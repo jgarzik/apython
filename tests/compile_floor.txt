@@ -35,6 +35,7 @@ test_async_gen
 test_async_gen_sleep
 test_asyncio_runtime_regressions
 test_asyncio_subprocess_cancel
+test_asyncio_unix_signal
 test_async_iterator_protocol
 test_async_many_tasks
 test_async_resolve
@@ -674,6 +675,7 @@ test_shim_modules
 test_shutdown_finalizer
 test_signal_delivery
 test_signal_eintr
+test_signal_siginterrupt
 test_signal
 test_signal_wakeup_fd
 test_sigpipe_ignored
