@@ -1,5 +1,5 @@
 ; pyo/dict.asm - Dict type implementation
-; Open-addressing hash table with linear probing
+; Open-addressing hash table with perturbation probing
 
 %include "opcodes.inc"
 %include "macros.inc"
@@ -732,12 +732,8 @@ DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
 ; is the case CPython's own comment calls deadly.
 %macro DL_ADVANCE 0
     mov rax, [rbp - DL_PERT]
-    shr rax, PERTURB_SHIFT
+    DICT_PROBE_NEXT r14, rax, r15
     mov [rbp - DL_PERT], rax
-    lea r14, [r14 + r14*4]
-    add r14, rax
-    inc r14
-    and r14, r15
 %endmacro
 
 ; The entry at index %2, without the 3-cycle `imul reg, reg, 24`.
@@ -1019,11 +1015,7 @@ DEF_FUNC dict_resize_to, DR_FRAME
     mov rsi, [rbx + PyDictObject.dk_indices]
     cmp qword [rsi + rdx*8], DICT_IX_EMPTY
     je .dr_place
-    shr r8, PERTURB_SHIFT       ; the same recurrence dict_lookup walks
-    lea rdx, [rdx + rdx*4]
-    add rdx, r8
-    inc rdx
-    and rdx, rcx
+    DICT_PROBE_NEXT rdx, r8, rcx
     jmp .dr_probe
 .dr_place:
     mov rdi, [rbx + PyDictObject.dk_nentries]
@@ -1304,11 +1296,7 @@ DEF_FUNC dict_set, DS_FRAME
     mov rsi, [rbx + PyDictObject.dk_indices]
     cmp qword [rsi + r12*8], DICT_IX_EMPTY
     je .ds_have_room
-    shr r8, PERTURB_SHIFT
-    lea r12, [r12 + r12*4]
-    add r12, r8
-    inc r12
-    and r12, rcx
+    DICT_PROBE_NEXT r12, r8, rcx
     jmp .ds_empty_probe
 
 .ds_have_room:

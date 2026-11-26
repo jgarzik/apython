@@ -353,10 +353,10 @@ CPython's `ceval_gil.c`), and CPython's own `threading.py`, `queue.py` and
   the kernel delivers to the main thread to begin with.  A program sees the
   same thing -- handlers run on the main thread -- unless it inspects another
   thread's signal mask.
-- **A `readinto`-style call into a `bytearray` does not pin it.**  The GIL is
-  given up for the read, and CPython holds a buffer export for that time so
-  a resize from another thread raises `BufferError`; here the resize is not
-  refused.  Reading into a buffer one thread owns is unaffected.
+- **`socket.recv_into` with a positive timeout releases the buffer while
+  waiting for readiness.** Each receive pins the buffer for the syscall.
+  If it would block, the Python socket wrapper waits and retries with a new
+  export. CPython holds one export across the entire wait.
 - **Not every blocking call gives up the GIL.**  The ones that do are sleep,
   lock waits, `read`/`write`, the socket calls, `poll`/`epoll`, `connect`,
   `waitpid`, `flock`, `pause`, `input()` and the four OpenSSL calls that do

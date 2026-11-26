@@ -29,6 +29,7 @@ test_async_gather_nested
 test_async_gather
 test_async_gc
 test_async_gen_await
+test_asyncgen_gc_finalizer
 test_asyncgen_hooks
 test_async_gen
 test_async_gen_sleep
@@ -617,6 +618,7 @@ test_range_protocol
 test_range
 test_range_slice
 test_range_wide
+test_readinto_buffer_export
 test_re_bytes_pattern_hash
 test_recursion_and_repr
 test_recursion

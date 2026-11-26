@@ -261,6 +261,7 @@ DEF_FUNC_BARE op_load_attr_method
     test r9, r9
     jz .lam_shadow_deopt
     dec r9                        ; the mask
+    mov rdx, r8                   ; perturb, separate from the original hash
     mov r10, r8
     and r10, r9                   ; the first slot dict_lookup would try
     mov r12d, 4                   ; at most four steps, then give up
@@ -285,8 +286,7 @@ DEF_FUNC_BARE op_load_attr_method
 .lam_probe_next:
     dec r12d
     jz .lam_shadow_deopt
-    inc r10
-    and r10, r9
+    DICT_PROBE_NEXT r10, rdx, r9
     jmp .lam_probe
 .lam_probe_absent:
     pop r12

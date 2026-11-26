@@ -170,6 +170,31 @@ posix.close(r)
 posix.close(w)
 
 print()
+print("--- change only the blocking mode of a pipe ---")
+r, w = posix.pipe()
+
+
+class PipeEnd:
+    def __index__(self):
+        return r
+
+
+try:
+    print("initial    :", posix.get_blocking(r))
+    print("set returns:", posix.set_blocking(PipeEnd(), []))
+    print("read/write :", posix.get_blocking(r), posix.get_blocking(w))
+    posix.set_blocking(r, [1])
+    print("restored   :", posix.get_blocking(r))
+    for bad_fd in (-1, 1 << 100):
+        try:
+            posix.set_blocking(bad_fd, False)
+        except (OSError, OverflowError) as error:
+            print("bad fd     :", type(error).__name__)
+finally:
+    posix.close(r)
+    posix.close(w)
+
+print()
 print("--- umask, restored immediately ---")
 old = posix.umask(0o077)
 print("type       :", type(old).__name__)

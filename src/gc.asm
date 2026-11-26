@@ -745,7 +745,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 .phase4_done:
 
     ; ---- Phase 4.5: run the finalizers, before anything is cleared --------
-    ; PEP 442.  Every unreachable object with a __del__ gets it called, once,
+    ; PEP 442.  Every unreachable object with a finalizer gets it called, once,
     ; while the cycle it is part of is still intact.  Letting phase 5's
     ; tp_clear drop the last reference and reach __del__ that way, which is
     ; what happened before, hands the finalizer an object whose attributes
@@ -780,8 +780,23 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     lea rdi, [rbx + GC_HEAD_SIZE]
     mov rax, [rdi + PyObject.ob_type]
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
-    jz .finalize_loop
+    jnz .run_finalizer
 
+    ; The event loop can keep an async generator alive to run its aclose.
+    ; Hand it over before clearing any of the frame's cells or other edges.
+    extern async_gen_type
+    lea rcx, [rel async_gen_type]
+    cmp rax, rcx
+    jne .finalize_loop
+    cmp qword [rdi + PyGenObject.ag_finalizer], 0
+    je .finalize_loop
+    mov rax, [rdi + PyGenObject.gi_frame]
+    test rax, rax
+    jz .finalize_loop
+    cmp qword [rax + PyFrame.instr_ptr], 0
+    je .finalize_loop
+
+.run_finalizer:
     or qword [rbx + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
     mov qword [rbp - GCG_RANFIN], 1
     extern obj_call_finalizer

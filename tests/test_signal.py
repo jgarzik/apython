@@ -21,6 +21,7 @@ print(len(signal.valid_signals()))
 
 print("--- what is installed to begin with ---")
 print(signal.getsignal(signal.SIGINT))
+print("default handler:", signal.getsignal(signal.SIGINT) is signal.default_int_handler)
 print(signal.getsignal(signal.SIGUSR1))
 print(signal.getsignal(signal.SIGTERM))
 

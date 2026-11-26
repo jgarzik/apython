@@ -547,23 +547,8 @@ DEF_FUNC gen_dealloc, GD_FRAME
     jmp .gd_closed
 
 .gd_hand_over:
-    sub rsp, 16
-    mov [rsp], rbx
-    mov rdi, [rbx + PyGenObject.ag_finalizer]
-    mov rsi, rsp
-    mov edx, 1
-    extern obj_call_n
-    call obj_call_n
-    add rsp, 16
-    ERR_NULL .gd_handed
-    DECREF_V rax, rcx
-.gd_handed:
-    ; Once.  The hook owns whatever it kept, and a second pass through this
-    ; dealloc -- after an aclose the hook scheduled, say -- must close rather
-    ; than hand the same generator over again.
-    mov rdi, [rbx + PyGenObject.ag_finalizer]
-    mov qword [rbx + PyGenObject.ag_finalizer], 0
-    call obj_decref
+    mov rdi, rbx
+    call async_gen_call_finalizer
 .gd_closed:
 
     ; Anything the cleanup raised is reported and dropped, as an exception
@@ -638,6 +623,31 @@ DEF_FUNC gen_dealloc, GD_FRAME
     leave
     ret
 END_FUNC gen_dealloc
+
+;; async_gen_call_finalizer(rdi = async generator) -> void
+;; Takes the snapshotted hook before calling Python. The caller owns a
+;; reference to the generator and saves and reports exceptions.
+AGF_GEN   equ 8
+AGF_HOOK  equ 16
+AGF_FRAME equ 16
+DEF_FUNC async_gen_call_finalizer, AGF_FRAME
+    mov [rbp - AGF_GEN], rdi
+    mov rax, [rdi + PyGenObject.ag_finalizer]
+    mov [rbp - AGF_HOOK], rax
+    mov qword [rdi + PyGenObject.ag_finalizer], 0
+    mov rdi, rax
+    lea rsi, [rbp - AGF_GEN]
+    mov edx, 1
+    extern obj_call_n
+    call obj_call_n
+    ERR_NULL .release
+    DECREF_V rax, rcx
+.release:
+    mov rdi, [rbp - AGF_HOOK]
+    call obj_decref
+    leave
+    ret
+END_FUNC async_gen_call_finalizer
 
 ;; ============================================================================
 ;; gen_iter_self(PyObject *self) -> self with INCREF

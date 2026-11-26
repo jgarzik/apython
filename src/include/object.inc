@@ -162,6 +162,7 @@ struc PyMemoryViewObject
     ; place that knows, and mv_stride == 1 is what `c_contiguous` answers and
     ; what anything handing the raw pointer to a syscall has to insist on.
     .mv_stride:   resq 1  ; +64
+    .mv_exports:  resq 1  ; blocking I/O borrows the view's buffer
 endstruc
 
 ; A released memoryview: mv_buf is 0 and every operation raises.  The source
@@ -247,6 +248,14 @@ DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
 ; i = (i*5 + perturb + 1) & mask.  CPython's PERTURB_SHIFT, and Tim Peters'
 ; note that 4 and 6 were not significantly worse.
 PERTURB_SHIFT   equ 5
+
+; DICT_PROBE_NEXT slot, perturb, mask
+%macro DICT_PROBE_NEXT 3
+    shr %2, PERTURB_SHIFT
+    lea %1, [%1 + %1*4 + 1]
+    add %1, %2
+    and %1, %3
+%endmacro
 
 ; A set uses the same recurrence, and that is NOT what CPython does: its set
 ; walks LINEAR_PROBES (9) consecutive entries before each jump, on the

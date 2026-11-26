@@ -4,4 +4,3 @@
 # only shrink.  Re-record with
 #   python3 src/compiler/lint.py --record-alignment
 # in the commit that pays some of it down.
-src/opcodes/build.asm op_set_update call set_add

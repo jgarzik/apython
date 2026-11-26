@@ -25,6 +25,7 @@ section .text
 extern posix_int_arg
 extern sys_fcntl
 extern sys_flock
+extern sys_ioctl
 extern bytes_from_data
 extern bytes_type
 extern bytearray_type
@@ -33,7 +34,10 @@ extern set_oserror
 extern set_exception
 extern exc_TypeError_type
 extern exc_ValueError_type
+extern exc_OverflowError_type
 extern none_singleton
+extern bool_false
+extern bool_true
 
 ;; ============================================================================
 ;; posix.fcntl(fd, cmd, arg=0) -> int, or bytes when arg was bytes-like
@@ -160,6 +164,106 @@ DEF_FUNC posix_fcntl, PFC_FRAME
     leave                           ; nothing pushed yet; rax = 0
     ret
 END_FUNC posix_fcntl
+
+;; posix_blocking_fd(rdi = descriptor Value) -> signed C int
+;; Fails: -1
+DEF_FUNC_LOCAL posix_blocking_fd
+    V_UNPACK rdi, rdx
+    extern obj_as_index_clamped
+    call obj_as_index_clamped
+    ERR_M1 .fail
+    movsxd rcx, eax
+    cmp rax, rcx
+    jne .overflow
+    leave
+    ret
+.overflow:
+    SET_EXC exc_OverflowError_type, "Python int too large to convert to C int"
+.fail:
+    mov rax, -1
+    leave
+    ret
+END_FUNC posix_blocking_fd
+
+;; posix.set_blocking(fd, blocking) -> None
+;; Fails: 0
+PSB_ARGS     equ 8
+PSB_FD       equ 16
+PSB_NONBLOCK equ 24
+PSB_FRAME    equ 32
+FIONBIO      equ 0x5421
+DEF_FUNC posix_set_blocking, PSB_FRAME
+    cmp rsi, 2
+    jne .args
+    mov [rbp - PSB_ARGS], rdi
+    mov rdi, [rdi]
+    call posix_blocking_fd
+    ERR_M1 .fail
+    mov [rbp - PSB_FD], rax
+    mov rdi, [rbp - PSB_ARGS]
+    mov rdi, [rdi + 8]
+    extern obj_is_true
+    call obj_is_true
+    ERR_M1 .fail
+    xor eax, 1
+    mov [rbp - PSB_NONBLOCK], eax
+    mov rdi, [rbp - PSB_FD]
+    mov esi, FIONBIO
+    lea rdx, [rbp - PSB_NONBLOCK]
+    call sys_ioctl
+    test rax, rax
+    js .oserror
+    LOAD_NONE rax
+    leave
+    ret
+.args:
+    SET_EXC exc_TypeError_type, "set_blocking() takes exactly 2 arguments"
+    jmp .fail
+.oserror:
+    neg rax
+    mov rdi, rax
+    xor esi, esi
+    call set_oserror
+.fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC posix_set_blocking
+
+;; posix.get_blocking(fd) -> bool
+;; Fails: 0
+F_GETFL equ 3
+DEF_FUNC posix_get_blocking
+    cmp rsi, 1
+    jne .args
+    mov rdi, [rdi]
+    call posix_blocking_fd
+    ERR_M1 .fail
+    mov rdi, rax
+    mov esi, F_GETFL
+    xor edx, edx
+    call sys_fcntl
+    test rax, rax
+    js .oserror
+    test eax, O_NONBLOCK
+    lea rax, [rel bool_true]
+    lea rcx, [rel bool_false]
+    cmovne rax, rcx
+    leave
+    ret
+.args:
+    SET_EXC exc_TypeError_type, "get_blocking() takes exactly 1 argument"
+    jmp .fail
+.oserror:
+    neg rax
+    mov rdi, rax
+    xor esi, esi
+    call set_oserror
+.fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC posix_get_blocking
 
 ;; ============================================================================
 ;; posix.flock(fd, operation) -> None

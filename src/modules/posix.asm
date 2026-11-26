@@ -2929,6 +2929,10 @@ DEF_FUNC posix_module_create, 40
     MODULE_ADD_FUNC posix_ioctl, pm_n_ioctl
     extern posix_fcntl
     MODULE_ADD_FUNC posix_fcntl, pm_n_fcntl
+    extern posix_set_blocking
+    MODULE_ADD_FUNC posix_set_blocking, pm_n_set_blocking
+    extern posix_get_blocking
+    MODULE_ADD_FUNC posix_get_blocking, pm_n_get_blocking
     extern posix_flock
     MODULE_ADD_FUNC posix_flock, pm_n_flock
     extern posix_prlimit
@@ -3134,6 +3138,8 @@ pm_n_umask:      db "umask", 0
 pm_n_isatty:     db "isatty", 0
 pm_n_ioctl:      db "ioctl", 0
 pm_n_fcntl:      db "fcntl", 0
+pm_n_set_blocking: db "set_blocking", 0
+pm_n_get_blocking: db "get_blocking", 0
 pm_n_flock:      db "flock", 0
 pm_n_prlimit:    db "prlimit", 0
 pm_n_getrusage:  db "getrusage", 0
