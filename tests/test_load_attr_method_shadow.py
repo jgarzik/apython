@@ -171,3 +171,37 @@ warm(get_val, w)
 print("property:", get_val(w))
 
 print("done")
+
+
+# Pick a collision whose perturbation slot differs from the next linear slot.
+def check_shadow():
+    class Worker:
+        pass
+
+    for suffix in range(100):
+        name = "method" + str(suffix)
+        name_hash = hash(name)
+        first = name_hash & 7
+        displaced = (first * 5 + (name_hash >> 5) + 1) & 7
+        if displaced not in (first, (first + 1) & 7):
+            break
+    else:
+        raise AssertionError("no displaced name")
+
+    setattr(Worker, name, lambda self: "type")
+    invoke = eval("lambda worker: worker." + name + "()")
+    worker = Worker()
+    assert invoke(worker) == "type"
+
+    for suffix in range(100):
+        other = "other" + str(suffix)
+        if hash(other) & 7 == first:
+            setattr(worker, other, None)
+            break
+    else:
+        raise AssertionError("no collision")
+
+    setattr(worker, name, lambda: "instance")
+    return invoke(worker)
+
+print(check_shadow())

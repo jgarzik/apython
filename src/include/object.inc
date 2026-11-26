@@ -248,6 +248,14 @@ DICT_INIT_CAP   equ 8               ; initial hash-table slots for dict and set
 ; note that 4 and 6 were not significantly worse.
 PERTURB_SHIFT   equ 5
 
+; DICT_PROBE_NEXT slot, perturb, mask
+%macro DICT_PROBE_NEXT 3
+    shr %2, PERTURB_SHIFT
+    lea %1, [%1 + %1*4 + 1]
+    add %1, %2
+    and %1, %3
+%endmacro
+
 ; A set uses the same recurrence, and that is NOT what CPython does: its set
 ; walks LINEAR_PROBES (9) consecutive entries before each jump, on the
 ; argument that a set entry is a contiguous sixteen bytes so ten of them are
