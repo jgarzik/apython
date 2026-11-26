@@ -1636,8 +1636,11 @@ END_FUNC fileio_readall_fn
 ;; The whole reason the buffered layer takes a memoryview: it reads straight
 ;; into the caller's buffer with no bytes object in between.
 ;; ============================================================================
-FRI_SELF  equ 8
-FRI_FRAME equ 16            ; + 0 pushes = 16
+FRI_SELF   equ 8
+FRI_BUFFER equ 16
+FRI_DATA   equ 24
+FRI_LEN    equ 32
+FRI_FRAME  equ 32
 
 DEF_FUNC fileio_readinto_fn, FRI_FRAME
     cmp rsi, 2
@@ -1645,20 +1648,31 @@ DEF_FUNC fileio_readinto_fn, FRI_FRAME
     mov rax, [rdi]
     mov [rbp - FRI_SELF], rax
     mov rsi, [rdi + 8]
+    mov [rbp - FRI_BUFFER], rsi
     mov rdi, rax
     call fileio_check
     ERR_M1 .fail
     test qword [rdi + PyFileIOObject.fio_flags], FIO_READABLE
     jz .fri_not_readable
 
-    mov rdi, rsi
+    mov rdi, [rbp - FRI_BUFFER]
     call fileio_writable_buffer   ; rax = data, r10 = length
     ERR_PENDING .fail
-    mov rsi, rax
-    mov rdx, r10
+    mov [rbp - FRI_DATA], rax
+    mov [rbp - FRI_LEN], r10
+    mov rdi, [rbp - FRI_BUFFER]
+    extern writable_buffer_acquire
+    call writable_buffer_acquire
+    mov rsi, [rbp - FRI_DATA]
+    mov rdx, [rbp - FRI_LEN]
     mov rdi, [rbp - FRI_SELF]
     mov rdi, [rdi + PyFileIOObject.fio_fd]
     call io_read_retry
+    mov [rbp - FRI_DATA], rax      ; the syscall no longer needs the data pointer
+    mov rdi, [rbp - FRI_BUFFER]
+    extern writable_buffer_release
+    call writable_buffer_release
+    mov rax, [rbp - FRI_DATA]
     test rax, rax
     js .fri_failed
     mov rdx, rax

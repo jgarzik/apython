@@ -162,6 +162,7 @@ struc PyMemoryViewObject
     ; place that knows, and mv_stride == 1 is what `c_contiguous` answers and
     ; what anything handing the raw pointer to a syscall has to insist on.
     .mv_stride:   resq 1  ; +64
+    .mv_exports:  resq 1  ; blocking I/O borrows the view's buffer
 endstruc
 
 ; A released memoryview: mv_buf is 0 and every operation raises.  The source

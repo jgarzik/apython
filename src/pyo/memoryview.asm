@@ -19,6 +19,7 @@ extern bytes_from_data
 extern bytes_like_ptr_len
 extern bytes_method_hex
 extern bytes_type
+extern exc_BufferError_type
 extern exc_NotImplementedError_type
 extern exc_ValueError_type
 extern hash_not_implemented
@@ -109,6 +110,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov [rax + PyMemoryViewObject.mv_source], rdi
     push rax                           ; save result
     push rdi                           ; save for INCREF
@@ -167,6 +169,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov rcx, [rdi + PyMemoryViewObject.mv_source]
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
@@ -256,6 +259,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov [rax + PyMemoryViewObject.mv_source], rdi
     push rax
     push rdi
@@ -441,6 +445,26 @@ DEF_FUNC_LOCAL mv_source_acquired, MSA_FRAME
     leave
     ret
 END_FUNC mv_source_acquired
+
+;; writable_buffer_acquire(rdi = validated bytearray or memoryview) -> void
+;; The call holding the buffer keeps its argument alive. The export prevents
+;; a resize or release while that call is using the raw pointer.
+DEF_FUNC_BARE writable_buffer_acquire
+    lea rcx, [rel memoryview_type]
+    cmp [rdi + PyObject.ob_type], rcx
+    jne bytearray_export_acquired
+    inc qword [rdi + PyMemoryViewObject.mv_exports]
+    ret
+END_FUNC writable_buffer_acquire
+
+;; writable_buffer_release(rdi = value passed to writable_buffer_acquire) -> void
+DEF_FUNC_BARE writable_buffer_release
+    lea rcx, [rel memoryview_type]
+    cmp [rdi + PyObject.ob_type], rcx
+    jne bytearray_export_released
+    dec qword [rdi + PyMemoryViewObject.mv_exports]
+    ret
+END_FUNC writable_buffer_release
 
 ;; Proper dealloc:
 DEF_FUNC memoryview_dealloc_proper, 8            ; 1 pushes, so rsp is 16-aligned
@@ -1192,14 +1216,18 @@ END_FUNC memoryview_method_toreadonly
 
 ;; memoryview.release(): (rdi = args, rsi = nargs) -> rax = None
 ;; Fails: 0
-;; for a call with no self; releasing twice is not an error.
-DEF_FUNC memoryview_method_release, MVM_FRAME
+;; Releasing twice is allowed. An outstanding export keeps the view live.
+MVR_FRAME equ 64
+DEF_FUNC memoryview_method_release, MVR_FRAME
     test rsi, rsi
     jz .mvrl_argerr
     mov rdi, [rdi]
     ; Releasing twice is not an error, as CPython has it.
     cmp qword [rdi + PyMemoryViewObject.mv_buf], MV_RELEASED
     je .mvrl_done
+    mov rcx, [rdi + PyMemoryViewObject.mv_exports]
+    test rcx, rcx
+    jnz .mvrl_exported
     mov qword [rdi + PyMemoryViewObject.mv_buf], MV_RELEASED
     mov rax, [rdi + PyMemoryViewObject.mv_source]
     mov qword [rdi + PyMemoryViewObject.mv_source], 0
@@ -1233,6 +1261,23 @@ DEF_FUNC memoryview_method_release, MVM_FRAME
     ret
 .mvrl_argerr:
     SET_EXC exc_TypeError_type, "release() takes no arguments"
+    jmp .mvrl_fail
+.mvrl_exported:
+    lea rdi, [rbp - MVR_FRAME]
+    mov esi, MVR_FRAME
+    CSTRING rdx, "memoryview has %ld exported buffer%s"
+    CSTRING r8, ""
+    CSTRING r9, "s"
+    cmp rcx, 1
+    cmovne r8, r9
+    xor eax, eax
+    extern snprintf
+    call snprintf wrt ..plt
+    lea rsi, [rbp - MVR_FRAME]
+    lea rdi, [rel exc_BufferError_type]
+    extern set_exception
+    call set_exception
+.mvrl_fail:
     RET_NULL
     leave
     ret
@@ -1268,9 +1313,7 @@ DEF_FUNC memoryview_method_exit, MVM_FRAME
     test rsi, rsi
     jz .mvx_argerr
     mov esi, 1
-    call memoryview_method_release    ; err: it is handed one argument, and refuses only none
-    LOAD_NONE rax
-    mov edx, TAG_PTR
+    call memoryview_method_release    ; err: forward the result unchanged
     leave
     ret
 .mvx_argerr:
@@ -1349,6 +1392,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov rdi, [rbp - MVC_SELF]
     mov rcx, [rdi + PyMemoryViewObject.mv_source]
     mov [rax + PyMemoryViewObject.mv_source], rcx
@@ -1682,6 +1726,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov qword [rax + PyMemoryViewObject.mv_exports], 0
 
     ; Every field the source carries has to come across.  A missed itemsize
     ; left the new view with 0, and memoryview_len divides by it.

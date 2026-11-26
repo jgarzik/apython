@@ -825,6 +825,7 @@ DEF_FUNC bytesio_getbuffer_fn
     mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
+    mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov [rax + PyMemoryViewObject.mv_source], rbx
     inc qword [rbx + PyObject.ob_refcnt]
     mov rcx, [rbx + PyBytesIOObject.bio_buf]

@@ -618,6 +618,7 @@ test_range_protocol
 test_range
 test_range_slice
 test_range_wide
+test_readinto_buffer_export
 test_re_bytes_pattern_hash
 test_recursion_and_repr
 test_recursion
