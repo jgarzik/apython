@@ -6,6 +6,11 @@ from tempfile import TemporaryDirectory
 
 assert __spec__ is None
 
+subprocess.run([sys.executable, "-c", "assert '__file__' not in globals()"],
+               check=True, timeout=10)
+subprocess.run([sys.executable, "-"], input=b"assert __file__ == '<stdin>'\n",
+               check=True, timeout=10)
+
 module_source = """
 import __main__
 assert __main__.__spec__.name == 'probe'

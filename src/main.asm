@@ -552,15 +552,21 @@ DEF_FUNC main, 8
     pop rdi
     call obj_decref
 
-    ; Set __file__ to the path the script was named by.  CPython sets it for
-    ; a script as readily as for an import, and code reads it constantly --
-    ; os.path.dirname(__file__) is the ordinary way to find a data file.  Its
-    ; absence is why trace.py counted nothing: globaltrace_lt reads
-    ; frame.f_globals['__file__'] to decide whether to trace a module at all.
+    ; Scripts and stdin have a filename. A -c command does not. Spawn uses
+    ; the presence of this entry to decide whether the child should run a file.
+    cmp qword [rel cmd_source], 0
+    je .main_set_file
+    cmp qword [rel cmd_is_stdin], 0
+    je .main_no_file
+.main_set_file:
     lea rdi, [rel __file__cstr]
     call str_from_cstr_heap
     push rax
     mov rdi, rbx                ; the script path, as given on the command line
+    cmp qword [rel cmd_is_stdin], 0
+    je .main_have_file
+    CSTRING rdi, "<stdin>"
+.main_have_file:
     call str_from_cstr_heap
     push rax
     mov rdx, rax
@@ -571,6 +577,7 @@ DEF_FUNC main, 8
     call obj_decref
     pop rdi
     call obj_decref
+.main_no_file:
 
     ; Set __package__ = None in globals (top-level module has no package)
     lea rdi, [rel __package__cstr]
