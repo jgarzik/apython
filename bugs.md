@@ -402,29 +402,6 @@ reasoning that chose them and what changing one would cost.
   new field -- and a missed one is a wrong CHARACTER out of a wide string, in
   a path the suite barely exercises, rather than a crash.
 
-- **One call inside an opcode handler is made with `rsp` misaligned.**
-  Recorded in `tests/align_floor.txt`, which `lint.py` ratchets: a new one
-  fails the build and the set can only shrink.
-
-  They are not cosmetic, and they are not local.  A misaligned call
-  PROPAGATES: the callee's whole frame is 8 out, so every Python frame the
-  interpreter runs beneath it is too.  The fault surfaces far away and only
-  when something eventually reaches an aligned SSE store -- which is how this
-  was found at all: `import gzip; gzip.open(...)` faulted inside libz's
-  `inflate`, at a `movaps %xmm0,-0x70(%rbp)`, several thousand instructions
-  from anything zlib had done wrong.
-
-  Forty-two of the forty-three are paid.  Most were a loop index or an item
-  saved across a call with a lone push; those became frame slots rather than
-  pads, because a handler with calls at both push depths has no single frame
-  size that satisfies them all -- and the pushed value always had a name.
-
-  The one left is `op_set_update`'s `call set_add`, which lint reports at a
-  depth eight above what its own pushes and frame account for.  I could not
-  source the difference, and moving the frame by eight only moves which call
-  in that handler is wrong.  Changing the code to satisfy a number I do not
-  understand is worse than leaving it recorded.
-
 - **Functions with no docblock at all**, and, among those that have one,
   docblocks with no `->` signature line.  The signature is the only part of a
   function's contract that nothing checks, so its absence is a real gap rather

@@ -2856,12 +2856,10 @@ DEF_FUNC op_set_update
     jz .su_set_next
     dec r14
 
-    ; set_add(target_set, key Value)
-    push rbx
+    ; The loop index is callee-saved, so the call needs no push.
     mov rdi, [rbp - SU_SOURCE]
     call set_add
     ERR_M1_JUMP
-    pop rbx
 
 .su_set_next:
     inc rbx
