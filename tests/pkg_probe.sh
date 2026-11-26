@@ -15,6 +15,7 @@
 #   ERROR   it ran no tests -- an import died, or a SkipTest at module scope
 #   CRASH   the process died on a signal
 #   HANG    it did not finish inside the timeout
+#   N/A     the package requires dynamic extension loading
 #
 # Compared against tests/pkg_floor.txt, which records the per-directory count
 # of PASSING tests and the crash set.  A directory that passes fewer tests
@@ -22,9 +23,9 @@
 #   bash tests/pkg_probe.sh --record
 # in the commit that earns it.
 #
-# Needs CPython's Lib/ (a source checkout, not an installed python).  Point
-# $CPYTHON_LIB at it; the target skips cleanly when it is not there, so a
-# build never depends on an out-of-tree checkout.
+# Point CPYTHON_LIB at Lib/ in a full CPython source checkout.  The probe
+# copies the tree so the tests cannot leave artifacts in the checkout.
+# Pass package names (e.g. test_module) to check only those packages.
 #
 # A package cannot be named on the command line the way a file can, so each
 # is driven through unittest's own loader, the way CPython's own suite is:
@@ -34,24 +35,28 @@
 set -u
 
 APYTHON=${APYTHON:-./apython}
-PYTHON=${PYTHON:-python3}
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$TESTDIR")"
 FLOOR="$TESTDIR/pkg_floor.txt"
+LIB_OVERRIDE=${CPYTHON_LIB:-}
 CPYTHON_LIB=${CPYTHON_LIB:-$HOME/tmp/repo/cpython/Lib}
 TIMEOUT=${PKG_TIMEOUT:-300}
 JOBS=${PKG_JOBS:-5}
 # A runaway allocation should fail the directory, not the machine.  3 GB is
 # far more than any of these needs and well under what a desktop has.
 VLIMIT=${PKG_VLIMIT:-3000000}
-WORK=$(mktemp -d)
+WORK=$(mktemp -d) || exit 1
 trap 'rm -rf "$WORK"' EXIT
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; NC='\033[0m'
 
-if [ ! -d "$CPYTHON_LIB" ]; then
+if [ ! -d "$CPYTHON_LIB" ] && [ -z "$LIB_OVERRIDE" ]; then
     echo "SKIP: no CPython Lib/ at $CPYTHON_LIB (set CPYTHON_LIB to override)"
     exit 0
+fi
+if [ ! -d "$CPYTHON_LIB/test" ] || [ ! -d "$CPYTHON_LIB/../Tools/peg_generator" ]; then
+    echo "CPYTHON_LIB must point to Lib/ in a full CPython source tree with Lib/test and Tools/peg_generator" >&2
+    exit 1
 fi
 if [ ! -x "$ROOT/$APYTHON" ] && [ ! -x "$APYTHON" ]; then
     echo "SKIP: $APYTHON not built"
@@ -62,13 +67,14 @@ case "$APYTHON" in
     *)  APY="$ROOT/${APYTHON#./}" ;;
 esac
 
-# apython reads .pyc and never .py, so the reference tree has to be
-# byte-compiled before anything can be found in it -- and unlike
-# stdlib_probe.sh this one needs test/ compiled too, which is the expensive
-# half.  CPython gitignores __pycache__, so doing it in place is invisible.
-if [ ! -f "$CPYTHON_LIB/test/__pycache__/__init__.cpython-312.pyc" ]; then
-    echo "byte-compiling $CPYTHON_LIB (one time, including test/)..."
-    $PYTHON -m compileall -q -j0 "$CPYTHON_LIB" >/dev/null 2>&1
+RECORD=0
+if [ "${1:-}" = "--record" ]; then
+    RECORD=1
+    shift
+    if [ "$#" -ne 0 ]; then
+        echo "--record requires a full package sweep" >&2
+        exit 1
+    fi
 fi
 
 list_pkgs() {
@@ -79,9 +85,48 @@ list_pkgs() {
       done ) | sort
 }
 
+list_pkgs > "$WORK/packages"
+if [ "$#" -gt 0 ]; then
+    for pkg in "$@"; do
+        if ! grep -Fxq -- "$pkg" "$WORK/packages"; then
+            echo "Unknown CPython test package: $pkg" >&2
+            exit 1
+        fi
+    done
+    printf '%s\n' "$@" | sort -u > "$WORK/selected"
+else
+    cp "$WORK/packages" "$WORK/selected" || exit 1
+fi
+
+mkdir "$WORK/cpython" || exit 1
+(
+    cd "$CPYTHON_LIB/.." || exit 1
+    shopt -s dotglob
+    for entry in *; do
+        [ "$entry" = .git ] && continue
+        cp -a --reflink=auto -- "$entry" "$WORK/cpython/" || exit 1
+    done
+) || exit 1
+CPYTHON_LIB="$WORK/cpython/Lib"
+
+DYNAMIC_LOADING=$(cd "$WORK" && PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" \
+    "$APY" -B -c 'import sysconfig; print(int(bool(sysconfig.get_config_var("HAVE_DYNAMIC_LOADING"))))') || exit 1
+case "$DYNAMIC_LOADING" in
+    0|1) ;;
+    *) echo "Unexpected dynamic loading capability: $DYNAMIC_LOADING" >&2; exit 1 ;;
+esac
+
 # One directory, one process.  Writes a single tab-separated row.
 probe_one() {
-    local pkg="$1" out rc ran fail err cwd
+    local pkg="$1" out rc ran cwd
+    if [ "$DYNAMIC_LOADING" = 0 ]; then
+        case "$pkg" in
+            test_cext|test_cppext)
+                printf '%s\tN/A\t0\t0\n' "$pkg" >> "$WORK/results.txt"
+                return
+                ;;
+        esac
+    fi
     out="$WORK/$pkg.txt"
     # A cwd of its own, thrown away afterwards, for the reason rc_sweep.sh
     # gives at length: run in the repo root, a package that writes in its cwd
@@ -128,12 +173,12 @@ probe_one() {
         >> "$WORK/results.txt"
 }
 export -f probe_one
-export WORK ROOT APY CPYTHON_LIB TIMEOUT VLIMIT
+export WORK APY CPYTHON_LIB TIMEOUT VLIMIT DYNAMIC_LOADING
 
 : > "$WORK/results.txt"
-NPKG=$(list_pkgs | wc -l)
+NPKG=$(wc -l < "$WORK/selected")
 echo "Probing $NPKG package-style test directories from $CPYTHON_LIB/test"
-list_pkgs | xargs -P "$JOBS" -I{} bash -c 'probe_one "$@"' _ {}
+xargs -P "$JOBS" -I{} bash -c 'probe_one "$@"' _ {} < "$WORK/selected" || exit 1
 sort -k1,1 "$WORK/results.txt" -o "$WORK/results.txt"
 
 PASS_TOTAL=$(awk -F'\t' '{n+=$3} END {print n+0}' "$WORK/results.txt")
@@ -145,15 +190,20 @@ awk -F'\t' '{printf "  %-34s %-7s %5d/%-5d\n", $1, $2, $3, $4}' "$WORK/results.t
 echo
 echo "  passing $PASS_TOTAL of $RAN_TOTAL run, $NCRASH crashing"
 
-if [ "${1:-}" = "--record" ]; then
+if [ "$RECORD" -eq 1 ]; then
     {
         echo "# Passing-test count per package-style test directory, and the"
         echo "# crash set.  A ratchet: a directory must not pass fewer than"
         echo "# its number, and a new crash fails the target."
         echo "# Regenerate with: bash tests/pkg_probe.sh --record"
         awk -F'\t' '$2=="CRASH"||$2=="HANG"{print "crash " $1}' "$WORK/results.txt"
-        awk -F'\t' '{print "pass " $1 " " $3}' "$WORK/results.txt"
-    } > "$FLOOR"
+        {
+            awk -F'\t' '$2!="N/A"{print "pass " $1 " " $3}' "$WORK/results.txt"
+            awk 'NR==FNR {if ($2=="N/A") keep[$1]=1; next}
+                $1=="pass" && ($2 in keep)' "$WORK/results.txt" "$FLOOR"
+        } | sort -k2,2
+    } > "$WORK/floor"
+    mv "$WORK/floor" "$FLOOR" || exit 1
     echo
     echo "recorded floor: $PASS_TOTAL passing, $NCRASH crashing -> $FLOOR"
     exit 0
@@ -166,14 +216,19 @@ fi
 
 rc=0
 # --- the passing counts, per directory -------------------------------------
-awk '/^pass /{print $2 "\t" $3}' "$FLOOR" | sort -k1,1 > "$WORK/floor_pass.txt"
-awk -F'\t' '{print $1 "\t" $3}' "$WORK/results.txt" > "$WORK/now_pass.txt"
+awk 'FILENAME==ARGV[1] {if ($2=="N/A") omit[$1]=1; next}
+     /^pass / && !($2 in omit){print $2 "\t" $3}' \
+    "$WORK/results.txt" "$FLOOR" | sort -k1,1 > "$WORK/floor_pass.txt"
+awk -F'\t' '$2!="N/A"{print $1 "\t" $3}' "$WORK/results.txt" > "$WORK/now_pass.txt"
 REGRESSED=$(join -t$'\t' "$WORK/floor_pass.txt" "$WORK/now_pass.txt" \
             | awk -F'\t' '$3 < $2 {printf "%s (%s -> %s)\n", $1, $2, $3}')
 GAINED=$(join -t$'\t' "$WORK/floor_pass.txt" "$WORK/now_pass.txt" \
          | awk -F'\t' '$3 > $2 {printf "%s (%s -> %s)\n", $1, $2, $3}')
 # A directory in the floor that did not report at all is a regression too.
 VANISHED=$(join -t$'\t' -v1 "$WORK/floor_pass.txt" "$WORK/now_pass.txt" | cut -f1)
+if [ "$#" -gt 0 ]; then
+    VANISHED=$(comm -12 <(printf '%s\n' "$VANISHED") "$WORK/selected")
+fi
 
 if [ -n "$GAINED" ]; then
     echo
@@ -197,6 +252,10 @@ fi
 
 # --- the crash set ---------------------------------------------------------
 awk '/^crash /{print $2}' "$FLOOR" | sort > "$WORK/floor_crash.txt"
+if [ "$#" -gt 0 ]; then
+    comm -12 "$WORK/floor_crash.txt" "$WORK/selected" > "$WORK/selected_crash.txt"
+    mv "$WORK/selected_crash.txt" "$WORK/floor_crash.txt"
+fi
 awk -F'\t' '$2=="CRASH"||$2=="HANG"{print $1}' "$WORK/results.txt" | sort \
     > "$WORK/now_crash.txt"
 NEWCRASH=$(comm -13 "$WORK/floor_crash.txt" "$WORK/now_crash.txt")
