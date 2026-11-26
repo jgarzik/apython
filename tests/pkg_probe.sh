@@ -176,7 +176,7 @@ probe_one() {
     cwd=$(mktemp -d "$WORK/cwd-$pkg.XXXXXX") || return
     ( ulimit -v "$VLIMIT" 2>/dev/null
       cd "$cwd" || exit
-      PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" "$APY" -m unittest \
+      PYTHONPATH="$CPYTHON_LIB" timeout -k 5 "$TIMEOUT" "$APY" -m unittest -v \
         "test.$pkg" ) > "$out" 2>&1
     rc=$?
     rm -rf "$cwd"          # after rc is taken: rm would clobber it
@@ -305,6 +305,10 @@ if [ -n "$NEWCRASH" ]; then
     echo -e "${RED}NEW CRASHES${NC} — these did not crash before:"
     echo "$NEWCRASH" | tr '\n' ' ' | fold -s -w 76 | sed 's/^/  /'
     echo
+    while IFS= read -r pkg; do
+        printf '\nLast output from %s\n' "$pkg"
+        tail -12 "$WORK/$pkg.txt"
+    done <<< "$NEWCRASH"
     rc=1
 fi
 if [ -n "$FIXEDCRASH" ]; then
