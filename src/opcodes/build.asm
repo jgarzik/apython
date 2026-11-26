@@ -1878,6 +1878,55 @@ END_FUNC op_build_slice
 ;; ============================================================================
 DEF_FUNC op_binary_slice, BSLC_FRAME
 
+    ; Exact ASCII str with two immediate bounds already in range. The
+    ; slice object and the code-point walks are unnecessary in this case.
+    mov rsi, [r13 - 16]
+    V_IS_INT rsi, rax
+    jb .bslc_general
+    mov rdx, [r13 - 8]
+    V_IS_INT rdx, rax
+    jb .bslc_general
+    mov rdi, [r13 - 24]
+    V_TEST_PTR rdi, rax
+    ja .bslc_general
+    test rdi, rdi
+    jz .bslc_general
+    extern str_type
+    lea rax, [rel str_type]
+    cmp [rdi + PyObject.ob_type], rax
+    jne .bslc_general
+    mov rcx, [rdi + PyStrObject.ob_size]
+    cmp rcx, [rdi + PyStrObject.ob_length]
+    jne .bslc_general
+    V_TO_I64 rsi
+    V_TO_I64 rdx
+    cmp rsi, rdx                 ; unsigned: a negative start is out of range
+    ja .bslc_general
+    cmp rdx, rcx
+    ja .bslc_general
+    sub rdx, rsi
+    cmp rdx, 1
+    jbe .bslc_short
+    extern str_new_slice
+    call str_new_slice
+    jmp .bslc_fast_result
+.bslc_short:
+    ; str_new reuses the one-character singleton.
+    lea rdi, [rdi + PyStrObject.data + rsi]
+    mov rsi, rdx
+    extern str_new
+    call str_new
+.bslc_fast_result:
+    mov [rbp - BSLC_SLICE], rax
+    sub r13, 16
+    mov rdi, [r13 - 8]
+    DECREF_REG rdi
+    mov rax, [rbp - BSLC_SLICE]
+    mov [r13 - 8], rax
+    leave
+    DISPATCH
+
+.bslc_general:
     ; Pop stop (TOS), start (TOS1), obj (TOS2) — save payloads + tags
     VPOP_VAL rsi, rax          ; stop
     mov [rbp - BSLC_PTAG], rax

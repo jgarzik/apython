@@ -10,6 +10,7 @@ test_adaptive_search
 test_aiter_anext
 test_annotations
 test_argument_messages
+test_ascii_slice_bounds
 test_arithmetic
 test_arity_messages
 test_array_file
