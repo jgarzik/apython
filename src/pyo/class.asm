@@ -107,6 +107,10 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     DUNDER_EXC_SAVE [rbp - OCF_EXC]
     mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rbx
+    extern async_gen_type
+    lea rax, [rel async_gen_type]
+    cmp [rbx + PyObject.ob_type], rax
+    je .async_gen
     lea rsi, [rel dunder_del]
     call dunder_call_1          ; err: a destructor reports its own error, below
     V_UNPACK rax, rdx           ; returns a Value
@@ -150,6 +154,11 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     leave
     ret
 
+.async_gen:
+    extern async_gen_call_finalizer
+    call async_gen_call_finalizer
+    jmp .del_no_result
+
 .del_report:
     ; A genuinely new exception: report it in full on stderr -- the object it
     ; came out of, and the traceback of where inside __del__ it happened --
@@ -157,6 +166,9 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     ; CPython names the __del__ FUNCTION, not the object it was called on.
     ; The lookup is borrowed, and cannot raise: it just found this method.
     mov rdi, [rbx + PyObject.ob_type]
+    lea rax, [rel async_gen_type]
+    cmp rdi, rax
+    je .report_generator
     lea rsi, [rel dunder_del]
     call dunder_lookup
     V_UNPACK rax, rdx
@@ -165,6 +177,10 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     xor eax, eax
 .del_report_have_fn:
     mov rsi, rax
+    jmp .report
+.report_generator:
+    mov rsi, rbx
+.report:
     mov rdi, [gs:ThreadState.current_exception]
     extern traceback_print_unraisable
     call traceback_print_unraisable
