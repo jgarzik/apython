@@ -87,9 +87,15 @@ extern XML_SetEndNamespaceDeclHandler
 extern XML_SetCommentHandler
 extern XML_SetStartCdataSectionHandler
 extern XML_SetEndCdataSectionHandler
+extern XML_SetDefaultHandler
+extern XML_SetDefaultHandlerExpand
+extern XML_SetNotStandaloneHandler
+extern XML_SetExternalEntityRefHandler
 extern XML_SetStartDoctypeDeclHandler
 extern XML_SetEndDoctypeDeclHandler
+extern XML_SetEntityDeclHandler
 extern XML_SetXmlDeclHandler
+extern XML_SetElementDeclHandler
 extern XML_SetAttlistDeclHandler
 extern XML_SetSkippedEntityHandler
 
@@ -105,9 +111,15 @@ extern px_cb_end_ns
 extern px_cb_comment
 extern px_cb_start_cdata
 extern px_cb_end_cdata
+extern px_cb_default
+extern px_cb_default_expand
+extern px_cb_not_standalone
+extern px_cb_external_entity
 extern px_cb_start_doctype
 extern px_cb_end_doctype
+extern px_cb_entity_decl
 extern px_cb_xml_decl
+extern px_cb_element_decl
 extern px_cb_attlist_decl
 extern px_cb_skipped_entity
 extern px_flush
@@ -126,11 +138,8 @@ px_set_reparse: dq 0            ; optional before Expat 2.6.0
 section .rodata
 align 8
 global px_installers
-; One row per handler index: the libexpat setter, and our trampoline.  A ZERO
-; row means the C side is not written yet -- the reference is still kept on the
-; handle and read back from Python, so a later commit fills the row in and
-; nothing else changes.  The order is PX_H_* from pyexpat.inc, which is
-; CPython's handler_info[] order.
+; One row per handler index: the libexpat setter and our trampoline.
+; PX_H_* in pyexpat.inc follows CPython's handler_info[] order.
 px_installers:
     dq XML_SetStartElementHandler,   px_cb_start_element    ; 0  StartElement
     dq XML_SetEndElementHandler,     px_cb_end_element      ; 1  EndElement
@@ -143,15 +152,15 @@ px_installers:
     dq XML_SetCommentHandler,           px_cb_comment            ; 8  Comment
     dq XML_SetStartCdataSectionHandler, px_cb_start_cdata        ; 9  StartCdata
     dq XML_SetEndCdataSectionHandler,   px_cb_end_cdata          ; 10 EndCdata
-    dq 0, 0                                                 ; 11 Default
-    dq 0, 0                                                 ; 12 DefaultExpand
-    dq 0, 0                                                 ; 13 NotStandalone
-    dq 0, 0                                                 ; 14 ExternalEntity
+    dq XML_SetDefaultHandler,           px_cb_default            ; 11 Default
+    dq XML_SetDefaultHandlerExpand,     px_cb_default_expand     ; 12 DefaultExpand
+    dq XML_SetNotStandaloneHandler,     px_cb_not_standalone     ; 13 NotStandalone
+    dq XML_SetExternalEntityRefHandler, px_cb_external_entity    ; 14 ExternalEntity
     dq XML_SetStartDoctypeDeclHandler,  px_cb_start_doctype      ; 15 StartDoctype
     dq XML_SetEndDoctypeDeclHandler,    px_cb_end_doctype        ; 16 EndDoctype
-    dq 0, 0                                                 ; 17 EntityDecl
+    dq XML_SetEntityDeclHandler,        px_cb_entity_decl        ; 17 EntityDecl
     dq XML_SetXmlDeclHandler,           px_cb_xml_decl           ; 18 XmlDecl
-    dq 0, 0                                                 ; 19 ElementDecl
+    dq XML_SetElementDeclHandler,       px_cb_element_decl       ; 19 ElementDecl
     dq XML_SetAttlistDeclHandler,       px_cb_attlist_decl       ; 20 AttlistDecl
     dq XML_SetSkippedEntityHandler,     px_cb_skipped_entity     ; 21 SkippedEntity
 
@@ -614,6 +623,12 @@ DEF_FUNC px_parser_free, PF_FRAME
     jz .done
     cmp qword [rcx + PxHandle.magic], PX_MAGIC
     jne .done
+    cmp qword [rcx + PxHandle.parsing], 0
+    jne .done
+    cmp qword [rcx + PxHandle.in_callback], 0
+    jne .done
+    cmp qword [rcx + PxHandle.flushing], 0
+    jne .done
     mov qword [rcx + PxHandle.magic], 0
     mov [rbp - PF_H], rcx
 
@@ -906,9 +921,7 @@ END_FUNC pyexpat_module_create
 ;;
 ;; Installing the trampoline is what makes libexpat call us, and it is done
 ;; per handler rather than all at once so that a document with no comments
-;; pays nothing for CommentHandler.  A handler with no row in px_installers
-;; yet is still stored, so the attribute reads back correctly and a later
-;; commit only has to fill the row in.
+;; pays nothing for CommentHandler.
 ;; ============================================================================
 SH_ARGS   equ 8
 SH_H      equ 16
@@ -987,8 +1000,6 @@ DEF_FUNC px_set_handler, 56
     lea rcx, [rel px_installers]
     add rcx, rax
     mov rdx, [rcx]                  ; the libexpat setter
-    test rdx, rdx
-    jz .done                        ; no C side yet; the reference is kept
     mov [rbp - SH_ROW], rcx
     mov rcx, [rbp - SH_H]
     mov rdi, [rcx + PxHandle.parser]
@@ -1079,14 +1090,20 @@ DEF_FUNC px_parse, PP_FRAME
     mov [rbp - PP_ARGS], rdi
     mov qword [rbp - PP_FLUSH], 1
     cmp rsi, 3
-    je .handle
+    je .final_arg
     cmp rsi, 4
     jne .nargs
     mov rdi, [rdi + 24]
     call obj_is_true
     ERR_M1 .pending
     mov [rbp - PP_FLUSH], rax
-.handle:
+.final_arg:
+    ; Truth testing may call Python. Resolve it before borrowing any pointers.
+    mov rdi, [rbp - PP_ARGS]
+    mov rdi, [rdi + 16]
+    call obj_is_true
+    ERR_M1 .pending
+    mov [rbp - PP_FINAL], rax
     mov rdi, [rbp - PP_ARGS]
 
     xor esi, esi
@@ -1096,7 +1113,11 @@ DEF_FUNC px_parse, PP_FRAME
     call px_handle_at
     ERR_NULL .pending
     mov [rbp - PP_H], rax
+    cmp qword [rax + PxHandle.parsing], 0
+    jne .reentrant
     cmp qword [rax + PxHandle.in_callback], 0
+    jne .reentrant
+    cmp qword [rax + PxHandle.flushing], 0
     jne .reentrant
     mov qword [rax + PxHandle.raised], 0
 
@@ -1175,27 +1196,16 @@ DEF_FUNC px_parse, PP_FRAME
     mov [rbp - PP_DATA], rax
 
 .feed:
-    ; isfinal is any object at all -- CPython runs it through the ordinary
-    ; truth test -- and obj_is_true takes a VALUE.  This used to V_UNPACK
-    ; first, which handed it the raw payload: a bool, None and a str are
-    ; pointers and a pointer is its own Value, so those worked, while an int
-    ; immediate's payload is the number and `Parse(data, 0)` dereferenced
-    ; address 0.  Every caller in the stdlib passes a bool, which is why it
-    ; took a hand-written int to find it.
-    mov rdi, [rbp - PP_ARGS]
-    mov rdi, [rdi + 16]
-    call obj_is_true
-    ; A __bool__ that raised: nothing is fed to a parser with that pending.
-    ERR_M1 .pending
-    mov [rbp - PP_FINAL], rax
-
     mov rcx, [rbp - PP_H]
+    mov qword [rcx + PxHandle.parsing], 1
     mov rdi, [rcx + PxHandle.parser]
     mov rsi, [rbp - PP_DATA]
     mov edx, [rbp - PP_LEN]
     mov ecx, [rbp - PP_FINAL]
     call XML_Parse wrt ..plt
     mov [rbp - PP_STATUS], rax
+    mov rcx, [rbp - PP_H]
+    mov qword [rcx + PxHandle.parsing], 0
 
     ; The order is pyexpat.c's get_parse_result: a pending exception wins over
     ; whatever libexpat thought of the document.

@@ -67,6 +67,16 @@ XML_STATUS_ERROR     equ 0
 XML_STATUS_OK        equ 1
 XML_STATUS_SUSPENDED equ 2
 
+; XML_Content, from expat.h, with UTF-8 XML_Char and the SysV C layout.
+struc PxContent
+    .type:        resd 1
+    .quant:       resd 1
+    .name:        resq 1
+    .numchildren: resd 1
+    .padding:     resd 1
+    .children:    resq 1
+endstruc
+
 struc PxHandle
     .magic:       resq 1
     .parser:      resq 1        ; XML_Parser, opaque: libexpat allocates and
@@ -82,6 +92,7 @@ struc PxHandle
     .ordered:     resq 1
     .specified:   resq 1
     .nsprefixes:  resq 1
+    .parsing:     resq 1        ; XML_Parse has native frames on the stack
     .in_callback: resq 1
     .raised:      resq 1        ; a handler raised; Parse reports it in band
 endstruc
