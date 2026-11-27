@@ -22,7 +22,7 @@ print("_git:", type(sys._git).__name__, len(sys._git),
       all(isinstance(x, str) for x in sys._git))
 # __spec__ exists; its VALUE is None here, because nothing builds a
 # ModuleSpec -- the import system is assembly rather than
-# importlib._bootstrap, which bugs.md records.  What is compared is that the
+# importlib._bootstrap, which the old bug list recorded.  What is compared is that the
 # attribute is there at all, which is what a module walker needs.
 print("__spec__ present:", hasattr(sys, "__spec__"))
 print("__loader__ present:", hasattr(sys, "__loader__"))

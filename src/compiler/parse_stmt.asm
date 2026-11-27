@@ -3468,7 +3468,7 @@ DEF_FUNC_LOCAL ps_type_alias, PTA_FRAME
     ; A node of its own, which the code generator lowers to the assignment
     ; this used to build directly.  CPython's TypeAlias is not an assignment:
     ; its value is evaluated lazily, inside a TypeAliasType.  That is the
-    ; runtime half, and it is in bugs.md; the tree is what says what was
+    ; runtime half, and it was in the old bug list; the tree is what says what was
     ; written.
     mov rdi, rbx
     mov esi, AST_TYPEALIAS

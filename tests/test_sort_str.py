@@ -116,7 +116,7 @@ def keys_and_mixed():
     # `sorted(["a", None])` is NOT here: it answers ['a', None] instead of
     # raising, while `sorted([None, "a"])` does raise -- the two differ only
     # in which side the None falls on.  Pre-existing, unrelated to the str
-    # arm, and recorded in bugs.md.
+    # arm, and recorded in the old bug list.
 
 
 def big():

@@ -11,7 +11,7 @@ is elsewhere.  That is:
   * every copy.copy, copy.deepcopy and pickle of a subclass of one of them,
     because the reduce protocol reconstructs through __new__.
 
-bugs.md recorded this for `bytes`.  It is a family.
+The old bug list recorded this for `bytes`.  It is a family.
 """
 
 import collections

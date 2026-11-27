@@ -177,7 +177,7 @@ END_FUNC super_no_attribute
 ;; LOAD_SUPER_ATTR refused a proxy outright: `s = super(C, p)` then `s.f()`,
 ;; `getattr(super(C, p), "f")`, and a super object passed anywhere.  The opcode
 ;; handler asks all three, which is why test_descr.test_proxy_super passed --
-;; it happens to use the one shape that specialises -- and why bugs.md read the
+;; it happens to use the one shape that specialises -- and why the old bug list read the
 ;; difference as position-dependent.
 ;;
 ;; The third answer is the one place the result is owned: obj_declared_class

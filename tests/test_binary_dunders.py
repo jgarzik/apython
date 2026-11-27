@@ -35,7 +35,7 @@ for a, b in PAIRS:
             print("r" + n, a, b, type(e).__name__)
 
 print("=== float ===")
-# (-7.5) ** 2.5 is a complex in CPython and a nan here; bugs.md carries it,
+# (-7.5) ** 2.5 is a complex in CPython and a nan here; the old bug list carried it,
 # and it is not what this file is about.
 FPAIRS = [(7.0, 2.0), (-7.5, 2.0), (1.5, 0.5), (2.0, 3.0)]
 for a, b in FPAIRS:

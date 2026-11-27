@@ -11,8 +11,8 @@ def show(label, fn, *a):
         print("%-28s %r" % (label, fn(*a)))
     except TypeError as e:
         # CPython's arity wording for a wrapper that takes a range has a
-        # leading space and says "at most"; ours reports the count.  bugs.md
-        # records that, so only the class is compared for those.
+        # leading space and says "at most"; ours reports the count.  The old bug list
+        # recorded that, so only the class is compared for those.
         text = str(e)
         print("%-28s TypeError%s" % (label, "" if "expected" in text else ": " + text))
     except Exception as e:

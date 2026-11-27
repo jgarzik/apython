@@ -14,7 +14,7 @@
 #
 # The split halves are printed by CONTENT rather than by type: apython builds
 # them from the group's own type where CPython's default derive() builds a
-# plain ExceptionGroup, which is a separate divergence recorded in bugs.md.
+# plain ExceptionGroup, which is a separate divergence recorded in the old bug list.
 
 import gc
 

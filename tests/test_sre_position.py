@@ -42,7 +42,7 @@ for filler in ("x", "é", "\U0001f600", " ", "-"):
           span_of(re.search(r"\w+$", s)))
     # \b and \B are deliberately not probed with a non-ASCII filler: this
     # tree's word-boundary test is ASCII-only, so "\b\d+\b" matches inside
-    # "eee42" where CPython sees no boundary.  bugs.md carries it; it is not
+    # "eee42" where CPython sees no boundary.  The old bug list carried it; it is not
     # what this file is about.
     if filler.isascii():
         print("  b", span_of(re.search(r"\b\d+\b", s)),
@@ -128,7 +128,7 @@ print(next(a).span(), sum(1 for _ in b))
 # the scanner's own search() method, which builds a state the same way
 # finditer does and shares the same cache.  match() is not probed here: a
 # failing scanner.match() ends the scan in CPython and does not in this tree,
-# which bugs.md carries and which has nothing to do with the cache -- it
+# which the old bug list carried and which has nothing to do with the cache -- it
 # reproduces identically on an ASCII subject, where no cache is built at all.
 sc = up.scanner(uni)
 print(span_of(sc.search()), span_of(sc.search()), span_of(sc.search()))

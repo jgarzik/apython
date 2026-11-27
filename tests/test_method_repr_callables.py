@@ -12,7 +12,7 @@
 # when neither is a str.  The names are set on the INSTANCE here because a
 # class's __qualname__ lives in its tp_dict in this tree and in a getset on
 # `type` in CPython, so an instance of a plain class finds one here and not
-# there -- a divergence of its own, recorded in bugs.md, and not what this
+# there -- a divergence of its own, recorded in the old bug list, and not what this
 # file is about.
 
 import types

@@ -246,7 +246,7 @@ PSR_FRAME equ 32            ; + 1 push = 40... see below
 
 ; A whole-nanosecond timestamp: seconds * 1e9 + the nanosecond remainder.
 ; The three _ns fields published tv_nsec alone, so st_mtime_ns was a number
-; below 1e9 -- bugs.md said they carried the exact value, and they did not.
+; below 1e9 -- the old bug list said they carried the exact value, and they did not.
 %macro STAT_FIELD_NS 3          ; %1 = field index, %2 = tv_sec, %3 = tv_nsec
     mov rax, %2
     mov ecx, 1000000000
@@ -1994,7 +1994,7 @@ END_FUNC posix_ftruncate
 ;; The rest of the file-system calls the module was short of: truncate, link,
 ;; chown, fchmod, fsync, dup2 and utime.
 ;;
-;; bugs.md listed ftruncate among the missing ones; ftruncate was here and
+;; The old bug list listed ftruncate among the missing ones; ftruncate was here and
 ;; `truncate` -- the path-taking form, which is what shutil and tempfile
 ;; reach for -- was not.
 ;; ============================================================================

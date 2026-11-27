@@ -1,5 +1,5 @@
 # The eight posix calls the module was short of: chdir, truncate, link, chown,
-# utime, dup2, fsync and fchmod.  bugs.md listed ftruncate among them, but
+# utime, dup2, fsync and fchmod.  The old bug list listed ftruncate among them, but
 # ftruncate was already here; it is `truncate`, the path-taking form that
 # shutil and tempfile reach for, that was missing.
 #

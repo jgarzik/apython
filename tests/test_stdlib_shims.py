@@ -158,7 +158,7 @@ show("tok continuation", lambda: toks("x = (1,\n  2)\n"))
 show("tok backslash", lambda: toks("x = 1 + \\\n  2\n"))
 show("tok number", lambda: toks("0x1f 1_000 1.5e-3 4j\n"))
 # A SyntaxError's str() carries the file and line in CPython and not here
-# (bugs.md), so only the message is compared.
+# (once in the old bug list), so only the message is compared.
 show("tok unterminated", lambda: _tok_err("s = 'a\n"))
 
 # --- atexit

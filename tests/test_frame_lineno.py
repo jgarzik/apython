@@ -10,7 +10,7 @@
 # The frame object is a SNAPSHOT, so f_lineno is where the frame was when
 # sys._getframe() ran -- CPython's is a live view and answers where the frame
 # is when the attribute is READ.  Every case here reads it on the same line,
-# where the two agree; bugs.md carries the difference.
+# where the two agree; the old bug list carried the difference.
 
 import sys
 

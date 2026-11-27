@@ -107,7 +107,7 @@ print("subclass:", MyError("m").__reduce__())
 # in vars(e) and its reduction is a two-tuple with the filename re-packed into
 # the args; here they live in the instance dict, so they come back as a STATE.
 # Every value survives the round trip either way and only the tuple's shape
-# differs -- recorded in bugs.md beside its cause, which is the same one.
+# differs -- recorded in the old bug list beside its cause, which is the same one.
 for e in (OSError(2, "no"), OSError(2, "no", "f1"), OSError("plain"), OSError()):
     r = e.__reduce__()
     # args[:len(e.args)] rather than args: CPython re-packs the filename into

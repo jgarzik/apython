@@ -634,7 +634,7 @@ DEF_FUNC zc_stream_feed, ZF_FRAME
     ; libz's inflate stores to its own frame with `movaps`, so it faults --
     ; a general protection fault inside the library, not a wrong answer -- if
     ; rsp is 8 out when it is called.  This function is reached at both
-    ; alignments, because func_call is (see bugs.md), so it aligns rsp for
+    ; alignments, because func_call is (see ROADMAP.md), so it aligns rsp for
     ; itself rather than trusting the caller.  The frame slots are rbp-based
     ; and do not move.  int_true_divide does the same for glibc's strtod.
     mov r12, rsp

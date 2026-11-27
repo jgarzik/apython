@@ -344,7 +344,7 @@ DEF_FUNC init_num_types, 8       ; + 1 push = 16, 16-aligned
     ;
     ; __repr__ goes through DEF_DUNDER_STRREPR, which calls the DEFINING
     ; type's slot rather than the argument's; the naive form recurses on a
-    ; subclass (bugs.md).  There is deliberately no __str__: CPython's complex
+    ; subclass (once in the old bug list).  There is deliberately no __str__: CPython's complex
     ; has no tp_str of its own, so `complex.__str__ is object.__str__` is True
     ; there, and leaving it out reproduces that while tp_str = complex_repr
     ; still keeps print(2j) fast.

@@ -80,7 +80,7 @@ print(ge.message, [type(x).__name__ for x in ge.exceptions], ge.tag, ge.__dict__
 
 # OSError, whose constructor rewrites its own class.  Its four named
 # attributes live in the instance dict here and in C fields in CPython, so
-# only the attributes themselves are compared; bugs.md carries the rest.
+# only the attributes themselves are compared; the old bug list carried the rest.
 oe = OSError(2, "no such file")
 oe.note = "extra"
 print(oe.errno, oe.strerror, oe.note, oe.note in str(oe.__dict__))

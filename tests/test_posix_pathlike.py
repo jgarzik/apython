@@ -103,7 +103,7 @@ check("listdir a missing one", lambda: posix.listdir(P(TMP + "_nope")))
 check("listdir a file", lambda: posix.listdir(P("/etc/hostname")))
 # Two message shapes differ from CPython's and have nothing to do with the
 # release: rename names only one of its two paths, and the "not a path"
-# message carries no function-name prefix.  bugs.md records both; what
+# message carries no function-name prefix.  The old bug list recorded both; what
 # matters here is the type and that the resolved path reaches the message.
 check("rename a missing one", lambda: type_and_path(
     lambda: posix.rename(P(TMP + "_nope"), P(TMP2))))

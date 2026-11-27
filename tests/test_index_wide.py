@@ -7,7 +7,7 @@
 # key's type in the refusal.  Both are diffed against CPython here.
 
 # CPython's compiler warns about a constant subscript that looks like a
-# missing comma, and this one has no such channel yet -- see bugs.md.
+# missing comma, and this one has no such channel yet -- once in the old bug list.
 import warnings
 warnings.simplefilter("ignore", SyntaxWarning)
 

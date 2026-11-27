@@ -61,7 +61,7 @@ print(list.__len__(L([1, 2])), list.__contains__(L([1, 2]), 2))
 # a subtype of the other -- so set's wrappers have to answer for both, or
 # frozenset loses the names entirely.  (CPython gives frozenset its own
 # descriptors and so rejects set.__and__(frozenset(...)); we are the more
-# permissive of the two, which bugs.md records.)
+# permissive of the two, which the old bug list recorded.)
 fs = frozenset({1, 2})
 print(len(fs), sorted(fs.__iter__()), fs.__len__())
 print(sorted(fs & {2, 3}), sorted(fs | {3}))

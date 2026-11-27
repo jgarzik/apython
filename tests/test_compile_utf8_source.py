@@ -11,7 +11,7 @@
 # the newline and the `y`, so two statements became one.
 #
 # CPython refuses the file as a codec error with a position of its own;
-# bugs.md records that wording difference.  What matters is the refusal.
+# ROADMAP.md records that wording difference.  What matters is the refusal.
 
 bad = [
     b"x = caf\xe9\ny = 2\nprint(y)\n",       # Latin-1, no encoding declared
@@ -33,7 +33,7 @@ for src in bad:
     except SyntaxError as e:
         # The line, not the column: CPython's offset for a bad FOUR-byte
         # lead is one further along than ours, and its message is a codec
-        # error of its own.  bugs.md records both.
+        # error of its own.  ROADMAP.md records both.
         print("reject", src, "|", e.lineno)
 
 good = [
@@ -48,7 +48,7 @@ for src in good:
 
 # And the code points really are what they should be.  A name PEP 3131's NFKC
 # normalisation would rewrite is left out: that step is absent here, and
-# bugs.md records it -- CPython turns U+1D498 into plain 'U'.
+# the old bug list recorded it -- CPython turns U+1D498 into plain 'U'.
 code = compile(b"\xce\xb1\xce\xb2 = 1\n", "<t>", "exec")
 name = code.co_names[0]
 print([ord(c) for c in name], len(name))

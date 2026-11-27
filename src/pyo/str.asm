@@ -19,7 +19,7 @@ extern none_singleton
 ;; its argument shuffling was about half the work.  They are still O(n) per
 ;; index -- `s[i]` over a non-ASCII string walks from byte 0, so a loop over
 ;; one is quadratic.  What would make it O(1) is a cursor on the string object
-;; itself, which is a layout change; bugs.md records it.
+;; itself, which is a layout change; ROADMAP.md records it.
 ;;
 ;; Every operand must be a 64-bit register: the byte tests are written in the
 ;; 32-bit form because a macro parameter cannot take a size suffix.

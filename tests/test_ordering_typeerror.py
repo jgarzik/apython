@@ -45,7 +45,7 @@ def ordering(a, b, label):
 
 ordering(lambda: object(), lambda: object(), "object")
 ordering(lambda: range(1), lambda: range(2), "range")
-# (slice is left out: CPython orders slices as tuples and we raise -- bugs.md)
+# (slice is left out: CPython orders slices as tuples and we raise -- once in the old bug list)
 ordering(lambda: [1], lambda: {1}, "list/set")
 ordering(lambda: {1: 2}, lambda: {3: 4}, "dict")
 ordering(lambda: int, lambda: str, "type")

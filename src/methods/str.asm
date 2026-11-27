@@ -98,7 +98,7 @@ section .rodata
 ;; bytes each in UTF-8, so no byte table can see them.  What the table DOES
 ;; add over the ladder it replaces is the four ASCII separators \x1c-\x1f,
 ;; which CPython's str.split() and str.strip() treat as whitespace and which
-;; the ladder had simply left out.  bugs.md records the rest.
+;; the ladder had simply left out.  The old bug list recorded the rest.
 global str_ws_class
 str_ws_class:
     db 0,0,0,0,0,0,0,0,0,1,1,1,1,1,0,0

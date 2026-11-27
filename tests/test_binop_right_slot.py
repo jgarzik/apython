@@ -18,7 +18,7 @@ print(u == (None | int))
 print(type(None | (int | str)).__name__)
 
 # What must NOT change: a pair neither side can serve is still a TypeError,
-# and it still names no operator (bugs.md records that wording gap).
+# and it still names no operator (the old bug list recorded that wording gap).
 for expr in ("None + 1", "1 + None", "None * 2", "[] - []", "'a' - 'b'"):
     try:
         eval(expr)
@@ -32,7 +32,7 @@ print(3 | 5, 3 & 5, 3 ^ 5, 1 << 4, 32 >> 2)
 
 
 # CPython's subclass-priority rule, the other half of binary_op1 -- and the
-# half of do_richcompare that bugs.md did not record at all.  When the right
+# half of do_richcompare that the old bug list did not record at all.  When the right
 # operand's type is a PROPER SUBCLASS of the left's and overrides the
 # operator, the right side goes first: P() + Q() for a Q(P) defining __radd__
 # is Q.__radd__, and P() < Q() for a Q defining __gt__ is Q.__gt__.

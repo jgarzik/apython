@@ -76,7 +76,7 @@ class Both:
 
 
 # __bytes__ wins over __index__, which is CPython's order.  (__index__ ALONE
-# is a count there and a TypeError here -- bugs.md records that.)
+# is a count there and a TypeError here -- the old bug list recorded that.)
 print(bytes(Both()))
 
 

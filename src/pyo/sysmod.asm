@@ -1195,7 +1195,7 @@ DEF_FUNC sys_module_init, 40
     ; os._createenviron decodes posix.environ with it.  It answers 'utf-8'
     ; unconditionally: PEP 540's locale handling does not exist here, and
     ; neither does the surrogateescape error handler that would make a
-    ; non-UTF-8 filename survive the round trip -- bugs.md records the gap.
+    ; non-UTF-8 filename survive the round trip -- the old bug list recorded the gap.
     lea rdi, [rel sys_getfsencoding_func]
     lea rsi, [rel sm_getfsencoding]
     call builtin_func_new
@@ -1215,7 +1215,7 @@ DEF_FUNC sys_module_init, 40
     ; --- sys.getfilesystemencodeerrors function ---
     ; os._fscodec reads it next to getfilesystemencoding.  It answers
     ; 'surrogateescape', which is the name CPython uses -- and which
-    ; str.encode here accepts and ignores; bugs.md records that.
+    ; str.encode here accepts and ignores; the old bug list recorded that.
     lea rdi, [rel sys_getfsencodeerrors_func]
     lea rsi, [rel sm_getfsencodeerrors]
     call builtin_func_new
@@ -1449,7 +1449,7 @@ DEF_FUNC sys_module_init, 40
 
     ; The three every module has.  __spec__ is None here for the same reason
     ; it is None on an imported module -- nothing builds a ModuleSpec, which
-    ; bugs.md records -- and __package__ is "" for a top-level module.
+    ; the old bug list recorded -- and __package__ is "" for a top-level module.
     SYS_ADD_OBJ sm_dunder_spec, none_singleton
     SYS_ADD_OBJ sm_dunder_loader, none_singleton
     lea rdi, [rel sm_dunder_package]

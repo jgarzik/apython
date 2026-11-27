@@ -164,8 +164,8 @@ print("sub callable ->", repr(rx2.sub(lambda mm: mm.group(2) + mm.group(1), "aba
 # A malformed template has to be refused; the class is deliberately not
 # pinned here.  CPython raises re.error, which is defined in Python and so
 # cannot be constructed from the engine without importing re -- these raise
-# IndexError for a group problem and ValueError for a bad escape.  bugs.md
-# carries it.
+# IndexError for a group problem and ValueError for a bad escape.  The old bug list
+# carried it.
 for bad in (r"\9", r"\g<nope>", r"\g<", r"\g", r"\q", "\\"):
     try:
         print("bad %-10r ->" % bad, repr(m.expand(bad)))

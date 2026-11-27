@@ -319,7 +319,7 @@ AST_INTERACTIVE equ 82   ; clist=body    (the "single" mode root); produced
 ; PEP 695.  The parameters are parsed into these and then ignored by
 ; everything downstream: a type parameter is visible only to annotations, and
 ; annotations are not evaluated here.  They exist so that the AST says what
-; the source said -- bugs.md carries what the RUNTIME would additionally need.
+; the source said -- the old bug list carried what the RUNTIME would additionally need.
 AST_TYPEALIAS   equ 83   ; a=target name node, b=value; type params on the side
 AST_TYPEPARAMS  equ 84   ; clist=the parameters; hung off a def, class or alias
                          ; through Comp.typeparams rather than a field, because

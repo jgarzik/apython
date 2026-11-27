@@ -4,7 +4,7 @@
 # asked about once, which fills a cache -- lived as long as the ABC did.
 # Registries are process-lifetime, so that is a leak with no upper bound on
 # what it holds: a class, its dict, its methods, and whatever those close
-# over.  bugs.md said "revisit if _weakref lands"; it has.
+# over.  The old bug list said "revisit if _weakref lands"; it has.
 #
 # A ref with no callback is SHARED here, so the same class always yields the
 # same object.  That is what makes a set lookup find what a registration put

@@ -3,7 +3,7 @@
 They are the reason the module's own header said "every caller in the suite
 reaches for frombytes and tobytes instead": that was measured and it is not
 true.  CPython's `test.datetimetester` calls `fromfile` on its way into 840 of
-its tests, and it is the single largest reach of anything left in bugs.md.
+its tests, and it is the single largest reach of anything left in the old bug list.
 
 The two are the file object's own `read` and `write` seen from the array's
 side, so what they mostly have to get right is the failures: a short read

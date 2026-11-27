@@ -2029,7 +2029,7 @@ END_FUNC set_nb_and
 ;; The in-place set operators.
 ;;
 ;; `s &= t` used to fall through to the binary form and REBIND, so every other
-;; name for the same set went on seeing the old value.  bugs.md filed that as a
+;; name for the same set went on seeing the old value.  The old bug list filed that as a
 ;; deliberate omission, on the grounds that a by-name `__iand__` that did not
 ;; really mutate would be worse than none at all.  It would be; the answer is
 ;; to mutate.

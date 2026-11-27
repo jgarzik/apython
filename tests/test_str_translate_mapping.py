@@ -1,7 +1,7 @@
 # str.translate over a mapping object, including the misses it signals with an
 # exception.
 #
-# bugs.md carried this as open: "a mapping object whose __getitem__ raises
+# The old bug list carried this as open: "a mapping object whose __getitem__ raises
 # LookupError to mean 'not in the table' propagates instead, where CPython
 # carries on", with the note that catching it was impossible because
 # raise_exception tail-jumps into the unwinder and never returns.  It works --

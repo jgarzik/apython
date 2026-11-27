@@ -1573,7 +1573,7 @@ DEF_FUNC %1_dunder_%2, DB_FRAME
     ; CPython reports both counts, and counts self in neither.  Its wording
     ; for a wrapper that takes a RANGE is different again (" expected at most
     ; 2 arguments, got 3", the leading space its own); ours reports the count
-    ; it wanted, which bugs.md records among the wordings that differ.
+    ; it wanted, which the old bug list recorded among the wordings that differ.
     dec rsi                     ; rsi is still nargs on this path
     mov edi, 1
     xor edx, edx                ; check_num_args' wording, with no gap

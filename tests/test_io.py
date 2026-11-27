@@ -135,7 +135,7 @@ check("latin-1 round trip", lambda: (lambda: [
     open(TMP + "2", "rb").read(),
     open(TMP + "2", encoding="latin-1").read()][1:])())
 # str() of a UnicodeDecodeError does not render its fields here, so this
-# checks the type rather than the message; bugs.md records the gap.
+# checks the type rather than the message; the old bug list recorded the gap.
 check("ascii rejects", lambda: type_name_of(
     lambda: open(TMP, encoding="ascii").read()))
 check("a split character", lambda: (lambda h: (h.read(2), h.read()))(

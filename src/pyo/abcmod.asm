@@ -7,7 +7,7 @@
 ; typing and most of what stands on them.
 ;
 ; The algorithm is CPython's, in Modules/_abc.c.  Two deliberate departures,
-; both recorded in bugs.md:
+; both once recorded in the old bug list:
 ;
 ;   * The registry and the caches hold strong references.  CPython uses weak
 ;     ones so a registered class can be collected; here a class that is

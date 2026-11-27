@@ -72,7 +72,7 @@ check("always Z", lambda: "abc".translate(Always()))
 # An exception raised inside a subscript cannot be caught: raise_exception
 # tail-jumps into eval_exception_unwind, which resumes the eval loop from
 # saved globals rather than returning through the C stack, so it propagates
-# where CPython would carry on.  bugs.md records it.  Every table that has a
+# where CPython would carry on.  The old bug list recorded it.  Every table that has a
 # LENGTH -- dict, list, tuple, str, bytes -- is exact, because the bound is
 # checked before the lookup rather than after, and those are the tables real
 # code uses.

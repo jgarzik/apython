@@ -3,7 +3,7 @@
 #
 # This is the commit where the design is on trial.  libexpat calls OUR function
 # pointer, which has to call a Python handler and then RETURN to libexpat --
-# and the handler may raise.  bugs.md's "a raise from a C-level slot is a
+# and the handler may raise.  The old bug list's "a raise from a C-level slot is a
 # non-local jump" is about assembly RAISING (`RAISE` tail-jumps into the
 # unwinder, which resets rsp to eval_base_rsp and never comes back); a CALLED
 # Python function that raises returns control normally, because eval_frame

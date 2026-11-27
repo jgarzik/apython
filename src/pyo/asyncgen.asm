@@ -1158,7 +1158,7 @@ DEF_FUNC _agt_throw_impl, AGTT_FRAME
     INCREF_V rcx, rdx
     ; A frame slot and not a push: DECREF_REG is `call obj_dealloc`, and a
     ; lone push before it made that call at rsp % 16 == 8.  The value has a
-    ; name, so it gets a slot -- which is what bugs.md prescribes for this
+    ; name, so it gets a slot -- which is what the old bug list prescribed for this
     ; shape rather than a pad.
     mov [rbp - AGTT_VAL], rcx
     mov rdi, rax

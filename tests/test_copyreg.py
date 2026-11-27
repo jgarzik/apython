@@ -8,7 +8,7 @@ AttributeError and CPython's own pickle.py -- which opens with
 
 -- could not import at all.  Nothing here registers an extension code, which
 is exactly why it went unnoticed: `from copyreg import *` does not check that
-the names in __all__ exist (bugs.md carries that), so the promise was never
+the names in __all__ exist (the old bug list carried that), so the promise was never
 tested against the module.
 """
 
@@ -80,7 +80,7 @@ t("__newobj_ex__", lambda: copyreg.__newobj_ex__(dict, (), {}))
 t("dispatch_table is a dict", lambda: isinstance(copyreg.dispatch_table, dict))
 # _reconstructor over a plain class.  The `list`/`object` pairing is not used
 # here: object.__new__(list) is meant to raise "not safe", and does not in this
-# tree -- a separate gap, recorded in bugs.md.
+# tree -- a separate gap, recorded in the old bug list.
 
 
 class _R:

@@ -92,13 +92,13 @@ print(callable(Later()), Later()())
 # `del Later.__call__` is not probed: type_install_slots never clears a slot
 # it once filled, so a deleted dunder stays installed.  That is a whole family
 # -- `del C.__iter__` answers RuntimeError today where CPython answers
-# TypeError -- and bugs.md carries it.  It is not specific to __call__.
+# TypeError -- and the old bug list carried it.  It is not specific to __call__.
 
 
 # `__call__ = None` is not probed: type_install_slots leaves the slot empty
 # for any dunder explicitly set to None, which is right for __iter__ and
 # __hash__ and makes this tree answer callable() False where CPython answers
-# True and then fails inside the call.  bugs.md carries it.
+# True and then fails inside the call.  The old bug list carried it.
 
 # --- iter(callable, sentinel) ------------------------------------------------
 

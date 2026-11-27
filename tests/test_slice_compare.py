@@ -2,7 +2,7 @@
 #
 # slice_type.tp_richcompare was 0, so every comparison fell to op_compare_op's
 # identity path: ordering raised TypeError and equality was identity, which
-# made slice(1,2,3) == slice(1,2,3) False.  bugs.md recorded the ordering half
+# made slice(1,2,3) == slice(1,2,3) False.  The old bug list recorded the ordering half
 # and said equality worked; it did not.  tp_hash was 0 as well, though a slice
 # has been hashable since 3.12.
 

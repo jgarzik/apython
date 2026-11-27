@@ -100,7 +100,7 @@ END_FUNC bytes_check_errors_type
 ;;
 ;; "'utf-8' codec can't decode byte 0xff in position 3: invalid start byte" --
 ;; CPython's wording, built here because str() of a UnicodeDecodeError does
-;; not render its fields (bugs.md).  Without the text the exception says
+;; not render its fields (once in the old bug list).  Without the text the exception says
 ;; nothing about which byte or where.
 ;; ============================================================================
 BRD_POS   equ 8

@@ -48,7 +48,7 @@ gc.collect()
 
 # strict= takes the same exit before it raises.  The wording of its message
 # is still ours rather than CPython's, so only the fact of the ValueError is
-# compared here; bugs.md carries the difference.
+# compared here; the old bug list carried the difference.
 for lengths in ((4, 1), (1, 4), (3, 3)):
     try:
         list(zip(fresh("m", lengths[0]), fresh("n", lengths[1]), strict=True))

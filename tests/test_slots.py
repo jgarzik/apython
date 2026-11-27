@@ -318,7 +318,7 @@ except TypeError as e:
 # fixed-offset slot.  Refusing is the divergence; writing over the characters
 # was the alternative, and it was a SIGSEGV.  Either answer passes here, which
 # is why this asks whether the outcome was SAFE rather than what it was;
-# bugs.md carries the divergence itself.
+# the old bug list carried the divergence itself.
 try:
     class MyStr(str):
         __slots__ = ("s",)

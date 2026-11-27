@@ -187,7 +187,7 @@ def the_getter_raises():
 # reasons that predate this cache and that it does not touch: a property
 # SUBCLASS defining its own __get__ is not consulted, and an AttributeError out
 # of a getter is propagated instead of letting __getattr__ answer.  Both are
-# recorded in bugs.md.
+# recorded in the old bug list.
 
 
 def the_getter_raises_attribute_error():

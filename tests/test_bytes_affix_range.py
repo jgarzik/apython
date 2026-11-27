@@ -13,7 +13,7 @@ def show(label, fn, *args):
         # CPython qualifies an arity message with the type for its
         # clinic-generated methods and not for its hand-written ones, and
         # bytes.startswith is one of the latter; ours qualifies every one.
-        # bugs.md records that inconsistency, so only what the message SAYS
+        # the old bug list recorded that inconsistency, so only what the message SAYS
         # is compared here, from the method name on.
         text = str(e)
         if "() takes " in text:
