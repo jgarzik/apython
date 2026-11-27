@@ -100,7 +100,7 @@ $(shell mkdir -p build; printf '%s\n' '$(NASMFLAGS)' | cmp -s - $(FLAGSTAMP) \
 # Python compiler for tests
 PYTHON = python3
 
-.PHONY: all install clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
+.PHONY: all install clean regen check gen-cpython-tests check-cpython check-cpython-source check-stdlib check-pkg rc-sweep rc-sweep-control conformance check-re check-source check-pyc check-arity check-syntax check-dtoa check-round lib-pyc
 
 all: $(TARGET) lib-pyc build/_ctypes_test.so
 
@@ -257,6 +257,10 @@ rc-sweep: $(TARGET)
 
 rc-sweep-control:
 	@bash tests/rc_sweep.sh cp
+
+# Matched file and package suites, scored by test ID.
+conformance: $(TARGET)
+	@python3 tests/conformance.py
 
 # The regex engine, diffed against CPython over a few hundred patterns.  Not
 # in `make check`: `re` is a Python module, so it comes from $CPYTHON_LIB.

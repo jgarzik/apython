@@ -62,13 +62,15 @@ RC_OUTDIR=<dir> bash tests/rc_sweep.sh ap      # then: cp
 bash tests/pkg_probe.sh                        # apython side of the packages
 ```
 
-Three things the instruments do not yet do, and should (Phase 0):
+Run `make conformance` for a matched file and package report by test ID.
+The control binary and its source checkout must match the vendored CPython
+release. For focused runs, pass module names to `python3 tests/conformance.py`.
+Use `--output` to keep logs and per-test outcomes. A crash, timeout, or
+incomplete control is visible on its module row; the published score covers
+completed control runs.
 
-- `rc_sweep.sh` reports skips but does not subtract the excess, so it prints
-  the headline.  It needs a strict column.
-- `pkg_probe.sh` has no CPython control.  The control above was run by hand.
-- Skip *reasons* only appear with `-v`.  The ranked list of them is the
-  cheapest gap catalogue there is and nothing prints it.
+The older scripts still provide the aggregate snapshot above and the package
+floor. Their aggregate counting is different from the matched-ID report.
 
 The control is itself imperfect: under it `test_runpy` hangs,
 `test_tracemalloc` aborts and `test_monitoring` reports no tests, so those
@@ -109,8 +111,7 @@ full gate set, both sweeps and the benchmarks.
 
 No conformance gain; everything after it is steered by what this fixes.
 
-1. Add the strict column and the skip-reason table to `rc_sweep.sh`; give
-   `pkg_probe.sh` a control side and fold both into one report.
+1. Use the matched conformance report for strict counts and ranked skip reasons.
 2. Re-record `tests/pkg_floor.txt` and the source floor; find out why
    `test_inspect` and `test_capi` dropped and make `check-pkg` green.
 3. Settle the scope decisions above and encode them as an exclusion list the
