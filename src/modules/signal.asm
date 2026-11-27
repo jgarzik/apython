@@ -880,42 +880,48 @@ END_FUNC signal_default_handler_get
 ;; where it stands.  That is what CPython does, and what every `except
 ;; KeyboardInterrupt` in the stdlib is written against.
 ;;
-;; SIGPIPE gets SIG_IGN, which CPython also does and for the same reason: a
-;; write to a closed pipe should be a BrokenPipeError the program can catch,
-;; not a signal that kills it where it stands.  Without it `apython foo.py |
-;; head` died at exit code 141 with no message, and every test in CPython's
-;; test_subprocess that closes a pipe early took the interpreter with it.
+;; CPython also ignores SIGPIPE and SIGXFSZ so a closed pipe or file-size
+;; limit is reported as a catchable write error.
 ;; ============================================================================
 SDI_FRAME equ 16            ; + 0 pushes = 16
 global signal_default_init
 DEF_FUNC signal_default_init, SDI_FRAME
     call signal_default_handler_get
     test rax, rax
-    jz .sdi_done
+    jz .sdi_ignore
     inc qword [rax + PyObject.ob_refcnt]   ; the SIGINT table owns a reference too
     lea rcx, [rel signal_handlers]
     mov [rcx + 2*8], rax                    ; SIGINT
     mov edi, 2
     lea rsi, [rel signal_trampoline]
     call signal_install
-.sdi_done:
-    ; SIGPIPE -> SIG_IGN, recorded in the table as the int 1 so that
-    ; getsignal(SIGPIPE) answers signal.SIG_IGN as CPython's does.
-    mov edi, 13
-    mov esi, 1                              ; SIG_IGN
-    call signal_install
-    test eax, eax
-    js .sdi_out
-    mov edi, 1
-    extern int_from_i64
-    call int_from_i64
-    V_PACK rax, rdx
-    lea rcx, [rel signal_handlers]
-    mov [rcx + 13*8], rax
-.sdi_out:
+.sdi_ignore:
+    mov edi, 13                             ; SIGPIPE
+    call signal_default_ignore
+    mov edi, 25                             ; SIGXFSZ
+    call signal_default_ignore
     leave
     ret
 END_FUNC signal_default_init
+
+;; signal_default_ignore(rdi = signum) -> void
+;; Publish SIG_IGN to getsignal only if the kernel accepted it.
+SDIGN_SIGNUM equ 8
+SDIGN_FRAME  equ 16
+DEF_FUNC_LOCAL signal_default_ignore, SDIGN_FRAME
+    mov [rbp - SDIGN_SIGNUM], rdi
+    mov esi, 1                              ; SIG_IGN
+    call signal_install
+    test eax, eax
+    js .out
+    mov rdi, [rbp - SDIGN_SIGNUM]
+    mov rax, V_INT(1)
+    lea rcx, [rel signal_handlers]
+    mov [rcx + rdi*8], rax
+.out:
+    leave
+    ret
+END_FUNC signal_default_ignore
 
 ;; ============================================================================
 ;; signal_module_create() -> PyObject*
