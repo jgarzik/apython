@@ -890,6 +890,94 @@ struc AsyncGenWrapped
     .agw_value:     resq 1  ; +16: the wrapped Value, owned
 endstruc
 
+; _asyncio.Future — native asyncio Future object (heaptype over object).
+; Begins with PyInstanceObject's 3-word header (ob_refcnt, ob_type, inst_dict)
+; so type_from_parts's tp_dictoffset=16 and subclass __slots__/__dict__ work
+; identically to _io.FileIO and _io.BytesIO.
+FUT_STATE_PENDING   equ 0
+FUT_STATE_CANCELLED equ 1
+FUT_STATE_FINISHED  equ 2
+
+struc PyFutureObject
+    .ob_refcnt:          resq 1  ; +0
+    .ob_type:            resq 1  ; +8
+    .inst_dict:          resq 1  ; +16: instance __dict__ (tp_dictoffset = 16)
+    .fut_loop:           resq 1  ; +24: event loop (owned Value, 0 = uninitialized)
+    .fut_callback0:      resq 1  ; +32: first done callback (owned Value, or 0)
+    .fut_context0:       resq 1  ; +40: first callback context (owned Value, or 0)
+    .fut_callbacks:      resq 1  ; +48: list of (cb, ctx) tuples for 2nd+ (owned, or 0)
+    .fut_exception:      resq 1  ; +56: exception (owned Value, or 0)
+    .fut_exception_tb:   resq 1  ; +64: saved traceback (owned Value, or 0)
+    .fut_result:         resq 1  ; +72: result (owned Value, or 0)
+    .fut_source_tb:      resq 1  ; +80: source traceback list (owned Value, or 0)
+    .fut_cancel_msg:     resq 1  ; +88: cancel message (owned Value, or 0)
+    .fut_cancelled_exc:  resq 1  ; +96: saved CancelledError (owned Value, or 0)
+    .fut_state:          resd 1  ; +104: FUT_STATE_*
+    .fut_log_tb:         resd 1  ; +108: 1 if unretrieved exception should be logged
+    .fut_blocking:       resd 1  ; +112: 1 if _asyncio_future_blocking is True
+    .fut_pad:            resd 1  ; +116: alignment pad (total 120)
+endstruc
+
+; _asyncio.Task — native asyncio Task, subclassing _asyncio.Future.
+; Prefix matches PyFutureObject byte-for-byte so every Future method works
+; directly on Task instances and Task subclasses.
+struc PyTaskObject
+    .ob_refcnt:          resq 1  ; +0
+    .ob_type:            resq 1  ; +8
+    .inst_dict:          resq 1  ; +16
+    .fut_loop:           resq 1  ; +24
+    .fut_callback0:      resq 1  ; +32
+    .fut_context0:       resq 1  ; +40
+    .fut_callbacks:      resq 1  ; +48
+    .fut_exception:      resq 1  ; +56
+    .fut_exception_tb:   resq 1  ; +64
+    .fut_result:         resq 1  ; +72
+    .fut_source_tb:      resq 1  ; +80
+    .fut_cancel_msg:     resq 1  ; +88
+    .fut_cancelled_exc:  resq 1  ; +96
+    .fut_state:          resd 1  ; +104
+    .fut_log_tb:         resd 1  ; +108
+    .fut_blocking:       resd 1  ; +112
+    .fut_pad:            resd 1  ; +116
+    .task_fut_waiter:    resq 1  ; +120: awaited Future (owned Value, or 0)
+    .task_coro:          resq 1  ; +128: wrapped coroutine (owned Value, or 0)
+    .task_name:          resq 1  ; +136: name str or int counter (owned Value, or 0)
+    .task_context:       resq 1  ; +144: contextvars.Context (owned Value, or 0)
+    .task_must_cancel:   resd 1  ; +152: 1 if next step must throw CancelledError
+    .task_log_destroy:   resd 1  ; +156: 1 if pending task logs on __del__
+    .task_num_cancels:   resd 1  ; +160: cancellation request count
+    .task_pad:           resd 1  ; +164: alignment pad (total 168)
+endstruc
+
+; _asyncio.FutureIter — iterator returned by Future.__await__ / Future.__iter__.
+; gi_return_value sits at +48 (matching PyGenObject.gi_return_value) so op_send
+; and builtin_next_fn read the Future's result directly when tp_iternext exhausts.
+struc PyFutureIterObject
+    .ob_refcnt:          resq 1  ; +0
+    .ob_type:            resq 1  ; +8
+    .fi_future:          resq 1  ; +16: PyFutureObject* (owned, 0 once exhausted/closed)
+    .fi_pad1:            resq 1  ; +24
+    .fi_pad2:            resq 1  ; +32
+    .fi_pad3:            resq 1  ; +40
+    .gi_return_value:    resq 1  ; +48: result Value for op_send exhaustion (owned, or 0)
+endstruc                         ; 56 bytes
+
+; _asyncio.TaskStepMethWrapper — callable scheduled via loop.call_soon for Task._step
+struc PyTaskStepWrapperObject
+    .ob_refcnt:          resq 1  ; +0
+    .ob_type:            resq 1  ; +8
+    .sw_task:            resq 1  ; +16: PyTaskObject* (owned)
+    .sw_arg:             resq 1  ; +24: exception Value or 0 (owned)
+    .sw_eager:           resq 1  ; +32: 1 when invoked from eager_start (skips enter/leave)
+endstruc                         ; 40 bytes
+
+; Callable bound wrapper for Task._wakeup (used in add_done_callback)
+struc PyTaskWakeupObject
+    .ob_refcnt:          resq 1  ; +0
+    .ob_type:            resq 1  ; +8
+    .tw_task:            resq 1  ; +16: PyTaskObject* (owned)
+endstruc                         ; 24 bytes
+
 struc AsyncGenASend
     .ob_refcnt:     resq 1  ; +0
     .ob_type:       resq 1  ; +8

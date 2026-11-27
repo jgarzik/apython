@@ -7,7 +7,7 @@ import sys
 import weakref
 
 if sys.implementation.name == "apython":
-    from _asyncio_future import Future
+    from _asyncio_native import Future
 else:
     from _asyncio import Future
 

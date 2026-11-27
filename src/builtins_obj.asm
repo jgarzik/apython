@@ -408,10 +408,15 @@ DEF_FUNC builtin_next_fn, NX_FRAME
     ; __next__ raising ValueError reported StopIteration instead.
     EXC_RAISED_SINCE [rbp - NX_EXC], rcx, .next_got_val_null
 
-    ; Check if iterator is a generator (has gi_return_value)
+    ; Check if iterator is a generator or FutureIter (both carry gi_return_value at +48)
     lea rax, [rel gen_type]
     cmp [rbx + PyObject.ob_type], rax
+    je .next_stop_has_retval
+    extern future_iter_type
+    lea rax, [rel future_iter_type]
+    cmp [rbx + PyObject.ob_type], rax
     jne .next_stop_no_val
+.next_stop_has_retval:
     ; Get generator's return value for StopIteration (already a Value)
     mov rsi, [rbx + PyGenObject.gi_return_value]
     test rsi, rsi

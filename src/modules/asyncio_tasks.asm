@@ -5,6 +5,7 @@
 %include "threadstate.inc"
 %include "value.inc"
 
+extern ap_strcmp
 extern async_call_method
 extern async_import
 extern builtin_func_new
@@ -115,13 +116,40 @@ END_FUNC async_scheduled_registry
 
 ;; async_current_task(args, nargs) -> running task or None
 ;; Fails: 0
-DEF_FUNC_LOCAL async_current_task
+ACT_LOOP  equ 8
+ACT_FRAME equ 16
+DEF_FUNC_LOCAL async_current_task, ACT_FRAME
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    mov qword [rbp - ACT_LOOP], 0
+    test rax, rax
+    jz .no_kw
+    mov rcx, [rax + PyTupleObject.ob_size]
+    cmp rcx, 1
+    ja .bad_kw
+    test rcx, rcx
+    jz .no_kw
+    cmp rsi, 1
+    jne .arity
+    mov rdx, [rdi]
+    mov [rbp - ACT_LOOP], rdx
+    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rdx]
+    lea rdi, [rdx + PyStrObject.data]
+    lea rsi, [rel async_kw_loop_name]
+    call ap_strcmp
+    test eax, eax
+    jnz .bad_kw
+    mov rsi, [rbp - ACT_LOOP]
+    jmp .have_loop_arg
+.no_kw:
     cmp rsi, 1
     ja .arity
-    lea rax, [rel none_singleton]
     test rsi, rsi
     jz .running_loop
     mov rsi, [rdi]
+.have_loop_arg:
+    lea rax, [rel none_singleton]
     cmp rsi, rax
     jne .lookup
 .running_loop:
@@ -143,6 +171,8 @@ DEF_FUNC_LOCAL async_current_task
     ret
 .no_loop:
     FAIL exc_RuntimeError_type, "no running event loop", .failed
+.bad_kw:
+    FAIL exc_TypeError_type, "current_task() got an unexpected keyword argument", .failed
 .arity:
     FAIL exc_TypeError_type, "current_task() takes at most one argument", .failed
 .failed:
@@ -309,3 +339,4 @@ async_add_name: db "add", 0
 async_discard_name: db "discard", 0
 async_weakref_name: db "weakref", 0
 async_weakset_name: db "WeakSet", 0
+async_kw_loop_name: db "loop", 0
