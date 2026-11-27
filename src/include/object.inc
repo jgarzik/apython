@@ -962,6 +962,19 @@ struc PyFutureIterObject
     .gi_return_value:    resq 1  ; +48: result Value for op_send exhaustion (owned, or 0)
 endstruc                         ; 56 bytes
 
+; coroutine_wrapper — iterator returned by coroutine.__await__().
+; gi_return_value sits at +48 so op_send and builtin_next_fn read the wrapped
+; coroutine's return value directly when tp_iternext exhausts.
+struc PyCoroWrapperObject
+    .ob_refcnt:          resq 1  ; +0
+    .ob_type:            resq 1  ; +8
+    .cw_coro:            resq 1  ; +16: PyGenObject* (owned)
+    .cw_pad1:            resq 1  ; +24
+    .cw_pad2:            resq 1  ; +32
+    .cw_pad3:            resq 1  ; +40
+    .gi_return_value:    resq 1  ; +48: return Value (owned, or 0)
+endstruc                         ; 56 bytes
+
 ; _asyncio.TaskStepMethWrapper — callable scheduled via loop.call_soon for Task._step
 struc PyTaskStepWrapperObject
     .ob_refcnt:          resq 1  ; +0

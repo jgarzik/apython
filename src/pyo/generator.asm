@@ -2639,3 +2639,270 @@ DEF_FUNC gen_get_qualname, 16       ; + 0 pushes = 16, 16-aligned
     leave
     jmp gen_get_name
 END_FUNC gen_get_qualname
+
+;; ============================================================================
+;; coroutine_wrapper — iterator returned by coroutine.__await__()
+;;
+;; CPython returns a distinct coroutine_wrapper iterator rather than self so
+;; that a user awaitable writing `def __await__(self): return self.coro.__await__()`
+;; yields a valid iterator (not a coroutine), while returning a bare coroutine
+;; from __await__ is still rejected as a non-iterator.
+;; ============================================================================
+
+;; coro_wrapper_new(rdi = PyGenObject* coro) -> owned PyCoroWrapperObject*
+DEF_FUNC coro_wrapper_new, 8
+    push rbx
+    mov rbx, rdi
+    mov edi, PyCoroWrapperObject_size
+    lea rsi, [rel coro_wrapper_type]
+    extern gc_alloc
+    call gc_alloc
+    INCREF rbx
+    mov [rax + PyCoroWrapperObject.cw_coro], rbx
+    mov qword [rax + PyCoroWrapperObject.cw_pad1], 0
+    mov qword [rax + PyCoroWrapperObject.cw_pad2], 0
+    mov qword [rax + PyCoroWrapperObject.cw_pad3], 0
+    mov qword [rax + PyCoroWrapperObject.gi_return_value], 0
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    extern gc_track
+    call gc_track
+    add rsp, 8
+    pop rax
+    pop rbx
+    leave
+    ret
+END_FUNC coro_wrapper_new
+
+;; coro_dunder_await(rdi = args, rsi = nargs) -> owned PyCoroWrapperObject*
+;; Fails: 0
+DEF_FUNC coro_dunder_await
+    NO_KEYWORDS_RET "__await__() takes no keyword arguments", .cda_fail
+    cmp rsi, 1
+    jne .cda_arity
+    mov rdi, [rdi]
+    call coro_wrapper_new
+    leave
+    ret
+.cda_arity:
+    FAIL exc_TypeError_type, "__await__() takes no arguments", .cda_fail
+.cda_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC coro_dunder_await
+
+;; coro_wrapper_iter(rdi = self) -> owned self
+DEF_FUNC_LOCAL coro_wrapper_iter
+    INCREF rdi
+    mov rax, rdi
+    leave
+    ret
+END_FUNC coro_wrapper_iter
+
+;; coro_wrapper_clear(rdi = PyCoroWrapperObject*) -> 0
+DEF_FUNC_LOCAL coro_wrapper_clear, 8
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyCoroWrapperObject.cw_coro]
+    mov qword [rbx + PyCoroWrapperObject.cw_coro], 0
+    XDECREF_V rdi, rax
+    mov rdi, [rbx + PyCoroWrapperObject.gi_return_value]
+    mov qword [rbx + PyCoroWrapperObject.gi_return_value], 0
+    XDECREF_V rdi, rax
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC coro_wrapper_clear
+
+;; coro_wrapper_traverse(rdi = PyCoroWrapperObject*, r14 = visit) -> 0
+DEF_FUNC_LOCAL coro_wrapper_traverse, 8
+    push rbx
+    mov rbx, rdi
+    mov rdi, [rbx + PyCoroWrapperObject.cw_coro]
+    VISIT_PTR rdi
+    mov rdi, [rbx + PyCoroWrapperObject.gi_return_value]
+    VISIT_V rdi, rax
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC coro_wrapper_traverse
+
+;; coro_wrapper_dealloc(rdi = PyCoroWrapperObject*) -> void
+DEF_FUNC_LOCAL coro_wrapper_dealloc, 8
+    push rbx
+    mov rbx, rdi
+    call coro_wrapper_clear
+    mov rdi, rbx
+    extern gc_dealloc
+    call gc_dealloc
+    pop rbx
+    leave
+    ret
+END_FUNC coro_wrapper_dealloc
+
+;; coro_wrapper_iternext(rdi = PyCoroWrapperObject*) -> yielded Value or 0
+CWX_SELF  equ 8
+CWX_FRAME equ 16
+DEF_FUNC_LOCAL coro_wrapper_iternext, CWX_FRAME
+    mov [rbp - CWX_SELF], rdi
+    mov rdi, [rdi + PyCoroWrapperObject.cw_coro]
+    call gen_iternext
+    test rax, rax
+    jnz .cwx_out
+    ; Copy wrapped coroutine's gi_return_value so op_send / next() see it.
+    mov rdi, [rbp - CWX_SELF]
+    mov rcx, [rdi + PyCoroWrapperObject.cw_coro]
+    mov rcx, [rcx + PyGenObject.gi_return_value]
+    INCREF_V rcx, rdx
+    mov rdx, [rdi + PyCoroWrapperObject.gi_return_value]
+    mov [rdi + PyCoroWrapperObject.gi_return_value], rcx
+    XDECREF_V rdx, r8
+    xor eax, eax
+.cwx_out:
+    leave
+    ret
+END_FUNC coro_wrapper_iternext
+
+;; coro_wrapper_send(rdi = args, rsi = nargs) -> yielded Value or 0
+;; Fails: 0
+CWS_A1    equ 8
+CWS_A0    equ 16
+CWS_FRAME equ 16
+DEF_FUNC coro_wrapper_send, CWS_FRAME
+    cmp rsi, 2
+    jne .cws_bad
+    mov rax, [rdi]
+    mov rax, [rax + PyCoroWrapperObject.cw_coro]
+    mov [rbp - CWS_A0], rax
+    mov rax, [rdi + 8]
+    mov [rbp - CWS_A1], rax
+    lea rdi, [rbp - CWS_A0]
+    call _gen_send_impl         ; err: propagate
+    leave
+    ret
+.cws_bad:
+    FAIL exc_TypeError_type, "send() takes exactly one argument", .cws_fail
+.cws_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC coro_wrapper_send
+
+;; coro_wrapper_throw(rdi = args, rsi = nargs) -> yielded Value or 0
+;; Fails: 0
+CWT_A3    equ 8
+CWT_A2    equ 16
+CWT_A1    equ 24
+CWT_A0    equ 32
+CWT_FRAME equ 32
+DEF_FUNC coro_wrapper_throw, CWT_FRAME
+    cmp rsi, 2
+    jb .cwt_bad
+    cmp rsi, 4
+    ja .cwt_bad
+    mov rax, [rdi]
+    mov rax, [rax + PyCoroWrapperObject.cw_coro]
+    mov [rbp - CWT_A0], rax
+    mov rax, [rdi + 8]
+    mov [rbp - CWT_A1], rax
+    cmp rsi, 3
+    jb .cwt_call
+    mov rax, [rdi + 16]
+    mov [rbp - CWT_A2], rax
+    cmp rsi, 4
+    jb .cwt_call
+    mov rax, [rdi + 24]
+    mov [rbp - CWT_A3], rax
+.cwt_call:
+    lea rdi, [rbp - CWT_A0]
+    call _gen_throw_impl        ; err: propagate
+    leave
+    ret
+.cwt_bad:
+    FAIL exc_TypeError_type, "throw() takes from 1 to 3 positional arguments", .cwt_fail
+.cwt_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC coro_wrapper_throw
+
+;; coro_wrapper_close(rdi = args, rsi = nargs) -> None or 0
+;; Fails: 0
+CWC_A0    equ 8
+CWC_FRAME equ 16
+DEF_FUNC coro_wrapper_close, CWC_FRAME
+    cmp rsi, 1
+    jne .cwc_bad
+    mov rax, [rdi]
+    mov rax, [rax + PyCoroWrapperObject.cw_coro]
+    mov [rbp - CWC_A0], rax
+    lea rdi, [rbp - CWC_A0]
+    call _gen_close_impl        ; err: propagate
+    leave
+    ret
+.cwc_bad:
+    FAIL exc_TypeError_type, "close() takes no arguments", .cwc_fail
+.cwc_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC coro_wrapper_close
+
+;; coro_wrapper_dunder_iter(rdi = args, rsi = nargs) -> self
+;; Fails: 0
+DEF_FUNC coro_wrapper_dunder_iter
+    NO_KEYWORDS_RET "__iter__() takes no keyword arguments", .cwdi_fail
+    cmp rsi, 1
+    jne .cwdi_bad
+    mov rax, [rdi]
+    INCREF rax
+    leave
+    ret
+.cwdi_bad:
+    FAIL exc_TypeError_type, "__iter__() takes no arguments", .cwdi_fail
+.cwdi_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC coro_wrapper_dunder_iter
+
+section .rodata
+coro_wrapper_name: db "coroutine_wrapper", 0
+
+section .data
+align 8
+global coro_wrapper_type
+coro_wrapper_type:
+    dq 1                        ; ob_refcnt
+    dq type_type                ; ob_type
+    dq coro_wrapper_name        ; tp_name
+    dq PyCoroWrapperObject_size ; tp_basicsize
+    dq coro_wrapper_dealloc     ; tp_dealloc
+    dq 0                        ; tp_repr
+    dq 0                        ; tp_str
+    dq 0                        ; tp_hash
+    dq 0                        ; tp_call
+    dq 0                        ; tp_getattr
+    dq 0                        ; tp_setattr
+    dq 0                        ; tp_richcompare
+    dq coro_wrapper_iter        ; tp_iter
+    dq coro_wrapper_iternext    ; tp_iternext
+    dq 0                        ; tp_init
+    dq 0                        ; tp_new
+    dq 0                        ; tp_as_number
+    dq 0                        ; tp_as_sequence
+    dq 0                        ; tp_as_mapping
+    dq 0                        ; tp_base
+    dq 0                        ; tp_dict (populated in methods/init.asm)
+    dq 0                        ; tp_mro
+    dq TYPE_FLAG_HAVE_GC        ; tp_flags
+    dq 0                        ; tp_bases
+    dq coro_wrapper_traverse    ; tp_traverse
+    dq coro_wrapper_clear       ; tp_clear
+    dq 0                        ; tp_dictoffset
+    dq 0                        ; tp_tailslots
+    dq 0                        ; tp_as_buffer

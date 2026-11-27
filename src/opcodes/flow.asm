@@ -835,6 +835,23 @@ DEF_FUNC_BARE op_yield_value
     ; it to give a surviving frame object its chain outward.
     mov qword [r12 + PyFrame.prev_frame], 0
 
+    ; If a frame object view was materialized while this generator/coroutine
+    ; was running, clear its cached f_back too so suspending does not pin the
+    ; caller's frame chain in memory or report a stale f_back while suspended.
+    mov rcx, [r12 + PyFrame.frame_obj]
+    test rcx, rcx
+    jz .yield_no_fo
+    mov rdi, [rcx + PyFrameObject.f_back]
+    test rdi, rdi
+    jz .yield_no_fo
+    mov qword [rcx + PyFrameObject.f_back], 0
+    push rax
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+.yield_no_fo:
+
     ; Return yielded value from eval_frame
     jmp eval_return
 END_FUNC op_yield_value
@@ -909,8 +926,35 @@ DEF_FUNC op_send, SND_FRAME
     lea rcx, [rel async_gen_type]
     cmp rax, rcx
     je .send_gen_send
+    extern coro_wrapper_type
+    lea rcx, [rel coro_wrapper_type]
+    cmp rax, rcx
+    je .send_coro_wrapper
     ; Not a generator — use tp_iternext (value is discarded)
     jmp .send_use_iternext
+
+.send_coro_wrapper:
+    ; Delegate send(val) to the wrapped coroutine and mirror gi_return_value on exhaustion.
+    DUNDER_EXC_SAVE [rbp - SND_EXC]
+    mov rdi, [rbp - SND_RECV]
+    mov rdi, [rdi + PyCoroWrapperObject.cw_coro]
+    mov rsi, [rbp - SND_SENT]
+    movzx edx, byte [rbp - SND_STAG]
+    V_PACK rsi, rdx
+    call gen_send
+    test rax, rax
+    jnz .send_cw_got
+    mov rdi, [rbp - SND_RECV]
+    mov rcx, [rdi + PyCoroWrapperObject.cw_coro]
+    mov rcx, [rcx + PyGenObject.gi_return_value]
+    INCREF_V rcx, rdx
+    mov rdx, [rdi + PyCoroWrapperObject.gi_return_value]
+    mov [rdi + PyCoroWrapperObject.gi_return_value], rcx
+    XDECREF_V rdx, r8
+    xor eax, eax
+.send_cw_got:
+    V_UNPACK rax, rdx
+    jmp .send_check_result
 
 .send_gen_send:
     ; gen_send(receiver, value, value_tag)

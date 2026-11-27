@@ -1224,8 +1224,8 @@ DEF_FUNC methods_init
     call dict_new
     mov rbx, rax
 
-    extern coro_dunder_iter
-    ADD_FN mn___await__, coro_dunder_iter
+    extern coro_dunder_await
+    ADD_FN mn___await__, coro_dunder_await
     ADD_FN mn_send, _gen_send_impl
     ADD_FN mn_throw, _gen_throw_impl
     ADD_FN mn_close, _gen_close_impl
@@ -1241,6 +1241,24 @@ DEF_FUNC methods_init
 
     extern coro_type
     lea rax, [rel coro_type]
+    mov [rax + PyTypeObject.tp_dict], rbx
+    mov rdi, rax
+    call type_stamp_methods
+
+    ;; coroutine_wrapper — iterator returned by coroutine.__await__()
+    call dict_new
+    mov rbx, rax
+    extern coro_wrapper_dunder_iter
+    extern coro_wrapper_send
+    extern coro_wrapper_throw
+    extern coro_wrapper_close
+    ADD_FN mn___iter__, coro_wrapper_dunder_iter
+    ADD_FN mn___next__, builtin_next_fn
+    ADD_FN mn_send, coro_wrapper_send
+    ADD_FN mn_throw, coro_wrapper_throw
+    ADD_FN mn_close, coro_wrapper_close
+    extern coro_wrapper_type
+    lea rax, [rel coro_wrapper_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
     call type_stamp_methods
