@@ -6,10 +6,7 @@ import sys
 import threading
 import weakref
 
-if sys.implementation.name == "apython":
-    import _asyncio_native as accelerator
-else:
-    import _asyncio as accelerator
+import _asyncio as accelerator
 
 
 class Loop:
@@ -70,8 +67,7 @@ finally:
 
 print("running loop is thread-local and clears after fork")
 
-scheduled = (accelerator._get_scheduled_tasks() if sys.implementation.name == "apython"
-             else accelerator._scheduled_tasks)
+scheduled = accelerator._scheduled_tasks
 first, second = Loop(), Loop()
 accelerator._register_task(first)
 accelerator._register_eager_task(second)

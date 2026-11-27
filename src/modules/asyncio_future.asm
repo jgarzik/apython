@@ -29,6 +29,7 @@ extern async_get_future_repr
 extern async_get_invalid_state_error
 extern bool_false
 extern bool_true
+extern deprecation_warn
 extern dict_new
 extern dict_set_str
 extern exc_fetch
@@ -2267,18 +2268,25 @@ DEF_FUNC_LOCAL future_iter_method_throw, FIT_FRAME
     mov [rbp - FIT_VAL], rax
 .check_tb:
     cmp rsi, 4
-    jb .args_read
+    jb .warn_throw
     mov rax, [rdi + 24]
     lea rcx, [rel none_singleton]
     cmp rax, rcx
-    je .args_read
+    je .warn_throw
+    mov [rbp - FIT_TB], rax
+.warn_throw:
+    lea rdi, [rel fmsg_throw_deprecated]
+    call deprecation_warn
+    ERR_NULL .failed
+    mov rax, [rbp - FIT_TB]
+    test rax, rax
+    jz .args_read
     V_TEST_PTR rax, rdx
     ja .bad_tb
     mov rdx, [rax + PyObject.ob_type]
     lea rcx, [rel traceback_type]
     cmp rdx, rcx
     jne .bad_tb
-    mov [rbp - FIT_TB], rax
 
 .args_read:
     mov rax, [rbp - FIT_TYPE]
@@ -2660,3 +2668,4 @@ fmsg_result_not_set: db "Result is not set.", 0
 fmsg_exc_not_set:   db "Exception is not set.", 0
 fmsg_stopiter_future: db "StopIteration interacts badly with generators and cannot be raised into a Future", 0
 fmsg_exc_unretrieved: db " exception was never retrieved", 0
+fmsg_throw_deprecated: db "the (type, exc, tb) signature of throw() is deprecated, use the single-arg signature instead.", 0

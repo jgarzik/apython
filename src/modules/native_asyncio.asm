@@ -16,6 +16,7 @@ extern async_tasks_init
 
 extern builtin_func_new
 extern builtin_getattr
+extern dict_get_str
 extern dict_new
 extern dict_set_str
 extern getset_descr_new
@@ -27,6 +28,7 @@ extern obj_decref
 extern obj_incref
 extern set_exception
 extern str_from_cstr_heap
+extern sys_modules_dict
 extern tuple_new
 
 extern exc_RuntimeError_type
@@ -170,7 +172,7 @@ DEF_FUNC_LOCAL async_get_event_loop
     ret
 END_FUNC async_get_event_loop
 
-;; async_import(rdi = C module name) -> owned module
+;; async_import(rdi = C module name) -> owned module (submodule for dotted names)
 ;; Fails: 0
 AI_NAME   equ 8
 AI_RESULT equ 16
@@ -183,6 +185,22 @@ DEF_FUNC async_import, AI_FRAME
     xor edx, edx
     call import_module          ; err: propagate after releasing the name
     mov [rbp - AI_RESULT], rax
+    test rax, rax
+    jz .done
+    ; import_module returns the top-level package for dotted names; fetch the
+    ; actual target submodule from sys.modules when present.
+    mov rdi, [rel sys_modules_dict]
+    mov rsi, [rbp - AI_NAME]
+    call dict_get_str
+    test rax, rax
+    jz .done
+    cmp rax, [rbp - AI_RESULT]
+    je .done
+    INCREF_V rax, rcx
+    mov rdi, [rbp - AI_RESULT]
+    mov [rbp - AI_RESULT], rax
+    DECREF_V rdi, rcx
+.done:
     mov rdi, [rbp - AI_NAME]
     call obj_decref
     mov rax, [rbp - AI_RESULT]

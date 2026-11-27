@@ -4,10 +4,7 @@ import asyncio
 import contextvars
 import sys
 
-if sys.implementation.name == "apython":
-    from _asyncio_native import Task, current_task
-else:
-    from _asyncio import Task, current_task
+from _asyncio import Task, current_task
 
 
 local = contextvars.ContextVar("local", default="caller")

@@ -864,9 +864,11 @@ DEF_FUNC_LOCAL async_task_step_impl, TSI_FRAME
     lea rdi, [rbp - TSI_A0]
     mov esi, 2
     call _gen_throw_impl        ; err: handled via .check_exc / StopIteration
+    mov [rbp - TSI_RETVAL], rax
     mov rdi, [rbp - TSI_OWNEXC]
     mov qword [rbp - TSI_OWNEXC], 0
     XDECREF_V rdi, rcx
+    mov rax, [rbp - TSI_RETVAL]
     test rax, rax
     jnz .got_yield
     jmp .check_exc
@@ -893,9 +895,11 @@ DEF_FUNC_LOCAL async_task_step_impl, TSI_FRAME
     lea rdx, [rbp - TSI_A0]
     mov ecx, 1
     call async_call_method      ; err: handled via .check_exc
+    mov [rbp - TSI_RETVAL], rax
     mov rdi, [rbp - TSI_OWNEXC]
     mov qword [rbp - TSI_OWNEXC], 0
     XDECREF_V rdi, rcx
+    mov rax, [rbp - TSI_RETVAL]
     test rax, rax
     jnz .got_yield
 

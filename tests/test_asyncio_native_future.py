@@ -6,10 +6,7 @@ import gc
 import sys
 import weakref
 
-if sys.implementation.name == "apython":
-    from _asyncio_native import Future
-else:
-    from _asyncio import Future
+from _asyncio import Future
 
 
 class DerivedFuture(Future):
