@@ -57,6 +57,9 @@ extern sys_ioctl
 extern sys_getrandom
 extern sys_pipe2
 extern str_type
+extern ap_strcmp
+extern sysconf
+extern __errno_location
 
 ;; The syscalls this file is the only user of.  runtime.asm holds the ones
 ;; more than one module wants; these are spelled here, beside the functions
@@ -1031,7 +1034,107 @@ pid_consts:
     PIDCONST TMP_MAX, 238328
     dq 0, 0
 
+align 8
+pid_sysconf_table:
+    PIDCONST SC_ARG_MAX, 0
+    PIDCONST SC_CHILD_MAX, 1
+    PIDCONST SC_CLK_TCK, 2
+    PIDCONST SC_NGROUPS_MAX, 3
+    PIDCONST SC_OPEN_MAX, 4
+    PIDCONST SC_PAGESIZE, 30
+    PIDCONST SC_PAGE_SIZE, 30
+    PIDCONST SC_LINE_MAX, 43
+    PIDCONST SC_IOV_MAX, 60
+    PIDCONST SC_GETGR_R_SIZE_MAX, 69
+    PIDCONST SC_GETPW_R_SIZE_MAX, 70
+    PIDCONST SC_LOGIN_NAME_MAX, 71
+    PIDCONST SC_TTY_NAME_MAX, 72
+    PIDCONST SC_THREAD_STACK_MIN, 75
+    PIDCONST SC_NPROCESSORS_CONF, 83
+    PIDCONST SC_NPROCESSORS_ONLN, 84
+    PIDCONST SC_PHYS_PAGES, 85
+    PIDCONST SC_AVPHYS_PAGES, 86
+    PIDCONST SC_PASS_MAX, 88
+    dq 0, 0
+
 section .text
+
+;; ============================================================================
+;; posixid_sysconf(name) -> int
+;;
+;; Accepts a sysconf name str (looked up in pid_sysconf_table) or an integer
+;; _SC_* code, and delegates to glibc's sysconf(3).
+;; ============================================================================
+DEF_FUNC posixid_sysconf, 16
+    push rbx
+    push r12
+    cmp rsi, 1
+    jne .psc_args
+    mov rbx, [rdi]
+    V_TEST_PTR rbx, rax
+    ja .psc_int
+    test rbx, rbx
+    jz .psc_int
+    mov rax, [rbx + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    jne .psc_int
+    ; Look up str in pid_sysconf_table
+    lea r12, [rel pid_sysconf_table]
+.psc_find:
+    mov rsi, [r12]
+    test rsi, rsi
+    jz .psc_unknown
+    lea rdi, [rbx + PyStrObject.data]
+    call ap_strcmp
+    test eax, eax
+    jz .psc_found
+    add r12, 16
+    jmp .psc_find
+.psc_found:
+    mov rbx, [r12 + 8]
+    jmp .psc_call
+.psc_int:
+    mov rdi, rbx
+    call posix_int_arg
+    ERR_M1 .psc_fail
+    mov rbx, rax
+.psc_call:
+    call __errno_location
+    mov dword [rax], 0
+    mov rdi, rbx
+    call sysconf
+    cmp rax, -1
+    jne .psc_ret
+    call __errno_location
+    mov edi, [rax]
+    test edi, edi
+    jz .psc_ret_m1
+    xor esi, esi
+    call set_oserror
+    jmp .psc_fail
+.psc_ret_m1:
+    mov rax, -1
+.psc_ret:
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    pop r12
+    pop rbx
+    leave
+    ret
+.psc_unknown:
+    FAIL exc_ValueError_type, "unrecognized configuration name", .psc_fail
+.psc_args:
+    FAIL exc_TypeError_type, "sysconf() takes exactly 1 argument", .psc_fail
+.psc_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC posixid_sysconf
 
 ;; ============================================================================
 ;; posixid_register(rdi = the module dict) -> nothing
@@ -1069,6 +1172,50 @@ DEF_FUNC posixid_register, PIR_FRAME
     MODULE_ADD_FUNC posixid_fchdir,    pid_n_fchdir
     MODULE_ADD_FUNC posixid_sendfile,  pid_n_sendfile
     MODULE_ADD_FUNC posixid_get_terminal_size, pid_n_get_terminal_size
+    MODULE_ADD_FUNC posixid_sysconf,   pid_n_sysconf
+
+    ; Build posix.sysconf_names dict from pid_sysconf_table.
+    call dict_new
+    test rax, rax
+    jz .pir_no_sc
+    mov [rbp - PIR_ROW], rax
+    lea rbx, [rel pid_sysconf_table]
+.pir_sc_loop:
+    mov rax, [rbx]
+    test rax, rax
+    jz .pir_sc_done
+    mov rdi, [rbx + 8]
+    V_PACK_I64 rdi, rcx
+    mov [rbp - PIR_ENT], rdi
+    mov rdi, [rbx]
+    call str_from_cstr_heap
+    test rax, rax
+    jz .pir_sc_next
+    mov [rbp - PIR_KEY], rax
+    mov rdi, [rbp - PIR_ROW]
+    mov rsi, rax
+    mov rdx, [rbp - PIR_ENT]
+    call dict_set_str
+    mov rax, [rbp - PIR_ENT]
+    DECREF_V rax, rcx
+    mov rdi, [rbp - PIR_KEY]
+    call obj_decref
+.pir_sc_next:
+    add rbx, 16
+    jmp .pir_sc_loop
+.pir_sc_done:
+    lea rdi, [rel pid_n_sysconf_names]
+    call str_from_cstr_heap
+    mov [rbp - PIR_KEY], rax
+    mov rdi, r12
+    mov rsi, rax
+    mov rdx, [rbp - PIR_ROW]
+    call dict_set_str
+    mov rdi, [rbp - PIR_ROW]
+    call obj_decref
+    mov rdi, [rbp - PIR_KEY]
+    call obj_decref
+.pir_no_sc:
 
     ; os.times returns os.times_result, and `os.times` IS `posix.times` --
     ; nothing in os.py wraps it, so the named fields have to come from here.
@@ -1140,5 +1287,7 @@ pid_n_pwrite:    db "pwrite", 0
 pid_n_fchdir:    db "fchdir", 0
 pid_n_sendfile:  db "sendfile", 0
 pid_n_get_terminal_size: db "get_terminal_size", 0
+pid_n_sysconf:   db "sysconf", 0
+pid_n_sysconf_names: db "sysconf_names", 0
 pid_n_times_result: db "times_result", 0
 section .text

@@ -39,6 +39,7 @@ SYS_connect         equ 42
 SYS_accept4         equ 288
 SYS_sendto          equ 44
 SYS_recvfrom        equ 45
+SYS_sendmsg         equ 46
 SYS_poll            equ 7
 SYS_bind            equ 49
 SYS_listen          equ 50
@@ -2162,3 +2163,13 @@ DEF_FUNC_BARE sys_pidfd_open
     syscall
     ret
 END_FUNC sys_pidfd_open
+
+;; ============================================================================
+;; sys_sendmsg(int fd, const struct msghdr *msg, int flags) -> ssize_t
+;; ============================================================================
+global sys_sendmsg
+DEF_FUNC_BARE sys_sendmsg
+    mov rax, SYS_sendmsg
+    syscall
+    ret
+END_FUNC sys_sendmsg

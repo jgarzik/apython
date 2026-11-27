@@ -326,6 +326,7 @@ class socket:
     """
 
     def __init__(self, family=AF_INET, type=SOCK_STREAM, proto=0, fileno=None):
+        nonblock = bool(type & SOCK_NONBLOCK)
         if fileno is None:
             # SOCK_CLOEXEC, as CPython does: a descriptor Python opens is
             # non-inheritable by default (PEP 446), so it does not survive
@@ -334,10 +335,10 @@ class socket:
         else:
             self._fd = int(fileno)
         self._family = family
-        self._type = type
+        self._type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)
         self._proto = proto
-        self._timeout = None
-        if _GLOBAL_DEFAULT_TIMEOUT is not None:
+        self._timeout = 0.0 if nonblock else None
+        if not nonblock and _GLOBAL_DEFAULT_TIMEOUT is not None:
             self.settimeout(_GLOBAL_DEFAULT_TIMEOUT)
 
     # --- identity
@@ -516,6 +517,23 @@ class socket:
         raw = _pack_addr(self._family, address)
         return self._io(True, _c.send, data, flags, raw)
 
+    def sendmsg(self, buffers, ancdata=(), flags=0, address=None):
+        bufs = list(buffers)
+        control = None
+        if ancdata:
+            parts = []
+            for cmsg_level, cmsg_type, cmsg_data in ancdata:
+                data = bytes(cmsg_data)
+                cmsg_len = CMSG_LEN(len(data))
+                pad = CMSG_SPACE(len(data)) - cmsg_len
+                hdr = (cmsg_len.to_bytes(8, "little")
+                       + int(cmsg_level).to_bytes(4, "little", signed=True)
+                       + int(cmsg_type).to_bytes(4, "little", signed=True))
+                parts.append(hdr + data + bytes(pad))
+            control = b"".join(parts)
+        raw_addr = None if address is None else _pack_addr(self._family, address)
+        return self._io(True, _c.sendmsg, bufs, control, flags, raw_addr)
+
     def recv(self, bufsize, flags=0):
         return self._io(False, _c.recv, bufsize, flags)
 
@@ -555,11 +573,26 @@ def _strerror(err):
         return "error %d" % err
 
 
+def CMSG_LEN(length):
+    length = int(length)
+    if length < 0:
+        raise OverflowError("CMSG_LEN() argument out of range")
+    return 16 + length
+
+
+def CMSG_SPACE(length):
+    length = int(length)
+    if length < 0:
+        raise OverflowError("CMSG_SPACE() argument out of range")
+    return 16 + ((length + 7) & ~7)
+
+
 __all__ = ["socket", "socketpair", "SocketType", "error", "timeout",
            "gaierror", "herror", "has_ipv6", "getdefaulttimeout",
            "setdefaulttimeout", "gethostname", "gethostbyname",
            "gethostbyaddr", "getaddrinfo", "getnameinfo", "getservbyname",
            "getservbyport", "getprotobyname", "dup", "close",
            "inet_aton", "inet_ntoa", "inet_pton", "inet_ntop",
-           "htons", "htonl", "ntohs", "ntohl"]
+           "htons", "htonl", "ntohs", "ntohl",
+           "CMSG_LEN", "CMSG_SPACE"]
 __all__.extend([_n for _n in dir(_c) if _n.isupper()])
