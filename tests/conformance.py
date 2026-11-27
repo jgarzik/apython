@@ -87,7 +87,7 @@ def run_module(side, binary, worker, lib, output, module, source, timeout, limit
     # Children inherit the address limit. Keep each test in its own session
     # so even a forked child that outlives the test can be reaped on timeout.
     command = [
-        "prlimit", "--as=" + str(limit), "--", binary, worker,
+        "prlimit", "--core=0", "--as=" + str(limit), "--", binary, worker,
         "test." + module, source or "", event_path, *retests,
     ]
     with tempfile.TemporaryDirectory(prefix=label + "-", dir=output) as cwd:
@@ -166,6 +166,8 @@ def sweep(args, modules, output, scope):
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             for suite, name, source in modules:
                 timeout = args.file_timeout if suite == "files" else args.package_timeout
+                if name == "test_zipfile64":
+                    timeout = args.zip64_timeout
                 for side, binary in (("ap", apython), ("cp", args.cpython)):
                     retests = [rule for rule in scope["retest"]
                                if rule.startswith("test." + name + ".")] if side == "ap" else []
@@ -188,9 +190,12 @@ def main():
     parser.add_argument("--jobs", type=int, default=6)
     parser.add_argument("--file-timeout", type=int, default=90)
     parser.add_argument("--package-timeout", type=int, default=300)
+    parser.add_argument("--zip64-timeout", type=int, default=300,
+                        help="time limit for the multi-gigabyte ZIP64 suite")
     parser.add_argument("--memory-kib", type=int, default=3_000_000)
     args = parser.parse_args()
-    if min(args.jobs, args.file_timeout, args.package_timeout, args.memory_kib) < 1:
+    if min(args.jobs, args.file_timeout, args.package_timeout,
+           args.zip64_timeout, args.memory_kib) < 1:
         parser.error("job, timeout, and memory limits must be positive")
     args.lib = args.lib.resolve()
     args.cpython = args.cpython.resolve()

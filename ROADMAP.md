@@ -128,8 +128,10 @@ No conformance gain; everything after it is steered by what this fixes.
    - `test_fstring` ends in "Fatal: out of memory" under the sweep's address
      limit when run quietly, and completes when run with `-v`; something in
      it allocates without bound on a path the output mode changes.
-   - `test_cmd_line_script` spins waiting for a REPL prompt (Phase 6);
-     `test_zipfile64` has not been diagnosed.
+   - `test_cmd_line_script` spins waiting for a REPL prompt (Phase 6).
+   - `test_zipfile64` passed all four tests with a dedicated time budget. The
+     workload took 126 seconds on apython, longer than the 90-second default.
+     The matched and file sweeps now give this module 300 seconds on both sides.
    - Deep recursion (`test_super_deep`, hidden behind `cpython_only`)
      overruns the C stack instead of raising RecursionError.
 
