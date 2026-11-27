@@ -1,12 +1,15 @@
-# Deliberate divergences
+# Divergences
 
-Places apython answers differently from CPython 3.12 **on purpose**.  Each was
-weighed and each was chosen; none is a defect waiting for a patch, and none
-belongs in `bugs.md`, which is the list of what is still wrong.
+Places apython answers differently from CPython 3.12, with what the
+difference is, why the tree is the way it is, and what changing it would cost.
 
-Every entry says what the difference is, why the choice was made, and what
-changing it would cost -- so that a later decision to revisit one starts from
-the reasoning rather than from scratch.
+**None of these is a ruling.**  Each is a description of a choice made at the
+time, kept so that revisiting it starts from the reasoning rather than from
+scratch.  `ROADMAP.md` is what decides the order of work, and several entries
+here are scheduled there because CPython's test suite asks about them: the
+builtin callable types, `mmap`'s buffer, `faulthandler`, the buffer slot, the
+standard streams, the REPL, `sys.monitoring`, the comprehension frame and the
+accelerator stand-ins.  An entry leaves this file in the commit that closes it.
 
 ## Object layout and introspection
 
@@ -43,25 +46,6 @@ the reasoning rather than from scratch.
   differ anyway.
 
 ## The platform surface
-
-- **`posix` is a subset, and a deliberate one.**  The file, directory and
-  process calls `os.py` and `os.path` reach for are there, along with
-  `environ`, `stat_result`, `error` and the O_*/W* constants -- enough that
-  CPython's own `os.py` imports and works.  What is not: the whole `*at`
-  family.  `_have_functions` is an empty list, which is the honest answer --
-  no `dir_fd=` support -- and os.py reads it to build `supports_dir_fd`.
-
-  `putenv` and `unsetenv` were on it too, and are not: `os.environ`'s
-  `__setitem__` and `__delitem__` call them, so `os.environ["X"] = "1"` was a
-  NameError -- and the setUp of CPython's test_argparse does exactly that on
-  every one of its four hundred tests.  They are libc's setenv and unsetenv,
-  because there is no syscall for the process environment.
-
-  `scandir` and `DirEntry` were on this list and are not any more.  Calling
-  their absence deliberate had stopped being true: `os.walk` reaches for
-  `scandir` and nothing else, and through it so do `shutil`, `glob`,
-  `pathlib` and `tempfile`'s cleanup -- 730 NameErrors across CPython's suite,
-  and every one of those modules unusable.
 
 - **An `mmap` object exports no buffer.**  `src/modules/mmap.asm` is the
   mapping -- mmap, munmap, mremap, msync, madvise, the raw bytes and the
@@ -101,35 +85,7 @@ the reasoning rather than from scratch.
   were waiting on.  `all_threads` is accepted and ignored: the dump is of the
   calling thread only.
 
-- **`sys.getfilesystemencoding()` always answers `'utf-8'`.**  PEP 540's
-  locale handling does not exist, and neither does the `surrogateescape`
-  error handler, so a filename or environment value that is not valid UTF-8
-  does not survive a decode/encode round trip, where CPython preserves it.
-  The other half of why is in `bugs.md`: the codecs the interpreter can spell
-  itself are utf-8, ascii and latin-1, and `surrogateescape` is not among the
-  error handlers any of them accept.
-
 ## Performance, where the answer is already right
-
-- **`collections.deque` is list-backed, and two itertools functions
-  materialise.**  CPython's deque is a block-linked list, so `appendleft` and
-  `popleft` are O(1) there and O(n) here; `itertools.groupby` materialises
-  each group rather than sharing the source iterator, and `tee` materialises
-  the source.  Every observable answer matches for a finite iterable.
-
-- **`itertools`' functions are functions, where CPython's are classes.**
-  `lib/itertools.py` writes all but `chain` as generator functions, so
-  `type(itertools.count(1))` is `generator` rather than `itertools.count`,
-  `isinstance(x, itertools.count)` is a TypeError rather than an answer, the
-  reprs read as a generator's, and none of them pickle -- CPython's each carry
-  a `__reduce__`.
-
-  Every VALUE they produce is CPython's; what differs is what the iterator
-  itself says it is.  Closing it means eighteen classes with `__iter__`,
-  `__next__`, `__reduce__` and `__setstate__` apiece, in place of eighteen
-  `yield` statements, for introspection that only CPython's own test_itertools
-  asks about.  `chain` is a class already, because `from_iterable` needed
-  somewhere to live.
 
 - **bytearray's read-only methods copy.**  bytes keeps its data inline and
   bytearray keeps it out of line, so the shared method bodies cannot read a
@@ -147,16 +103,6 @@ the reasoning rather than from scratch.
   `builtin_function_or_method` rather than `method_descriptor`.  Everything
   that asks *what* a descriptor is -- `hasattr(f, '__get__')`, `__set__`,
   the repr -- gets CPython's answer; only the type's name differs.
-
-- **A class's `__dict__` does not carry `__dict__`, `__weakref__` or
-  `__doc__`, and does carry `__qualname__`.**  CPython's `type_new` adds the
-  first two as getset descriptors, sets `__doc__` to None when the body has
-  no docstring, and moves `__qualname__` out of the dict onto the type.  Here
-  the two descriptors do not exist -- they are the instance-dict and weakref
-  layout recorded above -- `__doc__` is answered by a fallback rather than
-  stored, and `__qualname__` stays in the dict because there is no field on
-  the type to move it to.  Every one of those attributes reads correctly
-  through the class; it is only `sorted(C.__dict__)` that differs.
 
 - **A dict does not share its key table, so `gc.get_referents` reports its
   keys.**  CPython gives a dict whose keys are all strings a shared key table
@@ -235,16 +181,6 @@ would have been extra code to reproduce a regression.
 
 `tests/test_settrace.py` compares every other event against CPython and
 deliberately filters `'opcode'` out of the one case that asks for it.
-
-## Interpreter structure
-
-- **C code here cannot catch a Python exception.**  `raise_exception`
-  tail-jumps into `eval_exception_unwind`, which resumes the eval loop from
-  saved globals rather than returning through the C stack, so a `call` to a
-  slot that raises never comes back.  `str.translate` gets around it by
-  reaching a heaptype table through `dunder_call_2`, which does return; the
-  general limit stands, and is why the `bytes %` leak recorded in `bugs.md`
-  cannot be fixed by catching.
 
 ## A buffer reached through `tp_as_buffer` is a read-only view of BYTES
 
@@ -439,29 +375,6 @@ test harness: every name in them answers a true fact about this interpreter
 or raises NotImplementedError, and nothing pretends to exercise a C API that
 is not here.
 
-## PEP 563 stores a raw source slice, not an unparse
-
-`from __future__ import annotations` makes every annotation a string of its
-own source text, and this tree takes that string by SLICING the file between
-the annotation node's start and the end its AstSpan records.  CPython stores
-what its own unparser produces from the same node.
-
-The two agree for every ordinary annotation and differ in three ways:
-redundant parentheses survive here (`x: (int)` is `'(int)'` rather than
-`'int'`), a multi-line annotation keeps its newlines and indentation, and a
-string literal keeps the quote it was written with (`x: "s"` is `'"s"'` here
-and `"'s'"` there).
-
-The string still evaluates to the same object, which is what
-`typing.get_type_hints` and every other consumer does with it.  Matching the
-unparser exactly means writing one -- `lib/ast.py`'s `unparse` is present to
-diff against if it is ever wanted.
-
-`class C[T](*bases)` is the one shape that does not get its `Generic[T]`
-base: the starred form builds its base tuple with CALL_FUNCTION_EX, and one
-more element has to go into the tuple rather than onto the stack.  Every
-written-out base list gets it.
-
 ## A builtin method bound to an instance is a `method`
 
 `"x".upper` is a `builtin_function_or_method` in CPython and a `method` here.
@@ -480,23 +393,6 @@ Changing it means a `func_self` field on `PyBuiltinObject`, a bound/unbound
 distinction in `builtin_func_call`, and a second repr; the gain is the name
 `type()` prints.  This is the same choice recorded above about having one
 builtin callable type where CPython has four.
-
-## `subprocess` cannot change the child's credentials, and says so
-
-`_posixsubprocess.fork_exec` takes CPython's twenty-two arguments.  The ones
-that decide what the child sees are honoured: the executable list, the three
-pipes, the working directory, the environment, `close_fds`,
-`start_new_session` and `preexec_fn`.  `restore_signals` is honoured by
-having nothing to restore -- this interpreter installs no handlers, so a
-child starts with the dispositions it inherited, which is what the flag asks
-for.
-
-The five to do with credentials -- `uid`, `gid`, `gids`, `umask` and
-`process_group` -- raise `NotImplementedError`.  That is the divergence, and
-it is deliberate: there are no setuid, setgid or setpgid syscalls here, and a
-caller who passed `user=` to drop privileges must not be handed a child that
-quietly kept them.  Refusing to run is the safe answer; running as root when
-asked not to is not.
 
 ## A comprehension keeps a frame of its own
 
@@ -540,27 +436,6 @@ does not leak, that the outermost iterable is evaluated in the enclosing
 scope, and that a generator expression keeps its own frame in both.
 `tests/test_comprehension_inline.py` pins the pair, so the day the symbol
 table can hold two storages there is something to measure against.
-
-## The codecs that are neither a table nor a state machine
-
-`encodings/` here is one module and one generated table file rather than
-CPython's two hundred modules, and it answers for every codec that is a flat
-256-entry mapping: the cpNNN and iso8859-N pages, koi8, the mac_* family,
-tis-620, the EBCDIC cp037 group.  `_codecs` answers for the ones that are a
-state machine instead -- utf-8 and its BOM'd form, ascii, latin-1, the six
-fixed-width UTF-16 and UTF-32 forms, utf-7, the two escape codecs.  The multibyte CJK codecs use their own mapping data and state machines.
-The remaining differences include:
-- **The transform codecs** -- base64_codec, hex_codec, quopri_codec,
-  uu_codec, rot_13, zlib_codec, bz2_codec.  These are bytes-to-bytes and are
-  not text encodings: CPython refuses `"x".encode("base64")` too.  Reaching
-  them means `codecs.encode`, and `codecs` is not here either; two of them
-  additionally need zlib and bz2, which are not.
-- **punycode, idna and mbcs.**  idna needs `unicodedata`'s nameprep tables,
-  which are the same argument as the CJK ones; punycode exists only to serve
-  idna; mbcs and oem are Windows-only and absent on any Linux CPython too.
-
-An unknown codec is a LookupError with CPython's wording, so a program that
-catches one behaves the same either way.
 
 ## code.replace() cannot change co_varnames, co_freevars or co_cellvars
 
@@ -694,30 +569,6 @@ then declined, and the observable behaviour is CPython's; what differs is
 which of `hmac.py`'s two branches runs for a lambda.  This is the
 single-builtin-callable-type divergence recorded above, reaching one more
 module.
-
-## `marshal.load()` reads the whole stream, not one object
-
-CPython's `marshal.load()` pulls bytes from the file as the reader needs them,
-so a file holding several marshalled objects is walked with one call per
-object, and the file is left positioned after the one just read.  Ours calls
-`file.read()` once and hands the whole result to the same reader `loads` uses.
-
-For the only shape anybody writes -- a `.pyc`, or a file holding one object --
-the two agree.  They differ for a file holding two: the second `load()` sees
-an empty read and raises `EOFError`, and a file that is not seekable is
-consumed whole rather than up to the object's end.
-
-The reason is that the reader is written against a contiguous buffer with a
-position in it (`marshal_buf`/`marshal_pos`/`marshal_len`), which is what a
-`.pyc` already is.  Making it pull would mean an input abstraction under every
-one of its read primitives, for a form of the call that nothing in the stdlib
-makes.
-
-`marshal.dumps()` also differs from CPython's byte for byte on values CPython
-happens to hold more than one reference to: `FLAG_REF` is set from
-`ob_refcnt > 1` there, so `marshal.dumps(0)` carries it in CPython and not
-here.  Both are valid streams and each reads the other's; what is not stable
-is the bytes.
 
 ## `sys.getsizeof()` reports the allocation, not CPython's number
 
