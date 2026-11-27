@@ -153,7 +153,7 @@ INPLACE = [
 # (operator, left type, right type) cells where apython and CPython disagree for
 # a reason that is a missing *feature* rather than an unsafe one.  Every one of
 # these raises TypeError or returns the wrong container type; none of them reads
-# or writes memory it should not.  Each group is in bugs.md.
+# or writes memory it should not.  Each group was in the old bug list.
 #
 # The set was derived from the triage after the safety fixes landed, not guessed
 # at up front -- a skip set written in advance is how one grows to cover real

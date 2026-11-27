@@ -1,4 +1,4 @@
-# Two entries bugs.md carried that no longer reproduce.
+# Two entries the old bug list carried that no longer reproduce.
 #
 # "@abc.abstractmethod is not enforced" -- it is: type_call consults
 # __abstractmethods__ and abc's bookkeeping fills it.  The message differed
@@ -82,7 +82,7 @@ for n in (0, 1, 7, 8, 9, 64, 200):
 print("no clash")
 
 # (An empty __slots__ on a str subclass still gets a dict here, where CPython
-# suppresses it.  Recorded in bugs.md; it is not what this file is about.)
+# suppresses it.  Recorded in the old bug list; it is not what this file is about.)
 
 # The message names the class and what is missing.
 #

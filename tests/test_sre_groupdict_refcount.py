@@ -10,7 +10,7 @@
 # constant the code object keeps alive.  It surfaced at interpreter shutdown,
 # where whichever of the two owners died first took the string with it and the
 # other read freed memory -- and only became a crash when an unrelated change
-# moved the heap enough for glibc to notice.  See bugs.md history and
+# moved the heap enough for glibc to notice.  See the old bug list's history and
 # tests/test_sre2.py, which exercised groupdict('N/A') without catching it.
 #
 # So this file builds the default at RUN TIME and drops every other reference

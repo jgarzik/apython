@@ -23,7 +23,7 @@ WS = ["\t", "\n", "\v", "\f", "\r", "\x1c", "\x1d", "\x1e", "\x1f", " "]
 NOT_WS = ["\0", "a", "0", "_", "\x0e", "\x7f"]
 # NOT tested here: U+0085, U+00A0, U+2028 and the other Unicode spaces, which
 # CPython also splits on.  They are two or three bytes in UTF-8, so no byte
-# table can see them and the split loops would have to decode.  bugs.md.
+# table can see them and the split loops would have to decode.  Once in the old bug list.
 
 
 def separators():

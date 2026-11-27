@@ -769,7 +769,7 @@ check("round(7)", lambda: round(7))
 
 # A dunder answering NotImplemented is declining, not answering.
 check("B() + C()", lambda: Declines() + Reflects())
-# The message is the fixed string bugs.md records, not CPython's wording.
+# The message is the fixed string the old bug list recorded, not CPython's wording.
 check_type("B() + B()", lambda: Declines() + Declines())
 
 
@@ -841,7 +841,7 @@ check("structseq named tail", lambda: posix.terminal_size((80, 24)).columns)
 check("structseq repr", lambda: repr(posix.terminal_size((80, 24))))
 
 # stat: the _ns fields published tv_nsec alone, and follow_symlinks was
-# accepted and dropped.  bugs.md records that symlinks cannot be created from
+# accepted and dropped.  The old bug list recorded that symlinks cannot be created from
 # here, so this checks the keyword on a regular file.
 _ST = posix.stat("/etc/hostname")
 
@@ -1071,7 +1071,7 @@ check("tuple subclass contents", lambda: tuple(TupleSub((1, 2, 3))))
 
 # A str subclass as errors=: bytes_check_errors_type accepts one and then
 # codec_error_id, one call later, refused it -- so the argument passed the
-# type check and came back as "unknown error handler name".  bugs.md records
+# type check and came back as "unknown error handler name".  The old bug list recorded
 # that the ascii codec consults no handler at all, which is why these are all
 # utf-8.
 class ErrStr(str):

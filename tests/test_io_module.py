@@ -67,7 +67,7 @@ class IOBase(_io._IOBase, metaclass=abc.ABCMeta):
         return False
 
     # No abstractmethod here: apython does not enforce them, and this test is
-    # about the base type, not about abc.  bugs.md records the gap.
+    # about the base type, not about abc.  The old bug list recorded the gap.
 
 class RawIOBase(_io._RawIOBase, IOBase):
     pass

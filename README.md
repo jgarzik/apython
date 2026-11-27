@@ -190,9 +190,9 @@ which records the set that works.  It is a ratchet: a module that imported and
 no longer does fails the target.  Point `$CPYTHON_LIB` at a source checkout;
 the target skips cleanly when there is not one.
 
-`bugs.md` records what the rest fail on, with counts.  `DIVERGENCES.md`
-records the places apython answers differently from CPython on purpose,
-so that the bug list stays a list of what is still wrong.
+`ROADMAP.md` is the measured gap to CPython 3.12 and the order it is being
+closed in, open defects included.  `DIVERGENCES.md` describes the places
+apython answers differently from CPython and why.
 
 ### Garbage collection
 

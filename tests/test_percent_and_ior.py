@@ -17,7 +17,7 @@ class M:
         return "M[" + k + "]"
 print("%(k)s" % M(), "%(a)s-%(b)s" % M())
 # ("%d" % "x" is a TypeError in CPython and is accepted here; that is the
-# conversion table, which bugs.md records, not the operand rule.)
+# conversion table, which the old bug list recorded, not the operand rule.)
 for e in ("'%s%s' % [1, 2]", "'%(a)s' % [1, 2]", "'%s %s' % ('one',)",
           "'%s' % ('a', 'b')"):
     try:

@@ -746,7 +746,7 @@ END_FUNC op_delete_subscr
 ;; interned constant -- setattr(o, "".join(...), 1) -- can never satisfy the
 ;; handler's pointer guard.  Refusing to install here is what stops such a site
 ;; specializing and deopting on every execution for ever, which is the shape
-;; bugs.md records on the load side.
+;; the old bug list recorded on the load side.
 ;;
 ;; A type whose version is zero is never cached.  That is a static type, and
 ;; its instances have no instance dict to write into.

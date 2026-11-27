@@ -25,7 +25,7 @@ for make, label in ((bytes, "bytes"), (bytearray, "bytearray"),
         print(label, "TypeError", err)
 
 # `b"x" in exc` is left out: both raise TypeError, and ours omits the type
-# name from the message (bugs.md records the wording).
+# name from the message (the old bug list recorded the wording).
 for call, label in ((lambda: b"".join([exc]), "join"),
                     (lambda: b"x".find(exc), "find"),
                     (lambda: b"x" + exc, "concat"),

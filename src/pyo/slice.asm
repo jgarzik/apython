@@ -144,7 +144,7 @@ END_FUNC slice_dealloc
 ;; slice(1) < slice(2) is True.  slice_type.tp_richcompare was 0, which sent
 ;; every comparison to op_compare_op's identity path: ordering was a
 ;; TypeError, and equality was identity, so slice(1,2,3) == slice(1,2,3) was
-;; False as well -- bugs.md recorded that half as working.
+;; False as well -- the old bug list recorded that half as working.
 ;;
 ;; A NULL Value declines, the way every other tp_richcompare here does.
 ;; ============================================================================

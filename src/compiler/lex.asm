@@ -1088,7 +1088,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; Not valid UTF-8 at all: eax is the offending byte.  CPython refuses the
     ; whole file for this, as a codec error with a position of its own --
     ; "(unicode error) 'utf-8' codec can't decode byte 0xe9 in position 3" --
-    ; and bugs.md records the wording difference.  What matters is that the
+    ; and ROADMAP.md records the wording difference.  What matters is that the
     ; byte is refused rather than becoming part of a name: a Latin-1 source
     ; used to compile to a different program.
     mov [rbp - LR_CP], rax

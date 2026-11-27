@@ -34,7 +34,7 @@ check("bytearray(bytearray)", lambda: bytes(B(B(b"xy"))))
 check("bytearray([65,66])", lambda: bytes(B([65, 66])))
 check("bytearray((65,66))", lambda: bytes(B((65, 66))))
 check("bytearray(range(3))", lambda: bytes(B(range(3))))
-# bytearray(str, encoding) is not accepted yet; bugs.md records it.
+# bytearray(str, encoding) is not accepted yet; the old bug list recorded it.
 check("bytearray(-1)", lambda: B(-1))
 check("bytearray([256])", lambda: B([256]))
 check("bytearray([-1])", lambda: B([-1]))
@@ -176,7 +176,7 @@ print("--- the read-only methods bytes already had ---")
 # Only the ones bytes itself implements.  bytes has no rfind, index, rindex,
 # rsplit, splitlines, strip, partition, the case methods, the justify
 # methods, zfill, expandtabs, translate or the is* predicates, so neither
-# does bytearray -- recorded in bugs.md as one gap covering both types.
+# does bytearray -- recorded in the old bug list as one gap covering both types.
 c = B(b"Hello World")
 check("find", lambda: (c.find(b"World"), c.find(b"zzz")))
 check("find int", lambda: B(b"abc").find(98))

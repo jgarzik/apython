@@ -28,7 +28,7 @@
 # byte 0, so a loop that indexes a non-ASCII string is quadratic here and
 # CPython's is not.  At ASCII counts those cases do not finish.  Reading their
 # ratios is therefore reading a bug and a millisecond of CPython time, and
-# neither number means much until bugs.md's entry is closed and the counts are
+# neither number means much until ROADMAP.md's entry is closed and the counts are
 # raised to match.
 #
 # Usage: bash tests/run_str_bench.sh

@@ -41,7 +41,7 @@ async def main():
 
     # A manager with no __aexit__ at all: a TypeError, and the reference
     # count has to stay put for that arm too.  (The message is not CPython's;
-    # bugs.md records the wording.)
+    # the old bug list recorded the wording.)
     base2 = sys.getrefcount(plain)
     for i in range(4):
         try:

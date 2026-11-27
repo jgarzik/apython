@@ -251,7 +251,7 @@ for bad in ["1 +", "def", "class 1:", "for x in: pass"]:
         print(repr(bad), "NO ERROR")
     except SyntaxError as e:
         # Only the type: SyntaxError carries none of CPython's .msg,
-        # .filename, .lineno or .offset attributes here -- see bugs.md.
+        # .filename, .lineno or .offset attributes here -- once in the old bug list.
         print(repr(bad), type(e).__name__)
 
 print("=== positions that a whole file finds and a snippet does not ===")
@@ -299,7 +299,7 @@ print("=== mode='single' has a root of its own ===")
 # CPython's is Interactive, whose body is a statement list exactly as Module's
 # is; this answered Module.  What single mode ACCEPTS is a narrower grammar
 # there than here -- `def f(): pass` without a trailing newline, and the empty
-# string, are syntax errors in CPython and not here -- which is in bugs.md, so
+# string, are syntax errors in CPython and not here -- which was in the old bug list, so
 # every case below is one both interpreters take.
 for src in ["x = 1", "1 + 2", "def f(): pass\n", "if x:\n    pass\n",
             "x = 1; y = 2", "class C: pass\n", "while 0: pass\n"]:

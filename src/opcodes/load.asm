@@ -248,7 +248,7 @@ DEF_FUNC_BARE op_load_name
     ; builtin __getitem__ reports a miss by RAISING, which in this tree is a
     ; non-local jump into the unwinder, so the KeyError could not be absorbed
     ; -- `class Enum(metaclass=EnumType)` died on `__name__`.  The cost is
-    ; that a dict subclass overriding __getitem__ is not consulted; bugs.md
+    ; that a dict subclass overriding __getitem__ is not consulted; ROADMAP.md
     ; carries it.
     extern dict_type
     mov rax, [rdi + PyObject.ob_type]

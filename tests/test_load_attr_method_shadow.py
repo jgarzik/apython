@@ -10,7 +10,7 @@ is cold and takes the generic path, so the obvious test -- warm it in a loop,
 then read `c.m` on the next line -- passes while the bug is live.  Every case
 below funnels through one function for that reason.
 
-bugs.md described this hazard as something a hypothetical new opcode would
+The old bug list described this hazard as something a hypothetical new opcode would
 have to avoid.  It was already live: 203 has been installed for classes
 written in Python since the method-load work, and its guards were the ones
 written for a static builtin type, whose instances have no dict to shadow

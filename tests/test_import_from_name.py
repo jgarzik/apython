@@ -22,7 +22,7 @@
 # location replaced by whether it is a real file, plus the two attributes.
 #
 # The partially-initialized variant is NOT covered: it needs a module
-# __spec__ with _initializing set, and ours are None.  bugs.md records it.
+# __spec__ with _initializing set, and ours are None.  The old bug list recorded it.
 
 import os
 import re

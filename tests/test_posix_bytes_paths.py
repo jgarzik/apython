@@ -5,7 +5,7 @@
 # and .path, os.listdir(b'.') gave str entries, and os.readlink on a bytes path
 # gave a str.  os.walk(b'.') and the bytes half of glob propagate all three.
 #
-# bugs.md recorded only scandir; listdir and readlink are the same defect in the
+# The old bug list recorded only scandir; listdir and readlink are the same defect in the
 # same function.
 #
 # Written against `posix` directly, like tests/test_posix_scandir.py, so it says

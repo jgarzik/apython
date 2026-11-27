@@ -35,7 +35,7 @@ check("mv[1:3]", lambda: bytes(mv[1:3]))
 check("type of a slice", lambda: type(mv[1:3]).__name__)
 check("mv[:]", lambda: bytes(mv[:]))
 # A step other than 1 needs a stride the view does not carry; CPython answers
-# with a non-contiguous view.  Recorded in bugs.md, so the two lines that
+# with a non-contiguous view.  Recorded in the old bug list, so the two lines that
 # would test it are not here.
 check("list(mv)", lambda: list(mv))
 check("iter", lambda: [x for x in mv])

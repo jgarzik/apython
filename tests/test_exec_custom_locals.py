@@ -11,7 +11,7 @@
 # A dict SUBCLASS keeps the direct read here, where CPython's
 # PyDict_CheckExact sends it through PyObject_GetItem: a builtin __getitem__
 # reports a miss by RAISING, which in this tree is a non-local jump into the
-# unwinder, so the KeyError could not be absorbed.  bugs.md carries what that
+# unwinder, so the KeyError could not be absorbed.  ROADMAP.md carries what that
 # costs.
 #
 # CPython's test_grammar.test_var_annot_refleak is the annotations half.

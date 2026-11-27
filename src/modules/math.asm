@@ -1911,7 +1911,7 @@ END_FUNC math_isclose
 ;; math.dist(p, q) -> the Euclidean distance between two points
 ;;
 ;; The differences are handed to the same routine hypot uses, so the two
-;; always agree with each other.  (bugs.md records that our n-ary hypot rounds
+;; always agree with each other.  (ROADMAP.md records that our n-ary hypot rounds
 ;; differently from CPython's, which uses a compensated sum; dist inherits
 ;; that, and inherits the fix when it comes.)
 ;; ============================================================================

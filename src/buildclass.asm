@@ -2071,7 +2071,7 @@ END_FUNC bc_inherit_lifecycle
 ;; why it is file-local and named for its one caller.
 ;;
 ;; A base with __slots__ of its own does NOT count: it has a dict word
-;; reserved in its layout that it can never use (bugs.md carries that), so
+;; reserved in its layout that it can never use (the old bug list carried that), so
 ;; the offset being non-zero says nothing about whether instances have one.
 ;; ============================================================================
 ;; ============================================================================
@@ -2143,7 +2143,7 @@ END_FUNC bc_base_has_dict
 ;; Read-only on purpose.  CPython's __weakref__ getset has no setter at all,
 ;; and __dict__'s cannot be reached from here anyway: the store side gates on
 ;; TYPE_FLAG_MRO_HAS_DATA_DESCR, which GS_LAYOUT deliberately keeps clear.
-;; bugs.md carries what that leaves open.
+;; The old bug list carried what that leaves open.
 ;; ============================================================================
 BLE_TYPE  equ 8
 BLE_DICT  equ 16

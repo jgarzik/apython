@@ -8,7 +8,7 @@
 # op_load_super_attr asked all three; super_check, which every shape that does
 # NOT compile to LOAD_SUPER_ATTR goes through, asked only the first two.  Both
 # raise the same sentence, so the difference read as position-dependent --
-# bugs.md recorded it as an answer that changed when an unrelated later
+# the old bug list recorded it as an answer that changed when an unrelated later
 # statement was deleted.  It is not: it is which of two code paths the shape
 # compiles to.
 

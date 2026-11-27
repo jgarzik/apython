@@ -8,7 +8,7 @@
 #   the callee raises, so the frame is freed on the error path
 #   the frame is captured -- by a traceback or by a closure  (sys._getframe is
 #     NOT here: it leaks the frame's locals on its own, which predates this and
-#     is recorded in bugs.md)
+#     was recorded in the old bug list)
 #   the argument's ONLY reference was the stack slot
 #   both call shapes: a plain function and a bound method (self is an argument)
 #

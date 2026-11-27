@@ -35,8 +35,8 @@ print("runs are runs:", len(list(f.__code__.co_lines())) <
       f.__code__.co_code.__len__() // 2)
 
 # Deliberately NOT compile(): a code object built here comes from apython's
-# own compiler, whose line table differs from CPython's in ways bugs.md
-# records -- a module's leading RESUME and the implicit `return None` at the
+# own compiler, whose line table differs from CPython's in ways the old bug list
+# recorded -- a module's leading RESUME and the implicit `return None` at the
 # end of a body.  Those are the compiler's to answer for, not these two
 # readers'.  Everything above comes from the .pyc, so it is CPython's table
 # being decoded.

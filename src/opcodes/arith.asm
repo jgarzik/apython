@@ -2056,7 +2056,7 @@ DEF_FUNC_BARE op_compare_op
 .cmp_no_float:
     ; CPython's do_richcompare tries the RIGHT operand first when its type is
     ; a proper subclass of the left's -- the same subclass-priority rule the
-    ; arithmetic operators have, and the half bugs.md did not record.
+    ; arithmetic operators have, and the half the old bug list did not record.
     ; `P() < Q()` for a Q(P) defining __gt__ called P.__lt__ here and calls
     ; Q.__gt__ in CPython.
     mov r15d, ecx               ; r15 is the handler scratch; ecx holds the op

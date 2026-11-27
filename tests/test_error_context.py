@@ -1,4 +1,4 @@
-"""The four sharp corrections in bugs.md's tail, each with its own repro.
+"""The four sharp corrections in the old bug list's tail, each with its own repro.
 
 None of them is about a missing feature: every one is a message or an
 attribute that answered something CPython does not, in code that ran.

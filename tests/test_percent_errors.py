@@ -3,7 +3,7 @@
 # bytes % hands a decoded copy of the format to the same engine str % uses,
 # and that engine RAISED -- which abandons the C stack, so the copy and every
 # converted argument were leaked, once per malformed `b"%d" % (1, 2)`.
-# bugs.md said putting them somewhere the unwinder frees would be worse: an
+# The old bug list said putting them somewhere the unwinder frees would be worse: an
 # argument's __str__ can run Python, and a raise caught inside it would free a
 # buffer the engine is still reading.
 #
