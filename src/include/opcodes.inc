@@ -204,6 +204,7 @@ CO_ASYNC_GENERATOR  equ 0x200
 ; CPython's rule, and the reason the flag is on the CODE rather than only in
 ; the compiler.
 CO_FUTURE_ANNOTATIONS equ 0x1000000
+CO_FUTURE_BARRY_AS_BDFL equ 0x400000
 
 ; CALL_INTRINSIC_1 / _2 selectors, matching CPython 3.12's intrinsics table.
 INTRINSIC_1_INVALID          equ 0

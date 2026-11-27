@@ -364,6 +364,9 @@ DEF_FUNC eval_frame
     mov rax, [r15 + ThreadState.recursion_depth]
     cmp rax, [rel recursion_limit]
     jg .eval_recursion_error
+    ; A high Python recursion limit can outlive the thread's native stack.
+    cmp rsp, [r15 + ThreadState.eval_stack_floor]
+    jb .eval_recursion_error
 
     ; Check for pending throw (set by gen_throw before resume)
     mov [r12 + PyFrame.disp_ip], rbx
@@ -1626,12 +1629,52 @@ DEF_FUNC tstate_install
     test rax, rax
     jnz .ti_failed
     mov [gs:ThreadState.ts_self], rdi
+    call tstate_stack_floor
     leave
     ret
 .ti_failed:
     CSTRING rdi, "tstate_install: arch_prctl(ARCH_SET_GS) failed"
     call fatal_error
 END_FUNC tstate_install
+
+;; tstate_stack_floor() -> void
+;; Reserve native stack space for creating and unwinding RecursionError.
+;; A pthread may have a much smaller stack than the main thread.
+TSF_BASE  equ 8
+TSF_SIZE  equ 16
+TSF_ATTR  equ 72             ; 56-byte pthread_attr_t
+TSF_FRAME equ 80
+DEF_FUNC_LOCAL tstate_stack_floor, TSF_FRAME
+    extern pthread_self
+    call pthread_self
+    mov rdi, rax
+    lea rsi, [rbp - TSF_ATTR]
+    extern pthread_getattr_np
+    call pthread_getattr_np
+    test eax, eax
+    jnz .out
+    lea rdi, [rbp - TSF_ATTR]
+    lea rsi, [rbp - TSF_BASE]
+    lea rdx, [rbp - TSF_SIZE]
+    extern pthread_attr_getstack
+    call pthread_attr_getstack
+    test eax, eax
+    jnz .destroy
+    mov rax, [rbp - TSF_SIZE]
+    shr rax, 2
+    mov edx, 128 * 1024
+    cmp rax, rdx
+    cmova rax, rdx
+    add rax, [rbp - TSF_BASE]
+    mov [gs:ThreadState.eval_stack_floor], rax
+.destroy:
+    lea rdi, [rbp - TSF_ATTR]
+    extern pthread_attr_destroy
+    call pthread_attr_destroy
+.out:
+    leave
+    ret
+END_FUNC tstate_stack_floor
 
 ;; ============================================================================
 ;; Read-only data for traceback printing

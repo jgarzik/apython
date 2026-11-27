@@ -26,6 +26,7 @@ extern array_module_create
 extern impcore_module_create
 extern time_module_create
 extern asyncio_module_create
+extern native_asyncio_module_create
 extern sre_module_create
 extern abc_module_create
 extern weakref_module_create
@@ -55,6 +56,7 @@ section .rodata
 bm_n_builtins: db "builtins", 0
 bm_n_sys:      db "sys", 0
 bm_n_time:     db "time", 0
+bm_n_asyncio_native: db "_asyncio_native", 0
 bm_n_asyncio:  db "_asynciocore", 0
 bm_n_sre:      db "_sre", 0
 bm_n_array:    db "array", 0
@@ -90,6 +92,7 @@ global builtin_module_table
 builtin_module_table:
     dq bm_n_abc,      abc_module_create
     dq bm_n_array,    array_module_create
+    dq bm_n_asyncio_native, native_asyncio_module_create
     dq bm_n_asyncio,  asyncio_module_create
     dq bm_n_randomcore, random_module_create
     dq bm_n_mmapcore, mmap_module_create

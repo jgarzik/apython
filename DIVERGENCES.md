@@ -320,28 +320,14 @@ older than 3.12 use; `sys.monitoring` is the newer interface over the same
 events and needs per-code-object instrumentation that this interpreter's
 dispatch does not have a place for yet.
 
-## There is no REPL
+## Interactive console
 
-`./apython` reads a file, `-c`, `-m` or stdin.  There is no interactive
-prompt.  `CMODE_SINGLE` and `sys.displayhook` both exist, so starting one is
-cheap and finishing one -- line continuation, the input hook, readline, the
-traceback rules an interactive statement has -- is not; it is its own
-feature rather than a missing piece of this one.
+A terminal on stdin or `-i` starts the console. It preserves the main
+namespace after a script and flushes stdout before writing each prompt to
+stderr. Expression values go through `sys.displayhook`.
 
-`-i` is refused with the usage message, which is where this costs something
-measurable: `test_cmd_line_script`'s `interactive_python` helper is
-
-    while True:
-        data = stderr.read(4)
-        if data == b">>> ":
-            break
-        stderr.readline()
-
-and a subprocess that exited leaves both calls answering `b''` forever, so
-the four REPL-flush tests spin rather than fail.  The module reports nothing
-either way -- it did not import at all before `_frozen_importlib_external`
-arrived -- so nothing is lost by it, but it is why that module is a HANG in
-the sweep rather than a row of failures.
+CPython's incomplete-input compiler flags, readline, the interactive input
+hook, `PYTHONINSPECT` and `PYTHONSTARTUP` are still pending.
 
 ## The alias modules in lib/
 

@@ -18,6 +18,17 @@ ranking, not a ledger: re-measure at each phase gate.
 
 ## Where we are
 
+The latest matched CPython 3.12.9 run reports **30,129 of 42,074** passing
+test IDs in mission scope (71.61%) and **30,178 of 43,097** against the
+full measured denominator (70.02%). apython completed the sweep without
+a process crash or timeout. The CPython control timed out in `test_runpy`
+and aborted in `test_tracemalloc`.
+
+The package, source, curated CPython-source and stdlib gates pass. The
+aggregate macro benchmark measured 1.41x CPython and the core suite 1.52x.
+
+### Earlier aggregate snapshot
+
 | Gate | Result |
 |---|---|
 | `make check` | green |
@@ -62,13 +73,15 @@ RC_OUTDIR=<dir> bash tests/rc_sweep.sh ap      # then: cp
 bash tests/pkg_probe.sh                        # apython side of the packages
 ```
 
-Three things the instruments do not yet do, and should (Phase 0):
+Run `make conformance` for a matched file and package report by test ID.
+The control binary and its source checkout must match the vendored CPython
+release. For focused runs, pass module names to `python3 tests/conformance.py`.
+Use `--output` to keep logs and per-test outcomes. A crash, timeout, or
+incomplete control is visible on its module row; the published score covers
+completed control runs.
 
-- `rc_sweep.sh` reports skips but does not subtract the excess, so it prints
-  the headline.  It needs a strict column.
-- `pkg_probe.sh` has no CPython control.  The control above was run by hand.
-- Skip *reasons* only appear with `-v`.  The ranked list of them is the
-  cheapest gap catalogue there is and nothing prints it.
+The older scripts still provide the aggregate snapshot above and the package
+floor. Their aggregate counting is different from the matched-ID report.
 
 The control is itself imperfect: under it `test_runpy` hangs,
 `test_tracemalloc` aborts and `test_monitoring` reports no tests, so those
@@ -86,10 +99,10 @@ than Python.  Whether they count decides how far 95% is.
 | Subinterpreters: `test_interpreters`, `test__xxsubinterpreters`, `test__xxinterpchannels` | ~210 | A second interpreter state in one process |
 | `test_gdb`, `test_perf_profiler`, `test_asdl_parser` | ~70 | A CPython source build |
 
-Recommended: declare the C API, subinterpreters and source-build groups **out
-of scope** and report the percentage against a denominator without them
-(roughly 42,800); and stop hiding behind `cpython_only` -- triage those 510,
-make the behavioural ones run, and record the layout ones as excluded by name.
+The mission score excludes named C API, subinterpreter, source-build and
+implementation-layout tests. The full-denominator score is reported alongside
+it. `tests/conformance_scope.txt` records the current audit and opts individual
+behavioural definitions guarded by `cpython_only` into the matched run.
 
 Measured, by running those tests with the implementation name patched to
 `cpython`: of about 490, **116 already pass**, 311 fail and the rest do not
@@ -107,30 +120,22 @@ full gate set, both sweeps and the benchmarks.
 
 ### Phase 0 -- Make the instrument honest
 
-No conformance gain; everything after it is steered by what this fixes.
-
-1. Add the strict column and the skip-reason table to `rc_sweep.sh`; give
-   `pkg_probe.sh` a control side and fold both into one report.
-2. Re-record `tests/pkg_floor.txt` and the source floor; find out why
-   `test_inspect` and `test_capi` dropped and make `check-pkg` green.
-3. Settle the scope decisions above and encode them as an exclusion list the
-   report reads, so the denominator is written down rather than argued.
-4. Close the three crashes and two hangs listed above before anything else:
-   each hides its whole module (`test_yield_from` 40, `test_fstring` 85,
-   `test_cmd_line_script` 47, `test_resource` 11).  What is known of each:
-   - `test_yield_from` segfaults in
-     `test_delegating_generators_claim_to_be_running`, after an unraisable
-     "generator already executing" from a generator's finaliser.
-   - `test_resource` is killed by SIGXFSZ in `test_fsize_enforced`: CPython
-     ignores SIGXFSZ at start-up so that the write fails with EFBIG, and this
-     leaves it at the default.  SIGPIPE is ignored correctly.
-   - `test_fstring` ends in "Fatal: out of memory" under the sweep's address
-     limit when run quietly, and completes when run with `-v`; something in
-     it allocates without bound on a path the output mode changes.
-   - `test_cmd_line_script` spins waiting for a REPL prompt (Phase 6);
-     `test_zipfile64` has not been diagnosed.
-   - Deep recursion (`test_super_deep`, hidden behind `cpython_only`)
-     overruns the C stack instead of raising RecursionError.
+- The matched report counts shared passing test IDs and ranks skip reasons.
+  The scope file records the exclusions and selectively re-enables
+  behavioural cases behind `cpython_only`.
+- The package and source floors record the verified gains. Returning code
+  position iterators restored the `test_inspect` floor. The excluded C API
+  packages still run and count toward the crash check.
+- `test_yield_from` completes after guarding a delegating generator during
+  `throw()` and `close()`. `test_resource` passes after ignoring SIGXFSZ
+  at startup. Deep Python recursion now raises on both the main stack and
+  a worker stack.
+- `test_cmd_line_script` completes and passes its four stream-flush cases.
+  `test_zipfile64` passed all four tests with a 300-second budget. An
+  isolated apython run took 126 seconds.
+- The quiet-run `test_fstring` OOM came from numeric format specs reaching the
+  integer formatter with a tuple or function. The fallback now raises
+  `TypeError` for a nonempty spec on objects using `object.__format__`.
 
 ### Phase 1 -- Whole modules behind one missing piece
 
@@ -140,7 +145,7 @@ Each item is a single absent name or module with hundreds of tests behind it.
 |---|---|---|
 | `array._array_reconstructor`, and `array.__reduce_ex__` to match | 814 | `test_array` dies at import on the one name.  Pickling an `array` fails today too |
 | `_multiprocessing` (`SemLock`), `_posixshmem`, fd passing over `sendmsg` | ~1,500 | Unlocks the three `test_multiprocessing_*` packages, `test_concurrent_futures` (255), `ProcessPoolExecutor`, `test_multiprocessing_main_handling`, `compileall -j` |
-| `_asyncio` | ~900 | 824 asyncio tests are skipped for "requires the C `_asyncio` module".  Supply it on the stand-in pattern `_datetime` and `_pickle` use, then fix the ~90 real failures (text-mode `makefile`, pidfd watchers, `sendmsg`) |
+| `_asyncio` | ~900 | Build native loop and task bookkeeping, `Future`, and `Task` before enabling the accelerator. Then close the asyncio failures in text-mode `makefile`, pidfd watchers, and `sendmsg`. |
 | `_sqlite3` | 468 | A shim over `-lsqlite3`, in the shape `zlib.asm`/`lib/zlib.py` set.  Callbacks from C into Python follow `pyexpat_cb.asm` |
 | `_gdbm`, `_dbm` | ~230 | Shims over libgdbm.  `test_shelve` silently runs half its classes without them; `test_dbm`, `test_dbm_gnu`, `test_dbm_ndbm` |
 | C-accelerator stand-ins: `_functools` (96), `_uuid` (37), `_queue` (28), `_heapq` (25), `_bisect` (22), `_statistics` (20), `_elementtree` (19), `_stat` (6), `_opcode` (3), `_json`'s five names (12) | ~270 | Mostly re-exports under the C name.  `_json`, `_bisect` and `_stat` are imported as `None` by fresh-module tests today and take the test class with them |
@@ -217,10 +222,9 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 
 ### Phase 4 -- Code objects, the compiler's public face, tracing
 
-- **`co_lines()` and `co_positions()` return lists**; CPython's are iterators.
-  `dis` calls `next()` on them, so every `dis` entry point raises: `test_dis`
-  (120) dies at import, `test_peepholer` (51), parts of `test_compile` (63),
-  `test_code` (26), `test_inspect`.
+- **Code-object parity.** `co_lines()` and `co_positions()` now return
+  iterators. `test_dis` still fails at import because a fixture finds
+  an integer where CPython's constants tuple contains a nested code object.
 - **`dis.stack_effect`** (`_opcode`), `co_lnotab`, `_varname_from_oparg`,
   `code.replace()` for the three name tuples.
 - **The optimiser.** No constant folding (`2 * 3` stays two constants),
@@ -262,9 +266,9 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 
 ### Phase 6 -- The command line and start-up
 
-- **A REPL.** `-i`, bare `apython`, `PYTHONINSPECT`, `PYTHONSTARTUP`,
-  `readline`.  `test_cmd_line_script` hangs waiting for a prompt;
-  `test_repl`, `test_code_module`, `test_readline`.
+- **Interactive mode.** Incomplete-input compilation and continuation,
+  `PYTHONINSPECT`, `PYTHONSTARTUP`, and `readline`.
+  See `test_repl`, `test_code_module`, and `test_readline`.
 - **Flags that are rejected:** `-V`, `-VV`, `-x`, `--help-env`,
   `--help-xoptions`, `--help-all`, `--check-hash-based-pycs`, and any `-X` or
   `-W` written without a space (`-Xutf8`, `-Wd`).  The last alone is 65
@@ -306,8 +310,7 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
   `test_grammar` 13, `test_positional_only_arg` 13, `test_scope`,
   `test_global`, `test_string_literals`, `test_eof`, `test_future_stmt` 9.
   f-string field errors have two messages where CPython has a dozen, reported
-  at the token rather than in the field (`test_fstring`, 85 once it stops
-  running out of memory).
+  at the token rather than in the field (`test_fstring`).
 - **Object model.** `obj.__class__ = int` is accepted; a dict subclass used as
   `exec()` locals does not have `__getitem__` consulted; exceptions and
   `__notes__`; `RecursionError` in `isinstance` chains; `test_descr` 53,

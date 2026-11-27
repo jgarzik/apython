@@ -68,6 +68,8 @@ TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$TESTDIR")"
 CPYTHON_LIB=${CPYTHON_LIB:-$HOME/tmp/repo/cpython/Lib}
 TIMEOUT=${RC_TIMEOUT:-90}
+# Both controls write and read several GiB in test_zipfile64.
+ZIP64_TIMEOUT=${RC_ZIP64_TIMEOUT:-300}
 JOBS=${RC_JOBS:-6}
 VLIMIT=${RC_VLIMIT:-3000000}
 OUTDIR=${RC_OUTDIR:-/tmp/apython-rc-sweep-$SIDE}
@@ -128,8 +130,11 @@ fi
 rm -rf "${OUTDIR:?}/cwd"/* 2>/dev/null
 
 run_one() {
-    local f="$1" b out rc ran nbad pass skip cat last work
+    local f="$1" b out rc ran nbad pass skip cat last work timeout="$TIMEOUT"
     b=$(basename "$f" .py)
+    if [ "$b" = "test_zipfile64" ]; then
+        timeout="$ZIP64_TIMEOUT"
+    fi
     out="$OUTDIR/logs/$b.txt"
     # A cwd of its own, so what the module writes there goes with it.  Nothing
     # needs the repo root: the runner, the module and PYTHONPATH are all
@@ -137,7 +142,7 @@ run_one() {
     work=$(mktemp -d "$OUTDIR/cwd/$b.XXXXXX") || return
     ( ulimit -v "$VLIMIT" 2>/dev/null
       cd "$work" || exit
-      PYTHONPATH="$CPYTHON_LIB" timeout "$TIMEOUT" "$RUNNER" "$f" ) > "$out" 2>&1
+      PYTHONPATH="$CPYTHON_LIB" timeout "$timeout" "$RUNNER" "$f" ) > "$out" 2>&1
     rc=$?
     # After rc is taken: rm would clobber it.  A module that forked and
     # outlived the runner may still be writing in here, and removing the
@@ -165,7 +170,7 @@ run_one() {
         "$b" "$cat" "$rc" "$ran" "$nbad" "$skip" "$last"
 }
 export -f run_one
-export OUTDIR ROOT RUNNER CPYTHON_LIB TIMEOUT VLIMIT
+export OUTDIR ROOT RUNNER CPYTHON_LIB TIMEOUT ZIP64_TIMEOUT VLIMIT
 
 NMOD=$(ls "$CPYTHON_LIB"/test/test_*.py | wc -l)
 echo "Sweeping $NMOD test modules from $CPYTHON_LIB/test under $RUNNER"

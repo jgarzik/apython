@@ -58,6 +58,7 @@ struc ThreadState
     .frame_datastack_base: resq 1 ;   the current chunk
     .attr_error_pending:  resq 1  ; AttributeError __getattr__ handed back
     .ts_self:             resq 1  ; this block's own linear address
+    .eval_stack_floor:    resq 1  ; lowest safe rsp at Python frame entry
     ; ---- the rest ---------------------------------------------------------
     .cfex_temp_pending:   resq 1  ; CALL_FUNCTION_EX temp buffer, or NULL
     .cfex_merged_pending: resq 1  ; CALL_FUNCTION_EX merged kwargs buffer
@@ -105,6 +106,7 @@ struc ThreadState
     ; ---- asyncio: the running loop and its backend's state ----------------
     .eventloop:           resb TS_EVENTLOOP_SIZE
     .eventloop_root_exception: resq 1
+    .asyncio_running_loop: resq 1 ; owned stdlib loop Value, or zero
     .poll_fds:            resq 1  ; PollFd*
     .poll_fd_tasks:       resq 1  ; AsyncTask**
     .poll_cap:            resd 1

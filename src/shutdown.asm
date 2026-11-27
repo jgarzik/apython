@@ -122,6 +122,8 @@ DEF_FUNC interp_shutdown
     lea rdi, [rel sd_atexit]
     lea rsi, [rel sd_run_exitfuncs]
     call shutdown_call
+    extern native_asyncio_clear_running_loop
+    call native_asyncio_clear_running_loop
     mov qword [rel gil_finalizing], 1
     leave
     ret

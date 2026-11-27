@@ -1023,6 +1023,9 @@ DEF_FUNC gen_throw, GT_FRAME
     mov [rbp - GT_YF], rax
     test rax, rax
     jz .gt_local
+    ; A delegate can re-enter the parent, directly or through another
+    ; yield from. Keep the parent running until the delegation returns.
+    mov qword [rbx + PyGenObject.gi_running], 1
 
     ; GeneratorExit is the exception: the child is CLOSED rather than thrown
     ; into, so its `except GeneratorExit` sees its own close.  That is
@@ -1070,6 +1073,7 @@ DEF_FUNC gen_throw, GT_FRAME
     call gen_throw
 
 .gt_child_done:
+    mov qword [rbx + PyGenObject.gi_running], 0
     test edx, edx
     jz .gt_child_finished
     ; The child yielded, so this generator is still suspended at the same
