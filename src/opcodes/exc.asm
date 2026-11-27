@@ -477,22 +477,13 @@ DEF_FUNC_BARE op_raise_varargs
     test eax, eax
     jnz .raise_exc_obj
 
-    ; Check if rdi is an exception TYPE (e.g., bare "raise ValueError")
-    ; First verify rdi is actually a type object (ob_type == type_type, exc_metatype,
-    ; or user_type_metatype) to avoid segfault on non-type objects like strings
+    ; Check if rdi is an exception TYPE (e.g., bare "raise ValueError" or a
+    ; custom-metaclass exception like ssl.SSLWantReadError).  Every type object
+    ; -- builtin, heap, exception, or custom metaclass -- has TYPE_FLAG_METATYPE
+    ; on its ob_type.
     mov rax, [rdi + PyObject.ob_type]
-    extern type_type
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .raise_check_type
-    extern exc_metatype
-    lea rcx, [rel exc_metatype]
-    cmp rax, rcx
-    je .raise_check_type
-    extern user_type_metatype
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .raise_bad               ; not a type object at all
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .raise_bad                ; not a type object at all
 
 .raise_check_type:
     ; rdi is a type object — check if it's an exception subclass
@@ -670,15 +661,8 @@ DEF_FUNC_LOCAL raise_coerce_cause, RCC_FRAME
     ; Otherwise it has to be an exception CLASS.  Verify it is a type at all
     ; before asking whether it is one: type_is_exc_subclass walks tp_mro.
     mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel type_type]
-    cmp rax, rcx
-    je .rcc_is_type
-    lea rcx, [rel exc_metatype]
-    cmp rax, rcx
-    je .rcc_is_type
-    lea rcx, [rel user_type_metatype]
-    cmp rax, rcx
-    jne .rcc_bad
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_METATYPE
+    jz .rcc_bad
 
 .rcc_is_type:
     mov rdi, rbx

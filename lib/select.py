@@ -92,7 +92,10 @@ def select(rlist, wlist, xlist, timeout=None):
         timeout = float(timeout)
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        ms = int(timeout * 1000)
+        v = timeout * 1000.0
+        ms = int(v)
+        if v > ms:
+            ms += 1
 
     revents = _c.poll(flat, ms)
     out = ([], [], [])
@@ -154,7 +157,10 @@ class poll:
         if timeout is None or timeout < 0:
             ms = -1
         else:
-            ms = int(timeout)
+            v = float(timeout)
+            ms = int(v)
+            if v > ms:
+                ms += 1
         revents = _c.poll(flat, ms)
         out = []
         for i in range(len(fds)):
@@ -245,7 +251,10 @@ class epoll:
         if timeout is None or timeout < 0:
             ms = -1
         else:
-            ms = int(timeout * 1000.0)
+            v = float(timeout) * 1000.0
+            ms = int(v)
+            if v > ms:
+                ms += 1
         if maxevents == 0:
             raise ValueError("maxevents must be greater than 0, got 0")
         if maxevents < 0:

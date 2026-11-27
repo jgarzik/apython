@@ -241,6 +241,8 @@ def getprotobyname(name):
 def _port_number(port):
     if port is None:
         return 0
+    if isinstance(port, bytes):
+        port = port.decode("ascii")
     if isinstance(port, str):
         if port.isdigit():
             return int(port)

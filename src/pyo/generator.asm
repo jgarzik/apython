@@ -2414,7 +2414,13 @@ DEF_FUNC gen_traverse, 8        ; rsp 16-aligned at the call the macros below ex
     mov rdi, [rbx + PyGenObject.ag_finalizer]
     VISIT_PTR rdi
 
-    ; Traverse frame localsplus if frame exists
+    ; Traverse frame localsplus if frame exists and is not currently executing.
+    ; A running generator/coroutine's frame is rooted on the active call stack
+    ; (cannot be unreachable garbage), and skipping it matches CPython 3.12's
+    ; _PyFrame_Traverse where an executing frame has stacktop == 0 (so
+    ; gc.get_referrers(local_var) does not report the running coroutine itself).
+    cmp qword [rbx + PyGenObject.gi_running], 0
+    jne .done
     mov r12, [rbx + PyGenObject.gi_frame]
     test r12, r12
     jz .done

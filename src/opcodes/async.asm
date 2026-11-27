@@ -28,7 +28,9 @@ extern coro_type
 extern raise_exception
 extern raise_exception_obj
 extern exc_TypeError_type
+extern exc_RuntimeError_type
 extern exc_StopAsyncIteration_type
+extern gen_yf
 extern exc_StopIteration_type
 extern exc_isinstance
 extern exc_new
@@ -220,11 +222,33 @@ DEF_FUNC_BARE op_get_awaitable
     ; hands back self, so releasing it earlier and then using the result was
     ; a use-after-free that surfaced two opcodes later inside SEND.
     VPOP rdi
+    PUBLISH_SP
     push rax
     sub rsp, 8
     DECREF_V rdi, rcx
     add rsp, 8
     pop rax
+
+    ; CPython GET_AWAITABLE: if the awaitable is a coroutine that is already
+    ; awaiting another awaitable (`cr_await is not None`), reject the second
+    ; `await` with RuntimeError("coroutine is being awaited already").
+    lea rcx, [rel coro_type]
+    cmp [rax + PyObject.ob_type], rcx
+    jne .gaw_push
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call gen_yf
+    test rax, rax
+    jz .gaw_not_awaited
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    RAISE exc_RuntimeError_type, "coroutine is being awaited already"
+.gaw_not_awaited:
+    add rsp, 8
+    pop rax
+.gaw_push:
     VPUSH_PTR rax
     DISPATCH
 
