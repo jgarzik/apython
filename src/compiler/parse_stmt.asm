@@ -1490,8 +1490,8 @@ END_FUNC ps_from
 ;;     future.c refuses both, and this did neither: `from __future__ import *`
 ;;     compiled and bound whatever __all__ listed.
 ;;
-;;   - barry_as_FLUFL is refused with the message it has had since 3.0, which
-;;     is not "is not defined".
+;;   - barry_as_FLUFL sets a code flag inherited by later compile() calls.
+;;     Lexing this source has already happened by the time we see the import.
 ;;
 ;; The level is checked too -- `from .__future__ import annotations` is a
 ;; relative import of a module that happens to be called that, and CPython
@@ -1585,8 +1585,17 @@ DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
     CSTRING rsi, "annotations"
     call ap_strcmp
     test eax, eax
-    jnz .pnf_next
+    jnz .pnf_barry
     mov dword [rbx + Comp.future_anno], 1
+    jmp .pnf_next
+.pnf_barry:
+    mov rax, [rbp - PNF_NAME]
+    lea rdi, [rax + PyStrObject.data]
+    CSTRING rsi, "barry_as_FLUFL"
+    call ap_strcmp
+    test eax, eax
+    jnz .pnf_next
+    mov dword [rbx + Comp.future_barry], CO_FUTURE_BARRY_AS_BDFL
 .pnf_next:
     inc qword [rbp - PNF_I]
     jmp .pnf_loop

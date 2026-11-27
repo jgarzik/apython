@@ -1749,11 +1749,34 @@ DEF_FUNC lex_run, LR_FRAME
 ;; --- operators and delimiters ---------------------------------------------
 .operator:
     mov r15, r12
+    cmp dword [rbx + Comp.future_barry], 0
+    je .normal_operator
+    lea rax, [r12 + 1]
+    cmp rax, r13
+    jae .normal_operator
+    cmp word [r12], '<>'
+    je .barry_notequal
+    cmp word [r12], '!='
+    jne .normal_operator
+    mov r8, r12
+    sub r8, [r14 + Lexer.line_start]
+    mov rdi, rbx
+    lea rsi, [rel exc_SyntaxError_type]
+    mov ecx, [r14 + Lexer.lineno]
+    CSTRING rdx, "with Barry as BDFL, use '<>' instead of '!='"
+    call comp_error
+    jmp .fail
+.barry_notequal:
+    mov eax, TOK_NOTEQUAL
+    mov edx, 2
+    jmp .operator_kind
+.normal_operator:
     mov rdi, r12
     mov rsi, r13
     call lex_operator                   ; rax = kind, rdx = length
     test eax, eax
     jz .bad_char
+.operator_kind:
     add r12, rdx
     mov [rbp - LR_KIND], rax
 

@@ -881,6 +881,8 @@ DEF_FUNC compile_ast_raw, CAR_FRAME
     call comp_init
     mov rax, [rbp - CAR_WANTTC]
     mov [rbx + Comp.want_tc], eax
+    mov rdi, rbx
+    call comp_take_future
 
     mov rdi, rbx
     xor esi, esi                        ; the whole source
@@ -1041,15 +1043,8 @@ DEF_FUNC compile_source_ex, CS_FRAME
     mov r8, [rbp - CS_MODE]
     call comp_init
 
-    ; PEP 563 is inherited from the code that called compile()/exec()/eval(),
-    ; which is CPython's rule.  Consumed here, so it cannot leak into a
-    ; compile that did not ask.
-    mov rax, [gs:ThreadState.comp_inherit_future]
-    mov qword [gs:ThreadState.comp_inherit_future], 0
-    test rax, rax
-    jz .cs_no_inherit
-    mov dword [rbx + Comp.future_anno], 1
-.cs_no_inherit:
+    mov rdi, rbx
+    call comp_take_future
 
     lea r12, [rbp - CS_UNIT]
     mov rdi, r12
@@ -2318,13 +2313,26 @@ DEF_FUNC_LOCAL comp_note_caller_future
     mov rax, [rax + PyFrame.code]
     test rax, rax
     jz .cncf_done
-    test dword [rax + PyCodeObject.co_flags], CO_FUTURE_ANNOTATIONS
-    jz .cncf_done
-    mov qword [gs:ThreadState.comp_inherit_future], 1
+    mov eax, [rax + PyCodeObject.co_flags]
+    and eax, CO_FUTURE_ANNOTATIONS | CO_FUTURE_BARRY_AS_BDFL
+    mov [gs:ThreadState.comp_inherit_future], rax
 .cncf_done:
     leave
     ret
 END_FUNC comp_note_caller_future
+
+;; comp_take_future(rdi = Comp*) -> void
+;; Consume the flags for this compile before parsing can re-enter Python.
+DEF_FUNC_BARE comp_take_future
+    mov rax, [gs:ThreadState.comp_inherit_future]
+    mov qword [gs:ThreadState.comp_inherit_future], 0
+    mov edx, eax
+    and eax, CO_FUTURE_ANNOTATIONS
+    and edx, CO_FUTURE_BARRY_AS_BDFL
+    mov [rdi + Comp.future_anno], eax
+    mov [rdi + Comp.future_barry], edx
+    ret
+END_FUNC comp_take_future
 
 ;; ============================================================================
 ;; builtin_eval_fn(args, nargs) -> Value
@@ -2773,7 +2781,22 @@ DEF_FUNC builtin_compile_fn, CO_FRAME
     mov ecx, CMODE_SINGLE
 .have_mode:
     mov [rbp - CO_MODE], rcx
-    call comp_note_caller_future        ; PEP 563 is inherited; see the helper
+    mov rdi, [rbp - CO_SLOTS + 32]       ; dont_inherit
+    test rdi, rdi
+    jz .co_inherit
+    extern obj_is_true
+    call obj_is_true
+    ERR_M1 .propagate
+    test eax, eax
+    jz .co_inherit
+    mov qword [gs:ThreadState.comp_inherit_future], 0
+    jmp .co_future_flags
+.co_inherit:
+    call comp_note_caller_future
+.co_future_flags:
+    mov rax, [rbp - CO_FLAGS]
+    and eax, CO_FUTURE_ANNOTATIONS | CO_FUTURE_BARRY_AS_BDFL
+    or [gs:ThreadState.comp_inherit_future], rax
     cmp qword [rbp - CO_SRC], 0
     jne .co_text
     mov rdi, rbx

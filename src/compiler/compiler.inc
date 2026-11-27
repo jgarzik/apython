@@ -667,7 +667,7 @@ struc Comp
                                     ; is finished
     ; Four of these and a pad, so the fields below keep their alignment: the
     ; struct is a run of resd and an odd count shifts everything after it.
-    .future_pad3: resd 1
+    .future_barry: resd 1          ; CO_FUTURE_BARRY_AS_BDFL or zero
     .future_pad4: resd 1
     .err:       resb CompErr_size
     .warn_n:    resd 1              ; how many of .warns are filled

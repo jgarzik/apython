@@ -18,9 +18,11 @@ class Console(code.InteractiveConsole):
         # The compiler's single mode does not emit expression display.
         # Use eval mode for expressions and leave statements to the console.
         try:
-            expression = compile(source, filename, "eval")
+            expression = self.compile(source, filename, "eval")
         except SyntaxError:
             return super().runsource(source, filename, symbol)
+        if expression is None:
+            return True
         try:
             sys.displayhook(eval(expression, self.locals))
         except SystemExit:

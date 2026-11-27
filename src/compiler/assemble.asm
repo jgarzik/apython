@@ -1295,6 +1295,7 @@ DEF_FUNC asm_assemble, AA_FRAME
     mov eax, [r12 + CompUnit.stacksize]
     mov [rbp - AA_SPEC + CodeSpec.stacksize], eax
     mov eax, [r12 + CompUnit.flags]
+    or eax, [rbx + Comp.future_barry]
     mov [rbp - AA_SPEC + CodeSpec.flags], eax
     mov eax, [r12 + CompUnit.firstline]
     mov [rbp - AA_SPEC + CodeSpec.firstlineno], eax

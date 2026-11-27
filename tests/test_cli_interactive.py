@@ -30,4 +30,13 @@ with subprocess.Popen([sys.executable, "-iq", "-c", "answer = 42"],
         if process.poll() is None:
             process.kill()
 
+result = subprocess.run(
+    [sys.executable, "-iq"],
+    input=b"from __future__ import barry_as_FLUFL\n2 <> 3\n2 != 3\n",
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+)
+assert result.returncode == 0, result.stderr
+assert result.stdout == b"True\n", result.stdout
+assert b"with Barry as BDFL" in result.stderr, result.stderr
+
 print("interactive prompts, output, and exceptions")
