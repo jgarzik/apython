@@ -526,6 +526,12 @@ im_repr_mid:     db " mode='", 0
 im_repr_end:     db "' closefd=True>", 0
 im_repr_closed:  db "<_io.FileIO [closed]>", 0
 im_default_mode: db "rb", 0
+im_mode_rbp:     db "rb+", 0
+im_mode_wb:      db "wb", 0
+im_mode_ab:      db "ab", 0
+im_mode_abp:     db "ab+", 0
+im_mode_xb:      db "xb", 0
+im_mode_xbp:     db "xb+", 0
 io_msg_not:      db ", not ", 0
 io_msg_int:      db "int", 0
 global io_msg_readinto
@@ -2376,18 +2382,46 @@ DEF_FUNC_LOCAL fileio_str_append
     ret
 END_FUNC fileio_str_append
 
-;; fileio_mode_str(rdi = self) -> rax = the mode, one new reference
+;; fileio_mode_str(rdi = self) -> rax = the canonical binary mode, one new ref
+;; Matches CPython's fileio.c mode_string(): FileIO is always binary, so mode
+;; is derived from the opened flags and always includes 'b' (e.g. 'rb', 'wb',
+;; 'ab', 'xb', 'rb+', 'ab+', 'xb+').
 DEF_FUNC_LOCAL fileio_mode_str
-    mov rax, [rdi + PyFileIOObject.fio_mode]
-    test rax, rax
-    jz .fms_default
-    mov rdi, rax
-    call obj_incref
-    mov rax, rdi
-    leave
-    ret
-.fms_default:
+    mov rax, [rdi + PyFileIOObject.fio_flags]
+    test rax, FIO_CREATED
+    jz .fms_not_created
+    test rax, FIO_READABLE
+    jz .fms_xb
+    lea rdi, [rel im_mode_xbp]
+    jmp .fms_make
+.fms_xb:
+    lea rdi, [rel im_mode_xb]
+    jmp .fms_make
+.fms_not_created:
+    test rax, FIO_APPENDING
+    jz .fms_not_appending
+    test rax, FIO_READABLE
+    jz .fms_ab
+    lea rdi, [rel im_mode_abp]
+    jmp .fms_make
+.fms_ab:
+    lea rdi, [rel im_mode_ab]
+    jmp .fms_make
+.fms_not_appending:
+    test rax, FIO_READABLE
+    jz .fms_wb
+    test rax, FIO_WRITABLE
+    jz .fms_rb
+    lea rdi, [rel im_mode_rbp]
+    jmp .fms_make
+.fms_rb:
     lea rdi, [rel im_default_mode]
+    jmp .fms_make
+.fms_wb:
+    test rax, FIO_WRITABLE
+    jz .fms_rb
+    lea rdi, [rel im_mode_wb]
+.fms_make:
     call str_from_cstr_heap
     leave
     ret
