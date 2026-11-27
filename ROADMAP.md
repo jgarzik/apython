@@ -6,8 +6,10 @@ What stands between this tree and its mission, in the order to close it.
 judged against CPython itself: **95% or more of the tests CPython 3.12 passes**,
 no crashes on CPython's corpora, and performance at or above CPython's.
 
-This file owns "what is left and in what order".  It replaces `bugs.md`, whose
-open entries are in the [defect list](#open-defects) below.  `DIVERGENCES.md`
+This file owns "what is left and in what order".  When an item or defect is
+completed, delete it rather than adding historical "done" notes — git history
+is the record of completed work.  `ROADMAP.md` replaces `bugs.md`, whose open
+entries are in the [defect list](#open-defects) below.  `DIVERGENCES.md`
 records where the tree answers differently from CPython and why; nothing in it
 is a ruling, and the entries that cost tests are scheduled here like any other
 gap.

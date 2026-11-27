@@ -339,6 +339,11 @@ a description of a choice, not a ruling; an entry that costs tests is
 scheduled in the roadmap.  Reproduce an entry in either before working it;
 several have drifted.
 
+**Documentation policy:** When an item, defect, or divergence is completed or
+resolved, **delete** it from the documentation rather than marking it done or
+adding historical notes ("X is completed").  Documentation describes the
+current state and remaining work; git history is the record of completed work.
+
 ## Source Layout
 
 No hand-written file exceeds 100k bytes; only generated asm may.
