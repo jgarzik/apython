@@ -180,7 +180,9 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     mov rdi, rbx
     call ap_free
 
-    ; What this thread owned.  The dict first: releasing it can run Python.
+    ; Release Python state while the thread still owns the GIL.
+    extern native_asyncio_clear_running_loop
+    call native_asyncio_clear_running_loop
     mov rdi, [gs:ThreadState.ts_dict]
     test rdi, rdi
     jz .te_no_dict

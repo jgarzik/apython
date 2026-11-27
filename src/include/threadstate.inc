@@ -106,6 +106,7 @@ struc ThreadState
     ; ---- asyncio: the running loop and its backend's state ----------------
     .eventloop:           resb TS_EVENTLOOP_SIZE
     .eventloop_root_exception: resq 1
+    .asyncio_running_loop: resq 1 ; owned stdlib loop Value, or zero
     .poll_fds:            resq 1  ; PollFd*
     .poll_fd_tasks:       resq 1  ; AsyncTask**
     .poll_cap:            resd 1

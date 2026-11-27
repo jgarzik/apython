@@ -126,6 +126,8 @@ DEF_FUNC posix_fork, 24                 ; + 1 push = 32, 16-aligned
     jnz .pfk_have_list
     extern signal_after_fork_child
     call signal_after_fork_child
+    extern native_asyncio_clear_running_loop
+    call native_asyncio_clear_running_loop
     mov rdi, [rel pm_atfork_child]
 .pfk_have_list:
     xor esi, esi
