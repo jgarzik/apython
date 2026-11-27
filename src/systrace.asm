@@ -183,8 +183,9 @@ SI_FN    equ 8
 SI_SAVED equ 16             ; the exception in flight, parked across the call
 SI_ARGS  equ 40             ; three Values: frame, event, arg
 SI_EVENT equ 48
-SI_FRAME equ 72             ; + 0 pushes = 72; padded to 80 below
-DEF_FUNC_LOCAL systrace_invoke, 80
+SI_KW_NAMES equ 56
+SI_FRAME equ 64
+DEF_FUNC_LOCAL systrace_invoke, SI_FRAME
     mov [rbp - SI_FN], rdi
     mov [rbp - SI_ARGS], rsi
     mov [rbp - SI_ARGS + 16], rcx
@@ -210,6 +211,11 @@ DEF_FUNC_LOCAL systrace_invoke, 80
     mov rax, [gs:ThreadState.current_exception]
     mov [rbp - SI_SAVED], rax
     mov qword [gs:ThreadState.current_exception], 0
+    ; An opcode trace can run between KW_NAMES and CALL. Those names
+    ; belong to the traced frame's pending call, not to this callback.
+    mov rax, [gs:ThreadState.kw_names_pending]
+    mov [rbp - SI_KW_NAMES], rax
+    mov qword [gs:ThreadState.kw_names_pending], 0
 
     inc qword [gs:ThreadState.tracing_depth]
     mov rdi, [rbp - SI_FN]
@@ -239,6 +245,8 @@ DEF_FUNC_LOCAL systrace_invoke, 80
     call obj_decref
     mov rdi, [rbp - SI_ARGS]
     call obj_decref
+    mov rax, [rbp - SI_KW_NAMES]
+    mov [gs:ThreadState.kw_names_pending], rax
     pop rax
     leave
     ret
