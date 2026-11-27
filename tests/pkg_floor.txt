@@ -4,7 +4,7 @@
 # Whole packages outside the mission scope retain only the crash check.
 # Regenerate with: bash tests/pkg_probe.sh --record
 pass test_ast 125
-pass test_asyncio 2520
+pass test_asyncio 2571
 pass test_concurrent_futures 0
 pass test_ctypes 517
 pass test_dataclasses 231
@@ -27,7 +27,7 @@ pass test_tkinter 0
 pass test_tomllib 13
 pass test_tools 4
 pass test_ttk 0
-pass test_unittest 1018
+pass test_unittest 1027
 pass test_warnings 127
 pass test_zipfile 296
 pass test_zoneinfo 180

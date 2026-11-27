@@ -752,6 +752,51 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     ; have already been dropped -- and then frees whatever it resurrected,
     ; underneath the reference it was just given.
     ;
+    ; ---- Phase 4.4: Clear weakrefs to unreachable objects (PEP 442) ------
+    ; CPython clears weakrefs to unreachable cycle members BEFORE invoking
+    ; finalizers so a weakref (e.g. asyncio._scheduled_tasks WeakSet) sees the
+    ; object as dead even if a finalizer records/resurrects it.
+    extern weakref_live
+    cmp qword [rel weakref_live], 0
+    je .wr_done
+    lea r13, [rbp - GCG_SEEN]
+    mov [r13 + PyGC_Head.gc_next], r13
+    mov [r13 + PyGC_Head.gc_prev], r13
+.wr_loop:
+    mov rbx, [r15 + PyGC_Head.gc_next]
+    cmp rbx, r15
+    je .wr_swap_back
+    mov r14, [rbx + PyGC_Head.gc_prev]
+    and r14, ~GC_PREV_MASK
+    mov rdi, rbx
+    call gc_list_remove
+    mov rdi, rbx
+    mov rsi, r13
+    call gc_list_append
+    or [rbx + PyGC_Head.gc_prev], r14
+    lea rdi, [rbx + GC_HEAD_SIZE]
+    extern weakref_clear_for
+    call weakref_clear_for
+    jmp .wr_loop
+.wr_swap_back:
+    mov rax, [r13 + PyGC_Head.gc_next]
+    cmp rax, r13
+    je .wr_empty
+    mov rcx, [r13 + PyGC_Head.gc_prev]
+    and rcx, GC_PREV_MASK
+    mov [r15 + PyGC_Head.gc_next], rax
+    mov [r15 + PyGC_Head.gc_prev], rcx
+    mov rdx, [rax + PyGC_Head.gc_prev]
+    and rdx, ~GC_PREV_MASK
+    or rdx, r15
+    mov [rax + PyGC_Head.gc_prev], rdx
+    mov [rcx + PyGC_Head.gc_next], r15
+    jmp .wr_done
+.wr_empty:
+    mov [r15 + PyGC_Head.gc_next], r15
+    mov [r15 + PyGC_Head.gc_prev], r15
+.wr_done:
+
     ; Each object moves to `seen` BEFORE its finalizer runs and the head is
     ; re-read every turn, because a __del__ can break a cycle and free other
     ; members of this very list.  The state bits are carried across the move

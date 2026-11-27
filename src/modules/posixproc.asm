@@ -22,6 +22,7 @@ extern sys_exit_now
 extern sys_kill
 extern sys_setsid
 extern sys_close_range
+extern sys_pidfd_open
 extern sys_wait4
 extern int_from_i64
 extern tuple_new
@@ -52,6 +53,7 @@ global posix_exit_now
 global posix_kill
 global posix_setsid
 global posix_close_range
+global posix_pidfd_open
 ; The W* readers are exported by the macro that defines them, below.
 global posix_waitpid
 global posix_waitstatus_to_exitcode
@@ -1445,3 +1447,142 @@ DEF_FUNC posix_getrusage, GRU_FRAME
 .gru_argerr:
     FAIL exc_TypeError_type, "getrusage() takes exactly 1 argument", .gru_nomem
 END_FUNC posix_getrusage
+
+;; ============================================================================
+;; posix.pidfd_open(pid, flags=0) -> int fd
+;;
+;; Opens a Linux pidfd for `pid` via SYS_pidfd_open (434).  The kernel sets
+;; O_CLOEXEC automatically.  Accepts positional or keyword pid=/flags=.
+;; ============================================================================
+PFO_PID   equ 8
+PFO_FLAGS equ 16
+PFO_HAVE  equ 24
+PFO_NPOS  equ 32
+PFO_ARGS  equ 40
+PFO_I     equ 48
+PFO_FRAME equ 48            ; + 2 pushes = 64, 16-aligned
+DEF_FUNC posix_pidfd_open, PFO_FRAME
+    push rbx
+    push r12
+    mov [rbp - PFO_ARGS], rdi
+    mov [rbp - PFO_NPOS], rsi
+    mov qword [rbp - PFO_PID], 0
+    mov qword [rbp - PFO_FLAGS], 0
+    mov qword [rbp - PFO_HAVE], 0
+
+    mov r12, [gs:ThreadState.kw_names_pending]
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    test r12, r12
+    jz .pfo_pos
+    mov rax, [r12 + PyTupleObject.ob_size]
+    sub [rbp - PFO_NPOS], rax
+
+.pfo_pos:
+    mov rax, [rbp - PFO_NPOS]
+    cmp rax, 2
+    ja .pfo_toomany
+    test rax, rax
+    jz .pfo_kw
+    mov rbx, [rbp - PFO_ARGS]
+    mov rax, [rbx]
+    mov [rbp - PFO_PID], rax
+    or qword [rbp - PFO_HAVE], 1
+    cmp qword [rbp - PFO_NPOS], 2
+    jb .pfo_kw
+    mov rax, [rbx + 8]
+    mov [rbp - PFO_FLAGS], rax
+    or qword [rbp - PFO_HAVE], 2
+
+.pfo_kw:
+    test r12, r12
+    jz .pfo_parse
+    mov qword [rbp - PFO_I], 0
+.pfo_kw_loop:
+    mov rcx, [rbp - PFO_I]
+    cmp rcx, [r12 + PyTupleObject.ob_size]
+    jae .pfo_parse
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    add rdi, PyStrObject.data
+    CSTRING rsi, "pid"
+    call ap_strcmp
+    mov rcx, [rbp - PFO_I]
+    test eax, eax
+    jz .pfo_kw_pid
+    mov rax, [r12 + PyTupleObject.ob_item]
+    mov rdi, [rax + rcx*8]
+    add rdi, PyStrObject.data
+    CSTRING rsi, "flags"
+    call ap_strcmp
+    mov rcx, [rbp - PFO_I]
+    test eax, eax
+    jnz .pfo_badkw
+    test qword [rbp - PFO_HAVE], 2
+    jnz .pfo_dup
+    mov rdx, [rbp - PFO_NPOS]
+    add rdx, rcx
+    mov rbx, [rbp - PFO_ARGS]
+    mov rax, [rbx + rdx*8]
+    mov [rbp - PFO_FLAGS], rax
+    or qword [rbp - PFO_HAVE], 2
+    jmp .pfo_kw_next
+.pfo_kw_pid:
+    test qword [rbp - PFO_HAVE], 1
+    jnz .pfo_dup
+    mov rdx, [rbp - PFO_NPOS]
+    add rdx, rcx
+    mov rbx, [rbp - PFO_ARGS]
+    mov rax, [rbx + rdx*8]
+    mov [rbp - PFO_PID], rax
+    or qword [rbp - PFO_HAVE], 1
+.pfo_kw_next:
+    inc qword [rbp - PFO_I]
+    jmp .pfo_kw_loop
+
+.pfo_parse:
+    test qword [rbp - PFO_HAVE], 1
+    jz .pfo_missing
+    mov rdi, [rbp - PFO_PID]
+    call posix_int_arg
+    ERR_M1 .pfo_fail
+    mov rbx, rax                    ; rbx = pid
+    xor r12d, r12d                  ; r12 = flags (default 0)
+    test qword [rbp - PFO_HAVE], 2
+    jz .pfo_call
+    mov rdi, [rbp - PFO_FLAGS]
+    call posix_int_arg
+    ERR_M1 .pfo_fail
+    test rax, rax
+    js .pfo_neg_flags
+    mov r12, rax
+
+.pfo_call:
+    mov rdi, rbx
+    mov rsi, r12
+    call sys_pidfd_open
+    POSIX_CHECK_RET rax, 0, .pfo_fail
+    mov rdi, rax
+    call int_from_i64
+    V_PACK rax, rdx
+    pop r12
+    pop rbx
+    leave
+    ret
+.pfo_neg_flags:
+    FAIL exc_ValueError_type, "value must be positive", .pfo_fail
+.pfo_missing:
+    PM_MISSING "pidfd_open", "pid", 1, .pfo_fail
+.pfo_toomany:
+    FAIL exc_TypeError_type, "pidfd_open() takes at most 2 arguments", .pfo_fail
+.pfo_badkw:
+    FAIL exc_TypeError_type, "pidfd_open() got an unexpected keyword argument", .pfo_fail
+.pfo_dup:
+    FAIL exc_TypeError_type, "pidfd_open() got multiple values for argument", .pfo_fail
+.pfo_fail:
+    xor eax, eax
+    xor edx, edx
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC posix_pidfd_open

@@ -65,6 +65,7 @@ extern sys_accept4
 extern sys_connect
 extern sys_sendto
 extern sys_recvfrom
+extern sys_sendmsg
 extern sys_setsockopt
 extern sys_getsockopt
 extern sys_getsockname
@@ -827,6 +828,168 @@ DEF_FUNC sock_recv_fn, 16
     leave
     ret
 END_FUNC sock_recv_fn
+
+;; ============================================================================
+;; sendmsg(fd, buffers_list, control_bytes_or_none, flags, addr_bytes_or_none)
+;;   -> int bytes sent
+;;
+;; Builds an iovec array from `buffers_list` and a Linux x86-64 struct msghdr
+;; (56 bytes) on the stack, then calls sendmsg(2) via BLOCKING_CALL.
+;; ============================================================================
+SMG_FD    equ 8
+SMG_FLAGS equ 16
+SMG_IOV   equ 24
+SMG_N     equ 32
+SMG_I     equ 40
+SMG_LIST  equ 48
+SMG_MSG   equ 112                   ; 56-byte struct msghdr at [rbp-112..-57]
+SMG_ADDR  equ 112 + SOCKADDR_MAX    ; 128-byte sockaddr copy
+SMG_FRAME equ ((SMG_ADDR + 15) / 16) * 16 + 8   ; + 1 push = 16-aligned
+DEF_FUNC sock_sendmsg_fn, SMG_FRAME
+    push rbx
+    cmp rsi, 5
+    jl .smg_args
+    mov rbx, rdi
+    mov qword [rbp - SMG_IOV], 0
+
+    mov rdi, [rbx]
+    call sk_int_arg
+    ERR_M1 .smg_fail
+    mov [rbp - SMG_FD], rax
+
+    ; Zero the 56-byte struct msghdr
+    xor eax, eax
+    mov [rbp - SMG_MSG + 0], rax
+    mov [rbp - SMG_MSG + 8], rax
+    mov [rbp - SMG_MSG + 16], rax
+    mov [rbp - SMG_MSG + 24], rax
+    mov [rbp - SMG_MSG + 32], rax
+    mov [rbp - SMG_MSG + 40], rax
+    mov [rbp - SMG_MSG + 48], rax
+
+    ; buffers_list must be a list
+    mov rax, [rbx + 8]
+    V_TEST_PTR rax, rcx
+    ja .smg_badlist
+    test rax, rax
+    jz .smg_badlist
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    jne .smg_badlist
+    mov [rbp - SMG_LIST], rax
+    mov rcx, [rax + PyListObject.ob_size]
+    mov [rbp - SMG_N], rcx
+    test rcx, rcx
+    jz .smg_iov_done
+
+    ; Allocate struct iovec[n] (16 bytes each)
+    mov rdi, rcx
+    shl rdi, 4
+    call ap_malloc
+    test rax, rax
+    jz .smg_fail
+    mov [rbp - SMG_IOV], rax
+    mov [rbp - SMG_MSG + 16], rax   ; msg_iov
+    mov rcx, [rbp - SMG_N]
+    mov [rbp - SMG_MSG + 24], rcx   ; msg_iovlen
+
+    mov qword [rbp - SMG_I], 0
+.smg_iov_loop:
+    mov rcx, [rbp - SMG_I]
+    cmp rcx, [rbp - SMG_N]
+    jae .smg_iov_done
+    mov rax, [rbp - SMG_LIST]
+    mov rdx, [rax + PyListObject.ob_item]
+    mov rdi, [rdx + rcx*8]
+    call sk_bytes_arg               ; rax = data, r10 = length
+    ERR_PENDING .smg_free_fail
+    mov rcx, [rbp - SMG_I]
+    shl rcx, 4
+    mov rdx, [rbp - SMG_IOV]
+    mov [rdx + rcx], rax            ; iov_base
+    mov [rdx + rcx + 8], r10        ; iov_len
+    inc qword [rbp - SMG_I]
+    jmp .smg_iov_loop
+
+.smg_iov_done:
+    ; Optional control bytes (None -> NULL, 0)
+    mov rdi, [rbx + 16]
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .smg_no_ctrl
+    call sk_bytes_arg               ; rax = data, r10 = length
+    ERR_PENDING .smg_free_fail
+    test r10, r10
+    jz .smg_no_ctrl
+    mov [rbp - SMG_MSG + 32], rax   ; msg_control
+    mov [rbp - SMG_MSG + 40], r10   ; msg_controllen
+.smg_no_ctrl:
+
+    ; flags
+    mov rdi, [rbx + 24]
+    call sk_int_arg
+    ERR_M1 .smg_free_fail
+    mov [rbp - SMG_FLAGS], rax
+
+    ; Optional address bytes (None -> NULL, 0)
+    mov rdi, [rbx + 32]
+    lea rax, [rel none_singleton]
+    cmp rdi, rax
+    je .smg_no_addr
+    call sk_bytes_arg               ; rax = data, r10 = length
+    ERR_PENDING .smg_free_fail
+    test r10, r10
+    jz .smg_no_addr
+    cmp r10, SOCKADDR_MAX
+    ja .smg_addr_toobig
+    mov rdi, rbp
+    sub rdi, SMG_ADDR
+    mov [rbp - SMG_MSG + 0], rdi    ; msg_name
+    mov [rbp - SMG_MSG + 8], r10d   ; msg_namelen (socklen_t)
+    mov rsi, rax
+    mov rdx, r10
+    call ap_memcpy
+.smg_no_addr:
+
+    mov rdi, [rbp - SMG_FD]
+    lea rsi, [rbp - SMG_MSG]
+    mov rdx, [rbp - SMG_FLAGS]
+    BLOCKING_CALL sys_sendmsg
+    push rax
+    push rax
+    mov rdi, [rbp - SMG_IOV]
+    test rdi, rdi
+    jz .smg_no_free
+    mov qword [rbp - SMG_IOV], 0
+    call ap_free
+.smg_no_free:
+    pop rax
+    pop rax
+    SOCK_CHECK_RET rax, .smg_fail
+    mov rdi, rax
+    pop rbx
+    leave
+    jmp sk_ret_int
+
+.smg_addr_toobig:
+    FAIL exc_ValueError_type, "address too long", .smg_free_fail
+.smg_badlist:
+    FAIL exc_TypeError_type, "sendmsg() buffers must be a list", .smg_fail
+.smg_args:
+    FAIL exc_TypeError_type, "sendmsg() takes exactly 5 arguments", .smg_fail
+.smg_free_fail:
+    mov rdi, [rbp - SMG_IOV]
+    test rdi, rdi
+    jz .smg_fail
+    call ap_free
+.smg_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    ret
+END_FUNC sock_sendmsg_fn
 
 ;; recvfrom needs the address the datagram came from, so it repeats the body
 ;; with the two extra syscall arguments filled in.
@@ -1819,6 +1982,7 @@ DEF_FUNC socket_module_create, SMC_FRAME
     MODULE_ADD_FUNC sock_accept_fn,       sk_n_accept
     MODULE_ADD_FUNC sock_shutdown_fn,     sk_n_shutdown
     MODULE_ADD_FUNC sock_send_fn,         sk_n_send
+    MODULE_ADD_FUNC sock_sendmsg_fn,      sk_n_sendmsg
     MODULE_ADD_FUNC sock_recv_fn,         sk_n_recv
     MODULE_ADD_FUNC sock_recvfrom_fn,     sk_n_recvfrom
     MODULE_ADD_FUNC sock_recv_into_fn,    sk_n_recv_into
@@ -1899,6 +2063,7 @@ sk_n_listen:       db "listen", 0
 sk_n_accept:       db "accept", 0
 sk_n_shutdown:     db "shutdown", 0
 sk_n_send:         db "send", 0
+sk_n_sendmsg:      db "sendmsg", 0
 sk_n_recv:         db "recv", 0
 sk_n_recvfrom:     db "recvfrom", 0
 sk_n_recv_into:    db "recv_into", 0
@@ -1970,6 +2135,10 @@ sk_consts:
     SKCONST SOL_IP, 0
     SKCONST SOL_TCP, 6
     SKCONST SOL_UDP, 17
+
+    SKCONST SCM_RIGHTS, 1
+    SKCONST SCM_CREDENTIALS, 2
+    SKCONST SCM_TIMESTAMP, 29
 
     SKCONST SO_DEBUG, 1
     SKCONST SO_REUSEADDR, 2

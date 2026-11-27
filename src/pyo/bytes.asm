@@ -1780,12 +1780,20 @@ DEF_FUNC bytes_concat
     cmp rax, rcx
     je .bc_right_ba
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_BYTEARRAY_SUBCLASS
-    jz .bc_type_error
+    jz .bc_right_buf
 .bc_right_ba:
     mov r14, [r12 + PyByteArrayObject.ob_size]
     mov rdi, r12
     call bytearray_data
     mov r12, rax
+    jmp .bc_right_done
+.bc_right_buf:
+    mov rdi, r12
+    call bytes_like_ptr_len     ; rax = data, r10 = len, ecx = 1 if bytes-like
+    test ecx, ecx
+    jz .bc_type_error
+    mov r12, rax
+    mov r14, r10
 .bc_right_done:
 
     mov r13, [rbx + PyBytesObject.ob_size]

@@ -537,51 +537,36 @@ DEF_FUNC object_method_str
 END_FUNC object_method_str
 
 ;; object.__repr__ is the *default* implementation, not a re-dispatch: it
-;; writes "<Name object>" straight out.  Calling obj_repr here would come
-;; back through tp_repr to this same method.
+;; writes "<module.qualname object at 0x...>" (matching instance_repr_default
+;; and CPython's object_repr).  Calling obj_repr here would come back through
+;; tp_repr to this same method.
 ;; Fails: 0
-OMR_BUF   equ 136
-OMR_FRAME equ 160           ; + 0 pushes = 160
-DEF_FUNC object_method_repr, OMR_FRAME
-    test rsi, rsi
-    jz .omr_bad
+DEF_FUNC object_method_repr, 16
+    cmp rsi, 1
+    jne .omr_bad
     mov rdi, [rdi]
     V_TEST_PTR rdi, rax
-    ja .omr_plain
+    ja .omr_imm
     test rdi, rdi
     jz .omr_plain
-    mov rsi, [rdi + PyObject.ob_type]
-    mov rsi, [rsi + PyTypeObject.tp_name]
-    test rsi, rsi
-    jz .omr_plain
+    extern instance_repr_default
+    call instance_repr_default
+    leave
+    V_PACK rax, rdx
+    ret
 
-    lea rdi, [rbp - OMR_BUF]
-    xor ecx, ecx
-    mov byte [rdi], '<'
-    inc rcx
-.omr_name:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .omr_tail
-    inc rsi
-    cmp rcx, 100
-    jae .omr_tail
-    mov [rdi + rcx], al
-    inc rcx
-    jmp .omr_name
-.omr_tail:
-    CSTRING rsi, " object>"
-.omr_tail_copy:
-    movzx eax, byte [rsi]
-    test al, al
-    jz .omr_emit
-    inc rsi
-    mov [rdi + rcx], al
-    inc rcx
-    jmp .omr_tail_copy
-.omr_emit:
-    mov byte [rdi + rcx], 0
-    call str_from_cstr
+.omr_imm:
+    ; Non-pointer Value (SmallInt / Float): format as "<int object at 0x...>".
+    push rdi
+    sub rsp, 8
+    extern value_type
+    call value_type
+    add rsp, 8
+    pop rdi
+    xor esi, esi
+    mov rdx, [rax + PyTypeObject.tp_name]
+    extern obj_default_repr_named
+    call obj_default_repr_named
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
