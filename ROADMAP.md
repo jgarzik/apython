@@ -145,7 +145,6 @@ Each item is a single absent name or module with hundreds of tests behind it.
 |---|---|---|
 | `array._array_reconstructor`, and `array.__reduce_ex__` to match | 814 | `test_array` dies at import on the one name.  Pickling an `array` fails today too |
 | `_multiprocessing` (`SemLock`), `_posixshmem`, fd passing over `sendmsg` | ~1,500 | Unlocks the three `test_multiprocessing_*` packages, `test_concurrent_futures` (255), `ProcessPoolExecutor`, `test_multiprocessing_main_handling`, `compileall -j` |
-| `_asyncio` | ~900 | Build native loop and task bookkeeping, `Future`, and `Task` before enabling the accelerator. Then close the asyncio failures in text-mode `makefile`, pidfd watchers, and `sendmsg`. |
 | `_sqlite3` | 468 | A shim over `-lsqlite3`, in the shape `zlib.asm`/`lib/zlib.py` set.  Callbacks from C into Python follow `pyexpat_cb.asm` |
 | `_gdbm`, `_dbm` | ~230 | Shims over libgdbm.  `test_shelve` silently runs half its classes without them; `test_dbm`, `test_dbm_gnu`, `test_dbm_ndbm` |
 | C-accelerator stand-ins: `_functools` (96), `_uuid` (37), `_queue` (28), `_heapq` (25), `_bisect` (22), `_statistics` (20), `_elementtree` (19), `_stat` (6), `_opcode` (3), `_json`'s five names (12) | ~270 | Mostly re-exports under the C name.  `_json`, `_bisect` and `_stat` are imported as `None` by fresh-module tests today and take the test class with them |
@@ -166,12 +165,12 @@ on what is missing, so none of this shows in the headline.
   skip -- but nothing that talks to the internet by name can run, `pip
   install` and `urllib` included.  This is the largest gap the test suite
   does not measure, and it goes first in this phase.
-- **Sockets, ~480.** `sendmsg` / `recvmsg` / `recvmsg_into` and `CMSG_LEN` /
-  `CMSG_SPACE` (345 skips on their own); IPv6 (`has_ipv6` is False, so every
+- **Sockets, ~480.** `recvmsg` / `recvmsg_into`
+  (345 skips on their own); IPv6 (`has_ipv6` is False, so every
   v6 test skips); `gethostbyname_ex`, `if_nameindex` and friends,
   `sethostname`; the address families and option constants the build machine
   has (`AF_CAN`, `AF_ALG`, `AF_VSOCK`, UDPLITE, ... -- 275 names missing from
-  `socket`); `socket.makefile` in text mode.  About sixty network-resource
+  `socket`).  About sixty network-resource
   tests skip here and pass in the control, for the name-resolution reason
   above.
 - **`posix`, ~250.** The whole `*at` family and `dir_fd=` (`supports_dir_fd`
