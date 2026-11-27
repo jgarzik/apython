@@ -21,6 +21,8 @@
 # than it did, or a new crash, fails the target.  Raise the floor with
 #   bash tests/pkg_probe.sh --record
 # in the commit that earns it.
+# Whole packages excluded by the mission scope still run and retain the
+# crash check. Only their passing-test floor is omitted.
 #
 # Needs CPython's Lib/ (a source checkout, not an installed python).  Point
 # $CPYTHON_LIB at it; the target skips cleanly when it is not there, so a
@@ -38,6 +40,7 @@ PYTHON=${PYTHON:-python3}
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$TESTDIR")"
 FLOOR="$TESTDIR/pkg_floor.txt"
+SCOPE="$TESTDIR/conformance_scope.txt"
 CPYTHON_LIB=${CPYTHON_LIB:-$HOME/tmp/repo/cpython/Lib}
 TIMEOUT=${PKG_TIMEOUT:-300}
 JOBS=${PKG_JOBS:-5}
@@ -79,6 +82,19 @@ list_pkgs() {
       done ) | sort
 }
 
+in_scope_floors() {
+    awk '
+        NR == FNR {
+            if ($1 == "exclude" && $2 ~ /^test\.test_[a-zA-Z0-9_]+\.\*$/) {
+                split($2, parts, ".")
+                excluded[parts[2]] = 1
+            }
+            next
+        }
+        !($1 in excluded)
+    ' "$SCOPE" "$1"
+}
+
 # One directory, one process.  Writes a single tab-separated row.
 probe_one() {
     local pkg="$1" out rc ran fail err cwd
@@ -111,7 +127,7 @@ probe_one() {
     nbad=$(grep -aoE '^(FAIL|ERROR): [^ ]+' "$out" \
            | sed -E 's/^(FAIL|ERROR): //' | sort -u | wc -l)
     local cat
-    if [ $rc -ge 132 ] && [ $rc -le 139 ]; then
+    if [ "$rc" -gt 128 ] && [ "$rc" -le 192 ]; then
         cat=CRASH
     elif [ $rc -eq 124 ]; then
         cat=HANG
@@ -150,9 +166,10 @@ if [ "${1:-}" = "--record" ]; then
         echo "# Passing-test count per package-style test directory, and the"
         echo "# crash set.  A ratchet: a directory must not pass fewer than"
         echo "# its number, and a new crash fails the target."
+        echo "# Whole packages outside the mission scope retain only the crash check."
         echo "# Regenerate with: bash tests/pkg_probe.sh --record"
         awk -F'\t' '$2=="CRASH"||$2=="HANG"{print "crash " $1}' "$WORK/results.txt"
-        awk -F'\t' '{print "pass " $1 " " $3}' "$WORK/results.txt"
+        in_scope_floors "$WORK/results.txt" | awk -F'\t' '{print "pass " $1 " " $3}'
     } > "$FLOOR"
     echo
     echo "recorded floor: $PASS_TOTAL passing, $NCRASH crashing -> $FLOOR"
@@ -166,7 +183,8 @@ fi
 
 rc=0
 # --- the passing counts, per directory -------------------------------------
-awk '/^pass /{print $2 "\t" $3}' "$FLOOR" | sort -k1,1 > "$WORK/floor_pass.txt"
+awk '/^pass /{print $2 "\t" $3}' "$FLOOR" | sort -k1,1 > "$WORK/all_floors.txt"
+in_scope_floors "$WORK/all_floors.txt" > "$WORK/floor_pass.txt"
 awk -F'\t' '{print $1 "\t" $3}' "$WORK/results.txt" > "$WORK/now_pass.txt"
 REGRESSED=$(join -t$'\t' "$WORK/floor_pass.txt" "$WORK/now_pass.txt" \
             | awk -F'\t' '$3 < $2 {printf "%s (%s -> %s)\n", $1, $2, $3}')

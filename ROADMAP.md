@@ -18,6 +18,17 @@ ranking, not a ledger: re-measure at each phase gate.
 
 ## Where we are
 
+The latest matched CPython 3.12.9 run reports **30,129 of 42,074** passing
+test IDs in mission scope (71.61%) and **30,178 of 43,097** against the
+full measured denominator (70.02%). apython completed the sweep without
+a process crash or timeout. The CPython control timed out in `test_runpy`
+and aborted in `test_tracemalloc`.
+
+The package, source, curated CPython-source and stdlib gates pass. The
+aggregate macro benchmark measured 1.41x CPython and the core suite 1.52x.
+
+### Earlier aggregate snapshot
+
 | Gate | Result |
 |---|---|
 | `make check` | green |
@@ -109,32 +120,22 @@ full gate set, both sweeps and the benchmarks.
 
 ### Phase 0 -- Make the instrument honest
 
-No conformance gain; everything after it is steered by what this fixes.
-
-1. Use the matched conformance report for strict counts and ranked skip reasons.
-2. Re-record `tests/pkg_floor.txt` and the source floor; find out why
-   `test_inspect` and `test_capi` dropped and make `check-pkg` green.
-3. Settle the scope decisions above and encode them as an exclusion list the
-   report reads, so the denominator is written down rather than argued.
-4. Close the three crashes and two hangs listed above before anything else:
-   each hides its whole module (`test_yield_from` 40, `test_fstring` 85,
-   `test_cmd_line_script` 47, `test_resource` 11).  What is known of each:
-   - `test_yield_from` segfaults in
-     `test_delegating_generators_claim_to_be_running`, after an unraisable
-     "generator already executing" from a generator's finaliser.
-   - `test_resource` is killed by SIGXFSZ in `test_fsize_enforced`: CPython
-     ignores SIGXFSZ at start-up so that the write fails with EFBIG, and this
-     leaves it at the default.  SIGPIPE is ignored correctly.
-   - `test_fstring` ends in "Fatal: out of memory" under the sweep's address
-     limit when run quietly, and completes when run with `-v`; something in
-     it allocates without bound on a path the output mode changes.
-   - `test_cmd_line_script` completes with the console started by `-i`.
-     Its four REPL stream-flush cases pass.
-   - `test_zipfile64` passed all four tests with a dedicated time budget. The
-     workload took 126 seconds on apython, longer than the 90-second default.
-     The matched and file sweeps now give this module 300 seconds on both sides.
-   - Deep recursion (`test_super_deep`, hidden behind `cpython_only`)
-     overruns the C stack instead of raising RecursionError.
+- The matched report counts shared passing test IDs and ranks skip reasons.
+  The scope file records the exclusions and selectively re-enables
+  behavioural cases behind `cpython_only`.
+- The package and source floors record the verified gains. Returning code
+  position iterators restored the `test_inspect` floor. The excluded C API
+  packages still run and count toward the crash check.
+- `test_yield_from` completes after guarding a delegating generator during
+  `throw()` and `close()`. `test_resource` passes after ignoring SIGXFSZ
+  at startup. Deep Python recursion now raises on both the main stack and
+  a worker stack.
+- `test_cmd_line_script` completes and passes its four stream-flush cases.
+  `test_zipfile64` passed all four tests with a 300-second budget. An
+  isolated apython run took 126 seconds.
+- The intermittent quiet-run `test_fstring` OOM remains open. It occurred
+  under the sweep's address-space limit. Subsequent quiet runs completed
+  with 53 of the 85 control passes.
 
 ### Phase 1 -- Whole modules behind one missing piece
 
@@ -144,7 +145,7 @@ Each item is a single absent name or module with hundreds of tests behind it.
 |---|---|---|
 | `array._array_reconstructor`, and `array.__reduce_ex__` to match | 814 | `test_array` dies at import on the one name.  Pickling an `array` fails today too |
 | `_multiprocessing` (`SemLock`), `_posixshmem`, fd passing over `sendmsg` | ~1,500 | Unlocks the three `test_multiprocessing_*` packages, `test_concurrent_futures` (255), `ProcessPoolExecutor`, `test_multiprocessing_main_handling`, `compileall -j` |
-| `_asyncio` | ~900 | 824 asyncio tests are skipped for "requires the C `_asyncio` module".  Supply it on the stand-in pattern `_datetime` and `_pickle` use, then fix the ~90 real failures (text-mode `makefile`, pidfd watchers, `sendmsg`) |
+| `_asyncio` | ~900 | Build native loop and task bookkeeping, `Future`, and `Task` before enabling the accelerator. Then close the asyncio failures in text-mode `makefile`, pidfd watchers, and `sendmsg`. |
 | `_sqlite3` | 468 | A shim over `-lsqlite3`, in the shape `zlib.asm`/`lib/zlib.py` set.  Callbacks from C into Python follow `pyexpat_cb.asm` |
 | `_gdbm`, `_dbm` | ~230 | Shims over libgdbm.  `test_shelve` silently runs half its classes without them; `test_dbm`, `test_dbm_gnu`, `test_dbm_ndbm` |
 | C-accelerator stand-ins: `_functools` (96), `_uuid` (37), `_queue` (28), `_heapq` (25), `_bisect` (22), `_statistics` (20), `_elementtree` (19), `_stat` (6), `_opcode` (3), `_json`'s five names (12) | ~270 | Mostly re-exports under the C name.  `_json`, `_bisect` and `_stat` are imported as `None` by fresh-module tests today and take the test class with them |
@@ -221,10 +222,9 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 
 ### Phase 4 -- Code objects, the compiler's public face, tracing
 
-- **`co_lines()` and `co_positions()` return lists**; CPython's are iterators.
-  `dis` calls `next()` on them, so every `dis` entry point raises: `test_dis`
-  (120) dies at import, `test_peepholer` (51), parts of `test_compile` (63),
-  `test_code` (26), `test_inspect`.
+- **Code-object parity.** `co_lines()` and `co_positions()` now return
+  iterators. `test_dis` still fails at import because a fixture finds
+  an integer where CPython's constants tuple contains a nested code object.
 - **`dis.stack_effect`** (`_opcode`), `co_lnotab`, `_varname_from_oparg`,
   `code.replace()` for the three name tuples.
 - **The optimiser.** No constant folding (`2 * 3` stays two constants),
