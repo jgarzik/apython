@@ -128,7 +128,8 @@ No conformance gain; everything after it is steered by what this fixes.
    - `test_fstring` ends in "Fatal: out of memory" under the sweep's address
      limit when run quietly, and completes when run with `-v`; something in
      it allocates without bound on a path the output mode changes.
-   - `test_cmd_line_script` spins waiting for a REPL prompt (Phase 6).
+   - `test_cmd_line_script` completes with the console started by `-i`.
+     Its four REPL stream-flush cases pass.
    - `test_zipfile64` passed all four tests with a dedicated time budget. The
      workload took 126 seconds on apython, longer than the 90-second default.
      The matched and file sweeps now give this module 300 seconds on both sides.
@@ -265,9 +266,9 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 
 ### Phase 6 -- The command line and start-up
 
-- **A REPL.** `-i`, bare `apython`, `PYTHONINSPECT`, `PYTHONSTARTUP`,
-  `readline`.  `test_cmd_line_script` hangs waiting for a prompt;
-  `test_repl`, `test_code_module`, `test_readline`.
+- **Interactive mode.** Incomplete-input compilation and continuation,
+  `PYTHONINSPECT`, `PYTHONSTARTUP`, and `readline`.
+  See `test_repl`, `test_code_module`, and `test_readline`.
 - **Flags that are rejected:** `-V`, `-VV`, `-x`, `--help-env`,
   `--help-xoptions`, `--help-all`, `--check-hash-based-pycs`, and any `-X` or
   `-W` written without a space (`-Xutf8`, `-Wd`).  The last alone is 65

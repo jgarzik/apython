@@ -62,10 +62,6 @@ DEF_FUNC main, 8
     mov edi, r14d
     mov rsi, r15
 
-    ; Check argc >= 2
-    cmp edi, 2
-    jl .usage
-
     ; Save argc/argv early
     mov r14d, edi               ; r14 = argc
     mov r15, rsi                ; r15 = argv
@@ -98,6 +94,9 @@ DEF_FUNC main, 8
 .orig_argv_skipped:
     mov r14d, edi               ; the copy loop clobbered neither, but be
     mov r15, rsi                ; explicit: these are the working pair
+
+    cmp r14d, 2
+    jl .options
 
     ; Check for --version flag
     mov rax, [r15 + 8]          ; rax = argv[1]
@@ -274,10 +273,11 @@ DEF_FUNC main, 8
     ; sys.flags; -E, -s, -S, -I and -P are acted on further down.  Unknown
     ; flags are refused -- a lenient scan would swallow a filename beginning
     ; with '-'.
+.options:
     mov qword [rel cmd_source], 0
 .flag_loop:
     cmp r14d, 2
-    jl .usage
+    jl .flag_no_program
     mov rax, [r15 + 8]
     cmp byte [rax], '-'
     jne .flags_done
@@ -379,6 +379,11 @@ DEF_FUNC main, 8
     mov byte [rel main_sysflags + SF_NO_USER_SITE], 1
     mov byte [rel main_sysflags + SF_SAFE_PATH], 1
 .flag_not_isolated:
+    cmp dl, 'i'
+    jne .flag_not_interactive
+    mov byte [rel main_sysflags + SF_INTERACTIVE], 1
+    mov byte [rel main_sysflags + SF_INSPECT], 1
+.flag_not_interactive:
     cmp dl, 'B'
     jne .flag_char_step
     mov byte [rel main_no_bytecode], 1
@@ -422,7 +427,24 @@ DEF_FUNC main, 8
     sub r14d, 2
     jmp .flag_loop
 
+.flag_no_program:
+    ; sys.argv is [""] when stdin is implicit. Use a separate vector so
+    ; the original argv and its terminator still describe the invocation.
+    mov rax, [r15]
+    lea r15, [rel main_stdin_argv]
+    mov [r15], rax
+    CSTRING rax, ""
+    mov [r15 + 8], rax
+    mov r14d, 2
 .flag_stdin:
+    mov qword [rel cmd_is_stdin], 1
+    cmp byte [rel main_sysflags + SF_INTERACTIVE], 0
+    jne .flag_repl
+    xor edi, edi
+    extern fileobj_fd_isatty
+    call fileobj_fd_isatty
+    test eax, eax
+    jnz .flag_repl
     ; `apython -` reads the program from standard input, as CPython does.  It
     ; used to be treated as a filename and reached pyc_read_file, which said
     ; "pyc: cannot open file" -- and a pipeline is how a generated program is
@@ -432,7 +454,10 @@ DEF_FUNC main, 8
     test rax, rax
     jz .stdin_failed
     mov [rel cmd_source], rax
-    mov qword [rel cmd_is_stdin], 1
+    jmp .flags_done
+.flag_repl:
+    lea rax, [rel main_repl_cmd]
+    mov [rel cmd_source], rax
     jmp .flags_done
 
 .flags_done:
@@ -557,10 +582,17 @@ DEF_FUNC main, 8
     ; os.path.dirname(__file__) is the ordinary way to find a data file.  Its
     ; absence is why trace.py counted nothing: globaltrace_lt reads
     ; frame.f_globals['__file__'] to decide whether to trace a module at all.
+    lea rax, [rel main_repl_cmd]
+    cmp [rel cmd_source], rax
+    je .main_no_file
     lea rdi, [rel __file__cstr]
     call str_from_cstr_heap
     push rax
     mov rdi, rbx                ; the script path, as given on the command line
+    cmp qword [rel cmd_is_stdin], 0
+    je .main_file_named
+    CSTRING rdi, "<stdin>"
+.main_file_named:
     call str_from_cstr_heap
     push rax
     mov rdx, rax
@@ -571,6 +603,7 @@ DEF_FUNC main, 8
     call obj_decref
     pop rdi
     call obj_decref
+.main_no_file:
 
     ; Set __package__ = None in globals (top-level module has no package)
     lea rdi, [rel __package__cstr]
@@ -677,12 +710,18 @@ DEF_FUNC main, 8
     ; Clean up
     mov rdi, rbx
     call frame_free
+    cmp byte [rel main_sysflags + SF_INTERACTIVE], 0
+    je .check_uncaught
+    lea rax, [rel main_repl_cmd]
+    cmp [rel cmd_source], rax
+    je .check_uncaught
+    mov byte [rel main_repl_after_program], 1
 
     ; Check for unhandled exception
 .check_uncaught:
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
-    jz .exit_ok
+    jz .program_ok
 
     ; An uncaught SystemExit is the process status, not an error report.
     push rdi
@@ -712,10 +751,22 @@ DEF_FUNC main, 8
     mov rdi, [gs:ThreadState.current_exception]
     call obj_decref
     mov qword [gs:ThreadState.current_exception], 0
+    cmp byte [rel main_repl_after_program], 0
+    jne .run_repl
 
     ; Exit 1
     mov ebx, 1
     jmp .exit_cleanup
+
+.program_ok:
+    cmp byte [rel main_repl_after_program], 0
+    je .exit_ok
+.run_repl:
+    mov byte [rel main_repl_after_program], 0
+    lea rdi, [rel main_repl_cmd]
+    mov esi, main_repl_cmd_len
+    call main_run_startup
+    jmp .check_uncaught
 
 .system_exit:
     ; SystemExit.code: absent or None -> 0, an int -> that status, anything
@@ -1383,12 +1434,12 @@ DEF_FUNC main_run_startup, MIS_FRAME
 END_FUNC main_run_startup
 
 section .rodata
-; The single-letter flags accepted: -E -I -S -s -B -u -b -d -q -v -O -P -R,
+; The single-letter flags accepted: -E -I -S -s -B -u -b -d -i -q -v -O -P -R,
 ; and any repetition of them (-OO, -bb, -vv).  Each that has a field in
 ; sys.flags is counted there (main_flag_chars below); -E, -s, -S, -I and -P
 ; change what startup does, and the rest are reported but switch off
 ; machinery apython does not have.  An unknown flag is refused outright.
-main_noop_flags: db "EISBubdqvOPRs", 0
+main_noop_flags: db "EISBubdqvOPRsi", 0
 ; The flags that are a field of sys.flags, and that field's index.
 main_flag_chars: db "dOBsSEvbqP", 0
 main_flag_index: db SF_DEBUG, SF_OPTIMIZE, SF_DONT_WRITE_BC, SF_NO_USER_SITE
@@ -1412,6 +1463,9 @@ section .rodata
 
 ; What -m runs.  The module name is in sys.argv[0]; see the -m arm above.
 main_runmodule_cmd: db "import _runmodule; _runmodule.run()", 0
+main_repl_cmd: db "__import__('_repl').interact(__import__('__main__').__dict__)"
+main_repl_cmd_len equ $ - main_repl_cmd
+    db 0
 
 section .bss
 global main_orig_argc
@@ -1419,6 +1473,7 @@ global main_orig_argv
 ; argc and argv as the process received them, for sys.orig_argv.
 main_orig_argc: resq 1
 main_orig_argv: resq 1
+main_stdin_argv: resq 3
 ; The -c command, the -m bootstrap, or the text read from stdin; 0 when a
 ; file was named.
 cmd_source: resq 1
@@ -1427,6 +1482,7 @@ cmd_source: resq 1
 cmd_is_stdin: resq 1
 ; The stdin text, kept so it is not freed while the compile reads it.
 stdin_buf: resq 1
+main_repl_after_program: resb 1
 
 section .rodata
 help_flag: db "--help", 0
@@ -1438,6 +1494,7 @@ help_msg:
     db "-h     : print this help message and exit (also -? or --help)", 10
     db "-c <cmd> : run the string <cmd> as a program", 10
     db "-m <mod> : run the module <mod> as __main__", 10
+    db "-i       : enter an interactive session after running the program", 10
     db "-        : run the program read from standard input", 10
     db "-t     : trace opcodes (partial: DISPATCH-terminated handlers are", 10
     db "         not traced)", 10

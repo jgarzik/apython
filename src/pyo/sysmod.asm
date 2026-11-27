@@ -2705,10 +2705,8 @@ END_FUNC sah_store
 ;;
 ;; What an interactive prompt does with the value of an expression statement:
 ;; None is dropped silently, anything else is printed as its repr and bound to
-;; builtins._ so the next line can refer to it.  Nothing in this tree calls it
-;; -- there is no REPL -- but `sys.displayhook is sys.__displayhook__` is how
-;; a program asks whether anything has replaced the hook, and code.py, pdb and
-;; doctest all read it.
+;; builtins._ so the next line can refer to it. The console and stdlib tools
+;; can use a replacement while retaining this function as sys.__displayhook__.
 ;;
 ;; builtins._ is set AFTER the print, as CPython sets it: a repr that raises
 ;; must not leave the name bound to a value the user never saw.
