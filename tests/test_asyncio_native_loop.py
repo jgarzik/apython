@@ -69,3 +69,51 @@ finally:
     policy_loop.close()
 
 print("running loop is thread-local and clears after fork")
+
+scheduled = (accelerator._get_scheduled_tasks() if sys.implementation.name == "apython"
+             else accelerator._scheduled_tasks)
+first, second = Loop(), Loop()
+accelerator._register_task(first)
+accelerator._register_eager_task(second)
+assert first in scheduled
+assert second in accelerator._eager_tasks
+accelerator._unregister_eager_task(second)
+assert second not in accelerator._eager_tasks
+accelerator._unregister_task(first)
+assert first not in scheduled
+ephemeral = Loop()
+ref = weakref.ref(ephemeral)
+accelerator._register_task(ephemeral)
+del ephemeral
+assert ref() is None and len(scheduled) == 0
+
+accelerator._set_running_loop(main_loop)
+try:
+    assert accelerator.current_task() is None
+    accelerator._enter_task(main_loop, first)
+    assert accelerator.current_task() is first
+    try:
+        accelerator._enter_task(main_loop, second)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("entered an occupied task")
+    assert accelerator._swap_current_task(main_loop, second) is first
+    assert accelerator.current_task(main_loop) is second
+    try:
+        accelerator._leave_task(main_loop, first)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("left a different task")
+    accelerator._leave_task(main_loop, second)
+    try:
+        accelerator._swap_current_task(main_loop, None)
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("swapped out an absent task")
+    assert accelerator.current_task() is None
+finally:
+    accelerator._set_running_loop(None)
+print("scheduled, eager and current tasks have separate registries")

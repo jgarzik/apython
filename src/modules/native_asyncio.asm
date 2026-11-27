@@ -8,6 +8,8 @@
 %include "threadstate.inc"
 %include "value.inc"
 
+extern async_tasks_init
+
 extern builtin_func_new
 extern builtin_getattr
 extern dict_new
@@ -96,10 +98,7 @@ END_FUNC async_set_running_loop
 
 ;; async_get_event_loop(args, nargs) -> running or policy loop
 ;; Fails: 0
-AGE_NAME   equ 8
-AGE_MODULE equ 16
-AGE_FRAME  equ 16
-DEF_FUNC_LOCAL async_get_event_loop, AGE_FRAME
+DEF_FUNC_LOCAL async_get_event_loop
     test rsi, rsi
     jnz .arity
     mov rax, [gs:ThreadState.asyncio_running_loop]
@@ -110,24 +109,19 @@ DEF_FUNC_LOCAL async_get_event_loop, AGE_FRAME
     ret
 .policy:
     lea rdi, [rel async_package_name]
-    call str_from_cstr_heap
-    mov [rbp - AGE_NAME], rax
+    call async_import
+    ERR_NULL .failed
     mov rdi, rax
-    xor esi, esi
-    xor edx, edx
-    call import_module          ; err: check after releasing the name
-    mov [rbp - AGE_MODULE], rax
-    mov rdi, [rbp - AGE_NAME]
-    call obj_decref
-    mov rdi, [rbp - AGE_MODULE]
-    test rdi, rdi
-    jz .failed
     lea rsi, [rel async_policy_name]
-    call async_call_noargs
+    xor edx, edx
+    xor ecx, ecx
+    call async_call_method
     ERR_NULL .failed
     mov rdi, rax
     lea rsi, [rel async_get_event_loop_name]
-    call async_call_noargs      ; err: return the result to the caller
+    xor edx, edx
+    xor ecx, ecx
+    call async_call_method      ; err: return the result to the caller
     leave
     ret
 .arity:
@@ -138,15 +132,40 @@ DEF_FUNC_LOCAL async_get_event_loop, AGE_FRAME
     ret
 END_FUNC async_get_event_loop
 
-;; async_call_noargs(rdi = owned object, rsi = C method name) -> Value
-;; Consume the object and use descriptor lookup for policy overrides.
+;; async_import(rdi = C module name) -> owned module
+;; Fails: 0
+AI_NAME   equ 8
+AI_RESULT equ 16
+AI_FRAME  equ 16
+DEF_FUNC async_import, AI_FRAME
+    call str_from_cstr_heap
+    mov [rbp - AI_NAME], rax
+    mov rdi, rax
+    xor esi, esi
+    xor edx, edx
+    call import_module          ; err: propagate after releasing the name
+    mov [rbp - AI_RESULT], rax
+    mov rdi, [rbp - AI_NAME]
+    call obj_decref
+    mov rax, [rbp - AI_RESULT]
+    leave
+    ret
+END_FUNC async_import
+
+;; async_call_method(rdi = owned object, rsi = C name, rdx = args, rcx = nargs)
+;;   -> Value or 0
+;; Consume the object and look up the method with ordinary descriptor rules.
 ;; Fails: 0
 ACN_NAME     equ 8
 ACN_OBJECT   equ 16
 ACN_CALLABLE equ 24
 ACN_RESULT   equ 32
-ACN_FRAME    equ 32
-DEF_FUNC_LOCAL async_call_noargs, ACN_FRAME
+ACN_ARGS     equ 40
+ACN_NARGS    equ 48
+ACN_FRAME    equ 48
+DEF_FUNC async_call_method, ACN_FRAME
+    mov [rbp - ACN_ARGS], rdx
+    mov [rbp - ACN_NARGS], rcx
     mov [rbp - ACN_OBJECT], rdi
     mov rdi, rsi
     call str_from_cstr_heap
@@ -162,8 +181,8 @@ DEF_FUNC_LOCAL async_call_noargs, ACN_FRAME
     mov rdi, [rbp - ACN_CALLABLE]
     test rdi, rdi
     jz .failed
-    xor esi, esi
-    xor edx, edx
+    mov rsi, [rbp - ACN_ARGS]
+    mov rdx, [rbp - ACN_NARGS]
     call obj_call_n             ; err: return the result after releasing the callable
     mov [rbp - ACN_RESULT], rax
     mov rdi, [rbp - ACN_CALLABLE]
@@ -175,7 +194,7 @@ DEF_FUNC_LOCAL async_call_noargs, ACN_FRAME
     xor eax, eax
     leave
     ret
-END_FUNC async_call_noargs
+END_FUNC async_call_method
 
 ;; native_asyncio_clear_running_loop() -> void
 ;; Publish the empty slot before releasing the previous owner.
@@ -199,6 +218,7 @@ DEF_FUNC native_asyncio_module_create, NAM_FRAME
     MODULE_ADD_FUNC async_require_running_loop, async_require_running_loop_name
     MODULE_ADD_FUNC async_set_running_loop, async_set_running_loop_name
     MODULE_ADD_FUNC async_get_event_loop, async_get_event_loop_name
+    call async_tasks_init
 
     lea rdi, [rel async_module_name]
     call str_from_cstr_heap
