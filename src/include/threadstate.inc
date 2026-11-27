@@ -58,6 +58,7 @@ struc ThreadState
     .frame_datastack_base: resq 1 ;   the current chunk
     .attr_error_pending:  resq 1  ; AttributeError __getattr__ handed back
     .ts_self:             resq 1  ; this block's own linear address
+    .eval_stack_floor:    resq 1  ; lowest safe rsp at Python frame entry
     ; ---- the rest ---------------------------------------------------------
     .cfex_temp_pending:   resq 1  ; CALL_FUNCTION_EX temp buffer, or NULL
     .cfex_merged_pending: resq 1  ; CALL_FUNCTION_EX merged kwargs buffer
