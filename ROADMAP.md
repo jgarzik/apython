@@ -88,10 +88,10 @@ than Python.  Whether they count decides how far 95% is.
 | Subinterpreters: `test_interpreters`, `test__xxsubinterpreters`, `test__xxinterpchannels` | ~210 | A second interpreter state in one process |
 | `test_gdb`, `test_perf_profiler`, `test_asdl_parser` | ~70 | A CPython source build |
 
-Recommended: declare the C API, subinterpreters and source-build groups **out
-of scope** and report the percentage against a denominator without them
-(roughly 42,800); and stop hiding behind `cpython_only` -- triage those 510,
-make the behavioural ones run, and record the layout ones as excluded by name.
+The mission score excludes named C API, subinterpreter, source-build and
+implementation-layout tests. The full-denominator score is reported alongside
+it. `tests/conformance_scope.txt` records the current audit and opts individual
+behavioural definitions guarded by `cpython_only` into the matched run.
 
 Measured, by running those tests with the implementation name patched to
 `cpython`: of about 490, **116 already pass**, 311 fail and the rest do not

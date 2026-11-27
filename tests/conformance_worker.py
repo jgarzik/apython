@@ -65,12 +65,29 @@ def run_recording(runner, test):
         recording = False
 
 
+def allow_behavioral_tests(names):
+    # Keep sys.implementation and every other implementation guard intact.
+    # Only lift this decorator for the definitions named by the scope file.
+    from test import support
+    cpython_only = support.cpython_only
+
+    def decorate(obj):
+        namespace = module if obj.__module__ == "__main__" else obj.__module__
+        if namespace + "." + obj.__qualname__ in names:
+            return obj
+        return cpython_only(obj)
+
+    support.cpython_only = decorate
+
+
 if __name__ == "__main__":
-    module, source, event_path = sys.argv[1:]
+    module, source, event_path, *retests = sys.argv[1:]
     with open(event_path, "w", buffering=1, encoding="utf-8") as events:
         recording = False
         run_unittest = unittest.TextTestRunner.run
         unittest.TextTestRunner.run = run_recording
+        if retests:
+            allow_behavioral_tests(retests)
         try:
             if source:
                 sys.argv[:] = [source]

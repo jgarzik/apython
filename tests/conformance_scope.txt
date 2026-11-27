@@ -1,0 +1,26 @@
+# Action, unittest test ID (or a dotted prefix ending in .*), and rationale.
+# Retest entries name definitions guarded by test.support.cpython_only.
+exclude test.test_capi.* Exercises the CPython C API and its object layout.
+exclude test.test_cext.* Loads a CPython C extension.
+exclude test.test_cppext.* Loads a CPython C++ extension.
+exclude test.test_embed.* Runs the CPython embedding test executable.
+exclude test.test_stable_abi_ctypes.* Checks exported CPython stable ABI symbols.
+exclude test.test_call.TestCallingConventionsInstance.* Uses _testcapi.MethInstance.
+exclude test.test_call.TestCallingConventionsClass.* Uses _testcapi.MethClass.
+exclude test.test_call.TestCallingConventionsClassInstance.* Uses _testcapi.MethClass.
+exclude test.test_call.TestCallingConventionsStatic.* Uses _testcapi.MethStatic.
+exclude test.test_call.FastCallTests.* Calls the CPython C fastcall and vectorcall APIs.
+exclude test.test_call.TestPEP590.* Exercises the CPython vectorcall ABI.
+exclude test.test_call.TestRecursion.test_super_deep Mixes Python recursion with _testcapi.pyobject_fastcall.
+exclude test.test_type_cache.* Examines CPython type versions and specialization caches.
+exclude test.test_interpreters.* Exercises CPython subinterpreters.
+exclude test.test__xxinterpchannels.* Exercises CPython subinterpreter channels.
+exclude test.test__xxsubinterpreters.* Exercises CPython subinterpreters.
+exclude test.test_gdb.* Requires a CPython source build and its GDB helpers.
+exclude test.test_perf_profiler.* Requires CPython's perf trampoline and build configuration.
+exclude test.test_perfmaps.* Requires CPython's perf map support.
+exclude test.test_asdl_parser.* Tests the ASDL parser used to build CPython.
+
+retest test.test_call.CFunctionCallsErrorMessages Checks Python-visible error messages for builtins.
+retest test.test_call.TestErrorMessagesUseQualifiedName Checks Python-visible argument errors.
+retest test.test_sys_settrace.TraceOpcodesTestCase Checks Python-visible opcode trace events.

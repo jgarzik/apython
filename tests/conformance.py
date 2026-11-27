@@ -14,6 +14,27 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKER = ROOT / "tests" / "conformance_worker.py"
+SCOPE = ROOT / "tests" / "conformance_scope.txt"
+
+
+def read_scope(path):
+    rules = {"exclude": [], "retest": []}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split(maxsplit=2)
+        if (len(fields) != 3 or fields[0] not in rules
+                or not fields[1].startswith("test.")):
+            raise ValueError(f"{path}:{number}: expected action, test ID, and rationale")
+        action, name, _ = fields
+        rules[action].append(name)
+    return rules
+
+
+def matches(name, patterns):
+    return any(name.startswith(pattern[:-1]) if pattern.endswith(".*")
+               else name == pattern for pattern in patterns)
 
 
 def read_outcomes(events, returncode):
@@ -56,7 +77,8 @@ def read_outcomes(events, returncode):
     return status, passed - missed, skips
 
 
-def run_module(side, binary, worker, lib, output, module, source, timeout, limit):
+def run_module(side, binary, worker, lib, output, module, source, timeout, limit,
+               retests):
     label = side + "-" + module
     event_path = output / (label + ".jsonl")
     event_path.unlink(missing_ok=True)
@@ -66,7 +88,7 @@ def run_module(side, binary, worker, lib, output, module, source, timeout, limit
     # so even a forked child that outlives the test can be reaped on timeout.
     command = [
         "prlimit", "--as=" + str(limit), "--", binary, worker,
-        "test." + module, source or "", event_path,
+        "test." + module, source or "", event_path, *retests,
     ]
     with tempfile.TemporaryDirectory(prefix=label + "-", dir=output) as cwd:
         with (output / (label + ".log")).open("wb") as log:
@@ -95,34 +117,40 @@ def run_module(side, binary, worker, lib, output, module, source, timeout, limit
     return read_outcomes(events, returncode)
 
 
-def report(results):
-    totals = {"files": [0, 0], "packages": [0, 0]}
+def report(results, exclusions=()):
+    totals = {"files": [0, 0, 0, 0], "packages": [0, 0, 0, 0]}
     reasons = Counter()
     for suite, module, ap, cp in results:
         ap_status, ap_passed, ap_skips = ap
         cp_status, cp_passed, _ = cp
         numerator = len(ap_passed & cp_passed)
         denominator = len(cp_passed)
-        totals[suite][0] += numerator
-        totals[suite][1] += denominator
+        in_scope = {test for test in cp_passed if not matches(test, exclusions)}
+        mission_passed = len(in_scope & ap_passed)
+        for index, count in enumerate((numerator, denominator, mission_passed, len(in_scope))):
+            totals[suite][index] += count
         module_skip = ap_skips.get("test." + module)
-        for test in cp_passed - ap_passed:
+        for test in in_scope - ap_passed:
             reason = ap_skips.get(test, module_skip)
             if reason is not None:
                 reasons[reason] += 1
         print(f"{module:40} {numerator:5}/{denominator:<5} "
-              f"ap {ap_status:<15} cp {cp_status}")
+              f"ap {ap_status:<15} cp {cp_status}"
+              + (f"  mission {mission_passed}/{len(in_scope)}"
+                 if denominator != len(in_scope) else ""))
     totals["combined"] = [sum(counts) for counts in zip(*totals.values())]
-    for suite, (passed, control) in totals.items():
+    for suite, (passed, control, mission_passed, mission_control) in totals.items():
         percent = f"{passed / control:.2%}" if control else "unavailable"
-        print(f"{suite}: {passed}/{control} ({percent})")
+        mission = f"{mission_passed / mission_control:.2%}" if mission_control else "unavailable"
+        print(f"{suite}: {passed}/{control} ({percent}) full, "
+              f"{mission_passed}/{mission_control} ({mission}) mission")
     if reasons:
         print("apython skip reasons among CPython passes:")
         for reason, count in sorted(reasons.items(), key=lambda row: (-row[1], row[0])):
             print(f"  {count:5} {reason}")
 
 
-def sweep(args, modules, output):
+def sweep(args, modules, output, scope):
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="prefix-", dir=output) as temporary:
         prefix = Path(temporary)
@@ -139,11 +167,13 @@ def sweep(args, modules, output):
             for suite, name, source in modules:
                 timeout = args.file_timeout if suite == "files" else args.package_timeout
                 for side, binary in (("ap", apython), ("cp", args.cpython)):
+                    retests = [rule for rule in scope["retest"]
+                               if rule.startswith("test." + name + ".")] if side == "ap" else []
                     args_for_module = (side, binary, worker, args.lib, output,
-                                       name, source, timeout, args.memory_kib * 1024)
+                                       name, source, timeout, args.memory_kib * 1024, retests)
                     jobs[name, side] = pool.submit(run_module, *args_for_module)
-            report((suite, name, jobs[name, "ap"].result(), jobs[name, "cp"].result())
-                   for suite, name, _ in modules)
+            report(((suite, name, jobs[name, "ap"].result(), jobs[name, "cp"].result())
+                    for suite, name, _ in modules), scope["exclude"])
 
 
 def main():
@@ -194,11 +224,12 @@ def main():
                for line in ref_version.splitlines()
                if line.startswith("#define PY_VERSION ")):
         parser.error(f"{args.lib} does not match CPython {control_version}")
+    scope = read_scope(SCOPE)
     if args.output:
-        sweep(args, modules, args.output.resolve())
+        sweep(args, modules, args.output.resolve(), scope)
     else:
         with tempfile.TemporaryDirectory(prefix="apython-conformance-") as temporary:
-            sweep(args, modules, Path(temporary))
+            sweep(args, modules, Path(temporary), scope)
 
 
 if __name__ == "__main__":

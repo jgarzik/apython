@@ -51,10 +51,11 @@ class ConformanceTests(unittest.TestCase):
         ]
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            report(rows)
+            report(rows, ["b"])
         self.assertIn("files: 1/2 (50.00%)", output.getvalue())
         self.assertIn("combined: 2/3 (66.67%)", output.getvalue())
-        self.assertIn("1 missing", output.getvalue())
+        self.assertIn("2/2 (100.00%) mission", output.getvalue())
+        self.assertNotIn("1 missing", output.getvalue())
         self.assertNotIn("1 host", output.getvalue())
 
 
