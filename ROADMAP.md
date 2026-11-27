@@ -133,9 +133,9 @@ full gate set, both sweeps and the benchmarks.
 - `test_cmd_line_script` completes and passes its four stream-flush cases.
   `test_zipfile64` passed all four tests with a 300-second budget. An
   isolated apython run took 126 seconds.
-- The intermittent quiet-run `test_fstring` OOM remains open. It occurred
-  under the sweep's address-space limit. Subsequent quiet runs completed
-  with 53 of the 85 control passes.
+- The quiet-run `test_fstring` OOM came from numeric format specs reaching the
+  integer formatter with a tuple or function. The fallback now raises
+  `TypeError` for a nonempty spec on objects using `object.__format__`.
 
 ### Phase 1 -- Whole modules behind one missing piece
 
@@ -310,8 +310,7 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
   `test_grammar` 13, `test_positional_only_arg` 13, `test_scope`,
   `test_global`, `test_string_literals`, `test_eof`, `test_future_stmt` 9.
   f-string field errors have two messages where CPython has a dozen, reported
-  at the token rather than in the field (`test_fstring`, 85 once it stops
-  running out of memory).
+  at the token rather than in the field (`test_fstring`).
 - **Object model.** `obj.__class__ = int` is accepted; a dict subclass used as
   `exec()` locals does not have `__getitem__` consulted; exceptions and
   `__notes__`; `RecursionError` in `isinstance` chains; `test_descr` 53,

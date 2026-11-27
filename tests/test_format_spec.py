@@ -54,6 +54,17 @@ class Custom:
 
 print(format(Custom(), ">5"), format(Custom()), f"{Custom():^9}")
 
+# A numeric presentation cannot use the integer layout of a foreign object.
+for value in ((0,), lambda: 0, object()):
+    for spec in ("x", "d", "f", "s"):
+        for render in (lambda: format(value, spec), lambda: f"{value:{spec}}"):
+            try:
+                render()
+            except TypeError as exc:
+                assert "unsupported format string" in str(exc), exc
+            else:
+                raise AssertionError(spec)
+
 # float_format_spec rendered into a fixed 48-byte stack buffer and took
 # whatever snprintf managed to fit.  format(1e300, '.2f') needs 305 bytes and
 # came back truncated at 46 digits -- with the fractional part it was asked
