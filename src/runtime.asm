@@ -94,6 +94,7 @@ SYS_exit            equ 60
 SYS_kill            equ 62
 SYS_setsid          equ 112
 SYS_close_range     equ 436
+SYS_pidfd_open      equ 434
 SYS_rt_sigaction    equ 13
 SYS_rt_sigprocmask  equ 14
 SYS_alarm           equ 37
@@ -2151,3 +2152,13 @@ DEF_FUNC_BARE sys_setsid
     syscall
     ret
 END_FUNC sys_setsid
+
+;; ============================================================================
+;; sys_pidfd_open(pid_t pid, unsigned int flags) -> int fd
+;; ============================================================================
+global sys_pidfd_open
+DEF_FUNC_BARE sys_pidfd_open
+    mov rax, SYS_pidfd_open
+    syscall
+    ret
+END_FUNC sys_pidfd_open
