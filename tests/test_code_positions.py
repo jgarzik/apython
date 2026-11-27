@@ -49,6 +49,13 @@ print("co_code:", type(f.__code__.co_code).__name__,
 print("tables:", type(f.__code__.co_linetable).__name__,
       type(f.__code__.co_exceptiontable).__name__)
 
+# Callers such as dis use next() directly and need independent cursors.
+for table in (f.__code__.co_lines, f.__code__.co_positions):
+    left, right = table(), table()
+    assert iter(left) is left
+    assert next(left) == next(right)
+    assert list(left) == list(right)
+
 # Both are methods, and both refuse arguments.
 try:
     f.__code__.co_lines(1)

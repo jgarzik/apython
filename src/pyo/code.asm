@@ -730,7 +730,7 @@ DEF_FUNC code_getattr
 END_FUNC code_getattr
 
 ;; ============================================================================
-;; code.co_positions() -> an iterable of (lineno, end_lineno, col, end_col)
+;; code.co_positions() -> an iterator of (lineno, end_lineno, col, end_col)
 ;;
 ;; CPython's traceback.py calls this on every traceback entry, to underline
 ;; the failing expression.  This tree records lines and not columns yet (the
@@ -739,8 +739,7 @@ END_FUNC code_getattr
 ;; code unit, which is enough for traceback.py to run and gives it exactly
 ;; the information there is.
 ;;
-;; A list rather than a generator: the caller indexes into it with
-;; islice, and a list is the shortest thing that supports that.
+;; Decode into a list using the ascending cursor, then return its iterator.
 ;; Fails: 0
 ;; ============================================================================
 CPO_CODE  equ 8
@@ -855,10 +854,9 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
     jmp .cpo_loop
 
 .cpo_done:
-    mov rax, [rbp - CPO_LIST]
-    mov edx, TAG_PTR
+    mov rdi, [rbp - CPO_LIST]
+    call code_list_iterator
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 .cpo_drop:
     mov rdi, [rbp - CPO_LIST]
@@ -870,6 +868,23 @@ DEF_FUNC code_method_co_positions, CPO_FRAME
 .cpo_args:
     FAIL exc_TypeError_type, "co_positions() takes no arguments", .cpo_failed
 END_FUNC code_method_co_positions
+
+;; code_list_iterator(rdi = owned list) -> iterator, or 0
+;; Transfer the temporary list to the iterator and consume our reference.
+CLI_LIST  equ 8
+CLI_ITER  equ 16
+CLI_FRAME equ 16
+DEF_FUNC_LOCAL code_list_iterator, CLI_FRAME
+    mov [rbp - CLI_LIST], rdi
+    extern list_iter_new
+    call list_iter_new
+    mov [rbp - CLI_ITER], rax
+    mov rdi, [rbp - CLI_LIST]
+    call obj_decref
+    mov rax, [rbp - CLI_ITER]
+    leave
+    ret
+END_FUNC code_list_iterator
 
 section .rodata
 align 8
@@ -1286,7 +1301,19 @@ DEF_FUNC code_method_replace, CR_FRAME
 END_FUNC code_method_replace
 
 ;; ============================================================================
-;; code.co_lines() -> an iterable of (start, end, lineno)
+;; code.co_lines() -> an iterator of (start, end, lineno)
+DEF_FUNC code_method_co_lines
+    call code_lines_list
+    ERR_NULL .out
+    mov rdi, rax
+    call code_list_iterator
+.out:
+    leave
+    ret
+END_FUNC code_method_co_lines
+
+;; ============================================================================
+;; code_lines_list(args, nargs) -> an owned list of (start, end, lineno)
 ;;
 ;; One entry per RUN of code units on the same line: CPython's own
 ;; co_lines() coalesces, and `dis`, `trace` and `inspect` all read it that
@@ -1308,7 +1335,7 @@ COL_TUP   equ 56
 COL_LOC   equ 96            ; the four out-slots, ascending from here
 COL_CUR   equ 136           ; the three-word resume cursor, ascending from here
 COL_FRAME equ 144           ; + 0 pushes = 144
-DEF_FUNC code_method_co_lines, COL_FRAME
+DEF_FUNC_LOCAL code_lines_list, COL_FRAME
     cmp rsi, 1                  ; bound, so self is the only argument
     jne .col_args
     mov rdi, [rdi]
@@ -1421,7 +1448,7 @@ col_emit:
     call obj_decref
 .ce_done:
     ret
-END_FUNC code_method_co_lines
+END_FUNC code_lines_list
 
 ;; ============================================================================
 ;; code_build_lnotab(rdi = a PyCodeObject*) -> rax = a bytes object, owned
@@ -1455,7 +1482,7 @@ DEF_FUNC_LOCAL code_build_lnotab, CBL_FRAME
     mov [rbp - CBL_ARGS], rdi
     lea rdi, [rbp - CBL_ARGS]
     mov esi, 1
-    call code_method_co_lines
+    call code_lines_list
     ERR_NULL .cbl_fail
     mov [rbp - CBL_LIST], rax
 
