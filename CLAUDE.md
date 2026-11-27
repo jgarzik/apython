@@ -332,10 +332,12 @@ and at the boundaries between converted and unconverted code.
 
 ## Bugs and divergences
 
-`bugs.md` is what is still wrong.  `DIVERGENCES.md` is what differs from
-CPython on purpose, with the reasoning and the cost of changing it -- a
-behaviour recorded there is not a bug to fix.  Reproduce an entry before
-working it; several have drifted.
+`ROADMAP.md` is what is left and in what order: the measured gap to CPython
+3.12, the phases that close it, and the open defects.  `DIVERGENCES.md` is
+what differs from CPython, with the reasoning and the cost of changing it --
+a description of a choice, not a ruling; an entry that costs tests is
+scheduled in the roadmap.  Reproduce an entry in either before working it;
+several have drifted.
 
 ## Source Layout
 
