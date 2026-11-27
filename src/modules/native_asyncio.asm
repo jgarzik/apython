@@ -8,6 +8,7 @@
 %include "threadstate.inc"
 %include "value.inc"
 
+extern async_future_init
 extern async_tasks_init
 
 extern builtin_func_new
@@ -219,6 +220,7 @@ DEF_FUNC native_asyncio_module_create, NAM_FRAME
     MODULE_ADD_FUNC async_set_running_loop, async_set_running_loop_name
     MODULE_ADD_FUNC async_get_event_loop, async_get_event_loop_name
     call async_tasks_init
+    call async_future_init
 
     lea rdi, [rel async_module_name]
     call str_from_cstr_heap
