@@ -517,6 +517,79 @@ DEF_FUNC_LOCAL gen_dealloc_close, GDC_FRAME
     ret
 END_FUNC gen_dealloc_close
 
+;; ============================================================================
+;; coro_warn_never_awaited(rdi = PyGenObject* coro) -> void
+;;
+;; Formats "coroutine '<qualname>' was never awaited" and emits RuntimeWarning.
+;; ============================================================================
+CWNA_BUF   equ 256
+CWNA_FRAME equ 256          ; + 0 pushes = 256, 16-aligned
+DEF_FUNC_LOCAL coro_warn_never_awaited, CWNA_FRAME
+    ; Choose co_qualname if set, else gi_name, else "coroutine".
+    mov r8, [rdi + PyGenObject.gi_code]
+    xor esi, esi
+    test r8, r8
+    jz .cwna_try_giname
+    mov rsi, [r8 + PyCodeObject.co_qualname]
+    test rsi, rsi
+    jnz .cwna_have_str
+    mov rsi, [r8 + PyCodeObject.co_name]
+    test rsi, rsi
+    jnz .cwna_have_str
+.cwna_try_giname:
+    mov rsi, [rdi + PyGenObject.gi_name]
+.cwna_have_str:
+    lea r9, [rel cwna_fallback]
+    test rsi, rsi
+    jz .cwna_fmt
+    lea r9, [rsi + PyStrObject.data]
+.cwna_fmt:
+    lea rdi, [rbp - CWNA_BUF]
+    lea rsi, [rel cwna_prefix]
+    xor ecx, ecx
+.cwna_p:
+    movzx eax, byte [rsi]
+    test al, al
+    jz .cwna_name
+    mov [rdi + rcx], al
+    inc rsi
+    inc rcx
+    jmp .cwna_p
+.cwna_name:
+    mov rsi, r9
+.cwna_n:
+    cmp rcx, 220
+    jae .cwna_suf
+    movzx eax, byte [rsi]
+    test al, al
+    jz .cwna_suf
+    mov [rdi + rcx], al
+    inc rsi
+    inc rcx
+    jmp .cwna_n
+.cwna_suf:
+    lea rsi, [rel cwna_suffix]
+.cwna_s:
+    movzx eax, byte [rsi]
+    mov [rdi + rcx], al
+    test al, al
+    jz .cwna_warn
+    inc rsi
+    inc rcx
+    jmp .cwna_s
+.cwna_warn:
+    extern runtime_warn
+    call runtime_warn
+    leave
+    ret
+END_FUNC coro_warn_never_awaited
+
+section .rodata
+cwna_prefix:   db "coroutine '", 0
+cwna_suffix:   db "' was never awaited", 0
+cwna_fallback: db "coroutine", 0
+section .text
+
 GD_EXC   equ 8
 GD_FRAME equ 16             ; + 2 pushes = 32, 16-aligned
 DEF_FUNC gen_dealloc, GD_FRAME
@@ -537,15 +610,30 @@ DEF_FUNC gen_dealloc, GD_FRAME
     ;     -- and the close both reads and clears current_exception;
     ;   - and nothing that unwinds, which is what gen_dealloc_close is for.
     ;
-    ; A frame with instr_ptr 0 has either never started or already finished:
-    ; there is nothing suspended in it, and CPython runs no cleanup for one
-    ; either.
+    ; A generator/coroutine with gi_frame != 0 and gi_started == 0 was never
+    ; started (op_return_generator already stored the post-RETURN_GENERATOR IP
+    ; in instr_ptr, so instr_ptr alone cannot distinguish never-started from
+    ; suspended).  Coroutines destroyed without ever being awaited or closed
+    ; emit RuntimeWarning("coroutine '<qualname>' was never awaited"), matching
+    ; CPython's gen_finalize.
     mov rdi, [rbx + PyGenObject.gi_frame]
     test rdi, rdi
     jz .no_frame
+    cmp qword [rbx + PyGenObject.gi_started], 0
+    jne .gd_check_suspended
+    lea rax, [rel coro_type]
+    cmp [rbx + PyObject.ob_type], rax
+    jne .gd_just_free
+    inc qword [rbx + PyObject.ob_refcnt]
+    DUNDER_EXC_SAVE r12
+    mov qword [gs:ThreadState.current_exception], 0
+    mov rdi, rbx
+    call coro_warn_never_awaited
+    jmp .gd_closed
+
+.gd_check_suspended:
     cmp qword [rdi + PyFrame.instr_ptr], 0
     je .gd_just_free
-
     inc qword [rbx + PyObject.ob_refcnt]
     ; The pending exception is TAKEN OUT for the cleanup: the global is
     ; cleared, so its reference is the register's now, and .gd_close_done

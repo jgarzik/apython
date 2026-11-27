@@ -2183,16 +2183,32 @@ section .text
 extern import_module
 extern obj_call_n
 extern exc_DeprecationWarning_type
+extern exc_RuntimeWarning_type
 
 DW_ARGS  equ 24             ; two Values: the message and the category
 DW_MSG   equ 32
 DW_KW    equ 40             ; the parked kw_names_pending
 DW_TMP   equ 48             ; whatever is being held across a call
+DW_CAT   equ 56             ; warning category type*
 DW_FRAME equ 56             ; + 1 push = 64, 16-aligned
 global deprecation_warn
-DEF_FUNC deprecation_warn, DW_FRAME
+DEF_FUNC_BARE deprecation_warn
+    lea rsi, [rel exc_DeprecationWarning_type]
+    jmp warn_with_category
+END_FUNC deprecation_warn
+
+;; runtime_warn(rdi = the message, a C string) -> eax = 1 ok, 0 raised
+global runtime_warn
+DEF_FUNC_BARE runtime_warn
+    lea rsi, [rel exc_RuntimeWarning_type]
+    jmp warn_with_category
+END_FUNC runtime_warn
+
+;; warn_with_category(rdi = message C string, rsi = warning type*) -> eax = 1 ok, 0 raised
+DEF_FUNC_LOCAL warn_with_category, DW_FRAME
     push rbx
     mov rbx, rdi
+    mov [rbp - DW_CAT], rsi
 
     cmp qword [rel dw_warn_impl], 0
     jne .dw_have
@@ -2244,7 +2260,7 @@ DEF_FUNC deprecation_warn, DW_FRAME
     call str_from_cstr_heap
     mov [rbp - DW_MSG], rax
     mov [rbp - DW_ARGS], rax
-    lea rax, [rel exc_DeprecationWarning_type]
+    mov rax, [rbp - DW_CAT]
     mov [rbp - DW_ARGS + 8], rax
 
     mov rdi, [rel dw_warn_impl]
@@ -2287,7 +2303,7 @@ DEF_FUNC deprecation_warn, DW_FRAME
     pop rbx
     leave
     ret
-END_FUNC deprecation_warn
+END_FUNC warn_with_category
 
 ;; ============================================================================
 ;; float_str_clean(rdi = NUL-terminated text, rsi = its length)

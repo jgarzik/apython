@@ -689,7 +689,7 @@ IRD_MOD   equ 16
 IRD_NAME  equ 24
 IRD_FRAME equ 40            ; + 1 push = 48, 16-aligned
 
-DEF_FUNC_LOCAL instance_repr_default, IRD_FRAME
+DEF_FUNC instance_repr_default, IRD_FRAME
     push rbx
     mov [rbp - IRD_OBJ], rdi
     mov qword [rbp - IRD_MOD], 0
