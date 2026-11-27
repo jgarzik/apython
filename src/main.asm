@@ -1440,7 +1440,7 @@ help_msg:
     db "-m <mod> : run the module <mod> as __main__", 10
     db "-        : run the program read from standard input", 10
     db "-t     : trace opcodes (partial: DISPATCH-terminated handlers are", 10
-    db "         not traced -- see bugs.md)", 10
+    db "         not traced)", 10
     db "--version : print the apython version number and exit", 10
     db "--dis [-x] <source> : print the bytecode compiled from <source>;", 10
     db "         -x compiles in exec mode rather than eval mode", 10
