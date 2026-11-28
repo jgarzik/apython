@@ -10,6 +10,8 @@
 ASM_INIT
 
 extern eval_breaker
+extern tstate_list_head
+extern tstate_list_lock
 extern malloc
 extern realloc
 extern free
@@ -30,6 +32,16 @@ rt_threaded:    db 0
 global rt_next_tid
 rt_next_tid:    dd 2
                 times 60 db 0
+
+; Stop-The-World (STW) coordinator state (cache-line isolated).
+align 64
+stw_mutex:      dd 0            ; serializes concurrent STW requesters
+                dd 0
+global stw_requested
+stw_requested:  dd 0            ; 1 while STW active (futex for parked threads)
+stw_remaining:  dd 0            ; attached threads still to park (futex for owner)
+stw_owner_ts:   dq 0            ; ThreadState* of active STW owner, or 0
+                times 40 db 0
 
 section .bss
 align 64
@@ -866,3 +878,380 @@ DEF_FUNC brc_drain_thread, BDT_FRAME
     leave
     ret
 END_FUNC brc_drain_thread
+
+;; ============================================================================
+;; brc_drain_all_stw() -> rax = libc-malloc'd PyObject** of deferred dead
+;;   objects (each pinned with refcount=1), rdx = count (0 if none)
+;;
+;; Must ONLY be called inside STW (or single-threaded).  Drains every live
+;; ThreadState's BRC queue so every object's refcount is exact before GC
+;; reachability analysis.  Never calls obj_dealloc inside STW: objects whose
+;; refcount reaches 0 are bumped back to 1 and returned for unlocked DECREF
+;; after stw_start_world().
+;; ============================================================================
+BDA_BUF   equ 8
+BDA_LEN   equ 16
+BDA_CAP   equ 24
+BDA_QLEN  equ 32
+BDA_FRAME equ 40                        ; + 5 pushes = 80, 16-aligned
+global brc_drain_all_stw
+DEF_FUNC brc_drain_all_stw, BDA_FRAME
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov qword [rbp - BDA_BUF], 0
+    mov qword [rbp - BDA_LEN], 0
+    mov qword [rbp - BDA_CAP], 0
+
+    mov r15, [rel tstate_list_head]
+.bda_ts_loop:
+    test r15, r15
+    jz .bda_done
+    cmp qword [r15 + ThreadState.ts_brc_len], 0
+    je .bda_ts_next
+    mov rdi, r15
+    lea rsi, [rbp - BDA_QLEN]
+    call brc_take_queue
+    test rax, rax
+    jz .bda_ts_next
+    mov rbx, rax
+    mov r12, [rbp - BDA_QLEN]
+    xor r13d, r13d
+.bda_obj_loop:
+    cmp r13, r12
+    jae .bda_free_q
+    mov r14, [rbx + r13*8]
+    inc r13
+    mov r8d, [r14 + PyObject.ob_ref_local]
+    mov dword [r14 + PyObject.ob_ref_local], 0
+    shl r8d, REF_SHARED_SHIFT
+    mov eax, [r14 + PyObject.ob_ref_shared]
+.bda_cas:
+    mov edx, eax
+    add edx, r8d
+    and edx, ~REF_QUEUED_BIT
+    or edx, REF_MERGED_BIT
+    lock cmpxchg [r14 + PyObject.ob_ref_shared], edx
+    jne .bda_cas
+    mov dword [r14 + PyObject.ob_tid], REF_TID_MERGED
+    cmp edx, REF_MERGED_BIT
+    jne .bda_obj_loop
+    ; Refcount reached 0 inside STW: pin to 1 and defer dealloc until after STW.
+    mov dword [r14 + PyObject.ob_ref_shared], REF_MERGED_BIT | REF_SHARED_ONE
+    mov rax, [rbp - BDA_LEN]
+    cmp rax, [rbp - BDA_CAP]
+    jb .bda_append
+    mov rcx, [rbp - BDA_CAP]
+    test rcx, rcx
+    jnz .bda_grow
+    mov ecx, 16
+    jmp .bda_realloc
+.bda_grow:
+    shl rcx, 1
+.bda_realloc:
+    mov [rbp - BDA_CAP], rcx
+    mov rdi, [rbp - BDA_BUF]
+    lea rsi, [rcx * 8]
+    call realloc wrt ..plt
+    test rax, rax
+    jz .bda_oom
+    mov [rbp - BDA_BUF], rax
+.bda_append:
+    mov rax, [rbp - BDA_BUF]
+    mov rcx, [rbp - BDA_LEN]
+    mov [rax + rcx * 8], r14
+    inc qword [rbp - BDA_LEN]
+    jmp .bda_obj_loop
+.bda_free_q:
+    mov rdi, rbx
+    call free wrt ..plt
+.bda_ts_next:
+    mov r15, [r15 + ThreadState.ts_next]
+    jmp .bda_ts_loop
+.bda_done:
+    lock and qword [rel eval_breaker], ~EB_BRC_MERGE
+    mov rax, [rbp - BDA_BUF]
+    mov rdx, [rbp - BDA_LEN]
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.bda_oom:
+    CSTRING rdi, "out of memory draining BRC queues during STW"
+    call fatal_error
+END_FUNC brc_drain_all_stw
+
+;; ============================================================================
+;; rt_detach() -> nothing
+;;
+;; Transition the calling thread from TS_STATE_ATTACHED to TS_STATE_DETACHED.
+;; If a Stop-The-World pause is currently waiting for attached threads to park,
+;; decrement stw_remaining and wake the STW coordinator when it reaches 0.
+;; ============================================================================
+global rt_detach
+DEF_FUNC rt_detach
+    cmp byte [rel rt_threaded], 0
+    je .rtd_done
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    mov rax, [gs:ThreadState.ts_self]
+    cmp dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+    jne .rtd_unlock
+    mov dword [rax + ThreadState.ts_state], TS_STATE_DETACHED
+    cmp dword [rel stw_requested], 0
+    je .rtd_unlock
+    cmp rax, [rel stw_owner_ts]
+    je .rtd_unlock
+    dec dword [rel stw_remaining]
+    jnz .rtd_unlock
+    ; Wake the STW coordinator waiting on stw_remaining
+    mov eax, SYS_futex
+    lea rdi, [rel stw_remaining]
+    mov esi, FUTEX_WAKE_PRIVATE
+    mov edx, 1
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+.rtd_unlock:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+.rtd_done:
+    leave
+    ret
+END_FUNC rt_detach
+
+;; ============================================================================
+;; rt_reattach() -> nothing
+;;
+;; Transition the calling thread back to TS_STATE_ATTACHED.  If a STW pause
+;; is active, block on the stw_requested futex until the world resumes.
+;; ============================================================================
+global rt_reattach
+DEF_FUNC rt_reattach
+    cmp byte [rel rt_threaded], 0
+    je .rtr_done
+.rtr_retry:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    cmp dword [rel stw_requested], 0
+    jne .rtr_wait
+    mov rax, [gs:ThreadState.ts_self]
+    mov dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+.rtr_done:
+    leave
+    ret
+.rtr_wait:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+    mov eax, SYS_futex
+    lea rdi, [rel stw_requested]
+    mov esi, FUTEX_WAIT_PRIVATE
+    mov edx, 1
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+    jmp .rtr_retry
+END_FUNC rt_reattach
+
+;; ============================================================================
+;; stw_safepoint() -> nothing
+;;
+;; Called from eval_breaker_slow (EB_STOP_WORLD) and long native loops (sre,
+;; timsort).  Parks the calling thread until stw_start_world() clears
+;; stw_requested and wakes all parked threads.
+;; ============================================================================
+global stw_safepoint
+DEF_FUNC stw_safepoint
+    cmp dword [rel stw_requested], 0
+    je .sp_done
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    cmp dword [rel stw_requested], 0
+    je .sp_unlock_done
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel stw_owner_ts]
+    je .sp_unlock_done
+    cmp dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+    jne .sp_unlock_wait
+    mov dword [rax + ThreadState.ts_state], TS_STATE_PARKED
+    dec dword [rel stw_remaining]
+    jnz .sp_unlock_wait
+    mov eax, SYS_futex
+    lea rdi, [rel stw_remaining]
+    mov esi, FUTEX_WAKE_PRIVATE
+    mov edx, 1
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+.sp_unlock_wait:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+.sp_wait_loop:
+    mov eax, SYS_futex
+    lea rdi, [rel stw_requested]
+    mov esi, FUTEX_WAIT_PRIVATE
+    mov edx, 1
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    cmp dword [rel stw_requested], 0
+    jne .sp_unlock_wait
+    mov rax, [gs:ThreadState.ts_self]
+    mov dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+.sp_unlock_done:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+.sp_done:
+    leave
+    ret
+END_FUNC stw_safepoint
+
+;; ============================================================================
+;; stw_stop_world() -> nothing
+;;
+;; Stop all other attached Python threads at safepoints.  No-op while
+;; rt_threaded == 0.  Detaches self while acquiring stw_mutex so two concurrent
+;; STW requesters never deadlock against each other.
+;; ============================================================================
+global stw_stop_world
+DEF_FUNC stw_stop_world
+    cmp byte [rel rt_threaded], 0
+    je .ssw_done
+    ; Detach while waiting on stw_mutex so another active STW does not wait on us.
+    call rt_detach
+    lea rdi, [rel stw_mutex]
+    call rt_mutex_lock
+
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    mov rcx, [gs:ThreadState.ts_self]
+    mov dword [rcx + ThreadState.ts_state], TS_STATE_ATTACHED
+    mov [rel stw_owner_ts], rcx
+    mov dword [rel stw_requested], 1
+    lock or qword [rel eval_breaker], EB_STOP_WORLD
+
+    ; Count every other thread currently in TS_STATE_ATTACHED.
+    xor edx, edx
+    mov rax, [rel tstate_list_head]
+.ssw_count:
+    test rax, rax
+    jz .ssw_counted
+    cmp rax, rcx
+    je .ssw_next
+    cmp dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+    jne .ssw_next
+    inc edx
+.ssw_next:
+    mov rax, [rax + ThreadState.ts_next]
+    jmp .ssw_count
+.ssw_counted:
+    mov [rel stw_remaining], edx
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+
+    ; Wait until every attached thread has parked or detached.
+.ssw_wait:
+    mov edx, [rel stw_remaining]
+    test edx, edx
+    jz .ssw_done
+    mov eax, SYS_futex
+    lea rdi, [rel stw_remaining]
+    mov esi, FUTEX_WAIT_PRIVATE
+    ; edx = observed stw_remaining
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+    jmp .ssw_wait
+.ssw_done:
+    leave
+    ret
+END_FUNC stw_stop_world
+
+;; ============================================================================
+;; stw_start_world() -> nothing
+;;
+;; Resume all threads parked by stw_stop_world().  No-op while rt_threaded == 0.
+;; ============================================================================
+global stw_start_world
+DEF_FUNC stw_start_world
+    cmp byte [rel rt_threaded], 0
+    je .srw_done
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    lock and qword [rel eval_breaker], ~EB_STOP_WORLD
+    mov qword [rel stw_owner_ts], 0
+    mov dword [rel stw_requested], 0
+    mov eax, SYS_futex
+    lea rdi, [rel stw_requested]
+    mov esi, FUTEX_WAKE_PRIVATE
+    mov edx, 0x7FFFFFFF
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+    lea rdi, [rel stw_mutex]
+    call rt_mutex_unlock
+.srw_done:
+    leave
+    ret
+END_FUNC stw_start_world
+
+;; ============================================================================
+;; stw_reset_after_fork() -> nothing
+;; Reset STW coordinator state in a forked child (single thread survives).
+;; ============================================================================
+global stw_reset_after_fork
+DEF_FUNC_BARE stw_reset_after_fork
+    mov dword [rel stw_mutex], 0
+    mov dword [rel stw_requested], 0
+    mov dword [rel stw_remaining], 0
+    mov qword [rel stw_owner_ts], 0
+    lock and qword [rel eval_breaker], ~EB_STOP_WORLD
+    ret
+END_FUNC stw_reset_after_fork
+
+;; ============================================================================
+;; stw_notify_unlink(rdi = ThreadState *self) -> nothing
+;;
+;; Called by tstate_unlink while holding tstate_list_lock.  If a STW is waiting
+;; on this exiting attached thread, decrement stw_remaining and wake owner.
+;; ============================================================================
+global stw_notify_unlink
+DEF_FUNC_BARE stw_notify_unlink
+    cmp dword [rdi + ThreadState.ts_state], TS_STATE_ATTACHED
+    jne .snu_done
+    mov dword [rdi + ThreadState.ts_state], TS_STATE_DETACHED
+    cmp dword [rel stw_requested], 0
+    je .snu_done
+    cmp rdi, [rel stw_owner_ts]
+    je .snu_done
+    dec dword [rel stw_remaining]
+    jnz .snu_done
+    mov eax, SYS_futex
+    lea rdi, [rel stw_remaining]
+    mov esi, FUTEX_WAKE_PRIVATE
+    mov edx, 1
+    xor r10d, r10d
+    xor r8d, r8d
+    xor r9d, r9d
+    syscall
+.snu_done:
+    ret
+END_FUNC stw_notify_unlink

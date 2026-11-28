@@ -45,7 +45,7 @@ extern gc_garbage_list
 extern list_append
 extern obj_incref
 extern obj_dealloc
-extern gc_gen0_count
+extern gc_get_gen0_count
 extern gc_gen1_collections
 extern gc_gen2_collections
 extern gc_gen0_threshold
@@ -191,7 +191,8 @@ END_FUNC gm_three
 DEF_FUNC gc_mod_get_count
     test rsi, rsi
     jnz .gmgc_args
-    mov rdi, [rel gc_gen0_count]
+    call gc_get_gen0_count
+    mov rdi, rax
     mov rsi, [rel gc_gen1_collections]
     mov rdx, [rel gc_gen2_collections]
     call gm_three

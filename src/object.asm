@@ -132,30 +132,18 @@ DEF_FUNC_BARE obj_dealloc
     mov dword [rbx + PyObject.ob_ref_local], 0
     mov dword [rbx + PyObject.ob_ref_shared], 0
 
-    ; PEP 442: __del__ runs before anything is taken apart -- before the weak
-    ; references are cleared and before tp_dealloc releases a field -- and if
-    ; it brings the object back, nothing below may run at all.  It used to be
-    ; called from inside instance_dealloc, after the weakrefs had already been
-    ; emptied and with no way to say the object had been resurrected, so
-    ; `def __del__(self): survivors.append(self)` freed an object that the
-    ; list it had just been added to still pointed at.
-    ;
-    ; TYPE_FLAG_HAS_DEL is one bit, maintained by type_refresh_attr_flags down
-    ; every subclass, and it is only ever set on a heaptype.
+    ; PEP 442: run __del__ before weakrefs are cleared or fields released.
+    ; TYPE_FLAG_HAS_DEL is maintained down every subclass on heaptypes only.
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax
     jz .no_finalizer
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
     jz .no_finalizer
 
-    ; A finalizer runs at most once, and the collector may have run this one
-    ; already: it finalizes a whole unreachable cycle before clearing any of
-    ; it.  The bit lives in the GC head, which is only there to read while the
-    ; object is still tracked -- gc_untrack happens later, inside gc_dealloc.
+    ; Run each finalizer at most once: GC Phase 4.5 sets GC_PREV_MASK_FINALIZED
+    ; in PyGC_Head.gc_prev and preserves it even when gc_next == 0.
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .td_do_finalize
-    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
-    je .td_do_finalize              ; untracked: no bit to read
     test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
     jnz .no_finalizer
     or qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
@@ -168,26 +156,13 @@ DEF_FUNC_BARE obj_dealloc
     jnz .td_leave                   ; resurrected: free nothing
 
 .no_finalizer:
-    ; Mark definitively dead (MERGED with count 0) before weakref_clear_for
-    ; so a concurrent obj_try_incref cannot resurrect the object.
+    ; Mark definitively dead (MERGED, rc=0) before weakref_clear_for so a
+    ; concurrent obj_try_incref cannot resurrect the object.
     mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
     mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
 
-    ; The object is dead: take it out of the collector's lists NOW, before a
-    ; single field is released.  This used to happen last, inside gc_dealloc,
-    ; so for the whole of a container's teardown -- every field released and
-    ; every __del__ those releases fire -- it sat in a generation list with a
-    ; refcount of zero, and anything walking the generations from inside one
-    ; of those finalizers found it.  gc.get_objects() took a reference to a
-    ; dead object and freed it a second time when the list went;
-    ; gc.collect() computed gc_refs = 0 for it, cleared it, and left the
-    ; freed block in its own young list.  CPython untracks at the top of
-    ; every tp_dealloc, and this is the one funnel they all come through.
-    ;
-    ; After the finalizer, not before it: __del__ runs with the object
-    ; tracked and held at one, which is what CPython's subtype_dealloc
-    ; arranges by re-tracking around the call.  gc_untrack is idempotent, so
-    ; the one inside gc_dealloc still runs, harmlessly.
+    ; Untrack before releasing fields (after finalization so __del__ saw the
+    ; object tracked). gc_untrack is idempotent for gc_dealloc below.
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax
     jz .no_untrack

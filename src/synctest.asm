@@ -25,13 +25,25 @@ extern brc_register_thread
 extern brc_unregister_thread
 extern brc_enqueue
 extern brc_take_queue
+extern rt_threaded
+extern tstate_link
+extern tstate_unlink
+extern rt_detach
+extern rt_reattach
+extern stw_safepoint
+extern stw_stop_world
+extern stw_start_world
 
-ST_NTHREADS equ 4
-ST_ITERS    equ 100000
-ST_ITERS2   equ 50000
+ST_NTHREADS  equ 4
+ST_ITERS     equ 100000
+ST_ITERS2    equ 50000
+ST_STW_REQ   equ 2000
+ST_STW_MUT   equ 20000
+SYS_arch_prctl equ 158
+ARCH_SET_GS  equ 0x1001
 
 section .bss
-align 64
+alignb 64
 st_lock_a:      resd 1
                 resb 60
 st_lock_b:      resd 1
@@ -40,7 +52,11 @@ st_counter:     resq 1
 st_bal_a:       resq 1
 st_bal_b:       resq 1
 st_reg_err:     resq 1
+st_stw_in_stw:  resq 1
+st_stw_epochs:  resq 1
 st_fake_ts:     resb ThreadState_size
+alignb 64
+st_stw_ts:      resb ThreadState_size * ST_NTHREADS
 
 section .rodata
 st_ok_msg:      db "sync selftest: OK", 10
@@ -133,6 +149,89 @@ DEF_FUNC_LOCAL st_worker_dual
     leave
     ret
 END_FUNC st_worker_dual
+
+;; st_worker_stw(rdi = thread index 0..3) -> rax = NULL
+;; Worker 4: 0,1 issue concurrent stw_stop_world/start_world; 2,3 alternate
+;; stw_safepoint and rt_detach/rt_reattach, asserting st_stw_in_stw == 0
+;; whenever attached outside STW.
+DEF_FUNC_LOCAL st_worker_stw
+    push rbx
+    push r12
+    mov r12, rdi
+    imul rax, r12, ThreadState_size
+    lea rbx, [rel st_stw_ts]
+    add rbx, rax
+    mov [rbx + ThreadState.ts_self], rbx
+    lea eax, [r12d + 1]
+    mov [rbx + ThreadState.ts_tid], eax
+    mov dword [rbx + ThreadState.ts_state], TS_STATE_DETACHED
+    mov qword [rbx + ThreadState.ts_next], 0
+
+    mov eax, SYS_arch_prctl
+    mov edi, ARCH_SET_GS
+    mov rsi, rbx
+    syscall
+
+    call tstate_link
+    call rt_reattach
+
+    cmp r12, 2
+    jae .w4_mutator
+
+    mov ebx, ST_STW_REQ
+.w4_req_loop:
+    call stw_stop_world
+    cmp qword [rel st_stw_in_stw], 0
+    je .w4_req_ok1
+    lock inc qword [rel st_reg_err]
+.w4_req_ok1:
+    mov qword [rel st_stw_in_stw], 1
+    inc qword [rel st_stw_epochs]
+    pause
+    pause
+    cmp qword [rel st_stw_in_stw], 1
+    je .w4_req_ok2
+    lock inc qword [rel st_reg_err]
+.w4_req_ok2:
+    mov qword [rel st_stw_in_stw], 0
+    call stw_start_world
+    test ebx, 3
+    jnz .w4_req_next
+    call stw_safepoint
+.w4_req_next:
+    dec ebx
+    jnz .w4_req_loop
+    jmp .w4_exit
+
+.w4_mutator:
+    mov ebx, ST_STW_MUT
+.w4_mut_loop:
+    call stw_safepoint
+    cmp qword [rel st_stw_in_stw], 0
+    je .w4_mut_ok1
+    lock inc qword [rel st_reg_err]
+.w4_mut_ok1:
+    test ebx, 7
+    jnz .w4_mut_next
+    call rt_detach
+    pause
+    pause
+    call rt_reattach
+    cmp qword [rel st_stw_in_stw], 0
+    je .w4_mut_next
+    lock inc qword [rel st_reg_err]
+.w4_mut_next:
+    dec ebx
+    jnz .w4_mut_loop
+
+.w4_exit:
+    call tstate_unlink
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC st_worker_stw
 
 ;; ============================================================================
 ;; sync_selftest_main() -> eax = 0 on pass, 1 on fail
@@ -254,6 +353,42 @@ DEF_FUNC sync_selftest_main, STM_FRAME
     test eax, eax
     jnz .fail
 
+    ; --- Test 4: 4-thread STW coordinator stress (stop/start/safepoint/detach) ---
+    mov qword [rel st_reg_err], 0
+    mov qword [rel st_stw_in_stw], 0
+    mov qword [rel st_stw_epochs], 0
+    mov byte [rel rt_threaded], 1
+    call rt_detach
+
+    xor ebx, ebx
+.t4_spawn:
+    lea rdi, [rbp - STM_TIDS + rbx*8]
+    xor esi, esi
+    lea rdx, [rel st_worker_stw]
+    mov rcx, rbx
+    call pthread_create wrt ..plt
+    test eax, eax
+    jnz .fail_stw
+    inc ebx
+    cmp ebx, ST_NTHREADS
+    jb .t4_spawn
+
+    xor ebx, ebx
+.t4_join:
+    mov rdi, [rbp - STM_TIDS + rbx*8]
+    xor esi, esi
+    call pthread_join wrt ..plt
+    inc ebx
+    cmp ebx, ST_NTHREADS
+    jb .t4_join
+
+    call rt_reattach
+    mov byte [rel rt_threaded], 0
+    cmp qword [rel st_reg_err], 0
+    jne .fail
+    cmp qword [rel st_stw_epochs], 2 * ST_STW_REQ
+    jne .fail
+
     mov edi, 1
     lea rsi, [rel st_ok_msg]
     mov edx, st_ok_len
@@ -264,6 +399,8 @@ DEF_FUNC sync_selftest_main, STM_FRAME
     leave
     ret
 
+.fail_stw:
+    mov byte [rel rt_threaded], 0
 .fail:
     mov edi, 2
     lea rsi, [rel st_fail_msg]

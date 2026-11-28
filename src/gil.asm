@@ -192,6 +192,9 @@ DEF_FUNC tstate_unlink
     mov qword [rax + ThreadState.ts_alloc_live], 0
     extern ap_exited_live
     add [rel ap_exited_live], rdx
+    mov rdi, rax
+    extern stw_notify_unlink
+    call stw_notify_unlink
     lea rdi, [rel tstate_list_lock]
     call rt_mutex_unlock
     leave
@@ -415,6 +418,11 @@ END_FUNC gil_acquire
 ;; thread that sees a signal pending yields, so the main thread gets to it.
 ;; ============================================================================
 DEF_FUNC eval_breaker_slow
+    test qword [rel eval_breaker], EB_STOP_WORLD
+    jz .ebs_gil
+    extern stw_safepoint
+    call stw_safepoint
+.ebs_gil:
     test qword [rel eval_breaker], EB_GIL_DROP
     jz .ebs_signals
     call gil_yield
@@ -501,6 +509,14 @@ DEF_FUNC gil_fork, GF_FRAME
     call brc_reset_after_fork
     extern weakref_reset_after_fork
     call weakref_reset_after_fork
+    extern stw_reset_after_fork
+    call stw_reset_after_fork
+    extern gc_reset_after_fork
+    call gc_reset_after_fork
+    extern subclass_reset_after_fork
+    call subclass_reset_after_fork
+    extern type_lock
+    mov dword [rel type_lock], 0
     mov eax, SYS_gettid_nr
     syscall
     mov [gs:ThreadState.ts_native_id], rax

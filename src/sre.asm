@@ -931,6 +931,10 @@ DEF_FUNC sre_match, SM_MFRAME
     inc dword [r12 + SRE_State.match_depth]
 
 .dispatch:
+    ; Safepoint check for STW GC/fork during long regex backtracking loops.
+    extern stw_requested
+    cmp dword [rel stw_requested], 0
+    jne .sre_stw_park
     ; The program counter has to be inside the pattern.  The opcode was
     ; bounded and the pc never was, so a crafted program whose last word is
     ; not SUCCESS or FAILURE simply walked off the end of the code array and
@@ -959,6 +963,11 @@ DEF_FUNC sre_match, SM_MFRAME
 
     lea rcx, [rel .op_table]
     jmp [rcx + rax*8]
+
+.sre_stw_park:
+    extern stw_safepoint
+    call stw_safepoint
+    jmp .dispatch
 
     align 8
 .op_table:

@@ -249,18 +249,20 @@ DEF_FUNC weakref_slot_get, WSG_FRAME
 END_FUNC weakref_slot_get
 
 ;; ============================================================================
-;; weakref_clear_for(rdi = object about to be freed)
+;; weakref_detach_for(rdi = object about to be freed or collected)
+;;   -> rax = owned PyListObject* of pinned weakrefs (wr_object cleared), or 0
 ;;
-;; Called from obj_dealloc, and only when the table is non-empty.  Every
-;; reference to the object is emptied under weakref_lock before unlocking and
-;; running any callbacks outside the lock.
+;; Pure leaf half of weakref_clear_for: acquires weakref_lock, pins live
+;; weakrefs via obj_try_incref, clears wr_object, removes the weakref_table
+;; entry, and unlocks.  Safe to call inside STW (never runs Python callbacks).
 ;; ============================================================================
 WC_OBJ   equ 8
 WC_LIST  equ 16
 WC_IDX   equ 24
 WC_EXC   equ 32
 WC_FRAME equ 48             ; + 2 pushes = 64
-DEF_FUNC weakref_clear_for, WC_FRAME
+global weakref_detach_for
+DEF_FUNC weakref_detach_for, WC_FRAME
     push rbx
     push r12
     mov [rbp - WC_OBJ], rdi
@@ -269,14 +271,11 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     mov rdi, [rbp - WC_OBJ]
     call weakref_chain
     test rax, rax
-    jz .done_unlock
+    jz .wdf_none
     mov [rbp - WC_LIST], rax
     mov rdi, rax
     call obj_incref             ; hold it past the table entry going away
 
-    ; Pin every still-live reference via obj_try_incref and clear wr_object.
-    ; A weakref whose refcount already reached 0 on another thread is dying in
-    ; ref_clear; zero its slot so we neither touch it nor invoke its callback.
     mov rax, [rbp - WC_LIST]
     mov rbx, [rax + PyListObject.ob_size]
     mov r12, [rax + PyListObject.ob_item]
@@ -303,7 +302,6 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jmp .hold_loop
 .hold_done:
 
-    ; Drop the table entry while still holding weakref_lock.
     mov rdi, [rel weakref_table]
     test rdi, rdi
     jz .no_entry
@@ -315,8 +313,33 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     mov [rel weakref_live], rax
 .no_entry:
     WR_UNLOCK
+    mov rax, [rbp - WC_LIST]
+    pop r12
+    pop rbx
+    leave
+    ret
+.wdf_none:
+    WR_UNLOCK
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC weakref_detach_for
 
-    ; Then the callbacks, strictly outside weakref_lock.
+;; ============================================================================
+;; weakref_run_callbacks(rdi = WC_LIST from weakref_detach_for) -> nothing
+;;
+;; Invokes each weakref's callback strictly outside weakref_lock and STW,
+;; then releases every pinned weakref and the list itself.
+;; ============================================================================
+global weakref_run_callbacks
+DEF_FUNC weakref_run_callbacks, WC_FRAME
+    push rbx
+    push r12
+    test rdi, rdi
+    jz .wrc_done
+    mov [rbp - WC_LIST], rdi
     mov qword [rbp - WC_IDX], 0
 .cb_loop:
     mov rax, [rbp - WC_LIST]
@@ -381,12 +404,23 @@ DEF_FUNC weakref_clear_for, WC_FRAME
 .rel_done:
     mov rdi, [rbp - WC_LIST]
     call obj_decref
-    jmp .done
-.done_unlock:
-    WR_UNLOCK
-.done:
+.wrc_done:
     pop r12
     pop rbx
+    leave
+    ret
+END_FUNC weakref_run_callbacks
+
+;; ============================================================================
+;; weakref_clear_for(rdi = object about to be freed) -> nothing
+;; ============================================================================
+DEF_FUNC weakref_clear_for
+    call weakref_detach_for
+    test rax, rax
+    jz .wcf_done
+    mov rdi, rax
+    call weakref_run_callbacks
+.wcf_done:
     leave
     ret
 END_FUNC weakref_clear_for

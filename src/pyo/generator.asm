@@ -591,11 +591,66 @@ section .text
 
 GD_EXC   equ 8
 GD_FRAME equ 16             ; + 2 pushes = 32, 16-aligned
+;; ============================================================================
+;; gen_gc_finalize(rdi = PyGenObject*) -> nothing
+;; PEP 442 finalizer called by GC Phase 4.5 before tp_clear: closes a
+;; suspended generator/coroutine (running its try/finally) or warns on an
+;; unawaited coroutine.
+;; ============================================================================
+global gen_gc_finalize
+DEF_FUNC gen_gc_finalize, 16            ; + 2 pushes = 32, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .ggf_done
+    cmp qword [rbx + PyGenObject.gi_started], 0
+    jne .ggf_susp
+    lea rax, [rel coro_type]
+    cmp [rbx + PyObject.ob_type], rax
+    jne .ggf_done
+    DUNDER_EXC_SAVE r12
+    mov qword [gs:ThreadState.current_exception], 0
+    mov rdi, rbx
+    call coro_warn_never_awaited
+    jmp .ggf_after
+.ggf_susp:
+    cmp qword [rdi + PyFrame.instr_ptr], 0
+    je .ggf_done
+    DUNDER_EXC_SAVE r12
+    mov qword [gs:ThreadState.current_exception], 0
+    mov rdi, rbx
+    call gen_dealloc_close
+.ggf_after:
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .ggf_restore
+    mov qword [gs:ThreadState.current_exception], 0
+    push rdi
+    sub rsp, 8
+    mov rsi, rbx
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
+    add rsp, 8
+    pop rdi
+    call obj_decref
+.ggf_restore:
+    mov [gs:ThreadState.current_exception], r12
+.ggf_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gen_gc_finalize
+
 DEF_FUNC gen_dealloc, GD_FRAME
     push rbx
     push r12
 
     mov rbx, rdi
+    test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+    jnz .gd_just_free
 
     ; A generator suspended inside a try/finally has cleanup still to run, and
     ; CPython runs it when the generator is collected.  Doing it here means
