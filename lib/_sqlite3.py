@@ -52,6 +52,9 @@ class DataError(DatabaseError):
     __module__ = "sqlite3"
 
 
+_core.set_data_error_type(DataError)
+
+
 class OperationalError(DatabaseError):
     __module__ = "sqlite3"
 
@@ -589,20 +592,27 @@ def _lstrip_sql_bytes(b, pos=0):
 
 
 class _Statement:
+    __module__ = "sqlite3"
     __slots__ = ("_h", "_is_dml")
 
-    def __init__(self, stmt_h, is_dml):
+    def __new__(cls, *args, **kwargs):
+        raise TypeError(f"cannot create '{cls.__module__}.{cls.__name__}' instances")
+
+    @classmethod
+    def _from_handle(cls, stmt_h, is_dml):
+        self = object.__new__(cls)
         self._h = stmt_h
         self._is_dml = is_dml
+        return self
 
     def _reset(self):
-        h = self._h
+        h = getattr(self, "_h", 0)
         if h:
             return _core.reset(h)
         return SQLITE_OK
 
     def _finalize(self):
-        h = self._h
+        h = getattr(self, "_h", 0)
         if h:
             self._h = 0
             try:
@@ -651,6 +661,233 @@ def _convert_autocommit(val):
     raise ValueError(
         "autocommit must be True, False, or sqlite3.LEGACY_TRANSACTION_CONTROL"
     )
+
+
+def _check_cint(val):
+    if not isinstance(val, int):
+        raise TypeError(f"'{type(val).__name__}' object cannot be interpreted as an integer")
+    if val < -2147483648 or val > 2147483647:
+        raise OverflowError("Python int too large to convert to C int")
+    return int(val)
+
+
+def _to_bytes_like(data, allow_str=False):
+    if allow_str and isinstance(data, str):
+        return str.encode(data, "utf-8")
+    t = type(data)
+    if t is bytes or t is bytearray:
+        return data
+    if t is memoryview:
+        if not data.c_contiguous:
+            raise BufferError("underlying buffer is not C-contiguous")
+        return data
+    mv = memoryview(data)
+    try:
+        if not mv.c_contiguous:
+            raise BufferError("underlying buffer is not C-contiguous")
+        return mv.tobytes()
+    finally:
+        mv.release()
+
+
+# ---------------------------------------------------------------------------
+# Blob (incremental BLOB I/O)
+# ---------------------------------------------------------------------------
+
+
+class Blob:
+    __module__ = "sqlite3"
+    __iter__ = None
+
+    def __new__(cls, *args, **kwargs):
+        raise TypeError("cannot create 'sqlite3.Blob' instances")
+
+    @classmethod
+    def _from_handle(cls, connection, blob_h):
+        self = object.__new__(cls)
+        self._connection = connection
+        self._h = blob_h
+        self._offset = 0
+        return self
+
+    def _close_raw(self):
+        h = getattr(self, "_h", 0)
+        if h:
+            self._h = 0
+            try:
+                _core.blob_close(h)
+            except Exception:
+                pass
+
+    def _check_blob(self):
+        self._connection._check_connection()
+        self._connection._check_thread()
+        if not self._h:
+            raise ProgrammingError("Cannot operate on a closed blob.")
+
+    def close(self):
+        """Close the blob."""
+        self._connection._check_connection()
+        self._connection._check_thread()
+        self._close_raw()
+
+    def __del__(self):
+        self._close_raw()
+
+    def __enter__(self):
+        self._check_blob()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb, /):
+        self._check_blob()
+        self._close_raw()
+        return False
+
+    def __len__(self):
+        self._check_blob()
+        return _core.blob_bytes(self._h)
+
+    def _read_multiple(self, length, offset):
+        if length == 0:
+            return b""
+        rc, data = _core.blob_read(self._h, length, offset)
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(self._connection._db)
+        return data
+
+    def _write_raw(self, data, offset):
+        blob_len = _core.blob_bytes(self._h)
+        if len(data) > blob_len - offset:
+            raise ValueError("data longer than blob length")
+        rc = _core.blob_write(self._h, data, offset)
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(self._connection._db)
+
+    def read(self, length=-1, /):
+        """Read data at the current offset position."""
+        self._check_blob()
+        length = _check_cint(length)
+        blob_len = _core.blob_bytes(self._h)
+        max_read = blob_len - self._offset
+        if length < 0 or length > max_read:
+            length = max_read
+        if length == 0:
+            return b""
+        data = self._read_multiple(length, self._offset)
+        self._offset += length
+        return data
+
+    def write(self, data, /):
+        """Write data at the current offset."""
+        self._check_blob()
+        buf = _to_bytes_like(data)
+        self._write_raw(buf, self._offset)
+        self._offset += len(buf)
+
+    def seek(self, offset, origin=0, /):
+        """Set the current access position to offset."""
+        self._check_blob()
+        offset = _check_cint(offset)
+        origin = _check_cint(origin)
+        blob_len = _core.blob_bytes(self._h)
+        if origin == 0:  # SEEK_SET
+            pos = offset
+        elif origin == 1:  # SEEK_CUR
+            if offset > 2147483647 - self._offset:
+                raise OverflowError("seek offset results in overflow")
+            pos = self._offset + offset
+        elif origin == 2:  # SEEK_END
+            if offset > 2147483647 - blob_len:
+                raise OverflowError("seek offset results in overflow")
+            pos = blob_len + offset
+        else:
+            raise ValueError(
+                "'origin' should be os.SEEK_SET, os.SEEK_CUR, or os.SEEK_END"
+            )
+        if pos < 0 or pos > blob_len:
+            raise ValueError("offset out of blob range")
+        self._offset = pos
+
+    def tell(self):
+        """Return the current access position for the blob."""
+        self._check_blob()
+        return self._offset
+
+    def _norm_index(self, item):
+        try:
+            idx = item.__index__()
+        except AttributeError:
+            raise TypeError("Blob indices must be integers") from None
+        if idx > sys.maxsize or idx < -sys.maxsize - 1:
+            raise IndexError("cannot fit 'int' into an index-sized integer")
+        blob_len = _core.blob_bytes(self._h)
+        if idx < 0:
+            idx += blob_len
+        if idx < 0 or idx >= blob_len:
+            raise IndexError("Blob index out of range")
+        return idx
+
+    def __getitem__(self, item):
+        self._check_blob()
+        if isinstance(item, slice):
+            blob_len = _core.blob_bytes(self._h)
+            start, stop, step = item.indices(blob_len)
+            indices = range(start, stop, step)
+            slicelen = len(indices)
+            if slicelen == 0:
+                return b""
+            if step == 1:
+                return self._read_multiple(slicelen, start)
+            lo = min(indices[0], indices[-1])
+            hi = max(indices[0], indices[-1])
+            chunk = self._read_multiple(hi - lo + 1, lo)
+            return bytes(chunk[i - lo] for i in indices)
+        if hasattr(item, "__index__"):
+            idx = self._norm_index(item)
+            return self._read_multiple(1, idx)[0]
+        raise TypeError("Blob indices must be integers")
+
+    def __setitem__(self, item, value):
+        self._check_blob()
+        if isinstance(item, slice):
+            blob_len = _core.blob_bytes(self._h)
+            start, stop, step = item.indices(blob_len)
+            indices = range(start, stop, step)
+            slicelen = len(indices)
+            if slicelen == 0:
+                return
+            buf = _to_bytes_like(value)
+            if len(buf) != slicelen:
+                raise IndexError("Blob slice assignment is wrong size")
+            if step == 1:
+                self._write_raw(buf, start)
+                return
+            lo = min(indices[0], indices[-1])
+            hi = max(indices[0], indices[-1])
+            chunk = bytearray(self._read_multiple(hi - lo + 1, lo))
+            for src_i, dst_i in enumerate(indices):
+                chunk[dst_i - lo] = buf[src_i]
+            self._write_raw(chunk, lo)
+            return
+        if hasattr(item, "__index__"):
+            if not isinstance(value, int):
+                raise TypeError(
+                    f"'{type(value).__name__}' object cannot be interpreted as an integer"
+                )
+            idx = self._norm_index(item)
+            if value < 0 or value > 255:
+                raise ValueError("byte must be in range(0, 256)")
+            self._write_raw(bytes((value,)), idx)
+            return
+        raise TypeError("Blob indices must be integers")
+
+    def __delitem__(self, item):
+        self._check_blob()
+        if isinstance(item, slice):
+            raise TypeError("Blob doesn't support slice deletion")
+        if hasattr(item, "__index__"):
+            raise TypeError("Blob doesn't support item deletion")
+        raise TypeError("Blob indices must be integers")
 
 
 # ---------------------------------------------------------------------------
@@ -858,9 +1095,9 @@ class Cursor:
         if t is bytes or t is bytearray:
             return _core.bind_blob(stmt_h, pos, val)
         if t is memoryview:
-            if val.c_contiguous:
-                return _core.bind_blob(stmt_h, pos, val)
-            return _core.bind_blob(stmt_h, pos, val.tobytes())
+            if not val.c_contiguous:
+                raise BufferError("underlying buffer is not C-contiguous")
+            return _core.bind_blob(stmt_h, pos, val)
         # Generic buffer protocol fallback (array.array, custom __buffer__, etc.)
         try:
             mv = memoryview(val)
@@ -869,9 +1106,9 @@ class Cursor:
                 f"Error binding parameter {pos}: type '{type(val).__name__}' is not supported"
             ) from None
         try:
-            if mv.c_contiguous:
-                return _core.bind_blob(stmt_h, pos, mv)
-            return _core.bind_blob(stmt_h, pos, mv.tobytes())
+            if not mv.c_contiguous:
+                raise BufferError("underlying buffer is not C-contiguous")
+            return _core.bind_blob(stmt_h, pos, mv)
         finally:
             mv.release()
 
@@ -958,6 +1195,11 @@ class Cursor:
                 self._statement._reset()
 
             stmt = self._get_statement_from_cache(operation)
+            if not stmt._h:
+                # Empty SQL or comments only: nothing to execute.
+                self._statement = None
+                self._rowcount = -1
+                return self
             self._statement = stmt
 
             if multiple and _core.stmt_readonly(stmt._h):
@@ -1028,11 +1270,11 @@ class Cursor:
 
     def execute(self, sql, parameters=(), /):
         """Executes an SQL statement."""
-        return self._query_execute(False, sql, parameters, warn_stacklevel=3)
+        return self._query_execute(False, sql, parameters, warn_stacklevel=4)
 
     def executemany(self, sql, seq_of_parameters, /):
         """Repeatedly executes an SQL statement."""
-        return self._query_execute(True, sql, seq_of_parameters, warn_stacklevel=3)
+        return self._query_execute(True, sql, seq_of_parameters, warn_stacklevel=4)
 
     def executescript(self, sql_script, /):
         """Executes multiple SQL statements at once."""
@@ -1414,12 +1656,16 @@ class Connection:
                 or head.startswith(b"delete")
                 or head.startswith(b"replace")
             )
-        return _Statement(stmt_h, is_dml)
+        return _Statement._from_handle(stmt_h, is_dml)
 
-    def __call__(self, sql, /):
+    def __call__(self, *args):
         self._check_thread()
         self._check_connection()
-        return self._prepare_statement(sql)
+        if len(args) != 1:
+            raise TypeError(
+                f"Connection.__call__() takes exactly 1 argument ({len(args)} given)"
+            )
+        return self._prepare_statement(args[0])
 
     def _close_db(self):
         db_h = getattr(self, "_db", 0)
@@ -1546,12 +1792,12 @@ class Connection:
     def execute(self, sql, parameters=(), /):
         """Executes an SQL statement."""
         cur = self.cursor()
-        return cur._query_execute(False, sql, parameters, warn_stacklevel=3)
+        return cur._query_execute(False, sql, parameters, warn_stacklevel=4)
 
     def executemany(self, sql, parameters, /):
         """Repeatedly executes an SQL statement."""
         cur = self.cursor()
-        return cur._query_execute(True, sql, parameters, warn_stacklevel=3)
+        return cur._query_execute(True, sql, parameters, warn_stacklevel=4)
 
     def executescript(self, sql_script, /):
         """Executes multiple SQL statements at once."""
@@ -1568,6 +1814,261 @@ class Connection:
         self._check_connection()
         from sqlite3.dump import _iterdump
         return _iterdump(self)
+
+    def blobopen(self, table, column, row, /, *, readonly=False, name="main"):
+        """Open and return a BLOB object."""
+        self._check_thread()
+        self._check_connection()
+        tbl_b = _encode_cstr(table, "table")
+        col_b = _encode_cstr(column, "column")
+        name_b = _encode_cstr(name, "name")
+        if not isinstance(row, int):
+            raise TypeError("expected 'int'")
+        if row < -9223372036854775808 or row > 9223372036854775807:
+            raise OverflowError("Python int too large to convert to SQLite INTEGER")
+        flags = 0 if readonly else 1
+        rc, blob_h = _core.blob_open(self._db, name_b, tbl_b, col_b, int(row), flags)
+        if rc == SQLITE_MISUSE:
+            raise InterfaceError(_core.errstr(rc))
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(self._db)
+        blob = Blob._from_handle(self, blob_h)
+        self._blobs.append(weakref.ref(blob))
+        return blob
+
+    def create_function(self, name, narg, func, *, deterministic=False):
+        """Creates a new function."""
+        self._check_thread()
+        self._check_connection()
+        name_b = _encode_cstr(name, "name")
+        narg = _check_cint(narg)
+        flags = _SQLITE_UTF8
+        if deterministic:
+            if _core.SQLITE_VERSION_NUMBER < 3008003:
+                raise NotSupportedError(
+                    "deterministic=True requires SQLite 3.8.3 or higher"
+                )
+            flags |= _SQLITE_DETERMINISTIC
+        rc = _core.create_function(self._db, name_b, narg, flags, func)
+        if rc != SQLITE_OK:
+            raise OperationalError("Error creating function")
+        key = ("func", name_b.lower(), narg)
+        if func is None:
+            self._callbacks.pop(key, None)
+        else:
+            self._callbacks[key] = func
+
+    def create_aggregate(self, name, n_arg, aggregate_class):
+        """Creates a new aggregate."""
+        self._check_thread()
+        self._check_connection()
+        name_b = _encode_cstr(name, "name")
+        n_arg = _check_cint(n_arg)
+        rc = _core.create_aggregate(self._db, name_b, n_arg, aggregate_class)
+        if rc != SQLITE_OK:
+            raise OperationalError("Error creating aggregate")
+        key = ("agg", name_b.lower(), n_arg)
+        if aggregate_class is None:
+            self._callbacks.pop(key, None)
+        else:
+            self._callbacks[key] = aggregate_class
+
+    if _core.HAS_WINDOW_FUNCTIONS:
+        def create_window_function(self, name, num_params, aggregate_class, /):
+            """Creates or redefines an aggregate window function."""
+            if _core.SQLITE_VERSION_NUMBER < 3025000:
+                raise NotSupportedError(
+                    "create_window_function() requires SQLite 3.25.0 or higher"
+                )
+            self._check_thread()
+            self._check_connection()
+            name_b = _encode_cstr(name, "name")
+            num_params = _check_cint(num_params)
+            rc = _core.create_window_function(
+                self._db, name_b, num_params, aggregate_class
+            )
+            if rc != SQLITE_OK:
+                raise ProgrammingError(_core.errstr(rc))
+            key = ("win", name_b.lower(), num_params)
+            if aggregate_class is None:
+                self._callbacks.pop(key, None)
+            else:
+                self._callbacks[key] = aggregate_class
+
+    def create_collation(self, name, callback, /):
+        """Creates a collation function."""
+        self._check_thread()
+        self._check_connection()
+        name_b = _encode_cstr(name, "name")
+        if callback is not None and not callable(callback):
+            raise TypeError("parameter must be callable")
+        rc = _core.create_collation(self._db, name_b, callback)
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(self._db)
+        key = ("coll", name_b.lower())
+        if callback is None:
+            self._callbacks.pop(key, None)
+        else:
+            self._callbacks[key] = callback
+
+    def set_authorizer(self, authorizer_callback, /):
+        """Sets authorizer callback."""
+        self._check_thread()
+        self._check_connection()
+        rc = _core.set_authorizer(self._db, authorizer_callback)
+        if rc != SQLITE_OK:
+            self._callbacks.pop("auth", None)
+            raise OperationalError("Error setting authorizer callback")
+        if authorizer_callback is None:
+            self._callbacks.pop("auth", None)
+        else:
+            self._callbacks["auth"] = authorizer_callback
+
+    def set_progress_handler(self, progress_handler, n):
+        """Sets progress handler callback."""
+        self._check_thread()
+        self._check_connection()
+        n = _check_cint(n)
+        _core.set_progress_handler(self._db, progress_handler, n)
+        if progress_handler is None:
+            self._callbacks.pop("progress", None)
+        else:
+            self._callbacks["progress"] = progress_handler
+
+    def set_trace_callback(self, trace_callback, /):
+        """Sets a trace callback called for each SQL statement."""
+        self._check_thread()
+        self._check_connection()
+        _core.set_trace_callback(self._db, trace_callback)
+        if trace_callback is None:
+            self._callbacks.pop("trace", None)
+        else:
+            self._callbacks["trace"] = trace_callback
+
+    def setlimit(self, category, limit, /):
+        """Set connection run-time limits."""
+        self._check_thread()
+        self._check_connection()
+        category = _check_cint(category)
+        limit = _check_cint(limit)
+        old = _core.limit(self._db, category, limit)
+        if old < 0:
+            raise ProgrammingError("'category' is out of bounds")
+        return old
+
+    def getlimit(self, category, /):
+        """Get connection run-time limits."""
+        return self.setlimit(category, -1)
+
+    def setconfig(self, op, enable=True, /):
+        """Set a boolean connection configuration option."""
+        self._check_thread()
+        self._check_connection()
+        op = _check_cint(op)
+        if op not in _VALID_DBCONFIG_OPS:
+            raise ValueError(f"unknown config 'op': {op}")
+        en = 1 if enable else 0
+        rc, actual = _core.db_config(self._db, op, en)
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(self._db)
+        if en != actual:
+            raise OperationalError("Unable to set config")
+
+    def getconfig(self, op, /):
+        """Query a boolean connection configuration option."""
+        self._check_thread()
+        self._check_connection()
+        op = _check_cint(op)
+        if op not in _VALID_DBCONFIG_OPS:
+            raise ValueError(f"unknown config 'op': {op}")
+        rc, current = _core.db_config(self._db, op, -1)
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(self._db)
+        return bool(current)
+
+    if _core.HAS_SERIALIZE:
+        def serialize(self, *, name="main"):
+            """Serialize a database into a byte string."""
+            self._check_thread()
+            self._check_connection()
+            name_b = _encode_cstr(name, "name")
+            data = _core.serialize(self._db, name_b)
+            if data is None:
+                raise OperationalError(f"unable to serialize '{name}'")
+            return data
+
+        def deserialize(self, data, /, *, name="main"):
+            """Load a serialized database."""
+            self._check_thread()
+            self._check_connection()
+            name_b = _encode_cstr(name, "name")
+            buf = _to_bytes_like(data, allow_str=True)
+            rc = _core.deserialize(self._db, name_b, buf)
+            if rc != SQLITE_OK:
+                _raise_sqlite_error(self._db)
+
+    if _core.HAS_LOAD_EXTENSION:
+        def enable_load_extension(self, enable, /):
+            """Enable dynamic loading of SQLite extension modules."""
+            self._check_thread()
+            self._check_connection()
+            rc = _core.enable_load_extension(self._db, 1 if enable else 0)
+            if rc != SQLITE_OK:
+                raise OperationalError("Error enabling load extension")
+
+        def load_extension(self, name, /, *, entrypoint=None):
+            """Load SQLite extension module."""
+            self._check_thread()
+            self._check_connection()
+            name_b = _encode_cstr(name, "name")
+            entry_b = None if entrypoint is None else _encode_cstr(entrypoint, "entrypoint")
+            rc, errmsg = _core.load_extension(self._db, name_b, entry_b)
+            if rc != SQLITE_OK:
+                raise OperationalError(errmsg if errmsg is not None else _core.errstr(rc))
+
+    def backup(self, target, *, pages=-1, progress=None, name="main", sleep=0.250):
+        """Makes a backup of the database."""
+        if not issubclass(type(target), Connection):
+            raise TypeError(
+                f"backup() argument 'target' must be sqlite3.Connection, not "
+                f"{type(target).__name__}"
+            )
+        pages = _check_cint(pages)
+        name_b = _encode_cstr(name, "name")
+        if not isinstance(sleep, (int, float)):
+            raise TypeError(f"must be real number, not {type(sleep).__name__}")
+        sleep_ms = int(float(sleep) * 1000.0)
+
+        self._check_thread()
+        self._check_connection()
+        target._check_connection()
+        if target is self:
+            raise ValueError("target cannot be the same connection instance")
+        if progress is not None and not callable(progress):
+            raise TypeError("progress argument must be a callable")
+        if pages == 0:
+            pages = -1
+
+        bkh = _core.backup_init(target._db, b"main", self._db, name_b)
+        if not bkh:
+            _raise_sqlite_error(target._db)
+        try:
+            while True:
+                rc = _core.backup_step(bkh, pages)
+                if progress is not None:
+                    rem = _core.backup_remaining(bkh)
+                    total = _core.backup_pagecount(bkh)
+                    progress(rc, rem, total)
+                if rc == SQLITE_BUSY or rc == SQLITE_LOCKED:
+                    _core.sleep(sleep_ms)
+                elif rc != SQLITE_OK:
+                    break
+        except BaseException:
+            _core.backup_finish(bkh)
+            raise
+        rc = _core.backup_finish(bkh)
+        if rc != SQLITE_OK:
+            _raise_sqlite_error(target._db)
 
     def __enter__(self):
         self._check_connection()

@@ -26,6 +26,7 @@ extern gil_holder
 extern gil_acquire
 extern gil_release
 extern sq_callback_tracebacks
+extern sq_data_error_type
 extern sq_cb_free_if_set
 extern sq_arg_int64_strict
 extern sq_arg_bytes_like
@@ -50,6 +51,8 @@ extern ap_malloc
 extern ap_free
 
 extern none_singleton
+extern bool_true
+extern bool_type
 extern int_type
 extern float_type
 extern str_type
@@ -62,6 +65,8 @@ extern exc_AttributeError_type
 extern exc_TypeError_type
 extern exc_ValueError_type
 extern exc_RuntimeError_type
+extern exc_BufferError_type
+extern exc_UnicodeEncodeError_type
 
 ; libsqlite3 callback-side functions.
 extern sqlite3_user_data
@@ -544,7 +549,12 @@ DEF_FUNC_LOCAL sq_cb_set_result, CSR_FRAME
     mov rax, [rsi + PyObject.ob_type]
     mov rcx, [rax + PyTypeObject.tp_flags]
 
-    ; int / bool / int subclass
+    ; bool
+    lea rdx, [rel bool_type]
+    cmp rax, rdx
+    je .res_bool
+
+    ; int / int subclass
     test rcx, TYPE_FLAG_INT_SUBCLASS
     jnz .res_int_obj
     lea rdx, [rel int_type]
@@ -595,6 +605,18 @@ DEF_FUNC_LOCAL sq_cb_set_result, CSR_FRAME
     leave
     ret
 
+.res_bool:
+    lea rax, [rel bool_true]
+    xor edx, edx
+    cmp rsi, rax
+    sete dl
+    mov rdi, [rbp - CSR_CTX]
+    mov rsi, rdx
+    call sqlite3_result_int64 wrt ..plt
+    xor eax, eax
+    leave
+    ret
+
 .res_int_obj:
     mov rdi, rsi
     call sq_arg_int64_strict
@@ -619,12 +641,25 @@ DEF_FUNC_LOCAL sq_cb_set_result, CSR_FRAME
     mov eax, 0x7FFFFFFF
     cmp rdx, rax
     ja .str_too_big
+    ; Reject lone surrogates (UTF-8 check fails on U+D800..U+DFFF).
+    lea rdi, [rsi + PyStrObject.data]
+    mov rsi, rdx
+    call bytes_utf8_check
+    cmp rax, -1
+    jne .str_bad_utf8
+    mov rsi, [rbp - CSR_VAL]
+    mov rdx, [rsi + PyStrObject.ob_size]
     mov rdi, [rbp - CSR_CTX]
     lea rsi, [rsi + PyStrObject.data]
-    ; edx already holds length
     mov rcx, SQLITE_TRANSIENT
     call sqlite3_result_text wrt ..plt
     xor eax, eax
+    leave
+    ret
+
+.str_bad_utf8:
+    SET_EXC exc_UnicodeEncodeError_type, "surrogates not allowed"
+    mov rax, -1
     leave
     ret
 
@@ -647,9 +682,14 @@ DEF_FUNC_LOCAL sq_cb_set_result, CSR_FRAME
     test rax, rax
     jz .bad_type
     cmp qword [rsi + PyMemoryViewObject.mv_stride], 1
-    jne .bad_type
+    jne .non_contig
     mov rsi, rax
     jmp .emit_blob
+.non_contig:
+    SET_EXC exc_BufferError_type, "underlying buffer is not C-contiguous"
+    mov rax, -1
+    leave
+    ret
 
 .res_buffer:
     mov rdi, rsi
@@ -1648,7 +1688,11 @@ DEF_FUNC sq_cb_trace, CT_FRAME
     cmp eax, SQLITE_NOMEM
     je .leave_gil
 
+    mov rdi, [rel sq_data_error_type]
+    test rdi, rdi
+    jnz .trace_set_exc
     lea rdi, [rel exc_RuntimeError_type]
+.trace_set_exc:
     lea rsi, [rel cb_e_trace_big]
     call set_exception
     mov rcx, [rbp - CT_CB]

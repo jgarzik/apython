@@ -93,6 +93,7 @@ extern exc_ValueError_type
 extern exc_OverflowError_type
 extern exc_MemoryError_type
 extern exc_RuntimeError_type
+extern exc_BufferError_type
 
 ; libsqlite3 entry points (core, present since SQLite 3.7.15).
 extern sqlite3_initialize
@@ -191,6 +192,10 @@ sq_fn_create_window:    dq 0
 global sq_callback_tracebacks
 sq_callback_tracebacks: dq 0
 
+; Registered sqlite3.DataError type for trace_v2 expanded-SQL overflow.
+global sq_data_error_type
+sq_data_error_type:     dq 0
+
 section .rodata
 sq_empty_byte:          db 0
 sq_modname:             db "_sqlite3core", 0
@@ -261,6 +266,7 @@ sn_backup_finish:       db "backup_finish", 0
 sn_backup_remaining:    db "backup_remaining", 0
 sn_backup_pagecount:    db "backup_pagecount", 0
 sn_sleep:               db "sleep", 0
+sn_set_data_err_type:   db "set_data_error_type", 0
 
 ; Optional dlsym target names.
 sym_serialize:          db "sqlite3_serialize", 0
@@ -599,8 +605,13 @@ DEF_FUNC sq_arg_bytes_like
     test rax, rax
     jz .bad
     cmp qword [rdi + PyMemoryViewObject.mv_stride], 1
-    jne .bad
+    jne .non_contig
     mov rdx, [rdi + PyMemoryViewObject.mv_len]
+    leave
+    ret
+.non_contig:
+    SET_EXC exc_BufferError_type, "underlying buffer is not C-contiguous"
+    xor eax, eax
     leave
     ret
 END_FUNC sq_arg_bytes_like
@@ -2059,6 +2070,37 @@ DEF_FUNC sq_bind_blob, SBBL_FRAME
 END_FUNC sq_bind_blob
 
 ;; ============================================================================
+;; sq_set_data_error_type(rdi = args*, rsi = nargs) -> rax = None
+;; _sqlite3core.set_data_error_type(cls) -> None
+;; ============================================================================
+DEF_FUNC sq_set_data_error_type
+    and rsp, -16
+    NO_KEYWORDS_RET "_sqlite3core.set_data_error_type() takes no keyword arguments", .fail
+    cmp rsi, 1
+    jne .nargs
+    mov rax, [rdi]
+    mov rcx, [rel sq_data_error_type]
+    INCREF_V rax, rdx
+    mov [rel sq_data_error_type], rax
+    test rcx, rcx
+    jz .ret_none
+    DECREF_V rcx, rdx
+.ret_none:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    leave
+    ret
+.nargs:
+    lea rdi, [rel exc_TypeError_type]
+    lea rsi, [rel sq_e_nargs]
+    call set_exception
+.fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC sq_set_data_error_type
+
+;; ============================================================================
 ;; sq_set_bool_attr(rdi = dict, rsi = name_cstr, rdx = ptr_nonzero) -> nothing
 ;; ============================================================================
 SBA_DICT    equ 8
@@ -2159,6 +2201,7 @@ DEF_FUNC sqlite3_module_create, SM_FRAME
     MODULE_ADD_FUNC sq_backup_remaining,  sn_backup_remaining
     MODULE_ADD_FUNC sq_backup_pagecount,  sn_backup_pagecount
     MODULE_ADD_FUNC sq_sleep,             sn_sleep
+    MODULE_ADD_FUNC sq_set_data_error_type, sn_set_data_err_type
 
     ; Probe optional libsqlite3 entry points via dlsym(RTLD_DEFAULT, name).
     xor edi, edi
