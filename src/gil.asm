@@ -92,6 +92,7 @@ gil_cond:           resb 64     ; pthread_cond_t (48 bytes): the GIL is free
 gil_switch_cond:    resb 64     ; pthread_cond_t: the GIL has a new holder
 gil_locked:         resq 1      ; 1 while some thread holds it
 gil_last_holder:    resq 1      ; the ThreadState that took it last
+global gil_holder
 gil_holder:         resq 1      ; the ThreadState holding it now, or 0
 gil_switch_number:  resq 1      ; bumped each time a DIFFERENT thread takes it
 gil_waiters:        resq 1      ; threads inside gil_take's wait

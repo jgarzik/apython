@@ -48,6 +48,7 @@ extern signal_module_create
 extern zlib_module_create
 extern hashlib_module_create
 extern ssl_module_create
+extern sqlite3_module_create
 extern pyexpat_module_create
 extern thread_module_create
 
@@ -59,6 +60,7 @@ bm_n_time:     db "time", 0
 bm_n_asyncio_native: db "_asyncio_native", 0
 bm_n_asyncio:  db "_asynciocore", 0
 bm_n_sre:      db "_sre", 0
+bm_n_sqlite3:  db "_sqlite3core", 0
 bm_n_array:    db "array", 0
 bm_n_abc:      db "_abc", 0
 bm_n_errno:    db "errno", 0
@@ -105,6 +107,7 @@ builtin_module_table:
     dq bm_n_pyexpat,  pyexpat_module_create
     dq bm_n_socket,   socket_module_create
     dq bm_n_signal,   signal_module_create
+    dq bm_n_sqlite3,  sqlite3_module_create
     dq bm_n_sre,      sre_module_create
     dq bm_n_ssl,      ssl_module_create
     dq bm_n_thread,   thread_module_create
