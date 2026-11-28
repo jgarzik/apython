@@ -163,7 +163,7 @@ DEF_FUNC_LOCAL zc_set_z, ZE_FRAME
     movsxd rsi, esi
     mov [rbp - ZE_CODE], rsi
 
-    lea rdi, [rel zc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel zc_e_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -190,7 +190,7 @@ DEF_FUNC_LOCAL zc_set_z, ZE_FRAME
     call rbt_append_cstr
 .zez_raise:
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel zc_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     leave
     ret

@@ -341,7 +341,7 @@ DEF_FUNC obj_default_repr
     push r12
     mov rbx, rdi
     mov r12, rsi
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel odr_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -357,7 +357,7 @@ DEF_FUNC obj_default_repr
     mov rdi, rax
     mov rsi, r12
     call obj_repr_address
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     pop r12
     pop rbx
@@ -384,7 +384,7 @@ DEF_FUNC obj_default_repr_named, ODN_FRAME
     mov [rbp - ODN_MOD], rsi
     mov [rbp - ODN_NAME], rdx
 
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel odr_open]
     call rbt_append_cstr
     mov rsi, [rbp - ODN_MOD]
@@ -405,7 +405,7 @@ DEF_FUNC obj_default_repr_named, ODN_FRAME
     mov rdi, rax
     mov rsi, [rbp - ODN_OBJ]
     call obj_repr_address
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -426,7 +426,7 @@ DEF_FUNC obj_repr_named_at, ORN_FRAME
     mov [rbp - ORN_OBJ], rdi
     mov [rbp - ORN_NAME], rdx
     mov rdx, rsi
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel odr_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -446,7 +446,7 @@ DEF_FUNC obj_repr_named_at, ORN_FRAME
     mov rdi, rax
     mov rsi, [rbp - ORN_OBJ]
     call obj_repr_address
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -461,7 +461,7 @@ END_FUNC obj_repr_named_at
 global obj_repr_buf
 DEF_FUNC obj_repr_buf
     mov rsi, rdi
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call rbt_append_cstr
     leave
     ret
@@ -472,7 +472,7 @@ END_FUNC obj_repr_buf
 ;; ============================================================================
 global obj_repr_buf_str
 DEF_FUNC obj_repr_buf_str
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -1119,7 +1119,7 @@ DEF_FUNC type_name_message
     push r12
     mov rbx, rdi
     mov r12, rsi
-    lea rdi, [rel rtn_buf]
+    TS_LEA rdi, ts_errbuf2
     xor ecx, ecx
 .tnm_copy:
     movzx eax, byte [rbx]
@@ -1158,7 +1158,7 @@ DEF_FUNC type_name_message
     jmp .tnm_name
 .tnm_end:
     mov byte [rdi + rcx], 0
-    lea rax, [rel rtn_buf]
+    TS_LEA rax, ts_errbuf2
     pop r12
     pop rbx
     leave
@@ -1232,7 +1232,7 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     leave
     ret
 .drs_bad:
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel drs_prefix]
     call rbt_append_cstr
     mov rdi, rax
@@ -1265,7 +1265,7 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     lea rsi, [rel rbt_close]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rbt_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     leave
     ret
@@ -1335,7 +1335,7 @@ DEF_FUNC compose_binop_type_error, RBT_FRAME
 .cbt_have_open:
     mov [rbp - RBT_OPEN], rcx
 
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, rbx
     call rbt_append_cstr
     mov rdi, rax
@@ -1354,7 +1354,7 @@ DEF_FUNC compose_binop_type_error, RBT_FRAME
     lea rsi, [rel rbt_close]
     call rbt_append_cstr
 
-    lea rax, [rel rbt_buf]
+    TS_LEA rax, ts_errbuf
     pop rbx
     leave
     ret
@@ -2532,7 +2532,7 @@ DEF_FUNC set_hash_not_implemented
     extern exc_TypeError_type
     push rdi
     sub rsp, 8
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel hni_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -2543,7 +2543,7 @@ DEF_FUNC set_hash_not_implemented
     lea rsi, [rel rbt_close]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rbt_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     leave
     ret

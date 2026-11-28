@@ -578,7 +578,7 @@ DEF_FUNC property_set_no_accessor, PRN_FRAME
     mov [rbp - PRN_WHAT], rdx
     mov rbx, [rdi + PyPropertyObject.prop_name]
 
-    lea rdi, [rel prop_msg_buf]
+    TS_LEA rdi, ts_errbuf
     test rbx, rbx
     jz .prn_unnamed
     lea rsi, [rel prop_msg_open]
@@ -610,7 +610,7 @@ DEF_FUNC property_set_no_accessor, PRN_FRAME
     mov rsi, [rbp - PRN_WHAT]
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
-    lea rsi, [rel prop_msg_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     pop rbx
     leave
@@ -1216,7 +1216,7 @@ DEF_FUNC_LOCAL getset_descr_getattr, GDA_FRAME
     mov rax, [rax + PyGetSetDescrObject.gs_name]
     test rax, rax
     jz .gda_miss
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rcx + PyTypeObject.tp_name]
     call rbt_append_cstr
     mov rdi, rax
@@ -1227,7 +1227,7 @@ DEF_FUNC_LOCAL getset_descr_getattr, GDA_FRAME
     mov rsi, [rcx + PyGetSetDescrObject.gs_name]
     lea rsi, [rsi + PyStrObject.data]
     call rbt_append_cstr
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     mov edx, TAG_PTR
     leave
@@ -1280,7 +1280,7 @@ DEF_FUNC getset_descr_repr
     mov rdi, rax                ; the NUL the composer left
     lea rsi, [rel gdr_close]
     call rbt_append_cstr
-    lea rdi, [rel gdr_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -1392,7 +1392,7 @@ DEF_FUNC_LOCAL getset_descr_compose, 8            ; 3 pushes, so rsp is 16-align
     mov rbx, rsi
     mov r12, rdi
     mov r13, rdx                ; 1 = say "for" where the others say "of"
-    lea rdi, [rel gdr_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, r12
     call rbt_append_cstr
     mov rdi, rax
@@ -1573,7 +1573,7 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     lea rsi, [rel gcr_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel gdr_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     leave
     ret
@@ -1618,7 +1618,7 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     ret
 
 .mcr_bad:
-    lea rdi, [rel gdr_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel gcr_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -1660,7 +1660,7 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     lea rsi, [rel gcr_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel gdr_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     leave
     ret
@@ -1846,7 +1846,7 @@ DEF_FUNC_LOCAL member_descr_getattr, MDA_FRAME
     mov rax, [rax + PyMemberDescrObject.md_name]
     test rax, rax
     jz .mda_miss
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rcx + PyTypeObject.tp_name]
     call rbt_append_cstr
     mov rdi, rax
@@ -1857,7 +1857,7 @@ DEF_FUNC_LOCAL member_descr_getattr, MDA_FRAME
     mov rsi, [rcx + PyMemberDescrObject.md_name]
     lea rsi, [rsi + PyStrObject.data]
     call rbt_append_cstr
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     mov edx, TAG_PTR
     leave
@@ -2030,7 +2030,7 @@ DEF_FUNC getset_descr_set, GDS_FRAME
     lea rsi, [rel gds_ro_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
-    lea rsi, [rel gdr_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
 .gds_fail:
     mov rax, -1

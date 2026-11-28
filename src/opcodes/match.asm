@@ -82,7 +82,7 @@ section .bss
 ci_msgbuf: resb 64
 section .text
 DEF_FUNC_BARE ci_unsupported
-    lea r9, [rel ci_msgbuf]
+    TS_LEA r9, ts_errbuf
 .cu_copy:
     mov al, [rdi]
     test al, al
@@ -122,7 +122,7 @@ DEF_FUNC_BARE ci_unsupported
     jnz .cu_digit
     mov byte [r9], 0
     lea rdi, [rel exc_SystemError_type]
-    lea rsi, [rel ci_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call raise_exception
 END_FUNC ci_unsupported
 

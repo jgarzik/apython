@@ -417,9 +417,9 @@ DEF_FUNC gc_mod_get_referrers, GGF_FRAME
     xor edi, edi
     call list_new
     mov r13, rax
-    mov rax, [rel gm_referents_out]
+    mov rax, [gs:ThreadState.ts_gm_referents_out]
     push rax
-    mov [rel gm_referents_out], r13
+    mov [gs:ThreadState.ts_gm_referents_out], r13
     ; The visit callback goes in r14, which is what VISIT_PTR calls -- and
     ; r14 is where the argument index lives below, so it is reloaded there.
     mov rdi, r12
@@ -428,7 +428,7 @@ DEF_FUNC gc_mod_get_referrers, GGF_FRAME
     mov rax, [rax + PyTypeObject.tp_traverse]
     call rax
     pop rax
-    mov [rel gm_referents_out], rax
+    mov [gs:ThreadState.ts_gm_referents_out], rax
 
     xor r14d, r14d              ; argument index
 .ggf_arg_loop:
@@ -643,7 +643,7 @@ section .text
 DEF_FUNC_LOCAL gm_visit_append, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
-    mov rdi, [rel gm_referents_out]
+    mov rdi, [gs:ThreadState.ts_gm_referents_out]
     mov rsi, rbx
     call list_append          ; err: the caller's own list, built for this walk
     pop rbx
@@ -671,10 +671,10 @@ DEF_FUNC gc_mod_get_referents, GGR_FRAME
     xor edi, edi
     call list_new
     mov [rbp - GGR_LIST], rax
-    mov rax, [rel gm_referents_out]
+    mov rax, [gs:ThreadState.ts_gm_referents_out]
     mov [rbp - GGR_SAVED], rax
     mov rax, [rbp - GGR_LIST]
-    mov [rel gm_referents_out], rax
+    mov [gs:ThreadState.ts_gm_referents_out], rax
 
     xor ebx, ebx
 .ggr_loop:
@@ -696,7 +696,7 @@ DEF_FUNC gc_mod_get_referents, GGR_FRAME
     jmp .ggr_loop
 .ggr_done:
     mov rax, [rbp - GGR_SAVED]
-    mov [rel gm_referents_out], rax
+    mov [gs:ThreadState.ts_gm_referents_out], rax
     mov rax, [rbp - GGR_LIST]
     mov edx, TAG_PTR
     pop r14

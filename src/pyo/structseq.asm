@@ -676,7 +676,7 @@ DEF_FUNC structseq_set_length
     mov r12, rdx
     mov r13, rcx
     mov rsi, [rdi + PyTypeObject.tp_name]
-    lea rdi, [rel ssq_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov edx, 60
     call ssq_copy
     mov rdi, rax
@@ -698,7 +698,7 @@ DEF_FUNC structseq_set_length
     mov edx, 20
     call ssq_copy
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel ssq_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     pop r13
     pop r13
@@ -728,7 +728,8 @@ END_FUNC ssq_copy
 
 DEF_FUNC_LOCAL ssq_append_i64   ; (rdi = dest, rsi = value) -> the NUL
     mov rax, rsi
-    lea r8, [rel ssq_numbuf + 24]
+    TS_LEA r8, ts_numbuf
+    add r8, 24
     mov byte [r8], 0
     mov r9d, 10
 .sqa_loop:

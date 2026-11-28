@@ -183,9 +183,9 @@ TOKEN_SHIFT equ 5
 ;; ============================================================================
 %macro SUITE_FOR 2              ; %1 = the text, %2 = a source of the line
     CSTRING rax, %1
-    mov [rel psu_what], rax
+    mov [gs:ThreadState.ts_psu_what], rax
     mov eax, %2
-    mov [rel psu_line], eax
+    mov [gs:ThreadState.ts_psu_line], rax
 %endmacro
 
 ;; SUITE_FOR_HERE text -- the same, for a clause that is its own statement.
@@ -196,9 +196,9 @@ TOKEN_SHIFT equ 5
     mov rdi, rbx
     call par_peek
     mov eax, [rax + Token.lineno]
-    mov [rel psu_line], eax
+    mov [gs:ThreadState.ts_psu_line], rax
     CSTRING rax, %1
-    mov [rel psu_what], rax
+    mov [gs:ThreadState.ts_psu_what], rax
 %endmacro
 
 ;; ===========================================================================

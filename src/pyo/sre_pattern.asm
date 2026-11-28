@@ -136,7 +136,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     mov rdx, [rbp - PM_STR]
     mov rcx, [rbp - PM_POS]
     mov r8, [rbp - PM_ENDPOS]
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .pm_fail
 
@@ -504,16 +504,36 @@ DEF_FUNC sre_substr_from_state_empty
 ;; string whose address the allocator reused would read as a hit and the
 ;; engine would index a stale decode.
 ;; ============================================================================
-section .bss
-align 8
-sre_shared_cpcache: resq 4      ; an SRE_CpCache: buf, len, subject, borrows
-
-section .text
-
 section .rodata
 sse_nothing: db 0
 section .text
 END_FUNC sre_substr_from_state_empty
+
+;; sre_cpcache_clear_thread() -> release this thread's ts_sre_cpcache on exit.
+global sre_cpcache_clear_thread
+DEF_FUNC sre_cpcache_clear_thread
+    push rbx
+    sub rsp, 8
+    TS_LEA rbx, ts_sre_cpcache
+    mov rdi, [rbx + SRE_CpCache.buf]
+    test rdi, rdi
+    jz .scc_subj
+    mov qword [rbx + SRE_CpCache.buf], 0
+    call ap_free
+.scc_subj:
+    mov rdi, [rbx + SRE_CpCache.subject]
+    test rdi, rdi
+    jz .scc_done
+    mov qword [rbx + SRE_CpCache.subject], 0
+    mov qword [rbx + SRE_CpCache.len], 0
+    mov qword [rbx + SRE_CpCache.borrows], 0
+    call obj_decref
+.scc_done:
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC sre_cpcache_clear_thread
 
 ;; ============================================================================
 ;; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
@@ -674,7 +694,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     lea rdi, [rbp - FA_STATE]
     mov rsi, [rbp - FA_PAT]
     mov rdx, [rbp - FA_STR]
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .fa_fail
 
@@ -1081,7 +1101,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdx, [rbp - SUB_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .sub_abort
 
@@ -1678,7 +1698,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdx, [rbp - SN_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .subn_abort
 
@@ -2161,7 +2181,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rdx, [rbp - SP_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .split_fail
 

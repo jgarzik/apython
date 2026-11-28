@@ -96,7 +96,7 @@ section .text
 ;; ============================================================================
 global format_apply_spec_printf
 DEF_FUNC format_apply_spec_printf
-    mov qword [rel fs_printf_pending], 1
+    mov qword [gs:ThreadState.ts_fs_printf_pending], 1
     leave
     jmp format_apply_spec
 END_FUNC format_apply_spec_printf
@@ -119,9 +119,9 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov [rbp - FS_VALUE], rdi
     mov qword [rbp - FS_BODY], 0
     mov qword [rbp - FS_SIGNCH], 0
-    mov rax, [rel fs_printf_pending]
+    mov rax, [gs:ThreadState.ts_fs_printf_pending]
     mov [rbp - FS_PRINTF], rax
-    mov qword [rel fs_printf_pending], 0
+    mov qword [gs:ThreadState.ts_fs_printf_pending], 0
 
     ; ---- defaults ----------------------------------------------------------
     mov qword [rbp - FS_FILL], ' '
@@ -2770,7 +2770,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     je .fpc_bad_build
     lea rsi, [rel fpc_msg_integer]
 .fpc_bad_build:
-    lea rdi, [rel fpc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rax, [rbp - FPC_CONV]
     mov byte [rdi], '%'
     mov [rdi + 1], al
@@ -2784,7 +2784,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     inc rcx
     jmp .fpc_bad_copy
 .fpc_bad_raise:
-    lea rdi, [rel fpc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - FPC_VAL]
     call set_type_error_with_name
     jmp .fpc_fail

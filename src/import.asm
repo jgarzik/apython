@@ -1400,14 +1400,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .found_in_sysmod
 
-    ; Ensure path buffer is allocated
-    mov rdi, [rel import_path_buf_ptr]
-    test rdi, rdi
-    jnz .have_buf
-    mov edi, PATHBUF_SIZE
-    call ap_malloc
-    mov [rel import_path_buf_ptr], rax
-.have_buf:
+    ; Ensure per-thread path scratch is allocated
+    call ts_get_path_scratch
 
     ; Compute leaf name: last component after final '.'
     ; e.g. "unittest.case" -> leaf="case", "unittest" -> leaf="unittest"
@@ -1615,7 +1609,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     cmp r12d, 3
     je .load_as_namespace
     mov rdi, [rbp - FL_NAME]
-    mov rsi, [rel import_path_buf_ptr]
+    call ts_get_path_scratch
+    mov rsi, rax
     xor edx, edx
     cmp r12d, 1
     jne .load_as_module
@@ -1657,8 +1652,20 @@ DEF_FUNC import_load_module, IF_FRAME
     push r15
 
     mov rbx, rdi                ; name_str
-    mov r12, rsi                ; path_cstr
     mov r13d, edx               ; is_package
+    ; Copy path_cstr onto a private heap buffer so nested imports (e.g.
+    ; `import warnings` inside comp_emit_warnings) cannot clobber r12.
+    push rsi
+    mov rdi, rsi
+    call ap_strlen
+    lea rdi, [rax + 1]
+    push rdi
+    call ap_malloc
+    mov r12, rax                ; r12 = owned copy of path_cstr
+    mov rdi, rax
+    pop rdx                     ; len + 1
+    pop rsi
+    call ap_memcpy
     DUNDER_EXC_SAVE [rbp - IF_EXC]
 
     ; Save marshal globals
@@ -1934,6 +1941,9 @@ DEF_FUNC import_load_module, IF_FRAME
     call obj_decref
 
 .create_module:
+    ; Done with path_cstr copy before r12 is reused for the execution frame.
+    mov rdi, r12
+    call ap_free
     ; Create module object
     mov rdi, rbx                ; name
     mov rsi, r15                ; dict
@@ -2059,6 +2069,8 @@ DEF_FUNC import_load_module, IF_FRAME
     jmp .br_not_cached
 
 .load_failed:
+    mov rdi, r12
+    call ap_free
     ; Free inner import's marshal refs array (if allocated)
     mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
@@ -2160,15 +2172,51 @@ im_dot:             db ".", 0
 section .bss
 im_path_key:        resq 1      ; the interned "__path__", built on first use
 
+section .text
+
+;; ============================================================================
+;; ts_get_path_scratch() -> rax = per-thread TS_PATH_SIZE scratch block
+;; Lazily malloc'd per thread and freed on worker exit (src/modules/thread.asm).
+;; ============================================================================
+extern malloc
+global ts_get_path_scratch
+DEF_FUNC_BARE ts_get_path_scratch
+    mov rax, [gs:ThreadState.ts_path_scratch]
+    test rax, rax
+    jnz .tgps_ok
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push r8
+    push r9
+    sub rsp, 8
+    mov edi, TS_PATH_SIZE
+    call malloc wrt ..plt
+    test rax, rax
+    jnz .tgps_store
+    CSTRING rdi, "out of memory allocating import scratch"
+    extern fatal_error
+    call fatal_error
+.tgps_store:
+    mov [gs:ThreadState.ts_path_scratch], rax
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+.tgps_ok:
+    ret
+END_FUNC ts_get_path_scratch
+
 section .bss
 ; The builtins module, borrowed: sys.modules holds the reference for the life
 ; of the interpreter.  A module-level builtin's __self__ is this, as CPython's
 ; is, and pickling one by name reads it.
 global builtins_module_obj
 builtins_module_obj: resq 1
-
-global import_path_buf_ptr
-import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
 
 
 ; A list searched in place of sys.path by the interpreter's own finder, or 0.

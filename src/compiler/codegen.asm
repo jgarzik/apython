@@ -1577,7 +1577,7 @@ DEF_FUNC_LOCAL cg_warn_is_literal, CWIL_FRAME
 .cwil_float:
     CSTRING rbx, "float"
 .cwil_have_name:
-    lea rdi, [rel cwil_buf]
+    TS_LEA rdi, ts_errbuf
     cmp qword [rbp - CWIL_OP], CMPOP_IS
     je .cwil_is
     CSTRING rsi, `"is not" with '`
@@ -1600,7 +1600,7 @@ DEF_FUNC_LOCAL cg_warn_is_literal, CWIL_FRAME
 .cwil_tail:
     call rbt_append_cstr
     mov rdi, [rbp - CWIL_C]
-    lea rsi, [rel cwil_buf]
+    TS_LEA rsi, ts_errbuf
     mov rdx, [rbp - CWIL_LINE]
     extern comp_warn
     call comp_warn

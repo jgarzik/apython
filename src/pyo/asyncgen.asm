@@ -824,7 +824,7 @@ DEF_FUNC throw_args_exc, TA_FRAME
 
 .arity:
     ; _PyArg_CheckPositional's wording, which names the count it got.
-    lea rdi, [rel aat_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - TA_NAME]
     extern rbt_append_cstr
     call rbt_append_cstr
@@ -842,7 +842,7 @@ DEF_FUNC throw_args_exc, TA_FRAME
     extern msg_append_i64
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel aat_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .raised
 END_FUNC throw_args_exc

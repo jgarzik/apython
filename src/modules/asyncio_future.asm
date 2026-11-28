@@ -885,12 +885,12 @@ DEF_FUNC future_finalize_impl, FFIN_FRAME
     mov rdi, [rbp - FFIN_FUT]
     mov rax, [rdi + PyObject.ob_type]
     mov rsi, [rax + PyTypeObject.tp_name]
-    lea rdi, [rel fut_fin_buf]
+    TS_LEA rdi, ts_errbuf
     call rbt_append_cstr
     mov rdi, rax
     lea rsi, [rel fmsg_exc_unretrieved]
     call rbt_append_cstr
-    lea rdi, [rel fut_fin_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr_heap
     mov [rbp - FFIN_MSG], rax
 

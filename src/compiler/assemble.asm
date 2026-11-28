@@ -1251,7 +1251,7 @@ DEF_FUNC asm_assemble, AA_FRAME
     mov rsi, r12
     call asm_kinds_bytes
     mov [rbp - AA_SPEC + CodeSpec.localspluskinds], rax
-    mov rax, [rel akb_nlocal_out]
+    mov rax, [gs:ThreadState.ts_akb_nlocal_out]
     mov [rbp - AA_SPEC + CodeSpec.nlocals], eax
 
     ; --- the exception table ---
@@ -1576,7 +1576,7 @@ DEF_FUNC asm_kinds_bytes, AKB_FRAME
     add rdi, 8
     call ap_malloc
     mov rbx, rax
-    mov qword [rel akb_nlocal_out], 0
+    mov qword [gs:ThreadState.ts_akb_nlocal_out], 0
     xor ecx, ecx
 .fill:
     cmp rcx, r12
@@ -1617,7 +1617,7 @@ DEF_FUNC asm_kinds_bytes, AKB_FRAME
     mov [rbx + rcx], al
     test al, CO_FAST_LOCAL
     jz .fill_next
-    inc qword [rel akb_nlocal_out]
+    inc qword [gs:ThreadState.ts_akb_nlocal_out]
 .fill_next:
     inc rcx
     jmp .fill

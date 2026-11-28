@@ -1330,7 +1330,7 @@ DEF_FUNC posix_set_typename, 16     ; + 2 pushes = 32, 16-aligned
     push r12
     mov rbx, rdi
     mov r12, rdx
-    lea rdi, [rel pm_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov byte [rdi], 0x27        ; an apostrophe
     inc rdi
     mov rsi, r12
@@ -1359,7 +1359,7 @@ DEF_FUNC posix_set_typename, 16     ; + 2 pushes = 32, 16-aligned
     mov edx, 80
     call posix_copy_bounded
     mov rdi, rbx
-    lea rsi, [rel pm_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     pop r12
     pop rbx
@@ -2724,7 +2724,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     ; same two-name message posix_path_arg composes.
     push rax                    ; the result, released once its name is copied:
     push rax                    ; twice, to keep rsp 16-byte aligned
-    lea rdi, [rel pm_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel pm_msg_expected]
     mov edx, 40
     call posix_copy_bounded
@@ -2742,7 +2742,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     pop rdi
     DECREF_V rdi, rcx           ; a Value: __fspath__ may answer an immediate
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel pm_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .pfs_propagate
 

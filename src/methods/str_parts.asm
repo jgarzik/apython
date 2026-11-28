@@ -2244,7 +2244,7 @@ DEF_FUNC_LOCAL str_set_encode_error, SRE_FRAME
     mov [rbp - SRE_NAME], rdx
     mov [rbp - SRE_LIMIT], rcx
 
-    lea rdi, [rel se_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel see_quote]
     call rbt_append_cstr
     mov rdi, rax
@@ -2321,7 +2321,7 @@ DEF_FUNC_LOCAL str_set_encode_error, SRE_FRAME
 
     extern exc_UnicodeEncodeError_type
     lea rdi, [rel exc_UnicodeEncodeError_type]
-    lea rsi, [rel se_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     xor eax, eax
     pop rbx
@@ -2490,7 +2490,7 @@ DEF_FUNC_LOCAL str_set_encode_range, SRR_FRAME
     mov [rbp - SRR_NAME], rdx
     mov [rbp - SRR_LIMIT], rcx
 
-    lea rdi, [rel se_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel see_quote]
     call rbt_append_cstr
     mov rdi, rax
@@ -2519,7 +2519,7 @@ DEF_FUNC_LOCAL str_set_encode_range, SRR_FRAME
     call rbt_append_cstr
 
     lea rdi, [rel exc_UnicodeEncodeError_type]
-    lea rsi, [rel se_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     xor eax, eax
     leave

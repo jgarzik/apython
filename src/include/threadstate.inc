@@ -39,6 +39,18 @@ TB_SEEN_MAX equ 64
 ; agree.
 TS_EVENTLOOP_SIZE equ 40
 
+; Per-thread lazy path scratch layout (allocated via ts_get_path_scratch,
+; freed on worker thread exit).
+TS_PATH_IMPORT equ 0            ; 4096B: import_path_buf
+TS_PATH_ISP    equ 4096         ; 4096B: import_source_path buffer
+TS_PATH_IAP    equ 8192         ; 4096B: import_abs_path buffer
+TS_PATH_PYCW   equ 12288        ; 4160B: pycw_path
+TS_PATH_PYTMP  equ 16448        ; 4160B: pycw_tmp
+TS_PATH_SIZE   equ 20608
+
+TS_ERRBUF_SIZE equ 512
+TS_NUMBUF_SIZE equ 32
+
 struc ThreadState
     ; ---- line 0: the dispatch loop's words --------------------------------
     .current_exception:   resq 1  ; PyExceptionObject* or NULL -- IN FLIGHT
@@ -135,6 +147,33 @@ struc ThreadState
     .ssl_last_errno:      resq 1  ; _sslcore last engine errno
     .ssl_pw_len_plus1:    resq 1  ; _sslcore PEM password len+1 (0 = none)
     .ssl_pw_buf:          resq 1  ; _sslcore lazily malloc'd 1024B pw buffer
+    ; ---- per-thread scratch & reentrant subsystem channels ----------------
+    .ts_sre_cpcache:      resq 4  ; SRE_CpCache: buf, len, subject, borrows
+    .ts_path_scratch:     resq 1  ; lazy malloc'd TS_PATH_SIZE bytes
+    .ts_import_ns_portions: resq 1 ; PEP 420 portion list for current search
+    .ts_pycw_dirlen:      resq 1  ; pyc_cache_path dirlen out
+    .ts_pycw_len:         resq 1  ; pyc_cache_path len out
+    .ts_mw_buf:           resq 1  ; marshal writer state
+    .ts_mw_len:           resq 1
+    .ts_mw_cap:           resq 1
+    .ts_mw_error:         resq 1
+    .ts_mw_memo:          resq 1
+    .ts_mw_memo_len:      resq 1
+    .ts_mw_memo_cap:      resq 1
+    .ts_fs_printf_pending: resq 1 ; format.asm % vs format() channel
+    .ts_io_readinto_msg:  resq 1  ; io.asm readinto vs readinto1 error msg
+    .ts_io_badmode_char:  resq 1  ; io.asm invalid mode char
+    .ts_gm_referents_out: resq 1  ; modules/gc.asm get_referents target list
+    .ts_udn_active:       resq 1  ; unicodenorm active UdnTables*
+    .ts_udn_pending_tables: resq 1 ; unicodenorm pending UdnTables*
+    .ts_ev_locals_owned:  resq 1  ; compiler eval/exec locals ownership flag
+    .ts_akb_nlocal_out:   resq 1  ; compiler assemble local count out
+    .ts_lex_tc_own_line:  resq 1  ; compiler lexer type-comment own-line flag
+    .ts_psu_what:         resq 1  ; compiler parser suite expected-what ptr
+    .ts_psu_line:         resq 1  ; compiler parser suite line number
+    .ts_errbuf:           resb TS_ERRBUF_SIZE ; primary error/format scratch
+    .ts_errbuf2:          resb TS_ERRBUF_SIZE ; secondary scratch (rtn_buf)
+    .ts_numbuf:           resb TS_NUMBUF_SIZE ; integer formatting scratch
     ; ---- byte flags, last -------------------------------------------------
     .throw_pending:       resb 1  ; gen_throw set current_exception
     .tb_suppress_frame:   resb 1  ; the next unwind adds no traceback entry

@@ -507,12 +507,14 @@ PXV_MAX   equ 256
 ; Two vectors: argv, then envp above it.  Each grows UPWARD from its base, so
 ; each slot names the DEEPEST word -- naming argv's 32 put its first pointer
 ; over PXV_ARGS and its second over PXV_PATH.
-PXV_VEC   equ 48 + (PXV_MAX + 1) * 8
+PXV_ENVBUF_SLOT equ 48
+PXV_VEC   equ 56 + (PXV_MAX + 1) * 8
 PXV_ENV   equ PXV_VEC + (PXV_MAX + 1) * 8
-PXV_FRAME equ ((PXV_ENV + 15) / 16) * 16
+PXV_FRAME equ ((PXV_ENV + 15) / 16) * 16 + 8    ; + 1 push (rbx) = 16-aligned
 DEF_FUNC posix_execv, PXV_FRAME
     push rbx
     mov qword [rbp - PXV_OWNED], 0
+    mov qword [rbp - PXV_ENVBUF_SLOT], 0
     cmp rsi, 2
     jl .pxv_argerr
     mov [rbp - PXV_NARGS], rsi
@@ -538,6 +540,7 @@ DEF_FUNC posix_execv, PXV_FRAME
     jl .pxv_have_env
     mov rdi, [rbx + 16]
     lea rsi, [rbp - PXV_ENV]
+    lea rdx, [rbp - PXV_ENVBUF_SLOT]
     call pxv_env_vector
     ERR_NULL .pxv_fail
     lea rdx, [rbp - PXV_ENV]
@@ -548,6 +551,13 @@ DEF_FUNC posix_execv, PXV_FRAME
     ; Only ever reached on failure.
     POSIX_CHECK_RET rax, 0, .pxv_fail
 .pxv_fail:
+    mov rdi, [rbp - PXV_ENVBUF_SLOT]
+    test rdi, rdi
+    jz .pxv_no_envbuf
+    mov esi, PXV_ENVBUF
+    extern sys_munmap
+    call sys_munmap
+.pxv_no_envbuf:
     ; A PathLike's resolved path: nothing released it on any of these exits.
     mov rdi, [rbp - PXV_OWNED]
     test rdi, rdi
@@ -665,6 +675,8 @@ PEV_OUT   equ 16
 PEV_N     equ 24
 PEV_POS   equ 32
 PEV_I     equ 40
+PEV_BUF   equ 48            ; per-call mmap'd 64 KiB buffer (fork- and thread-safe)
+PEV_BUF_OUT equ 56          ; caller's slot for cleanup on execve failure
 PEV_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
 DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     push rbx
@@ -672,6 +684,8 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     mov rbx, rdi
     mov [rbp - PEV_MAP], rdi
     mov [rbp - PEV_OUT], rsi
+    mov [rbp - PEV_BUF_OUT], rdx
+    mov qword [rbp - PEV_BUF], 0
 
     V_TEST_PTR rbx, rax
     ja .pev_bad
@@ -679,6 +693,22 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     lea rcx, [rel dict_type]
     cmp rax, rcx
     jne .pev_sequence
+
+    ; Map a private 64 KiB anonymous buffer via raw syscall (async-signal and
+    ; post-fork safe without touching any allocator lock).
+    xor edi, edi
+    mov esi, PXV_ENVBUF
+    mov edx, 3                          ; PROT_READ | PROT_WRITE
+    mov ecx, 0x22                       ; MAP_PRIVATE | MAP_ANONYMOUS
+    mov r8, -1
+    xor r9d, r9d
+    extern sys_mmap
+    call sys_mmap
+    cmp rax, -4095
+    jae .pev_full
+    mov [rbp - PEV_BUF], rax
+    mov rcx, [rbp - PEV_BUF_OUT]
+    mov [rcx], rax
 
     mov qword [rbp - PEV_POS], 0
     mov qword [rbp - PEV_I], 0
@@ -754,7 +784,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     ; This entry's text starts where the buffer has got to.
     mov rax, [rbp - PEV_OUT]
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
     add rdx, rcx
     mov [rax + r12*8], rdx
     inc r12
@@ -766,7 +796,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     test eax, eax
     jz .pev_full
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
     mov byte [rdx + rcx], '='
     inc qword [rbp - PEV_POS]
     mov rdi, rsi
@@ -775,7 +805,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     test eax, eax
     jz .pev_full
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
     mov byte [rdx + rcx], 0
     inc qword [rbp - PEV_POS]
 .pev_next:
@@ -824,7 +854,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
 .pev_append_body:
 pev_append:
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
 .pea_loop:
     cmp rcx, PXV_ENVBUF - 2
     jae .pea_full
@@ -845,11 +875,6 @@ pev_append:
 END_FUNC pxv_env_vector
 
 PXV_ENVBUF equ 65536
-
-section .bss
-; The environment a dict is flattened into.  Fixed, because this may run in a
-; freshly forked child where allocating is the one thing not to do.
-pxv_envbuf: resb PXV_ENVBUF
 
 section .text
 

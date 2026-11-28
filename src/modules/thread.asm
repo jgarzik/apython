@@ -183,6 +183,14 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     ; Release Python state while the thread still owns the GIL.
     extern native_asyncio_clear_running_loop
     call native_asyncio_clear_running_loop
+    extern sre_cpcache_clear_thread
+    call sre_cpcache_clear_thread
+    mov rdi, [gs:ThreadState.ts_import_ns_portions]
+    test rdi, rdi
+    jz .te_no_ns_portions
+    mov qword [gs:ThreadState.ts_import_ns_portions], 0
+    call obj_decref
+.te_no_ns_portions:
     mov rdi, [gs:ThreadState.ts_dict]
     test rdi, rdi
     jz .te_no_dict
@@ -211,7 +219,7 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     dec qword [rel tc_running]
 
     ; Past this line the thread holds no GIL and touches no object.  The
-    ; ThreadState and ssl_pw_buf came from libc, so freeing them needs no lock.
+    ; ThreadState, ssl_pw_buf and path_scratch came from libc.
     mov r12, [gs:ThreadState.ts_self]
     call gil_drop
     mov rdi, [r12 + ThreadState.ssl_pw_buf]
@@ -219,6 +227,11 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     jz .te_no_ssl_pw
     call free
 .te_no_ssl_pw:
+    mov rdi, [r12 + ThreadState.ts_path_scratch]
+    test rdi, rdi
+    jz .te_no_path_scratch
+    call free
+.te_no_path_scratch:
     mov rdi, r12
     call free
 

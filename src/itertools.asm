@@ -1188,7 +1188,7 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     ; with different lengths" whichever happened -- and the index and the
     ; direction are both in hand at the raise, so it was wording rather than
     ; machinery.  The plural arrives with the third argument.
-    lea rdi, [rel zip_msg_buf]
+    TS_LEA rdi, ts_errbuf
     extern rbt_append_cstr
     CSTRING rsi, "zip() argument "
     call rbt_append_cstr
@@ -1222,7 +1222,7 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     ; Set exception without longjmp — return NULL so callers can clean up
     extern exc_from_cstr
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel zip_msg_buf]
+    TS_LEA rsi, ts_errbuf
     call exc_from_cstr
     ; rax = exception object
     push rax

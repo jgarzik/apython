@@ -1637,7 +1637,7 @@ DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
     ; is static because CompErr keeps the POINTER rather than a copy, so a
     ; stack one is freed before the message is ever read -- which showed as
     ; three bytes of stack garbage where the feature name belonged.
-    lea rdi, [rel pnf_buf]
+    TS_LEA rdi, ts_errbuf
     CSTRING rsi, "future feature "
     call pnf_append
     mov rdi, rax
@@ -1649,7 +1649,7 @@ DEF_FUNC_LOCAL ps_note_future, PNF_FRAME
     call pnf_append
     mov rdi, rbx
     mov esi, [rbp - PNF_NODE]
-    lea rdx, [rel pnf_buf]
+    TS_LEA rdx, ts_errbuf
     call comp_error_node
     pop rbx
     leave
@@ -1700,7 +1700,7 @@ END_FUNC pnf_known
 ;; ============================================================================
 DEF_FUNC_LOCAL pnf_append
     mov rax, rdi
-    lea rcx, [rel pnf_buf]
+    TS_LEA rcx, ts_errbuf
     add rcx, PNF_BUFLEN - 1
 .pa_loop:
     cmp rax, rcx
@@ -1761,19 +1761,19 @@ DEF_FUNC_LOCAL psu_no_block, PNB_FRAME
     mov rdi, rax
     CSTRING rsi, "expected an indented block"
     call comp_msg_cstr
-    cmp qword [rel psu_what], 0
+    cmp qword [gs:ThreadState.ts_psu_what], 0
     je .pnb_done
     mov rdi, rax
     CSTRING rsi, " after "
     call comp_msg_cstr
     mov rdi, rax
-    mov rsi, [rel psu_what]
+    mov rsi, [gs:ThreadState.ts_psu_what]
     call comp_msg_cstr
     mov rdi, rax
     CSTRING rsi, " on line "
     call comp_msg_cstr
     mov rdi, rax
-    mov esi, [rel psu_line]
+    mov esi, [gs:ThreadState.ts_psu_line]
     call comp_msg_i64
 .pnb_done:
     pop rdx                     ; the message

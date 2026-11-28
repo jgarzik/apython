@@ -260,7 +260,7 @@ section .text
 ;; comp_msg_start() -> rax = the message buffer, emptied
 ;; ============================================================================
 DEF_FUNC_BARE comp_msg_start
-    lea rax, [rel comp_msgbuf]
+    TS_LEA rax, ts_errbuf
     mov byte [rax], 0
     ret
 END_FUNC comp_msg_start

@@ -957,7 +957,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_bad_conv:
     push rdi
     push rsi
-    lea rdi, [rel sm_convbuf]
+    TS_LEA rdi, ts_errbuf
     CSTRING rsi, "unsupported format character '"
     extern rbt_append_cstr
     call rbt_append_cstr
@@ -981,7 +981,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov byte [rax], 0
     add rsp, 16
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel sm_convbuf]
+    TS_LEA rsi, ts_errbuf
     jmp .sm_error
 
 .sm_key_raised:

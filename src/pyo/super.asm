@@ -100,7 +100,7 @@ DEF_FUNC_LOCAL sup_error
     mov rbx, rsi                ; the template
     mov r12, rdx                ; the substitution
     mov r13, rdi                ; the exception type
-    lea r14, [rel sup_msg_buf]
+    TS_LEA r14, ts_errbuf
     xor ecx, ecx
 .se_copy:
     movzx eax, byte [rbx]
@@ -637,7 +637,8 @@ DEF_FUNC super_construct, SN_FRAME
     cmp rdx, 2
     je .sn_two_arg
     ; "...got 3" -- render the count, which is what CPython reports.
-    lea rcx, [rel sup_msg_buf + SUP_MSG_MAX]
+    TS_LEA rcx, ts_numbuf
+    add rcx, 24
     mov byte [rcx], 0
     mov rax, rdx
     mov r8d, 10

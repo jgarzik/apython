@@ -193,16 +193,17 @@ END_FUNC poll_teardown
 ;; ============================================================================
 ;; get_monotonic_ns() -> rax = current time in nanoseconds
 ;; ============================================================================
-DEF_FUNC_LOCAL get_monotonic_ns
+GMN_TS equ 16
+DEF_FUNC_LOCAL get_monotonic_ns, GMN_TS
     mov edi, CLOCK_MONOTONIC
-    lea rsi, [rel timespec_buf]
+    lea rsi, [rbp - GMN_TS]
     call clock_gettime
 
     ; Convert to nanoseconds: tv_sec * 1_000_000_000 + tv_nsec
-    mov rax, [rel timespec_buf]        ; tv_sec
+    mov rax, [rbp - GMN_TS]            ; tv_sec
     mov ecx, 1000000000
     imul rax, rcx
-    add rax, [rel timespec_buf + 8]    ; tv_nsec
+    add rax, [rbp - GMN_TS + 8]        ; tv_nsec
     leave
     ret
 END_FUNC get_monotonic_ns

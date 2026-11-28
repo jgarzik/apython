@@ -474,9 +474,10 @@ DEF_FUNC bytesio_readinto_fn, BRI_FRAME
     call bytesio_check
     ERR_M1 .fail
     mov rdi, rsi
-    mov qword [rel io_readinto_msg], io_msg_binto
+    lea rax, [rel io_msg_binto]
+    mov [gs:ThreadState.ts_io_readinto_msg], rax
     call fileio_writable_buffer   ; rax = data, r10 = length
-    mov qword [rel io_readinto_msg], io_msg_readinto
+    mov qword [gs:ThreadState.ts_io_readinto_msg], 0
     ERR_PENDING .fail
 
     mov rdi, [rbp - BRI_SELF]
@@ -647,7 +648,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     je .bs_cur
     cmp r8, SEEK_END
     je .bs_end
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel io_msg_whence]
     mov edx, 100
     push r8
@@ -655,15 +656,15 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     pop rsi
     mov rdi, rax
     call io_append_i64
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     call ap_strlen
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     add rdi, rax
     lea rsi, [rel io_msg_whence2]
     mov edx, 40
     call io_copy_bounded
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel io_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .fail
 .bs_cur:

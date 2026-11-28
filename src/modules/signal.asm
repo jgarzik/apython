@@ -249,10 +249,12 @@ END_FUNC signal_report_wakeup_error
 ;; frame to run a handler on run signal_run_pending in between.
 ;; ============================================================================
 SI_NUM   equ 8
-SI_FRAME equ 16             ; + 0 pushes = 16
+SI_ACT   equ 16 + SIG_SA_SIZE
+SI_OLD   equ SI_ACT + SIG_SA_SIZE
+SI_FRAME equ (SI_OLD + 15) & ~15
 DEF_FUNC_LOCAL signal_install, SI_FRAME
     mov [rbp - SI_NUM], rdi
-    lea rax, [rel sig_act]
+    lea rax, [rbp - SI_ACT]
     mov [rax], rsi                          ; sa_handler
     mov dword [rax + SIG_SA_FLAGS], 0
     ; An empty sa_mask: only the signal being delivered is blocked, which is
@@ -262,8 +264,8 @@ DEF_FUNC_LOCAL signal_install, SI_FRAME
     mov ecx, 128 / 8
     rep stosq
     mov rdi, [rbp - SI_NUM]
-    lea rsi, [rel sig_act]
-    lea rdx, [rel sig_old]
+    lea rsi, [rbp - SI_ACT]
+    lea rdx, [rbp - SI_OLD]
     call sigaction
     leave
     ret

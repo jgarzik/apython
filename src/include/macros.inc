@@ -564,6 +564,13 @@
     mov %1, [gs:ThreadState.eval_co_names]
 %endmacro
 
+; Compute the linear address of a ThreadState field into %1.  Preserves flags
+; and every other register.
+%macro TS_LEA 2                 ; %1 = dest reg, %2 = ThreadState field name
+    mov %1, [gs:ThreadState.ts_self]
+    lea %1, [%1 + ThreadState.%2]
+%endmacro
+
 ; ==========================================================================
 ; LEGACY (payload, tag) SUPPORT — being retired
 ; ==========================================================================

@@ -2098,7 +2098,7 @@ NS_LOC   equ 32
 NS_FRAME equ 40          ; + 1 push = 48
 DEF_FUNC ev_resolve_ns, NS_FRAME
     push rbx
-    mov qword [rel ev_locals_owned], 0
+    mov qword [gs:ThreadState.ts_ev_locals_owned], 0
     mov [rbp - NS_ARGS], rdi
     mov [rbp - NS_NARGS], rsi
     mov qword [rbp - NS_GLOB], 0
@@ -2148,7 +2148,7 @@ DEF_FUNC ev_resolve_ns, NS_FRAME
     pop rcx
     test rax, rax
     jz .ftl_failed
-    mov [rel ev_locals_owned], rax
+    mov [gs:ThreadState.ts_ev_locals_owned], rax
     mov rdx, rax
     jmp .use_frame_locals
 .ftl_failed:
@@ -2353,7 +2353,7 @@ DEF_FUNC builtin_eval_fn, EV_FRAME
     ERR_NULL .ev_own_prop_0     ; nothing is held yet
     mov [rbp - EV_GLOB], rax
     mov [rbp - EV_LOC], rdx
-    mov rcx, [rel ev_locals_owned]
+    mov rcx, [gs:ThreadState.ts_ev_locals_owned]
     mov [rbp - EV_OWNLOC], rcx
 
     mov rdi, rax
@@ -2915,7 +2915,7 @@ DEF_FUNC builtin_exec_fn, EV_FRAME
     ERR_NULL .ev_own_prop_2     ; nothing is held yet
     mov [rbp - EV_GLOB], rax
     mov [rbp - EV_LOC], rdx
-    mov rcx, [rel ev_locals_owned]
+    mov rcx, [gs:ThreadState.ts_ev_locals_owned]
     mov [rbp - EV_OWNLOC], rcx
 
     mov rdi, rax

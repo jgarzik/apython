@@ -112,12 +112,12 @@ MWR_NEED  equ 8             ; the size the buffer must reach
 MWR_CAP   equ 16            ; the capacity being asked for, across the realloc
 MWR_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL mw_reserve, MWR_FRAME
-    mov rax, [rel mw_len]
+    mov rax, [gs:ThreadState.ts_mw_len]
     add rax, rdi
-    cmp rax, [rel mw_cap]
+    cmp rax, [gs:ThreadState.ts_mw_cap]
     jbe .mwr_ok
     mov [rbp - MWR_NEED], rax
-    mov rax, [rel mw_cap]
+    mov rax, [gs:ThreadState.ts_mw_cap]
     test rax, rax
     jnz .mwr_grow
     mov eax, 256
@@ -126,20 +126,20 @@ DEF_FUNC_LOCAL mw_reserve, MWR_FRAME
     cmp rax, [rbp - MWR_NEED]
     jb .mwr_grow
     mov [rbp - MWR_CAP], rax
-    mov rdi, [rel mw_buf]
+    mov rdi, [gs:ThreadState.ts_mw_buf]
     mov rsi, rax
     call ap_realloc
     test rax, rax
     jz .mwr_fail
-    mov [rel mw_buf], rax
+    mov [gs:ThreadState.ts_mw_buf], rax
     mov rax, [rbp - MWR_CAP]
-    mov [rel mw_cap], rax
+    mov [gs:ThreadState.ts_mw_cap], rax
 .mwr_ok:
     mov eax, 1
     leave
     ret
 .mwr_fail:
-    mov qword [rel mw_error], 1
+    mov qword [gs:ThreadState.ts_mw_error], 1
     xor eax, eax
     leave
     ret
@@ -156,11 +156,11 @@ DEF_FUNC_LOCAL mw_byte, MWV_FRAME
     call mw_reserve
     test eax, eax
     jz .mwb_out
-    mov rax, [rel mw_buf]
-    mov rcx, [rel mw_len]
+    mov rax, [gs:ThreadState.ts_mw_buf]
+    mov rcx, [gs:ThreadState.ts_mw_len]
     mov rdx, [rbp - MWV_VAL]
     mov [rax + rcx], dl
-    inc qword [rel mw_len]
+    inc qword [gs:ThreadState.ts_mw_len]
 .mwb_out:
     leave
     ret
@@ -175,11 +175,11 @@ DEF_FUNC_LOCAL mw_long, MWV_FRAME
     call mw_reserve
     test eax, eax
     jz .mwl_out
-    mov rax, [rel mw_buf]
-    mov rcx, [rel mw_len]
+    mov rax, [gs:ThreadState.ts_mw_buf]
+    mov rcx, [gs:ThreadState.ts_mw_len]
     mov rdx, [rbp - MWV_VAL]
     mov [rax + rcx], edx
-    add qword [rel mw_len], 4
+    add qword [gs:ThreadState.ts_mw_len], 4
 .mwl_out:
     leave
     ret
@@ -194,11 +194,11 @@ DEF_FUNC_LOCAL mw_short, MWV_FRAME
     call mw_reserve
     test eax, eax
     jz .mws_out
-    mov rax, [rel mw_buf]
-    mov rcx, [rel mw_len]
+    mov rax, [gs:ThreadState.ts_mw_buf]
+    mov rcx, [gs:ThreadState.ts_mw_len]
     mov rdx, [rbp - MWV_VAL]
     mov [rax + rcx], dx
-    add qword [rel mw_len], 2
+    add qword [gs:ThreadState.ts_mw_len], 2
 .mws_out:
     leave
     ret
@@ -213,11 +213,11 @@ DEF_FUNC_LOCAL mw_long64, MWV_FRAME
     call mw_reserve
     test eax, eax
     jz .mwq_out
-    mov rax, [rel mw_buf]
-    mov rcx, [rel mw_len]
+    mov rax, [gs:ThreadState.ts_mw_buf]
+    mov rcx, [gs:ThreadState.ts_mw_len]
     mov rdx, [rbp - MWV_VAL]
     mov [rax + rcx], rdx
-    add qword [rel mw_len], 8
+    add qword [gs:ThreadState.ts_mw_len], 8
 .mwq_out:
     leave
     ret
@@ -237,13 +237,13 @@ DEF_FUNC_LOCAL mw_bytes, MWB_FRAME
     call mw_reserve
     test eax, eax
     jz .mwbs_out
-    mov rdi, [rel mw_buf]
-    add rdi, [rel mw_len]
+    mov rdi, [gs:ThreadState.ts_mw_buf]
+    add rdi, [gs:ThreadState.ts_mw_len]
     mov rsi, [rbp - MWB_DATA]
     mov rdx, [rbp - MWB_LEN]
     call ap_memcpy
     mov rax, [rbp - MWB_LEN]
-    add [rel mw_len], rax
+    add [gs:ThreadState.ts_mw_len], rax
 .mwbs_out:
     leave
     ret
@@ -259,10 +259,10 @@ END_FUNC mw_bytes
 ;; object number 7", which is the opposite question.
 ;; ============================================================================
 DEF_FUNC_LOCAL mw_memo_find, 16
-    mov rsi, [rel mw_memo]
+    mov rsi, [gs:ThreadState.ts_mw_memo]
     test rsi, rsi
     jz .mmf_no
-    mov rcx, [rel mw_memo_len]
+    mov rcx, [gs:ThreadState.ts_mw_memo_len]
     xor edx, edx
 .mmf_loop:
     cmp rdx, rcx
@@ -292,10 +292,10 @@ MMA_OBJ   equ 8
 MMA_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL mw_memo_add, MMA_FRAME
     mov [rbp - MMA_OBJ], rdi
-    mov rax, [rel mw_memo_len]
-    cmp rax, [rel mw_memo_cap]
+    mov rax, [gs:ThreadState.ts_mw_memo_len]
+    cmp rax, [gs:ThreadState.ts_mw_memo_cap]
     jb .mma_room
-    mov rax, [rel mw_memo_cap]
+    mov rax, [gs:ThreadState.ts_mw_memo_cap]
     test rax, rax
     jnz .mma_double
     mov eax, 16
@@ -305,7 +305,7 @@ DEF_FUNC_LOCAL mw_memo_add, MMA_FRAME
 .mma_alloc:
     push rax
     push rax
-    mov rdi, [rel mw_memo]
+    mov rdi, [gs:ThreadState.ts_mw_memo]
     mov rsi, rax
     shl rsi, 4
     call ap_realloc
@@ -313,11 +313,11 @@ DEF_FUNC_LOCAL mw_memo_add, MMA_FRAME
     pop rcx
     test rax, rax
     jz .mma_fail
-    mov [rel mw_memo], rax
-    mov [rel mw_memo_cap], rcx
+    mov [gs:ThreadState.ts_mw_memo], rax
+    mov [gs:ThreadState.ts_mw_memo_cap], rcx
 .mma_room:
-    mov rax, [rel mw_memo]
-    mov rcx, [rel mw_memo_len]
+    mov rax, [gs:ThreadState.ts_mw_memo]
+    mov rcx, [gs:ThreadState.ts_mw_memo_len]
     mov rsi, rcx
     shl rsi, 4
     add rax, rsi
@@ -326,7 +326,7 @@ DEF_FUNC_LOCAL mw_memo_add, MMA_FRAME
     ; The index a reference will name is how many objects have been memoised,
     ; which is the position CPython's w_ref assigns.
     mov [rax + 8], rcx
-    inc qword [rel mw_memo_len]
+    inc qword [gs:ThreadState.ts_mw_memo_len]
 .mma_fail:
     leave
     ret
@@ -395,7 +395,7 @@ global mw_object
 DEF_FUNC mw_object, MWO_FRAME
     push rbx
     mov [rbp - MWO_VAL], rdi
-    cmp qword [rel mw_error], 0
+    cmp qword [gs:ThreadState.ts_mw_error], 0
     jne .mwo_out
 
     ; An immediate: an int in +-2^50, or a float.
@@ -800,7 +800,7 @@ DEF_FUNC mw_object, MWO_FRAME
     ret
 
 .mwo_unmarshallable:
-    mov qword [rel mw_error], 2
+    mov qword [gs:ThreadState.ts_mw_error], 2
     pop rbx
     leave
     ret
@@ -874,7 +874,7 @@ DEF_FUNC_LOCAL mw_code_fields, MCF_FRAME
     leave
     ret
 .mcf_oom:
-    mov qword [rel mw_error], 1
+    mov qword [gs:ThreadState.ts_mw_error], 1
     leave
     ret
 END_FUNC mw_code_fields
@@ -887,13 +887,13 @@ END_FUNC mw_code_fields
 ;; unit, and they are what a caller must bracket every top-level write with.
 ;; ============================================================================
 DEF_FUNC_LOCAL mw_begin, 16
-    mov qword [rel mw_buf], 0
-    mov qword [rel mw_len], 0
-    mov qword [rel mw_cap], 0
-    mov qword [rel mw_error], 0
-    mov qword [rel mw_memo], 0
-    mov qword [rel mw_memo_len], 0
-    mov qword [rel mw_memo_cap], 0
+    mov qword [gs:ThreadState.ts_mw_buf], 0
+    mov qword [gs:ThreadState.ts_mw_len], 0
+    mov qword [gs:ThreadState.ts_mw_cap], 0
+    mov qword [gs:ThreadState.ts_mw_error], 0
+    mov qword [gs:ThreadState.ts_mw_memo], 0
+    mov qword [gs:ThreadState.ts_mw_memo_len], 0
+    mov qword [gs:ThreadState.ts_mw_memo_cap], 0
     leave
     ret
 END_FUNC mw_begin
@@ -905,27 +905,27 @@ MWE_OUT   equ 8
 MWE_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC_LOCAL mw_end, MWE_FRAME
     mov qword [rbp - MWE_OUT], 0
-    cmp qword [rel mw_error], 0
+    cmp qword [gs:ThreadState.ts_mw_error], 0
     jne .mwe_free
-    mov rdi, [rel mw_buf]
-    mov rsi, [rel mw_len]
+    mov rdi, [gs:ThreadState.ts_mw_buf]
+    mov rsi, [gs:ThreadState.ts_mw_len]
     call bytes_from_data
     mov [rbp - MWE_OUT], rax
 .mwe_free:
-    mov rdi, [rel mw_buf]
+    mov rdi, [gs:ThreadState.ts_mw_buf]
     test rdi, rdi
     jz .mwe_no_buf
     call ap_free
 .mwe_no_buf:
-    mov rdi, [rel mw_memo]
+    mov rdi, [gs:ThreadState.ts_mw_memo]
     test rdi, rdi
     jz .mwe_no_memo
     call ap_free
 .mwe_no_memo:
-    mov qword [rel mw_buf], 0
-    mov qword [rel mw_memo], 0
-    mov qword [rel mw_cap], 0
-    mov qword [rel mw_memo_cap], 0
+    mov qword [gs:ThreadState.ts_mw_buf], 0
+    mov qword [gs:ThreadState.ts_mw_memo], 0
+    mov qword [gs:ThreadState.ts_mw_cap], 0
+    mov qword [gs:ThreadState.ts_mw_memo_cap], 0
     mov rax, [rbp - MWE_OUT]
     leave
     ret
@@ -962,7 +962,7 @@ DEF_FUNC marshal_dumps_fn, MDS_FRAME
 .mds_failed:
     ; mw_error 2 is "this object has no marshal form"; anything else is the
     ; allocator.  CPython words the first "unmarshallable object".
-    cmp qword [rel mw_error], 2
+    cmp qword [gs:ThreadState.ts_mw_error], 2
     jne .mds_oom
     SET_EXC exc_ValueError_type, "unmarshallable object"
 .mds_oom:
@@ -1080,7 +1080,7 @@ DEF_FUNC marshal_dump_fn, MDP_FRAME
     leave
     ret
 .mdp_failed:
-    cmp qword [rel mw_error], 2
+    cmp qword [gs:ThreadState.ts_mw_error], 2
     jne .mdp_propagate
     FAIL exc_ValueError_type, "unmarshallable object", .mdp_propagate
 .mdp_args:
@@ -1218,26 +1218,31 @@ DEF_FUNC pyc_cache_path, PCP_FRAME
     mov [rbp - PCP_STEM], rcx
 .pcp_scanned:
 
-    lea rdi, [rel pycw_path]
+    extern ts_get_path_scratch
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
     mov rsi, [rbp - PCP_SRC]
     mov rdx, [rbp - PCP_STEM]
     call ap_memcpy
     mov rbx, [rbp - PCP_STEM]
-    lea rdi, [rel pycw_path]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
     add rdi, rbx
     lea rsi, [rel pycw_dirname]
     mov edx, pycw_dirname_len
     call ap_memcpy
     add rbx, pycw_dirname_len
-    mov [rel pycw_dirlen], rbx
+    mov [gs:ThreadState.ts_pycw_dirlen], rbx
 
-    lea rdi, [rel pycw_path]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
     mov byte [rdi + rbx], '/'
     inc rbx
     mov rdx, [rbp - PCP_LEN]
     sub rdx, [rbp - PCP_STEM]
     sub rdx, 3                          ; the stem, without its ".py"
-    lea rdi, [rel pycw_path]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
     add rdi, rbx
     mov rsi, [rbp - PCP_SRC]
     add rsi, [rbp - PCP_STEM]
@@ -1245,7 +1250,8 @@ DEF_FUNC pyc_cache_path, PCP_FRAME
     call ap_memcpy
     pop rdx
     add rbx, rdx
-    lea rdi, [rel pycw_path]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
     add rdi, rbx
     lea rsi, [rel pycw_suffix]
     mov edx, pycw_suffix_len + 1        ; the NUL too
@@ -1253,8 +1259,9 @@ DEF_FUNC pyc_cache_path, PCP_FRAME
     add rbx, pycw_suffix_len
     cmp rbx, PYCW_PATHMAX
     ja .pcp_no
-    mov [rel pycw_len], rbx
-    lea rax, [rel pycw_path]
+    mov [gs:ThreadState.ts_pycw_len], rbx
+    call ts_get_path_scratch
+    lea rax, [rax + TS_PATH_PYCW]
     pop rbx
     leave
     ret
@@ -1362,7 +1369,7 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     call pyc_cache_path
     test rax, rax
     jz .pw_out
-    mov rax, [rel pycw_len]
+    mov rax, [gs:ThreadState.ts_pycw_len]
     mov [rbp - PW_CLEN], rax
 
     ; The source's mtime, size and MODE.  The first two are what the header
@@ -1376,44 +1383,47 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     js .pw_out
 
     ; The directory, which usually exists; EEXIST is the ordinary answer.
-    lea rdi, [rel pycw_path]
-    mov rbx, [rel pycw_dirlen]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
+    mov rbx, [gs:ThreadState.ts_pycw_dirlen]
     mov byte [rdi + rbx], 0
     mov esi, 0o777
     call sys_mkdir
-    lea rdi, [rel pycw_path]
-    mov rbx, [rel pycw_dirlen]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYCW]
+    mov rbx, [gs:ThreadState.ts_pycw_dirlen]
     mov byte [rdi + rbx], '/'
 
-    ; The temporary: the target plus ".<pid>", renamed into place at the end.
-    lea rdi, [rel pycw_tmp]
-    lea rsi, [rel pycw_path]
+    ; The temporary: the target plus ".<pid><tid>", renamed into place at the end.
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYTMP]
+    lea rsi, [rax + TS_PATH_PYCW]
     mov rdx, [rbp - PW_CLEN]
     call ap_memcpy
     call sys_getpid
+    xor rax, [gs:ThreadState.ts_native_id]
     mov rbx, [rbp - PW_CLEN]
-    lea rdi, [rel pycw_tmp]
+    mov r8, rax
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYTMP]
+    mov rax, r8
     mov byte [rdi + rbx], '.'
     inc rbx
-    ; the pid in decimal, written backwards into the buffer then reversed is
-    ; more code than it is worth: five hex digits name it as well.
-    mov ecx, 5
+    mov ecx, 8
 .pw_pid:
     mov rdx, rax
-    shr rdx, 16
+    shr rdx, 28
     and edx, 15
     add dl, '0'
     cmp dl, '9'
     jbe .pw_pid_digit
     add dl, 'a' - '0' - 10
 .pw_pid_digit:
-    lea rdi, [rel pycw_tmp]
     mov [rdi + rbx], dl
     inc rbx
     shl rax, 4
     dec ecx
     jnz .pw_pid
-    lea rdi, [rel pycw_tmp]
     mov byte [rdi + rbx], 0
 
     ; The payload.  mw_begin/mw_end are the same pair marshal.dumps uses, so
@@ -1432,26 +1442,28 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     mov edx, dword [rbp - PW_STAT + PYCW_ST_MODE]
     or edx, 0o200
     and edx, 0o666
-    lea rdi, [rel pycw_tmp]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYTMP]
     mov esi, 0o1101                     ; O_WRONLY|O_CREAT|O_TRUNC
     call sys_open
     test rax, rax
     js .pw_free
     mov [rbp - PW_FD], rax
 
-    ; The header.  A 32-bit mtime is what the format carries; CPython truncates
-    ; it the same way and the reader only ever compares it for equality.
-    mov dword [rel pycw_hdr], PYCW_MAGIC
-    mov dword [rel pycw_hdr + 4], 0
+    ; The header (on the stack: 16 bytes, keeping rsp 16-aligned).
+    sub rsp, 16
+    mov dword [rsp], PYCW_MAGIC
+    mov dword [rsp + 4], 0
     mov rax, [rbp - PW_STAT + PYCW_ST_MTIME]
-    mov dword [rel pycw_hdr + 8], eax
+    mov dword [rsp + 8], eax
     mov rax, [rbp - PW_STAT + PYCW_ST_SIZE]
-    mov dword [rel pycw_hdr + 12], eax
+    mov dword [rsp + 12], eax
 
     mov rdi, [rbp - PW_FD]
-    lea rsi, [rel pycw_hdr]
+    mov rsi, rsp
     mov edx, 16
     call sys_write
+    add rsp, 16
     cmp rax, 16
     jne .pw_close_fail
 
@@ -1465,19 +1477,22 @@ DEF_FUNC pyc_write_cache, PW_FRAME
 
     mov rdi, [rbp - PW_FD]
     call sys_close
-    lea rdi, [rel pycw_tmp]
-    lea rsi, [rel pycw_path]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYTMP]
+    lea rsi, [rax + TS_PATH_PYCW]
     call sys_rename
     test rax, rax
     jns .pw_free
-    lea rdi, [rel pycw_tmp]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYTMP]
     call sys_unlink
     jmp .pw_free
 
 .pw_close_fail:
     mov rdi, [rbp - PW_FD]
     call sys_close
-    lea rdi, [rel pycw_tmp]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_PYTMP]
     call sys_unlink
 .pw_free:
     mov rdi, [rbp - PW_BYTES]

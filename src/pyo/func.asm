@@ -990,7 +990,7 @@ DEF_FUNC func_setattr, SC_FRAME
     ; CPython names the function and both counts, which is the whole of what
     ; makes the message actionable: "k() requires a code object with 1 free
     ; vars, not 2".
-    lea rdi, [rel sc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbx + PyFuncObject.func_name]
     test rsi, rsi
     jz .scf_no_name
@@ -1012,7 +1012,7 @@ DEF_FUNC func_setattr, SC_FRAME
     mov rdi, rax
     mov rsi, [rbp - SC_WANT]
     call sc_append_num
-    lea rsi, [rel sc_msgbuf]
+    TS_LEA rsi, ts_errbuf
     lea rdi, [rel exc_ValueError_type]
     call set_exception
     jmp .fsa_fail

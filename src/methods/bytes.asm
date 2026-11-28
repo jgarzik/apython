@@ -861,20 +861,20 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     ; CPython words a bad ELEMENT differently from a bad argument: "a
     ; bytes-like object is required, not 'str'" rather than "first arg must
     ; be bytes or a tuple of bytes".
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel baf_msg_item]
     call bj_append_cstr
     mov rdi, rax
     mov rsi, [rbp - BAF_BAD]
     call baf_append_quoted_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .baf_fail
 .baf_arg_type:
     ; CPython names the method and the offending type: "startswith first arg
     ; must be bytes or a tuple of bytes, not str".
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - BAF_NAME]
     call bj_append_cstr
     mov rdi, rax
@@ -884,13 +884,13 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rsi, [rbp - BAF_BAD]
     call baf_append_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .baf_fail
 .baf_argerr:
     ; CPython counts the affix and the window, not self: "takes at least 1
     ; argument (0 given)" and "takes at most 3 arguments (4 given)".
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - BAF_NAME]
     call bj_append_cstr
     mov rdi, rax
@@ -908,7 +908,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     lea rsi, [rel baf_msg_given]
     call bj_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .baf_fail
 .baf_fail:
@@ -2853,7 +2853,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov rsi, [rbp - BJ_WPOS]
     call bj_append_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .bj_fail
 
@@ -2915,11 +2915,12 @@ DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     push r12
     mov r12, rsi
     mov rsi, rdi
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     call bj_append_cstr
     mov rbx, rax
     mov rax, r12
-    lea r8, [rel bj_numbuf + 24]
+    TS_LEA r8, ts_numbuf
+    add r8, 24
     mov byte [r8], 0
     mov r9d, 10
 .bai_loop:

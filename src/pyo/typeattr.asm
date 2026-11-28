@@ -679,7 +679,7 @@ DEF_FUNC type_setattr
     ; this function saves only rbx.
     push rdx
     push rdx                            ; and a pad, to keep rsp even
-    lea r8, [rel ts_imm_buf]
+    TS_LEA r8, ts_errbuf
     xor ecx, ecx
     CSTRING r9, "can only assign string to "
     call ts_imm_append
@@ -703,14 +703,14 @@ DEF_FUNC type_setattr
     call ts_imm_append
     mov byte [r8 + rcx], 0
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel ts_imm_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .ts_fail
 
 .ts_requalify_del:
     ; CPython says "immutable type" here even for a class that is not one:
     ; type_setattro reaches its shared refusal before the two part company.
-    lea r8, [rel ts_imm_buf]
+    TS_LEA r8, ts_errbuf
     xor ecx, ecx
     CSTRING r9, "cannot delete '__qualname__' attribute of immutable type '"
     call ts_imm_append
@@ -720,7 +720,7 @@ DEF_FUNC type_setattr
     call ts_imm_append
     mov byte [r8 + rcx], 0
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel ts_imm_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .ts_fail
 
@@ -730,7 +730,7 @@ DEF_FUNC type_setattr
     ; "set" for a delete too -- its check is ahead of the point where the two
     ; part company -- so this does not look at the value.
     mov rbx, rdi                        ; the type
-    lea r8, [rel ts_imm_buf]
+    TS_LEA r8, ts_errbuf
     xor ecx, ecx
     CSTRING r9, "cannot set '"
     call ts_imm_append
@@ -753,7 +753,7 @@ DEF_FUNC type_setattr
     call ts_imm_append
     mov byte [r8 + rcx], 0
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel ts_imm_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .ts_fail
 

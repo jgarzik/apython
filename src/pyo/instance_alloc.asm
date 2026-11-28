@@ -924,7 +924,7 @@ DEF_FUNC object_new_fn, ONF_FRAME
     mov rdi, [rbp - ONF_TYPE]
     call object_new_staticbase
     mov [rbp - ONF_BASE], rax
-    lea rdi, [rel onf_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel onf_not_safe_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -942,7 +942,7 @@ DEF_FUNC object_new_fn, ONF_FRAME
     lea rsi, [rel onf_not_safe_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel onf_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     leave
     ret

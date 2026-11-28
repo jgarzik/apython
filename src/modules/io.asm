@@ -629,7 +629,7 @@ DEF_FUNC io_set_typename_q, 8            ; 3 pushes, so rsp is 16-aligned
     mov r13d, 1
 io_set_typename_common:
 
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov edx, 200
     call io_copy_bounded        ; rax = one past the prefix
 
@@ -669,7 +669,7 @@ io_set_typename_common:
     mov byte [rax], 0
 
     mov rdi, rbx
-    lea rsi, [rel io_msgbuf]
+    TS_LEA rsi, ts_errbuf
     extern set_exception
     call set_exception
     xor eax, eax
@@ -714,14 +714,14 @@ DEF_FUNC io_set_number
     push r12
     mov rbx, rdi
     mov r12, rdx
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov edx, 200
     call io_copy_bounded
     mov rdi, rax
     mov rsi, r12
     call io_append_i64
     mov rdi, rbx
-    lea rsi, [rel io_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     xor eax, eax
     pop r12
@@ -742,7 +742,8 @@ DEF_FUNC io_append_i64
 .iai_positive:
     ; Digits come out backwards, so they go into a scratch run and get
     ; reversed on the way to the destination.
-    lea r8, [rel io_numbuf + 24]
+    TS_LEA r8, ts_numbuf
+    add r8, 24
     mov byte [r8], 0
     mov r9d, 10
 .iai_loop:
@@ -863,7 +864,7 @@ DEF_FUNC_LOCAL fileio_mode_flags
     je .fmf_a
     cmp al, '+'
     je .fmf_plus
-    mov [rel io_badmode_char], al
+    mov byte [gs:ThreadState.ts_io_badmode_char], al
     mov rax, -2                 ; an unknown letter, which the message names
     leave
     ret
@@ -1303,15 +1304,15 @@ DEF_FUNC fileio_init_fn, FI_FRAME
     jmp .fi_fail
 .fi_mode_letter:
     FI_DROP_MODE
-    lea rdi, [rel io_badmode_msg]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel io_msg_badmode]
     mov edx, 40
     call io_copy_bounded
-    mov cl, [rel io_badmode_char]
+    mov cl, byte [gs:ThreadState.ts_io_badmode_char]
     mov [rax], cl
     mov byte [rax + 1], 0
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel io_badmode_msg]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .fi_fail
 .fi_fd_bad:
@@ -1753,7 +1754,11 @@ DEF_FUNC fileio_writable_buffer, 8            ; 1 push, so rsp is 16-aligned
     ret
 .fwb_bad:
     lea rdi, [rel exc_TypeError_type]
-    mov rsi, [rel io_readinto_msg]
+    mov rsi, [gs:ThreadState.ts_io_readinto_msg]
+    test rsi, rsi
+    jnz .io_ri_have
+    lea rsi, [rel io_msg_readinto]
+.io_ri_have:
     mov rdx, rbx
     call io_set_typename
     pop rbx

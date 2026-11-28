@@ -529,7 +529,7 @@ DEF_FUNC frameobj_setattr, 48
 
     ; CPython names the attribute and the type:
     ;   attribute 'f_code' of 'frame' objects is not writable
-    lea rdi, [rel fsa_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel fsa_ro_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -540,7 +540,7 @@ DEF_FUNC frameobj_setattr, 48
     lea rsi, [rel fsa_ro_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
-    lea rsi, [rel fsa_buf]
+    TS_LEA rsi, ts_errbuf
     extern set_exception
     call set_exception
     jmp .fsa_fail
