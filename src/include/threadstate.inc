@@ -180,6 +180,22 @@ struc ThreadState
     .ts_errbuf:           resb TS_ERRBUF_SIZE ; primary error/format scratch
     .ts_errbuf2:          resb TS_ERRBUF_SIZE ; secondary scratch (rtn_buf)
     .ts_numbuf:           resb TS_NUMBUF_SIZE ; integer formatting scratch
+    ; ---- per-thread pool allocator cache & object freelists ----------------
+    .ts_sc_free:          resq 32 ; AP_NCLASSES per-thread free-list heads
+    .ts_sc_free_count:    resd 32 ; per-class local free-list lengths
+    .ts_sc_bump:          resq 32 ; per-class current pool bump ptr
+    .ts_sc_bump_end:      resq 32 ; per-class current pool end ptr
+    .ts_alloc_live:       resq 1  ; signed net live blocks for this thread
+    .ts_frame_pool:       resq 8  ; 4 x (head:8, count:4, pad:4)
+    .ts_int_freelist:     resq 1  ; PyIntObject freelist head
+    .ts_int_freelist_cnt: resq 1  ; PyIntObject freelist count
+    .ts_list_pool_head:   resq 1  ; PyListObject freelist head
+    .ts_list_pool_count:  resd 1  ; PyListObject freelist count
+    .ts_list_pool_pad:    resd 1
+    .ts_slice_pool_head:  resq 1  ; PySliceObject freelist head
+    .ts_slice_pool_count: resd 1  ; PySliceObject freelist count
+    .ts_slice_pool_pad:   resd 1
+    .ts_tuple_pool:       resq 6  ; 3 x (head:8, count:4, pad:4) for 1/2/3-tuples
     ; ---- byte flags, last -------------------------------------------------
     .throw_pending:       resb 1  ; gen_throw set current_exception
     .tb_suppress_frame:   resb 1  ; the next unwind adds no traceback entry

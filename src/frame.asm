@@ -121,19 +121,23 @@ DEF_FUNC frame_pool_get
     jmp .fp_malloc
 
 .fp_class0:
-    lea rcx, [rel frame_pool_free_0]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 0]
     mov edi, FRAME_POOL_CLASS_0
     jmp .fp_try_pool
 .fp_class1:
-    lea rcx, [rel frame_pool_free_1]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 16]
     mov edi, FRAME_POOL_CLASS_1
     jmp .fp_try_pool
 .fp_class2:
-    lea rcx, [rel frame_pool_free_2]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 32]
     mov edi, FRAME_POOL_CLASS_2
     jmp .fp_try_pool
 .fp_class3:
-    lea rcx, [rel frame_pool_free_3]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 48]
     mov edi, FRAME_POOL_CLASS_3
 
 .fp_try_pool:
@@ -176,16 +180,20 @@ DEF_FUNC frame_pool_put
     jmp ap_free                ; tail call
 
 .fpp_class0:
-    lea rcx, [rel frame_pool_free_0]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 0]
     jmp .fpp_try_push
 .fpp_class1:
-    lea rcx, [rel frame_pool_free_1]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 16]
     jmp .fpp_try_push
 .fpp_class2:
-    lea rcx, [rel frame_pool_free_2]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 32]
     jmp .fpp_try_push
 .fpp_class3:
-    lea rcx, [rel frame_pool_free_3]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_frame_pool + 48]
 
 .fpp_try_push:
     ; rcx = &pool_free_N
@@ -463,8 +471,9 @@ DEF_FUNC frame_pool_drain
     call ap_free
 .no_datastack:
 
-    ; Drain pool class 0
-    lea rbx, [rel frame_pool_free_0]
+    ; Drain all 4 per-thread frame pool classes
+    mov r12, [gs:ThreadState.ts_self]
+    lea rbx, [r12 + ThreadState.ts_frame_pool + 0]
 .drain_0:
     mov rdi, [rbx]
     test rdi, rdi
@@ -476,8 +485,7 @@ DEF_FUNC frame_pool_drain
 .done_0:
     mov dword [rbx + 8], 0
 
-    ; Drain pool class 1
-    lea rbx, [rel frame_pool_free_1]
+    lea rbx, [r12 + ThreadState.ts_frame_pool + 16]
 .drain_1:
     mov rdi, [rbx]
     test rdi, rdi
@@ -489,8 +497,7 @@ DEF_FUNC frame_pool_drain
 .done_1:
     mov dword [rbx + 8], 0
 
-    ; Drain pool class 2
-    lea rbx, [rel frame_pool_free_2]
+    lea rbx, [r12 + ThreadState.ts_frame_pool + 32]
 .drain_2:
     mov rdi, [rbx]
     test rdi, rdi
@@ -502,8 +509,7 @@ DEF_FUNC frame_pool_drain
 .done_2:
     mov dword [rbx + 8], 0
 
-    ; Drain pool class 3
-    lea rbx, [rel frame_pool_free_3]
+    lea rbx, [r12 + ThreadState.ts_frame_pool + 48]
 .drain_3:
     mov rdi, [rbx]
     test rdi, rdi
@@ -520,35 +526,6 @@ DEF_FUNC frame_pool_drain
     leave
     ret
 END_FUNC frame_pool_drain
-
-;; ============================================================================
-;; Pool data
-;; ============================================================================
-section .data
-
-; The datastack: base and end bound the region, top is the bump pointer.
-; Zero until the first inline call, which is what makes the handler's inline
-; fast path fall through to frame_alloc_inline exactly once.  The three words
-; (frame_datastack_base/_top/_end) lives in ThreadState (src/include/threadstate.inc).
-
-; Freelists: each is (head_ptr, count)
-align 8
-global frame_pool_free_0
-frame_pool_free_0:  dq 0        ; 256B class freelist head
-frame_pool_count_0: dd 0         ; count
-              dd 0         ; padding
-
-frame_pool_free_1:  dq 0         ; 512B class freelist head
-frame_pool_count_1: dd 0
-              dd 0
-
-frame_pool_free_2:  dq 0         ; 1024B class freelist head
-frame_pool_count_2: dd 0
-              dd 0
-
-frame_pool_free_3:  dq 0         ; 2048B class freelist head
-frame_pool_count_3: dd 0
-              dd 0
 
 section .text
 

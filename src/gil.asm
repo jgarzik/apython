@@ -81,9 +81,12 @@ global tstate_main_ptr
 tstate_main_ptr:    dq 0
 
 ; Every live ThreadState, newest first, linked through ts_next / ts_prev.
-; Read and written only with the GIL held.
+; Protected by tstate_list_lock (32-bit futex).
 global tstate_list_head
 tstate_list_head:   dq 0
+global tstate_list_lock
+tstate_list_lock:   dd 0
+                    dd 0
 
 section .bss
 align 64
@@ -116,7 +119,7 @@ section .text
 M_ARENA_MAX equ -8
 DEF_FUNC gil_init
     mov edi, M_ARENA_MAX
-    mov esi, 1
+    mov esi, 8
     call mallopt
     call pthread_self
     mov [gs:ThreadState.ts_ident], rax
@@ -138,9 +141,12 @@ END_FUNC gil_init
 ;; ============================================================================
 ;; tstate_link() -> nothing
 ;;
-;; Put the calling thread's ThreadState at the head of the list.  GIL held.
+;; Put the calling thread's ThreadState at the head of the list.
 ;; ============================================================================
-DEF_FUNC_BARE tstate_link
+DEF_FUNC tstate_link
+    lea rdi, [rel tstate_list_lock]
+    extern rt_mutex_lock
+    call rt_mutex_lock
     mov rax, [gs:ThreadState.ts_self]
     mov rcx, [rel tstate_list_head]
     mov [rax + ThreadState.ts_next], rcx
@@ -150,15 +156,22 @@ DEF_FUNC_BARE tstate_link
     mov [rcx + ThreadState.ts_prev], rax
 .tl_head:
     mov [rel tstate_list_head], rax
+    lea rdi, [rel tstate_list_lock]
+    extern rt_mutex_unlock
+    call rt_mutex_unlock
+    leave
     ret
 END_FUNC tstate_link
 
 ;; ============================================================================
 ;; tstate_unlink() -> nothing
 ;;
-;; Take the calling thread's ThreadState off the list.  GIL held.
+;; Take the calling thread's ThreadState off the list and fold its residual
+;; ts_alloc_live delta into ap_exited_live atomically under tstate_list_lock.
 ;; ============================================================================
-DEF_FUNC_BARE tstate_unlink
+DEF_FUNC tstate_unlink
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
     mov rax, [gs:ThreadState.ts_self]
     mov rcx, [rax + ThreadState.ts_next]
     mov rdx, [rax + ThreadState.ts_prev]
@@ -173,6 +186,15 @@ DEF_FUNC_BARE tstate_unlink
     jz .tu_done
     mov [rcx + ThreadState.ts_prev], rdx
 .tu_done:
+    mov qword [rax + ThreadState.ts_next], 0
+    mov qword [rax + ThreadState.ts_prev], 0
+    mov rdx, [rax + ThreadState.ts_alloc_live]
+    mov qword [rax + ThreadState.ts_alloc_live], 0
+    extern ap_exited_live
+    add [rel ap_exited_live], rdx
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+    leave
     ret
 END_FUNC tstate_unlink
 
@@ -466,8 +488,11 @@ DEF_FUNC gil_fork, GF_FRAME
     mov [rel gil_last_holder], rax
     mov [rel gil_holder], rax
     mov [rel tstate_list_head], rax
+    mov dword [rel tstate_list_lock], 0
     mov qword [rax + ThreadState.ts_next], 0
     mov qword [rax + ThreadState.ts_prev], 0
+    extern alloc_reset_after_fork
+    call alloc_reset_after_fork
     call thread_running_reset
     extern systrace_after_fork_child
     call systrace_after_fork_child

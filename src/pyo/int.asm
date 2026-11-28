@@ -182,13 +182,14 @@ INT_FREELIST_MAX equ 256
 
 DEF_FUNC_BARE int_alloc_raw
 %ifndef NO_INT_FREELIST
-    mov rax, [rel int_freelist]
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_int_freelist]
     test rax, rax
     jz .ial_malloc
-    ; The block is dead, so its refcount word is free to hold the next link.
+    ; The block is dead, so its header word 0 holds the next link.
     mov rcx, [rax]
-    mov [rel int_freelist], rcx
-    dec qword [rel int_freelist_count]
+    mov [rdx + ThreadState.ts_int_freelist], rcx
+    dec qword [rdx + ThreadState.ts_int_freelist_cnt]
     ret
 .ial_malloc:
 %endif
@@ -1570,15 +1571,15 @@ DEF_FUNC_BARE int_dealloc
     add rsp, 8
 .compact:
 %ifndef NO_INT_FREELIST
-    ; Back to the free list rather than to libc.  The mpz has been cleared
-    ; above when there was one, so the block is as raw as a fresh malloc.
-    mov rax, [rel int_freelist_count]
+    ; Back to this thread's free list rather than to ap_free.
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_int_freelist_cnt]
     cmp rax, INT_FREELIST_MAX
     jae .really_free
-    mov rcx, [rel int_freelist]
+    mov rcx, [rdx + ThreadState.ts_int_freelist]
     mov [rbx], rcx                          ; dead header word 0 is the link
-    mov [rel int_freelist], rbx
-    inc qword [rel int_freelist_count]
+    mov [rdx + ThreadState.ts_int_freelist], rbx
+    inc qword [rdx + ThreadState.ts_int_freelist_cnt]
     pop rbx
     pop rbp
     ret
@@ -1590,6 +1591,31 @@ DEF_FUNC_BARE int_dealloc
     pop rbp
     ret
 END_FUNC int_dealloc
+
+;; ============================================================================
+;; int_freelist_drain() -> nothing
+;; Return all cached PyIntObject blocks on this thread's freelist to ap_free.
+;; ============================================================================
+global int_freelist_drain
+DEF_FUNC int_freelist_drain
+    push rbx
+    sub rsp, 8
+    mov rbx, [gs:ThreadState.ts_self]
+.ifd_loop:
+    mov rdi, [rbx + ThreadState.ts_int_freelist]
+    test rdi, rdi
+    jz .ifd_done
+    mov rax, [rdi]
+    mov [rbx + ThreadState.ts_int_freelist], rax
+    call ap_free
+    jmp .ifd_loop
+.ifd_done:
+    mov qword [rbx + ThreadState.ts_int_freelist_cnt], 0
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC int_freelist_drain
 
 ;; ============================================================================
 ;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> rax = Value
@@ -2808,14 +2834,3 @@ int_type:
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
-
-section .bss
-;; The free list int_alloc_raw pops from and int_dealloc pushes onto.  A block
-;; on it is dead: its refcount word holds the link to the next one.
-;;
-;; align 8 because a `resd 1` earlier in this file's .bss (type_version_counter)
-;; had left both of these at `addr % 8 == 4`, so every push and pop of the free
-;; list was an unaligned qword access four bytes from a line split.
-align 8
-int_freelist:       resq 1
-int_freelist_count: resq 1

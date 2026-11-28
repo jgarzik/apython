@@ -94,14 +94,15 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     mov r12d, 8                     ; minimum capacity
 .has_cap:
 
-    ; Try list header pool first
-    mov rax, [rel list_pool_head]
+    ; Try this thread's list header pool first
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_list_pool_head]
     test rax, rax
     jz .alloc_fresh
-    ; Pop from pool: reuse ob_refcnt slot as next-link
+    ; Pop from pool: reuse dead header word 0 as next-link
     mov rcx, [rax]
-    mov [rel list_pool_head], rcx
-    dec dword [rel list_pool_count]
+    mov [rdx + ThreadState.ts_list_pool_head], rcx
+    dec dword [rdx + ThreadState.ts_list_pool_count]
     INIT_OBJ_RC rax  ; reinit refcount
     mov rbx, rax
     jmp .init_fields
@@ -1484,18 +1485,20 @@ DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, [rbx + PyListObject.ob_item]
     call ap_free
 
-    ; Try to pool list header
-    cmp dword [rel list_pool_count], LIST_POOL_MAX
+    ; Try to pool list header in this thread's freelist
+    mov rdx, [gs:ThreadState.ts_self]
+    cmp dword [rdx + ThreadState.ts_list_pool_count], LIST_POOL_MAX
     jge .free_header
     ; Untrack from GC before pooling
     mov rdi, rbx
     extern gc_untrack
     call gc_untrack
-    ; Push to pool: reuse ob_refcnt as next-pointer
-    mov rcx, [rel list_pool_head]
+    ; Push to pool: reuse dead header word 0 as next-pointer
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rcx, [rdx + ThreadState.ts_list_pool_head]
     mov [rbx], rcx
-    mov [rel list_pool_head], rbx
-    inc dword [rel list_pool_count]
+    mov [rdx + ThreadState.ts_list_pool_head], rbx
+    inc dword [rdx + ThreadState.ts_list_pool_count]
     pop r13
     pop r12
     pop rbx
@@ -1512,6 +1515,31 @@ DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC list_dealloc
+
+;; ============================================================================
+;; list_pool_drain() -> nothing
+;; Return all cached PyListObject headers on this thread's pool to gc_dealloc.
+;; ============================================================================
+global list_pool_drain
+DEF_FUNC list_pool_drain
+    push rbx
+    sub rsp, 8
+    mov rbx, [gs:ThreadState.ts_self]
+.lpd_loop:
+    mov rdi, [rbx + ThreadState.ts_list_pool_head]
+    test rdi, rdi
+    jz .lpd_done
+    mov rax, [rdi]
+    mov [rbx + ThreadState.ts_list_pool_head], rax
+    call gc_dealloc
+    jmp .lpd_loop
+.lpd_done:
+    mov dword [rbx + ThreadState.ts_list_pool_count], 0
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC list_pool_drain
 
 ; list_repr is in src/repr.asm
 extern list_repr
@@ -2556,12 +2584,6 @@ END_FUNC list_type_call
 ;; Data section
 ;; ============================================================================
 section .data
-
-; List header pool (freelist, singly-linked via ob_refcnt)
-align 8
-list_pool_head:  dq 0       ; freelist head
-list_pool_count: dd 0       ; current count
-                 dd 0       ; padding
 
 list_name_str: db "list", 0
 ; list_repr_str removed - repr now in src/repr.asm

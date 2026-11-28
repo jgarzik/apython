@@ -338,6 +338,7 @@ DEF_FUNC sre_match_repr, MRP_FRAME
     call obj_decref
 .mrp_done:
     mov rax, [rbp - MRP_END]
+    mov edx, TAG_PTR
     leave
     ret
 END_FUNC sre_match_repr

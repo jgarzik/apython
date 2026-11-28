@@ -1040,7 +1040,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
 .zip_released:
     mov rdi, r13
     call ap_free
-    xor eax, eax
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -1394,7 +1394,7 @@ DEF_FUNC builtin_map
 .map_error:
     SET_EXC exc_TypeError_type, "map() must have at least two arguments."
 .map_fail:
-    xor eax, eax
+    RET_NULL
     pop r14
     pop r13
     pop r12

@@ -57,13 +57,16 @@ DEF_FUNC tuple_new
     je .try_pool_3
     jmp .alloc_fresh
 .try_pool_1:
-    lea rcx, [rel tuple_pool_1_head]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_tuple_pool + 0]
     jmp .try_pool
 .try_pool_2:
-    lea rcx, [rel tuple_pool_2_head]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_tuple_pool + 16]
     jmp .try_pool
 .try_pool_3:
-    lea rcx, [rel tuple_pool_3_head]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_tuple_pool + 32]
 .try_pool:
     mov rax, [rcx + TUPLE_POOL_HEAD]  ; head
     test rax, rax
@@ -260,13 +263,16 @@ DEF_FUNC tuple_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     je .pool_3
     jmp .free_self
 .pool_1:
-    lea rcx, [rel tuple_pool_1_head]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_tuple_pool + 0]
     jmp .try_push
 .pool_2:
-    lea rcx, [rel tuple_pool_2_head]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_tuple_pool + 16]
     jmp .try_push
 .pool_3:
-    lea rcx, [rel tuple_pool_3_head]
+    mov rcx, [gs:ThreadState.ts_self]
+    lea rcx, [rcx + ThreadState.ts_tuple_pool + 32]
 .try_push:
     cmp dword [rcx + TUPLE_POOL_COUNT], TUPLE_POOL_MAX
     jge .free_self
@@ -1181,19 +1187,56 @@ DEF_FUNC tuple_type_call, TTC_FRAME
     ret
 END_FUNC tuple_type_call
 
-section .data
+;; ============================================================================
+;; tuple_pool_drain() -> nothing
+;; Return all cached 1/2/3-tuples (headers + item arrays) on this thread's
+;; pool to ap_free / gc_dealloc.
+;; ============================================================================
+global tuple_pool_drain
+DEF_FUNC tuple_pool_drain
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8
+    mov r12, [gs:ThreadState.ts_self]
+    xor r13d, r13d
+.tpd_bucket:
+    cmp r13d, 3
+    jae .tpd_done
+    mov rax, r13
+    shl rax, 4
+    lea rbx, [r12 + ThreadState.ts_tuple_pool + rax]
+.tpd_loop:
+    mov rdi, [rbx + TUPLE_POOL_HEAD]
+    test rdi, rdi
+    jz .tpd_next
+    mov rax, [rdi]
+    mov [rbx + TUPLE_POOL_HEAD], rax
+    push rdi
+    push rdi
+    mov rdi, [rdi + PyTupleObject.ob_item]
+    test rdi, rdi
+    jz .tpd_no_items
+    call ap_free
+.tpd_no_items:
+    pop rdi
+    pop rdi
+    call gc_dealloc
+    jmp .tpd_loop
+.tpd_next:
+    mov dword [rbx + TUPLE_POOL_COUNT], 0
+    inc r13d
+    jmp .tpd_bucket
+.tpd_done:
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC tuple_pool_drain
 
-; Tuple object pools (freelist per size class, singly-linked via ob_refcnt)
-align 8
-tuple_pool_1_head:  dq 0       ; 1-tuple freelist head
-tuple_pool_1_count: dd 0       ; current count
-                    dd 0       ; padding
-tuple_pool_2_head:  dq 0       ; 2-tuple freelist head
-tuple_pool_2_count: dd 0
-                    dd 0
-tuple_pool_3_head:  dq 0       ; 3-tuple freelist head
-tuple_pool_3_count: dd 0
-                    dd 0
+section .data
 
 tuple_name_str: db "tuple", 0
 ; tuple_repr_str removed - repr now in src/repr.asm
