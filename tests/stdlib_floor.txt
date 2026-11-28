@@ -141,6 +141,7 @@ ok smtplib
 ok sndhdr
 ok socket
 ok socketserver
+ok sqlite3
 ok sre_compile
 ok sre_constants
 ok sre_parse

@@ -73,14 +73,14 @@ DEF_FUNC bytes_check_errors_type
 .bcet_bad:
     ; CPython names the type: "must be str, not None".
     push rdi
-    lea rdi, [rel bd_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel bd_msg_errtype]
     call bd_copy
     pop rsi
     mov rdi, rax
     call bd_append_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bd_msgbuf]
+    TS_LEA rsi, ts_errbuf
     extern set_exception
     call set_exception
     mov rax, -1
@@ -138,7 +138,7 @@ DEF_FUNC bytes_set_decode_error, BRD_FRAME
     movzx eax, byte [rdx + rax]     ; the low one
     push rcx
     push rax
-    lea rdi, [rel bd_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel bd_quote]
     call bd_copy
     mov rdi, rax
@@ -174,7 +174,7 @@ DEF_FUNC bytes_set_decode_error, BRD_FRAME
 .brd_range:
     ; "can't decode bytes in position 0-1", which is what CPython says when
     ; the input ends in the middle of a sequence.
-    lea rdi, [rel bd_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel bd_quote]
     call bd_copy
     mov rdi, rax
@@ -210,7 +210,7 @@ DEF_FUNC bytes_set_decode_error, BRD_FRAME
     ; error handlers read every one of them: `e.start`, `e.end` and
     ; `e.object` are how a replacement handler knows what to replace.  This
     ; raised a bare message with none of them.
-    lea rdi, [rel bd_msgbuf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr_heap
     push rax
     sub rsp, 8
@@ -379,7 +379,8 @@ END_FUNC bd_copy
 ;; ============================================================================
 DEF_FUNC_LOCAL bd_append_i64    ; (rdi = dest, rsi = n) -> rax = the NUL
     mov rax, rsi
-    lea r8, [rel bd_numbuf + 24]
+    TS_LEA r8, ts_numbuf
+    add r8, 24
     mov byte [r8], 0
     mov r9d, 10
 .bda_loop:
@@ -723,7 +724,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     test rax, rax
     jz .bd_nomem
     mov [rbp - BD_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -864,7 +865,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     test rax, rax
     jz .bd_nomem
     mov [rbp - BD_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -917,7 +918,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     add rdi, PyStrObject.data + 8
     call ap_malloc
     mov [rbp - BD_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -965,14 +966,14 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     ; CPython's argument clinic writes "not None" here where the tp_name is
     ; "NoneType" -- and it is the clinic's wording a program greps for.
     push rax
-    lea rdi, [rel bd_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel bd_msg_enctype]
     call bd_copy
     pop rsi
     mov rdi, rax
     call bd_append_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bd_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .bd_fail
 .bd_empty:

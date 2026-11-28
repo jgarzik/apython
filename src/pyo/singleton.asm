@@ -336,7 +336,8 @@ bool_number_methods:
 align 8
 global bool_type
 bool_type:
-    dq 1                    ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq bool_name_str        ; tp_name
     dq PyIntObject_size     ; tp_basicsize (bool is subtype of int)
@@ -371,7 +372,8 @@ bool_type:
 align 8
 global bool_true
 bool_true:
-    dq 0x7fffffffffffffff   ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq bool_type            ; ob_type
     ; mpz_t inline: _mp_alloc(4 bytes), _mp_size(4 bytes), _mp_d(8 bytes)
     dd 0                    ; _mp_alloc (set by gmpz_init)
@@ -384,7 +386,8 @@ bool_true:
 align 8
 global bool_false
 bool_false:
-    dq 0x7fffffffffffffff   ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq bool_type            ; ob_type
     dd 0                    ; _mp_alloc
     dd 0                    ; _mp_size
@@ -492,7 +495,7 @@ DEF_FUNC singleton_type_call
     ; kw_names_pending, so the count covers both forms.
     test rdx, rdx
     jnz .stc_takes_none
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -561,7 +564,8 @@ none_number_methods:
 align 8
 global none_type
 none_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq none_name_str        ; tp_name
     dq PyObject_size        ; tp_basicsize
@@ -595,7 +599,8 @@ none_type:
 align 8
 global none_singleton
 none_singleton:
-    dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq none_type            ; ob_type
 
 ;; ============================================================================
@@ -619,7 +624,8 @@ notimpl_repr_str: db "NotImplemented", 0
 align 8
 global notimpl_type
 notimpl_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq notimpl_name_str     ; tp_name
     dq PyObject_size        ; tp_basicsize
@@ -653,7 +659,8 @@ notimpl_type:
 align 8
 global notimpl_singleton
 notimpl_singleton:
-    dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq notimpl_type         ; ob_type
 
 ;; ============================================================================
@@ -677,7 +684,8 @@ ellipsis_repr_str: db "Ellipsis", 0
 align 8
 global ellipsis_type
 ellipsis_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq ellipsis_name_str    ; tp_name
     dq PyObject_size        ; tp_basicsize
@@ -711,7 +719,8 @@ ellipsis_type:
 align 8
 global ellipsis_singleton
 ellipsis_singleton:
-    dq 0x7fffffffffffffff   ; ob_refcnt (max value, never reaches zero)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq ellipsis_type        ; ob_type
 
 ;; ============================================================================

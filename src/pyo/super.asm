@@ -100,7 +100,7 @@ DEF_FUNC_LOCAL sup_error
     mov rbx, rsi                ; the template
     mov r12, rdx                ; the substitution
     mov r13, rdi                ; the exception type
-    lea r14, [rel sup_msg_buf]
+    TS_LEA r14, ts_errbuf
     xor ecx, ecx
 .se_copy:
     movzx eax, byte [rbx]
@@ -380,7 +380,7 @@ DEF_FUNC super_lookup, SL_FRAME
     jz .sl_absent
     mov [rbp - SL_ATTR], rax
     mov [rbp - SL_TAG], rdx
-    INCREF_VAL rax, rdx         ; ours from here on
+    ; super_find already returns an owned ref (from dict_get_mro)
 
     cmp qword [rbp - SL_TAG], TAG_PTR
     jne .sl_plain               ; an immediate is never a descriptor
@@ -637,7 +637,8 @@ DEF_FUNC super_construct, SN_FRAME
     cmp rdx, 2
     je .sn_two_arg
     ; "...got 3" -- render the count, which is what CPython reports.
-    lea rcx, [rel sup_msg_buf + SUP_MSG_MAX]
+    TS_LEA rcx, ts_numbuf
+    add rcx, 24
     mov byte [rcx], 0
     mov rax, rdx
     mov r8d, 10
@@ -1180,7 +1181,8 @@ section .data
 align 8
 global super_type
 super_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sup_name_str             ; tp_name
     dq PySuperObject_size       ; tp_basicsize

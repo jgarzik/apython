@@ -357,17 +357,24 @@ DEF_FUNC func_call
 
 .kw_done:
     ; === Phase 5: Apply positional defaults ===
+    cmp qword [rbx + PyFuncObject.func_defaults], 0
+    je .pos_defaults_done
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_defaults]
     test rax, rax
-    jz .pos_defaults_done
+    jz .pos_defaults_unlock_done
+    INCREF rax
+    OBJ_UNLOCK rbx
+    mov r11d, [rsp+8]       ; positional_count (read before pinning tuple)
+    push rax                ; pin defaults tuple across Phase 5 (and pad)
+    push rax
 
     mov rdi, [rbx + PyFuncObject.func_code]
     mov edx, [rdi + PyCodeObject.co_argcount]
 
     ; If all positional slots already filled, skip
-    mov ecx, [rsp+8]       ; positional_count
-    cmp ecx, edx
-    jge .pos_defaults_done
+    cmp r11d, edx
+    jge .pos_defaults_drop
 
     ; defcount = len(defaults)
     mov rcx, [rax + PyTupleObject.ob_size]
@@ -379,7 +386,7 @@ DEF_FUNC func_call
     xor edi, edi            ; i = 0 (check all positional slots)
 .defaults_loop:
     cmp edi, edx
-    jge .pos_defaults_done
+    jge .pos_defaults_drop
 
     mov r10, rdi
     cmp qword [r12 + PyFrame.localsplus + r10*8], 0
@@ -407,17 +414,32 @@ DEF_FUNC func_call
     inc edi
     jmp .defaults_loop
 
+.pos_defaults_unlock_done:
+    OBJ_UNLOCK rbx
+    jmp .pos_defaults_done
+.pos_defaults_drop:
+    pop rdi
+    pop rax
+    call obj_decref
+
 .pos_defaults_done:
     ; === Phase 6: Apply kw-only defaults ===
+    cmp qword [rbx + PyFuncObject.func_kwdefaults], 0
+    je .kw_defaults_done
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_kwdefaults]
     test rax, rax
-    jz .kw_defaults_done
+    jz .kw_defaults_unlock_done
+    INCREF rax
+    OBJ_UNLOCK rbx
+    push rax                ; pin kwdefaults dict across Phase 6 (and pad)
+    push rax
 
     mov rdi, [rbx + PyFuncObject.func_code]
     mov ecx, [rdi + PyCodeObject.co_argcount]       ; ecx = co_argcount
     mov edx, [rdi + PyCodeObject.co_kwonlyargcount] ; edx = co_kwonlyargcount
     test edx, edx
-    jz .kw_defaults_done
+    jz .kw_defaults_drop
 
     ; For i in [co_argcount..co_argcount+co_kwonlyargcount):
     ;   if localsplus[i] is NULL: look up name in kwdefaults dict
@@ -426,15 +448,13 @@ DEF_FUNC func_call
 
 .kw_defaults_loop:
     cmp esi, edx
-    jge .kw_defaults_done
+    jge .kw_defaults_drop
 
     movsxd r8, esi
     cmp qword [r12 + PyFrame.localsplus + r8*8], 0
     jne .kw_defaults_next
 
     ; Slot is NULL - look up param name in kwdefaults dict
-    ; rax = kwdefaults dict, esi = param index
-    ; Get param name from co_localsplusnames[i]
     push rax
     push rdx
     push rsi
@@ -445,7 +465,7 @@ DEF_FUNC func_call
     movsxd r9, esi
     mov rsi, [r8 + r9*8]                              ; param name string
 
-    ; dict_get(kwdefaults, param_name) -> borrowed ref or NULL
+    ; dict_get(kwdefaults, param_name) -> owned Value or NULL
     mov rdi, rax            ; kwdefaults dict
     call dict_get       ; err: tested at .kw_default_miss, once the loop registers are back
     V_UNPACK rax, rdx           ; dict_get returns a Value
@@ -459,17 +479,24 @@ DEF_FUNC func_call
     test r10, r10
     jz .kw_default_miss     ; not in kwdefaults, skip (would be error)
 
-    ; Assign and INCREF
+    ; Assign (already owned from dict_get)
     movsxd r9, esi
     mov r11, r9
     shl r9, 3                  ; localsplus 8 bytes/slot
-    INCREF_VAL r8, r10
     V_PACK r8, r10
     mov [r12 + PyFrame.localsplus + r9], r8
 
 .kw_defaults_next:
     inc esi
     jmp .kw_defaults_loop
+
+.kw_defaults_unlock_done:
+    OBJ_UNLOCK rbx
+    jmp .kw_defaults_done
+.kw_defaults_drop:
+    pop rdi
+    pop rax
+    call obj_decref
 
 .kw_defaults_done:
     ; === Phase 6.5: Validate all required args are filled ===
@@ -534,6 +561,9 @@ DEF_FUNC func_call
     ; searched.  The frame goes back as it does for any other refusal.
     cmp qword [gs:ThreadState.current_exception], 0
     je .kw_defaults_next
+    pop rdi                 ; drop pinned kwdefaults dict
+    pop rax
+    call obj_decref
     mov rdi, r12
     call frame_free
     jmp .fc_refused
@@ -883,15 +913,25 @@ DEF_FUNC func_setattr, SC_FRAME
     test eax, eax
     jz .set_code
 
-    ; Check if func_dict exists
+    ; Check if func_dict exists; publish lazily via CAS to avoid double alloc.
     mov rdi, [rbx + PyFuncObject.func_dict]
     test rdi, rdi
     jnz .have_dict
 
     ; Create func_dict lazily
     call dict_new
-    mov [rbx + PyFuncObject.func_dict], rax
-    mov rdi, rax
+    mov rdx, rax
+    xor eax, eax
+    lock cmpxchg [rbx + PyFuncObject.func_dict], rdx
+    jz .fsa_dict_installed
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rdx
+    pop rax
+.fsa_dict_installed:
+    mov rdi, rdx
 
 .have_dict:
     ; dict_set(func_dict, name Value, value Value)
@@ -919,8 +959,10 @@ DEF_FUNC func_setattr, SC_FRAME
     REQUIRE_STR_TYPE rax, rcx, .sq_type
 .sq_store:
     INCREF_V r13, rax
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_qualname]
     mov [rbx + PyFuncObject.func_qualname], r13
+    OBJ_UNLOCK rbx
     test rax, rax
     jz .sq_done
     mov rdi, rax
@@ -969,8 +1011,10 @@ DEF_FUNC func_setattr, SC_FRAME
 .sc_counts_ok:
     mov rdi, r13
     call obj_incref
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_code]
     mov [rbx + PyFuncObject.func_code], r13
+    OBJ_UNLOCK rbx
     test rax, rax
     jz .sc_done
     mov rdi, rax
@@ -990,7 +1034,7 @@ DEF_FUNC func_setattr, SC_FRAME
     ; CPython names the function and both counts, which is the whole of what
     ; makes the message actionable: "k() requires a code object with 1 free
     ; vars, not 2".
-    lea rdi, [rel sc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbx + PyFuncObject.func_name]
     test rsi, rsi
     jz .scf_no_name
@@ -1012,7 +1056,7 @@ DEF_FUNC func_setattr, SC_FRAME
     mov rdi, rax
     mov rsi, [rbp - SC_WANT]
     call sc_append_num
-    lea rsi, [rel sc_msgbuf]
+    TS_LEA rsi, ts_errbuf
     lea rdi, [rel exc_ValueError_type]
     call set_exception
     jmp .fsa_fail
@@ -1032,8 +1076,10 @@ DEF_FUNC func_setattr, SC_FRAME
     cmp rax, rcx
     jne .sa_type
     INCREF_V r13, rax
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_annotations]
     mov [rbx + PyFuncObject.func_annotations], r13
+    OBJ_UNLOCK rbx
     test rax, rax
     jz .sa_done
     mov rdi, rax
@@ -1059,8 +1105,10 @@ DEF_FUNC func_setattr, SC_FRAME
     lea r13, [rel none_singleton]
 .smod_have:
     INCREF_V r13, rax
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_module]
     mov [rbx + PyFuncObject.func_module], r13
+    OBJ_UNLOCK rbx
     test rax, rax
     jz .sd_done
     mov rdi, rax
@@ -1070,8 +1118,10 @@ DEF_FUNC func_setattr, SC_FRAME
 .set_doc:
     ; __doc__ takes anything, including None, as CPython's does.
     INCREF_V r13, rax
+    OBJ_LOCK rbx
     mov rax, [rbx + PyFuncObject.func_doc]
     mov [rbx + PyFuncObject.func_doc], r13
+    OBJ_UNLOCK rbx
     test rax, rax
     jz .sd_done
     mov rdi, rax
@@ -1093,10 +1143,12 @@ DEF_FUNC func_setattr, SC_FRAME
     ja .set_name_type_error
     mov rax, [rdi + PyObject.ob_type]
     REQUIRE_STR_TYPE rax, rcx, .set_name_type_error
-    mov rdi, [rbx + PyFuncObject.func_name]
     mov rax, r13
     INCREF rax
+    OBJ_LOCK rbx
+    mov rdi, [rbx + PyFuncObject.func_name]
     mov [rbx + PyFuncObject.func_name], rax
+    OBJ_UNLOCK rbx
     test rdi, rdi
     jz .set_name_done
     call obj_decref
@@ -1138,16 +1190,20 @@ DEF_FUNC func_setattr, SC_FRAME
 .set_defaults_store:
     mov rdi, r13
     call obj_incref
+    OBJ_LOCK rbx
     mov rdi, [rbx + PyFuncObject.func_defaults]
     mov [rbx + PyFuncObject.func_defaults], r13
+    OBJ_UNLOCK rbx
     test rdi, rdi
     jz .setattr_done
     call obj_decref
     jmp .setattr_done
 
 .set_defaults_clear:
+    OBJ_LOCK rbx
     mov rdi, [rbx + PyFuncObject.func_defaults]
     mov qword [rbx + PyFuncObject.func_defaults], 0
+    OBJ_UNLOCK rbx
     test rdi, rdi
     jz .setattr_done
     call obj_decref
@@ -1183,21 +1239,22 @@ DEF_FUNC func_setattr, SC_FRAME
     test eax, eax
     jz .set_kwd_type_error
 .set_kwd_store:
-    ; Store first, release second: the old value and the new one can be the
-    ; same object, and releasing it before the store would free what is
-    ; about to be installed.
     mov rdi, r13
     call obj_incref
+    OBJ_LOCK rbx
     mov rdi, [rbx + PyFuncObject.func_kwdefaults]
     mov [rbx + PyFuncObject.func_kwdefaults], r13
+    OBJ_UNLOCK rbx
     test rdi, rdi
     jz .setattr_done
     call obj_decref
     jmp .setattr_done
 
 .set_kwd_clear:
+    OBJ_LOCK rbx
     mov rdi, [rbx + PyFuncObject.func_kwdefaults]
     mov qword [rbx + PyFuncObject.func_kwdefaults], 0
+    OBJ_UNLOCK rbx
     test rdi, rdi
     jz .setattr_done
     call obj_decref
@@ -1382,8 +1439,7 @@ DEF_FUNC func_getattr
     test edx, edx
     jz .not_found
 
-    ; Found in dict - INCREF and return (rdx = tag from dict_get)
-    INCREF_VAL rax, rdx
+    ; Found in dict - already owned from dict_get
     pop r12
     pop rbx
     leave
@@ -1397,7 +1453,7 @@ DEF_FUNC func_getattr
     ; __qualname__ that way.
     call .fg_from_dict
     test rax, rax
-    jnz .return_ptr_attr
+    jnz .return_owned_val
     mov rax, [rbx + PyFuncObject.func_name]
     INCREF rax
     mov edx, TAG_PTR
@@ -1416,7 +1472,7 @@ DEF_FUNC func_getattr
     jnz .return_ptr_attr
     call .fg_from_dict
     test rax, rax
-    jnz .return_ptr_attr
+    jnz .return_owned_val
     ; Get co_qualname from the code object
     mov rax, [rbx + PyFuncObject.func_code]
     mov rax, [rax + PyCodeObject.co_qualname]
@@ -1527,6 +1583,7 @@ DEF_FUNC func_getattr
 .return_ptr_attr:
     INCREF rax
     mov edx, TAG_PTR
+.return_owned_val:
     pop r12
     pop rbx
     leave
@@ -1578,7 +1635,6 @@ DEF_FUNC func_getattr
     V_UNPACK rax, rdx
     test edx, edx
     jz .doc_from_code
-    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -1641,7 +1697,7 @@ DEF_FUNC func_getattr
     pop rax
     test edx, edx
     jz .fg_module_miss
-    jmp .return_ptr_attr
+    jmp .return_owned_val
 
 .return_code:
     mov rax, [rbx + PyFuncObject.func_code]
@@ -1962,7 +2018,8 @@ fn_dunder_name_key: db "__name__", 0
 align 8
 global func_type
 func_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq func_name_str        ; tp_name
     dq PyFuncObject_size    ; tp_basicsize
@@ -2298,12 +2355,16 @@ DEF_FUNC cell_getattr
     pop rdi
     test eax, eax
     jnz .cga_other
+    OBJ_LOCK rdi
     mov rax, [rdi + PyCellObject.ob_ref]
     test rax, rax
-    jz .cga_empty
+    jz .cga_unlock_empty
     INCREF_V rax, rcx
+    OBJ_UNLOCK rdi
     leave
     ret
+.cga_unlock_empty:
+    OBJ_UNLOCK rdi
 .cga_empty:
     SET_EXC exc_ValueError_type, "Cell is empty"
     leave
@@ -2339,8 +2400,10 @@ DEF_FUNC cell_setattr, CSA_FRAME
     mov rax, [rbp - CSA_VAL]
     INCREF_V rax, rcx
     mov rcx, [rbp - CSA_CELL]
+    OBJ_LOCK rcx
     mov rdi, [rcx + PyCellObject.ob_ref]
     mov [rcx + PyCellObject.ob_ref], rax
+    OBJ_UNLOCK rcx
     XDECREF_V rdi, rcx
     xor eax, eax
     leave
@@ -2362,7 +2425,8 @@ section .data
 align 8
 global cell_type
 cell_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type
     dq cell_name_str          ; tp_name
     dq PyCellObject_size      ; tp_basicsize

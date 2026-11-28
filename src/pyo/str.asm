@@ -717,8 +717,6 @@ DEF_FUNC codec_via_python, CVP_FRAME
     call obj_decref
     test rbx, rbx
     jz .cvp_missing
-    mov rdi, rbx
-    call obj_incref
     mov [rel codec_encode_impl], rbx
     pop rbx
 
@@ -734,8 +732,6 @@ DEF_FUNC codec_via_python, CVP_FRAME
     call obj_decref
     test rbx, rbx
     jz .cvp_missing
-    mov rdi, rbx
-    call obj_incref
     mov [rel codec_decode_impl], rbx
     pop rbx
 
@@ -751,8 +747,6 @@ DEF_FUNC codec_via_python, CVP_FRAME
     call obj_decref
     test rbx, rbx
     jz .cvp_missing
-    mov rdi, rbx
-    call obj_incref
     mov [rel codec_surrogate_impl], rbx
     pop rbx
 
@@ -1043,7 +1037,7 @@ DEF_FUNC str_from_cstr_heap
     ; rax = new PyStrObject*
 
     ; Fill header
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrObject.ob_size], r12
@@ -1108,7 +1102,7 @@ DEF_FUNC str_alloc_bytes
     lea rdi, [rbx + PyStrObject.data + 8]
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrObject.ob_size], rbx
@@ -1140,7 +1134,7 @@ DEF_FUNC str_new_heap, 8            ; 3 pushes, so rsp is 16-aligned
     mov r13, rax             ; r13 = new PyStrObject*
 
     ; Fill header
-    mov qword [r13 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r13
     lea rcx, [rel str_type]
     mov [r13 + PyObject.ob_type], rcx
     mov [r13 + PyStrObject.ob_size], r12
@@ -1255,14 +1249,15 @@ END_FUNC str_new_slice
 ;; keep the stride 8-aligned and to give the word-at-a-time readers their
 ;; 8 bytes past the end.
 ;; ============================================================================
-STR_CHAR_STRIDE equ 56
+STR_CHAR_STRIDE equ 64
 
 section .data
 global str_char_table
 str_char_table:
 %assign sci 0
 %rep 128
-    dq 0x7fffffffffffffff       ; ob_refcnt: immortal
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq str_type                 ; ob_type
     dq 1                        ; ob_size, in bytes
     dq -1                       ; ob_hash, not yet computed
@@ -1272,7 +1267,8 @@ str_char_table:
 %assign sci sci+1
 %endrep
 %rep 128
-    dq 0x7fffffffffffffff       ; ob_refcnt: immortal
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq str_type                 ; ob_type
     dq 2                        ; ob_size: two bytes of UTF-8
     dq -1                       ; ob_hash, not yet computed
@@ -1293,7 +1289,6 @@ DEF_FUNC_BARE str_char
     lea rax, [rel str_char_table]
     imul rdi, rdi, STR_CHAR_STRIDE
     add rax, rdi
-    inc qword [rax + PyObject.ob_refcnt]
     ret
 END_FUNC str_char
 
@@ -1366,7 +1361,7 @@ DEF_FUNC str_repr, 8            ; 3 pushes, so rsp is 16-aligned
     mov r13, rax             ; r13 = new str
 
     ; Fill header
-    mov qword [r13 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r13
     lea rcx, [rel str_type]
     mov [r13 + PyObject.ob_type], rcx
     mov qword [r13 + PyStrObject.ob_hash], -1
@@ -1627,7 +1622,7 @@ DEF_FUNC_BARE str_str
     lea rcx, [rel str_type]
     cmp rax, rcx
     jne str_str_copy
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     mov edx, TAG_PTR
     ret
@@ -1761,7 +1756,7 @@ DEF_FUNC str_concat
     push rax                ; save new str
 
     ; Fill header
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrObject.ob_size], r13
@@ -1871,7 +1866,7 @@ DEF_FUNC str_repeat
     push rax                ; save
 
     ; Fill header
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrObject.ob_size], r14
@@ -2353,7 +2348,7 @@ DEF_FUNC str_getslice, SGS_FRAME
     add rdi, PyStrObject.data + 8
     call ap_malloc
     mov [rbp - SGS_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rdx, [rel str_type]
     mov [rax + PyObject.ob_type], rdx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -2435,7 +2430,7 @@ DEF_FUNC str_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov edi, PyStrIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyStrIterObject.it_seq], rbx
@@ -2597,7 +2592,8 @@ str_mapping_methods:
 align 8
 global str_type
 str_type:
-    dq 1                ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type        ; ob_type
     dq str_name         ; tp_name
     dq PyStrObject.data ; tp_basicsize (minimum, without data)
@@ -2634,7 +2630,8 @@ str_iter_name: db "str_iterator", 0
 align 8
 global str_iter_type
 str_iter_type:
-    dq 1                        ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq str_iter_name            ; tp_name
     dq PyStrIterObject_size     ; tp_basicsize

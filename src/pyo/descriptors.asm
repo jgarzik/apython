@@ -578,7 +578,7 @@ DEF_FUNC property_set_no_accessor, PRN_FRAME
     mov [rbp - PRN_WHAT], rdx
     mov rbx, [rdi + PyPropertyObject.prop_name]
 
-    lea rdi, [rel prop_msg_buf]
+    TS_LEA rdi, ts_errbuf
     test rbx, rbx
     jz .prn_unnamed
     lea rsi, [rel prop_msg_open]
@@ -610,7 +610,7 @@ DEF_FUNC property_set_no_accessor, PRN_FRAME
     mov rsi, [rbp - PRN_WHAT]
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
-    lea rsi, [rel prop_msg_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     pop rbx
     leave
@@ -828,7 +828,7 @@ DEF_FUNC member_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov edi, PyMemberDescrObject_size
     call ap_malloc
 
-    mov qword [rax + PyMemberDescrObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel member_descr_type]
     mov [rax + PyMemberDescrObject.ob_type], rcx
     mov [rax + PyMemberDescrObject.md_offset], rbx
@@ -988,7 +988,7 @@ DEF_FUNC mappingproxy_new, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi                    ; the dict
     mov edi, PyMappingProxyObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel mappingproxy_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyMappingProxyObject.mp_mapping], rbx
@@ -1095,9 +1095,14 @@ DEF_FUNC mappingproxy_getattr, MPG_FRAME
     jz .mpg_none
     ; bind it to the wrapped dict, so proxy.keys() reads the dict
     extern method_new
+    push rax                    ; save owned func from dict_get_mro
     mov rsi, rdi
     mov rdi, rax
     call method_new
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1124,7 +1129,7 @@ DEF_FUNC getset_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov r13, rdx
     mov edi, PyGetSetDescrObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel getset_descr_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyGetSetDescrObject.gs_get], rbx
@@ -1216,7 +1221,7 @@ DEF_FUNC_LOCAL getset_descr_getattr, GDA_FRAME
     mov rax, [rax + PyGetSetDescrObject.gs_name]
     test rax, rax
     jz .gda_miss
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rcx + PyTypeObject.tp_name]
     call rbt_append_cstr
     mov rdi, rax
@@ -1227,7 +1232,7 @@ DEF_FUNC_LOCAL getset_descr_getattr, GDA_FRAME
     mov rsi, [rcx + PyGetSetDescrObject.gs_name]
     lea rsi, [rsi + PyStrObject.data]
     call rbt_append_cstr
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     mov edx, TAG_PTR
     leave
@@ -1280,7 +1285,7 @@ DEF_FUNC getset_descr_repr
     mov rdi, rax                ; the NUL the composer left
     lea rsi, [rel gdr_close]
     call rbt_append_cstr
-    lea rdi, [rel gdr_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -1392,7 +1397,7 @@ DEF_FUNC_LOCAL getset_descr_compose, 8            ; 3 pushes, so rsp is 16-align
     mov rbx, rsi
     mov r12, rdi
     mov r13, rdx                ; 1 = say "for" where the others say "of"
-    lea rdi, [rel gdr_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, r12
     call rbt_append_cstr
     mov rdi, rax
@@ -1573,7 +1578,7 @@ DEF_FUNC_LOCAL getset_check_receiver, GCR_FRAME
     lea rsi, [rel gcr_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel gdr_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     leave
     ret
@@ -1618,7 +1623,7 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     ret
 
 .mcr_bad:
-    lea rdi, [rel gdr_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel gcr_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -1660,7 +1665,7 @@ DEF_FUNC member_check_receiver, MCR_FRAME
     lea rsi, [rel gcr_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel gdr_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     leave
     ret
@@ -1688,13 +1693,17 @@ DEF_FUNC member_descr_get, MDG_FRAME
     mov rdi, [rbp - MDG_SELF]
     mov rsi, [rbp - MDG_RECV]
     mov rcx, [rdi + PyMemberDescrObject.md_offset]
+    OBJ_LOCK rsi
     SLOT_ADDR rdx, rsi, rcx
     mov rax, [rdx]
     test rax, rax
-    jz .mdg_unset
+    jz .mdg_unlock_unset
     INCREF_V rax, rdx
+    OBJ_UNLOCK rsi
     leave
     ret
+.mdg_unlock_unset:
+    OBJ_UNLOCK rsi
 
 .mdg_unset:
     mov rcx, [rbp - MDG_SELF]
@@ -1742,6 +1751,7 @@ DEF_FUNC member_descr_set, MDS_FRAME
     mov rdi, [rbp - MDS_SELF]
     mov rsi, [rbp - MDS_RECV]
     mov rcx, [rdi + PyMemberDescrObject.md_offset]
+    OBJ_LOCK rsi
     SLOT_ADDR rdx, rsi, rcx
     mov rax, [rdx]              ; the old Value
     mov rcx, [rbp - MDS_VAL]
@@ -1751,7 +1761,7 @@ DEF_FUNC member_descr_set, MDS_FRAME
     jnz .mds_store
     mov rdi, [rbp - MDS_SELF]
     cmp qword [rdi + PyMemberDescrObject.md_nullable], 0
-    je .mds_unset               ; deleting an unset T_OBJECT_EX
+    je .mds_unlock_unset        ; deleting an unset T_OBJECT_EX
 
 .mds_store:
     ; The new value is counted BEFORE the old one is released: they may be the
@@ -1759,10 +1769,14 @@ DEF_FUNC member_descr_set, MDS_FRAME
     mov rdi, [rbp - MDS_VAL]
     INCREF_V rdi, rcx
     mov [rdx], rdi
+    OBJ_UNLOCK rsi
     XDECREF_V rax, rcx
     xor eax, eax
     leave
     ret
+
+.mds_unlock_unset:
+    OBJ_UNLOCK rsi
 
 .mds_unset:
     mov rcx, [rbp - MDS_SELF]
@@ -1846,7 +1860,7 @@ DEF_FUNC_LOCAL member_descr_getattr, MDA_FRAME
     mov rax, [rax + PyMemberDescrObject.md_name]
     test rax, rax
     jz .mda_miss
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rcx + PyTypeObject.tp_name]
     call rbt_append_cstr
     mov rdi, rax
@@ -1857,7 +1871,7 @@ DEF_FUNC_LOCAL member_descr_getattr, MDA_FRAME
     mov rsi, [rcx + PyMemberDescrObject.md_name]
     lea rsi, [rsi + PyStrObject.data]
     call rbt_append_cstr
-    lea rdi, [rel gda_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     mov edx, TAG_PTR
     leave
@@ -2030,7 +2044,7 @@ DEF_FUNC getset_descr_set, GDS_FRAME
     lea rsi, [rel gds_ro_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
-    lea rsi, [rel gdr_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
 .gds_fail:
     mov rax, -1
@@ -2421,7 +2435,8 @@ section .data
 align 8
 global staticmethod_type
 staticmethod_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sm_name_str              ; tp_name
     dq PyStaticMethodObject_size ; tp_basicsize
@@ -2455,7 +2470,8 @@ staticmethod_type:
 align 8
 global classmethod_type
 classmethod_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq cm_name_str              ; tp_name
     dq PyClassMethodObject_size ; tp_basicsize
@@ -2489,7 +2505,8 @@ classmethod_type:
 align 8
 global property_type
 property_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq prop_name_str            ; tp_name
     dq PyPropertyObject_size    ; tp_basicsize
@@ -2524,7 +2541,8 @@ md_name_str: db "member_descriptor", 0
 align 8
 global member_descr_type
 member_descr_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq md_name_str                  ; tp_name
     dq PyMemberDescrObject_size     ; tp_basicsize
@@ -2560,7 +2578,8 @@ u_name_str: db "types.UnionType", 0
 align 8
 global union_type
 union_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq u_name_str                   ; tp_name
     dq PyGenericAliasObject_size    ; tp_basicsize
@@ -2627,7 +2646,8 @@ gsd_name_str: db "getset_descriptor", 0
 align 8
 global getset_descr_type
 getset_descr_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq gsd_name_str                 ; tp_name
     dq PyGetSetDescrObject_size     ; tp_basicsize
@@ -2663,7 +2683,8 @@ mp_name_str: db "mappingproxy", 0
 align 8
 global mappingproxy_type
 mappingproxy_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq mp_name_str                  ; tp_name
     dq PyMappingProxyObject_size    ; tp_basicsize

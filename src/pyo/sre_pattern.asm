@@ -136,7 +136,7 @@ DEF_FUNC sre_pattern_do_match, PM_FRAME
     mov rdx, [rbp - PM_STR]
     mov rcx, [rbp - PM_POS]
     mov r8, [rbp - PM_ENDPOS]
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .pm_fail
 
@@ -504,16 +504,36 @@ DEF_FUNC sre_substr_from_state_empty
 ;; string whose address the allocator reused would read as a hit and the
 ;; engine would index a stale decode.
 ;; ============================================================================
-section .bss
-align 8
-sre_shared_cpcache: resq 4      ; an SRE_CpCache: buf, len, subject, borrows
-
-section .text
-
 section .rodata
 sse_nothing: db 0
 section .text
 END_FUNC sre_substr_from_state_empty
+
+;; sre_cpcache_clear_thread() -> release this thread's ts_sre_cpcache on exit.
+global sre_cpcache_clear_thread
+DEF_FUNC sre_cpcache_clear_thread
+    push rbx
+    sub rsp, 8
+    TS_LEA rbx, ts_sre_cpcache
+    mov rdi, [rbx + SRE_CpCache.buf]
+    test rdi, rdi
+    jz .scc_subj
+    mov qword [rbx + SRE_CpCache.buf], 0
+    call ap_free
+.scc_subj:
+    mov rdi, [rbx + SRE_CpCache.subject]
+    test rdi, rdi
+    jz .scc_done
+    mov qword [rbx + SRE_CpCache.subject], 0
+    mov qword [rbx + SRE_CpCache.len], 0
+    mov qword [rbx + SRE_CpCache.borrows], 0
+    call obj_decref
+.scc_done:
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC sre_cpcache_clear_thread
 
 ;; ============================================================================
 ;; sre_substr_from_state(rdi=state, rsi=start_idx, rdx=end_idx)
@@ -674,7 +694,7 @@ DEF_FUNC sre_pattern_findall_method, FA_FRAME
     lea rdi, [rbp - FA_STATE]
     mov rsi, [rbp - FA_PAT]
     mov rdx, [rbp - FA_STR]
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .fa_fail
 
@@ -1081,7 +1101,7 @@ DEF_FUNC sre_pattern_sub_method, SUB_FRAME
     mov rdx, [rbp - SUB_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .sub_abort
 
@@ -1678,7 +1698,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov rdx, [rbp - SN_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .subn_abort
 
@@ -1983,7 +2003,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
 
     mov r12, [rbp - SN_RESULT]
-    inc qword [r12 + PyObject.ob_refcnt]
+    INCREF r12
     mov [r8], r12
 
     mov rax, [rbp - SN_NSUBS]
@@ -2161,7 +2181,7 @@ DEF_FUNC sre_pattern_split_method, SP_FRAME
     mov rdx, [rbp - SP_STR]
     xor ecx, ecx
     mov r8, 0x7fffffffffffffff
-    lea r9, [rel sre_shared_cpcache]   ; see its definition
+    TS_LEA r9, ts_sre_cpcache          ; per-thread SRE_CpCache
     call sre_state_init
     ERR_M1 .split_fail
 
@@ -2511,7 +2531,7 @@ DEF_FUNC sre_pattern_getattr
 .ga_pattern_attr:
     ; Return pattern.pattern (the regex string)
     mov rax, [rbx + SRE_PatternObject.pattern]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -2542,7 +2562,7 @@ DEF_FUNC sre_pattern_getattr
     mov rax, [rbx + SRE_PatternObject.groupindex]
     test rax, rax
     jz .ga_empty_dict
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -2591,7 +2611,7 @@ END_FUNC sre_strcmp
 ;; ============================================================================
 DEF_FUNC sre_pattern_copy_method
     mov rax, [rdi]             ; self payload
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -2840,15 +2860,15 @@ DEF_FUNC sre_scanner_new, 8            ; 5 pushes, so rsp is 16-aligned
     call ap_malloc
     mov rbx, rax
 
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rax, [rel sre_scanner_type]
     mov [rbx + PyObject.ob_type], rax
 
     mov [rbx + SRE_ScannerObject.pattern], r12
-    inc qword [r12 + PyObject.ob_refcnt]
+    INCREF r12
 
     mov [rbx + SRE_ScannerObject.string], r13
-    inc qword [r13 + PyObject.ob_refcnt]
+    INCREF r13
 
     mov [rbx + SRE_ScannerObject.pos], r14
     mov [rbx + SRE_ScannerObject.endpos], r15
@@ -2912,7 +2932,7 @@ END_FUNC sre_scanner_dealloc
 ;; sre_scanner_iter_self(rdi=self) -> rax (no edx, tp_iter convention)
 ;; ============================================================================
 DEF_FUNC_BARE sre_scanner_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC sre_scanner_iter_self
@@ -3239,7 +3259,7 @@ DEF_FUNC sre_scanner_getattr
 
 .sga_pattern:
     mov rax, [rbx + SRE_ScannerObject.pattern]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -3257,7 +3277,8 @@ align 8
 ; SRE_Scanner type
 global sre_scanner_type
 sre_scanner_type:
-    dq 1                       ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type               ; ob_type
     dq sc_type_name            ; tp_name
     dq SRE_ScannerObject_size  ; tp_basicsize
@@ -3292,7 +3313,8 @@ align 8
 ; SRE_Pattern type
 global sre_pattern_type
 sre_pattern_type:
-    dq 1                       ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type               ; ob_type
     dq sp_type_name            ; tp_name
     dq SRE_PatternObject_size  ; tp_basicsize

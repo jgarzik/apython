@@ -166,7 +166,9 @@ DEF_FUNC dict_view_iter
     mov [rax + PyObject.ob_type], rdx
 .dvi_kind_done:
     ; The SIZE, not the version: see dict_tp_iter.
+    OBJ_LOCK rdi
     mov rcx, [rdi + PyDictObject.ob_size]
+    OBJ_UNLOCK rdi
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF dict
@@ -287,7 +289,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     add rdi, PyStrObject.data + 10      ; two brackets, a NUL and slack
     extern ap_malloc
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -398,13 +400,21 @@ DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     test rax, rax
     jz .divc_no
 
-    ; The borrow is safe across the comparison: obj_richcompare_bool takes a
-    ; reference to both operands before it can run any Python.
+    ; dict_get returned an owned Value; release it after the comparison.
+    push rax
+    sub rsp, 8
     mov rdi, rax
     mov rax, [rbx + PyTupleObject.ob_item]
     mov rsi, [rax + 8]                  ; the value the pair carries
     mov edx, PY_EQ
     call obj_richcompare_bool
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     cmp eax, -1
     je .divc_error
     pop rbx
@@ -739,7 +749,7 @@ DEF_FUNC_LOCAL dict_view_richcompare, DVC_FRAME
 .dvc_false:
     lea rax, [rel bool_false]
 .dvc_answer:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .dvc_fail:
@@ -852,15 +862,15 @@ DEF_FUNC dict_view_reversed, DVREV_FRAME
     pop rdi                         ; rdi = the dict again
 
     mov [rax + PyDictIterObject.it_dict], rdi
-    ; From the end, as dict_reversed does: the scan walks the entry array down.
+    mov rcx, [rbx + PyDictViewObject.dv_kind]
+    mov [rax + PyDictIterObject.it_kind], rcx
+    ; Snapshot capacity and SIZE together under OBJ_LOCK so it_index matches.
+    OBJ_LOCK rdi
     mov rcx, [rdi + PyDictObject.capacity]
     dec rcx
     mov [rax + PyDictIterObject.it_index], rcx
-    mov rcx, [rbx + PyDictViewObject.dv_kind]
-    mov [rax + PyDictIterObject.it_kind], rcx
-    ; The SIZE, for mutation detection -- see dict_reversed on why not
-    ; dk_version.
     mov rcx, [rdi + PyDictObject.ob_size]
+    OBJ_UNLOCK rdi
     mov [rax + PyDictIterObject.it_version], rcx
 
     push rax
@@ -954,8 +964,7 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     call call_iternext
     test rax, rax
     jz .dvj_exhausted
-    V_PACK rax, rdx
-    mov rbx, rax                        ; the item, ours
+    mov rbx, rax                        ; the item Value, ours
 
     ; sq_contains on the view's own type, which is what `x in view` calls.
     mov rdi, [rbp - DVJ_SELF]
@@ -1041,7 +1050,8 @@ section .data
 align 8
 global dict_keys_view_type
 dict_keys_view_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_keys_view_name      ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
@@ -1075,7 +1085,8 @@ dict_keys_view_type:
 align 8
 global dict_values_view_type
 dict_values_view_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_values_view_name    ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
@@ -1109,7 +1120,8 @@ dict_values_view_type:
 align 8
 global dict_items_view_type
 dict_items_view_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_items_view_name     ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize

@@ -156,16 +156,21 @@ DEF_FUNC instance_getattr, IGA_FRAME
     jz .iga_default
     cmp edx, TAG_PTR
     jne .iga_default
-    ; object's own is a builtin wrapping object_method_getattribute.  Anything
-    ; else is a definition, and definitions run.
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel builtin_func_type]
     cmp rcx, r8
-    jne .iga_call
+    jne .iga_drop_call
     extern object_method_getattribute
     lea r8, [rel object_method_getattribute]
     cmp [rax + PyBuiltinObject.func_ptr], r8
-    je .iga_default
+    jne .iga_drop_call
+    mov rdi, rax
+    call obj_decref
+    jmp .iga_default
+.iga_drop_call:
+    mov rdi, rax
+    call obj_decref
+    jmp .iga_call
 .iga_call:
     mov rdi, [rbp - IGA_SELF]
     mov rsi, [rbp - IGA_NAME]
@@ -240,14 +245,14 @@ DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
     jz .aidd_no
     mov rdi, rbx
     CSTRING rsi, "__set__"
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jnz .aidd_yes
     mov rdi, rbx
     CSTRING rsi, "__delete__"
-    call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    call dunder_exists
+    test eax, eax
     jnz .aidd_yes
 
 .aidd_no:
@@ -330,40 +335,49 @@ DEF_FUNC dict_has_data_descr
     push r13
     push r14
     mov rbx, rdi
-    mov r13, [rbx + PyDictObject.capacity]
     xor r14d, r14d
 .dhdd_loop:
-    cmp r14, r13
-    jge .dhdd_no
+    OBJ_LOCK rbx
+    cmp r14, [rbx + PyDictObject.capacity]
+    jge .dhdd_unlock_no
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r14, DICT_ENTRY_SIZE
     add rax, rcx
     mov r12, [rax + DictEntry.key]
     test r12, r12
-    jz .dhdd_next
+    jz .dhdd_unlock_next
     mov rdi, [rax + DictEntry.value]
-    ; __dict__ and __weakref__ are in nearly every class's dict and must not
-    ; make this answer yes for all of them -- see GS_LAYOUT in object.inc.
-    ; attr_may_be_data_descr still says yes for them, which is what the live
-    ; ranking check and the per-name inline-cache question need; this is the
-    ; cached per-class over-approximation, and only it skips them.
     V_TEST_PTR rdi, rcx
     ja .dhdd_ask
     test rdi, rdi
-    jz .dhdd_next
+    jz .dhdd_unlock_next
     mov rcx, [rdi + PyObject.ob_type]
     lea rdx, [rel getset_descr_type]
     cmp rcx, rdx
     jne .dhdd_ask
     test qword [rdi + PyGetSetDescrObject.gs_flags], GS_LAYOUT
-    jnz .dhdd_next
+    jnz .dhdd_unlock_next
 .dhdd_ask:
+    mov r13, rdi
+    INCREF_V r13, rcx
+    OBJ_UNLOCK rbx
+    mov rdi, r13
     call attr_may_be_data_descr
+    push rax
+    push rax
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     test eax, eax
     jnz .dhdd_yes
+    jmp .dhdd_next
+.dhdd_unlock_next:
+    OBJ_UNLOCK rbx
 .dhdd_next:
     inc r14
     jmp .dhdd_loop
+.dhdd_unlock_no:
+    OBJ_UNLOCK rbx
 .dhdd_no:
     xor eax, eax
     jmp .dhdd_out
@@ -400,41 +414,125 @@ END_FUNC dict_has_data_descr
 DEF_FUNC_BARE type_bump_version
     test rdi, rdi
     jz .tbv_out
-    mov eax, [rel type_version_counter]
-    inc eax
-    jnz .tbv_store
-    mov eax, 1                      ; wrapped; zero is not a version
-.tbv_store:
-    mov [rel type_version_counter], eax
-    mov rdx, [rdi + PyTypeObject.tp_flags]
-    mov edx, edx                    ; keep the flags, drop the old version
-    shl rax, TYPE_VERSION_SHIFT
-    or rdx, rax
-    mov [rdi + PyTypeObject.tp_flags], rdx
+.tbv_ver_retry:
+    mov eax, 1
+    lock xadd [rel type_version_counter], eax
+    inc eax                         ; eax = new version value
+    jz .tbv_ver_retry               ; skip 0 (sentinel for unversioned)
+    mov ecx, eax                    ; keep new 32-bit version in ecx
+.tbv_cas:
+    mov rax, [rdi + PyTypeObject.tp_flags]
+    mov edx, eax                    ; keep low 32 flag bits
+    mov r8, rcx
+    shl r8, TYPE_VERSION_SHIFT
+    or rdx, r8
+    lock cmpxchg [rdi + PyTypeObject.tp_flags], rdx
+    jne .tbv_cas
 .tbv_out:
     ret
 END_FUNC type_bump_version
 
 ;; ============================================================================
-;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
+;; type_bump_version_tree(rdi = a type) -> nothing
 ;;
-;; Ask, once, the two questions instance_getattr's fast path is not allowed to
-;; ask per access:
-;;
-;;   - does anything in this MRO define a __getattribute__ that is not
-;;     object's?                      TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
-;;   - does anything in this MRO keep a DATA descriptor in its dict?
-;;                                    TYPE_FLAG_MRO_HAS_DATA_DESCR
-;;
-;; Both answers are inherited, so both are pushed down every subclass.  That
-;; is the whole reason the direct-subclass table has to be populated before
-;; any user code runs -- a class registered later would sit outside this walk
-;; and keep a stale bit forever.
-;;
-;; Called at class creation and from type_setattr.  Both are cold; this walks
-;; the MRO and allocates nothing.
+;; Bump tp_version on rdi and every subclass so type_cache entries referencing
+;; this class hierarchy are invalidated before tp_dict mutation.
 ;; ============================================================================
+global type_bump_version_tree
+DEF_FUNC type_bump_version_tree
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rdi, rdi
+    jz .tbvt_out
+    mov rbx, rdi
+    call type_bump_version
+    mov rdi, rbx
+    extern sub_list_snapshot
+    call sub_list_snapshot
+    test rax, rax
+    jz .tbvt_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
+    xor r14d, r14d
+.tbvt_loop:
+    cmp r14, r13
+    jge .tbvt_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
+    test rdi, rdi
+    jz .tbvt_next
+    call type_bump_version_tree
+.tbvt_next:
+    inc r14
+    jmp .tbvt_loop
+.tbvt_drop:
+    mov rdi, r12
+    call obj_decref
+.tbvt_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_bump_version_tree
 
+;; ============================================================================
+;; type_clear_version_tree(rdi = a type) -> nothing
+;;
+;; Clear tp_version to 0 on rdi and every subclass so type_lookup_cached will
+;; not populate new cache entries during a concurrent tp_dict mutation.
+;; ============================================================================
+global type_clear_version_tree
+DEF_FUNC type_clear_version_tree
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rdi, rdi
+    jz .tcvt_out
+    mov rbx, rdi
+.tcvt_cas:
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    mov edx, eax                    ; keep low 32 flag bits, version = 0
+    lock cmpxchg [rbx + PyTypeObject.tp_flags], rdx
+    jne .tcvt_cas
+    mov rdi, rbx
+    call sub_list_snapshot
+    test rax, rax
+    jz .tcvt_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
+    xor r14d, r14d
+.tcvt_loop:
+    cmp r14, r13
+    jge .tcvt_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
+    test rdi, rdi
+    jz .tcvt_next
+    call type_clear_version_tree
+.tcvt_next:
+    inc r14
+    jmp .tcvt_loop
+.tcvt_drop:
+    mov rdi, r12
+    call obj_decref
+.tcvt_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_clear_version_tree
+
+;; ============================================================================
+;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
+;; Recompute MRO attribute flags and bump version across the subclass tree.
+;; ============================================================================
 DEF_FUNC type_refresh_attr_flags
     push rbx
     push r12
@@ -444,11 +542,8 @@ DEF_FUNC type_refresh_attr_flags
     jz .trg_out
     mov rbx, rdi
 
-    ; Whatever this recomputes, it recomputes because the type or one of its
-    ; bases changed -- so every cache keyed on the old version is now wrong.
-    ; Stamping here rather than at the call sites means the walk over
-    ; subclasses below invalidates them too, which is the property the caches
-    ; rely on.
+    extern type_lock
+    RT_LOCK_GATED type_lock
     call type_bump_version
 
     lea rsi, [rel ig_getattribute_name]
@@ -458,40 +553,31 @@ DEF_FUNC type_refresh_attr_flags
     jz .trg_clear               ; nothing in the MRO at all
     cmp edx, TAG_PTR
     jne .trg_clear
-    ; object's own is a builtin wrapping object_method_getattribute; anything
-    ; else is a definition.  The same test instance_getattr makes.
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel builtin_func_type]
     cmp rcx, r8
-    jne .trg_set
+    jne .trg_drop_set
     lea r8, [rel object_method_getattribute]
     cmp [rax + PyBuiltinObject.func_ptr], r8
-    je .trg_clear
+    jne .trg_drop_set
+    mov rdi, rax
+    call obj_decref
+    jmp .trg_clear
+.trg_drop_set:
+    mov rdi, rax
+    call obj_decref
 .trg_set:
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     jmp .trg_data_descr
 .trg_clear:
     mov rax, TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     not rax
-    and [rbx + PyTypeObject.tp_flags], rax
+    lock and [rbx + PyTypeObject.tp_flags], rax
 
 .trg_data_descr:
-    ; --- and the data-descriptor bit ---
-    ; Reached whichever way the question above was answered.  It used to be
-    ; reached only on the `clear` path, so a class that overrode
-    ; __getattribute__ never had this bit computed at all -- and the two are
-    ; independent: __getattribute__ has nothing to do with __setattr__, and
-    ; op_store_attr consults this bit ALONE to decide whether a store needs to
-    ; look for a property.  A class with both answered `c.p = 5` by putting
-    ; `p` straight into the instance dict, so the setter never ran.
-    ; The MRO's dicts, scanned for anything a data descriptor could be.  Cold,
-    ; and the answer saves the hot path an MRO walk per attribute access.
-    ; TYPE_FLAG_HEAP_DATA_DESCR is the same answer counted over the
-    ; heaptypes alone, so the walk goes on past a static type that set the
-    ; wide bit, and stops at the first heaptype that sets both.
     mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR | TYPE_FLAG_HEAP_DATA_DESCR
     not rax
-    and [rbx + PyTypeObject.tp_flags], rax
+    lock and [rbx + PyTypeObject.tp_flags], rax
     mov r12, rbx                        ; the MRO walker
 .trg_mro:
     test r12, r12
@@ -502,50 +588,49 @@ DEF_FUNC type_refresh_attr_flags
     call dict_has_data_descr
     test eax, eax
     jz .trg_mro_next
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
     test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .trg_mro_next
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
     jmp .trg_has_del
 .trg_mro_next:
     MRO_NEXT r12, rbx
     jmp .trg_mro
 
 .trg_has_del:
-    ; --- and the __del__ bit ---
-    ; The same question instance_dealloc used to ask by name on every instance
-    ; that died.  Asked once here instead, and pushed down the subclasses by
-    ; the walk below, so `Base.__del__ = f` reaches an already-built D.
     mov rax, TYPE_FLAG_HAS_DEL
     not rax
-    and [rbx + PyTypeObject.tp_flags], rax
+    lock and [rbx + PyTypeObject.tp_flags], rax
     mov rdi, rbx
     lea rsi, [rel trg_del_name]
-    call dunder_lookup
-    test rax, rax                       ; a NULL Value is the only "absent"
+    call dunder_exists
+    test eax, eax
     jz .trg_children
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
 
 .trg_children:
+    RT_UNLOCK_GATED type_lock
     mov rdi, rbx
-    call sub_list_for_type
+    call sub_list_snapshot
     test rax, rax
     jz .trg_out
-    mov r12, [rax + SubList.items]
-    mov r13, [rax + SubList.count]
-    test r12, r12
-    jz .trg_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
     xor r14d, r14d
 .trg_loop:
     cmp r14, r13
-    jge .trg_out
-    mov rdi, [r12 + r14*8]
+    jge .trg_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
     test rdi, rdi
     jz .trg_next
     call type_refresh_attr_flags
 .trg_next:
     inc r14
     jmp .trg_loop
+.trg_drop:
+    mov rdi, r12
+    call obj_decref
 
 .trg_out:
     pop r14
@@ -681,9 +766,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jz .found_inst_nowhere
     mov qword [rcx], 1
 .found_inst_nowhere:
-    mov r13, rax                ; save payload
+    mov r13, rax                ; save payload (already owned from dict_get)
     mov r12, rdx                ; save tag (name no longer needed)
-    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     IG_RELEASE_HELD
@@ -695,6 +779,12 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ret
 
 .found_type:
+    ; type_lookup_cached returns an owned reference; park TAG_PTR in IG_HELD
+    ; so every exit releases it automatically via IG_RELEASE_HELD.
+    cmp rdx, TAG_PTR
+    jne .ft_check_descr
+    mov [rbp - IG_HELD], rax
+.ft_check_descr:
     ; On the descriptor-first order the instance dict has not been consulted
     ; yet, and it outranks everything here except a data descriptor.
     cmp qword [rbp - IG_DESCR1], 0
@@ -715,20 +805,9 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jnz .found_type_dispatch            ; data descriptor: it wins
 .ft_beaten_by_inst:
     ; Not one.  If the instance has the name, that is the answer.
-    ;
-    ; The lookup below runs the instance dict's KEYS' __eq__, and that is
-    ; arbitrary Python: `del C.attr` inside one drops the type's last
-    ; reference to the descriptor this is still holding, and everything after
-    ; reads freed memory.  CPython INCREFs what _PyType_Lookup found and keeps
-    ; it to the end of the function for exactly this -- test_descr's
-    ; vicious_descriptor_nonsense, from 2003 -- and so does IG_HELD.
+    ; IG_HELD already holds our owned ref across the instance dict lookup.
     push rax
     push rdx
-    cmp rdx, TAG_PTR
-    jne .ft_not_held
-    mov [rbp - IG_HELD], rax
-    INCREF rax
-.ft_not_held:
     LOAD_INST_DICT rdi, rbx, .ft_no_inst
     test rdi, rdi
     jz .ft_no_inst
@@ -927,8 +1006,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; find the member descriptor in tp_dict and hand THAT back.
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
-    call dunder_lookup
-    test rax, rax               ; a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jnz .ig_ask_getattr
 
     ; CPython names the type and the attribute here as it does everywhere
@@ -978,8 +1057,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; consulted, so a class defining it got a bare AttributeError.
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .really_not_found
     ; A __getattr__ explicitly set to None is not absent.  CPython calls it and
     ; the call fails as "'NoneType' object is not callable"; treating it as
@@ -1172,8 +1251,8 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     mov rdi, [rbp - AGH_OBJ]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
-    call dunder_lookup
-    test rax, rax               ; a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .agh_no
 
     ; rbx still holds the exception, and the global still holds its reference.
@@ -1254,32 +1333,35 @@ DEF_FUNC instance_setattr
     ; reference is borrowed the same way.
     mov rdi, rax
     mov rsi, r12                ; name
-    call type_lookup_cached     ; rax = payload, edx = tag
+    call type_lookup_cached     ; rax = payload (owned), edx = tag
     mov r9, rax
     test edx, edx
     jz .sa_no_slot
 
 .sa_found_type:
-    ; Check if it's a member descriptor (r9 = the value found)
+    ; Check if it's a member descriptor (r9 = owned value if TAG_PTR)
     cmp edx, TAG_PTR
     jne .sa_no_slot
+    mov r14, r9                 ; keep owned descriptor in callee-saved r14
     extern member_descr_type
     lea rcx, [rel member_descr_type]
-    cmp [r9 + PyObject.ob_type], rcx
+    cmp [r14 + PyObject.ob_type], rcx
     je .sa_member
 
-    ; A property is a data descriptor too, and this is the only road a DELETE
-    ; takes: op_store_attr has a property fast path of its own, op_delete_attr
-    ; has none and comes straight here.  So `del obj.prop` never reached the
-    ; deleter -- it fell through to the instance dict and did nothing.
     lea rcx, [rel property_type]
-    cmp [r9 + PyObject.ob_type], rcx
+    cmp [r14 + PyObject.ob_type], rcx
     jne .sa_check_getset
-    mov rdi, r9
+    mov rdi, r14
     mov rsi, rbx
     mov rdx, r13                ; the value Value; 0 means delete
     extern property_descr_set
     call property_descr_set     ; err: its status is this slot's own
+    push rax
+    sub rsp, 8
+    mov rdi, r14
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop r14
     pop r13
     pop r12
@@ -1288,25 +1370,23 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_check_getset:
-    ; A getset descriptor is a data descriptor: it takes precedence over the
-    ; instance dict, so `I(5).real = 9` is the AttributeError CPython raises
-    ; rather than a shadowing instance attribute.
     extern getset_descr_type
     lea rcx, [rel getset_descr_type]
-    cmp [r9 + PyObject.ob_type], rcx
+    cmp [r14 + PyObject.ob_type], rcx
     jne .sa_check_heap_descr
-    ; The __dict__ and __weakref__ getsets a class body grows are the
-    ; instance LAYOUT, handled below -- reached here only when some other
-    ; data descriptor (any property) set the MRO flag.  Their getset has no
-    ; setter, so `o.__dict__ = d` on an instance of a class with a property
-    ; was "not writable"; rich's Console is that class, and pip uses rich.
-    test qword [r9 + PyGetSetDescrObject.gs_flags], GS_LAYOUT
-    jnz .sa_no_slot
-    mov rdi, r9
+    test qword [r14 + PyGetSetDescrObject.gs_flags], GS_LAYOUT
+    jnz .sa_drop_no_slot
+    mov rdi, r14
     mov rsi, rbx
     mov rdx, r13
     extern getset_descr_set
     call getset_descr_set       ; err: its status is this slot's own
+    push rax
+    sub rsp, 8
+    mov rdi, r14
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop r14
     pop r13
     pop r12
@@ -1315,16 +1395,9 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_check_heap_descr:
-    ; A data descriptor written in Python -- a class with __set__, or with
-    ; __delete__ for a delete.  op_store_attr calls __set__ before it ever
-    ; gets here, but setattr(), object.__setattr__ and `del obj.x` come
-    ; straight to this store, and they stored into the instance dict past
-    ; it: setattr(struct, "x", 1) on a ctypes Structure, whose fields are
-    ; exactly such descriptors, left the field untouched.
-    mov rcx, [r9 + PyObject.ob_type]
+    mov rcx, [r14 + PyObject.ob_type]
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .sa_no_slot
-    mov r14, r9                 ; the descriptor, borrowed from the MRO
+    jz .sa_drop_no_slot
     mov rdi, rcx
     extern dunder_set
     lea rsi, [rel dunder_set]
@@ -1332,13 +1405,19 @@ DEF_FUNC instance_setattr
     jnz .sa_heap_lookup
     lea rsi, [rel ia_dunder_delete]
 .sa_heap_lookup:
-    call dunder_lookup          ; rax = the function, borrowed, or 0
+    call dunder_lookup          ; rax = the function (owned), or 0
     test rax, rax
-    jz .sa_no_slot
-    sub rsp, 32                 ; [descriptor, instance, value] + pad
-    mov [rsp], r14
-    mov [rsp + 8], rbx
-    mov [rsp + 16], r13
+    jz .sa_drop_no_slot
+SA_ARG_DESC equ 0
+SA_ARG_INST equ 8
+SA_ARG_VAL  equ 16
+SA_ARG_FN   equ 24
+SA_ARG_SZ   equ 32
+    sub rsp, SA_ARG_SZ
+    mov [rsp + SA_ARG_DESC], r14
+    mov [rsp + SA_ARG_INST], rbx
+    mov [rsp + SA_ARG_VAL], r13
+    mov [rsp + SA_ARG_FN], rax
     mov rdi, rax
     mov rsi, rsp
     mov edx, 3
@@ -1347,18 +1426,33 @@ DEF_FUNC instance_setattr
     mov edx, 2                  ; __delete__(descriptor, instance)
 .sa_heap_call:
     extern obj_call_n
-    call obj_call_n
-    add rsp, 32
+    call obj_call_n             ; err: checked via ERR_NULL .sa_fail after releasing r14 + fn
+    mov r8, [rsp + SA_ARG_FN]   ; owned fn
+    add rsp, SA_ARG_SZ
+    push rax
+    push r8
+    mov rdi, r8
+    DECREF_V rdi, rcx
+    mov rdi, r14
+    call obj_decref
+    pop r8
+    pop rax
     ERR_NULL .sa_fail
     DECREF_V rax, rcx
     jmp .sa_ok
 
 .sa_member:
-    mov rdi, r9
+    mov rdi, r14
     mov rsi, rbx
     mov rdx, r13
     extern member_descr_set
     call member_descr_set       ; err: forward the result
+    push rax
+    sub rsp, 8
+    mov rdi, r14
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop r14
     pop r13
     pop r12
@@ -1366,6 +1460,9 @@ DEF_FUNC instance_setattr
     leave
     ret
 
+.sa_drop_no_slot:
+    mov rdi, r14
+    call obj_decref
 .sa_no_slot:
     ; __dict__ and __weakref__ are the two names that reach here and must NOT
     ; become instance-dict keys.  Their getsets carry GS_LAYOUT, which stays
@@ -1400,17 +1497,41 @@ DEF_FUNC instance_setattr
     test rax, TYPE_FLAG_HAS_SLOTS
     jnz .sa_no_dict_error
 
-    ; Regular class without __slots__ — create dict on the fly
+    ; Regular class without __slots__ — create dict on the fly (locked publish)
     push r12
     push r13
     push r14
     call dict_new
-    STORE_INST_DICT rbx, rax, rcx, .sa_no_dict_slot
-    mov rdi, rax
+    mov r14, rax
+    OBJ_LOCK rbx
+    LOAD_INST_DICT rdi, rbx, .sa_unlock_no_dict
+    test rdi, rdi
+    jnz .sa_dict_race_lost
+    STORE_INST_DICT rbx, r14, rcx, .sa_unlock_no_dict
+    OBJ_UNLOCK rbx
+    mov rdi, r14
+    jmp .sa_dict_ready
+.sa_dict_race_lost:
+    OBJ_UNLOCK rbx
+    push rdi
+    push rdi
+    mov rdi, r14
+    call obj_decref
+    pop rdi
+    pop rax
+.sa_dict_ready:
     pop r14
     pop r13
     pop r12
     jmp .sa_dict_set
+.sa_unlock_no_dict:
+    OBJ_UNLOCK rbx
+    mov rdi, r14
+    call obj_decref
+    pop r14
+    pop r13
+    pop r12
+    jmp .sa_no_dict_slot
 
 .sa_have_dict:
 .sa_dict_set:
@@ -1467,16 +1588,24 @@ DEF_FUNC instance_setattr
     mov rdi, r13
     call obj_incref
 .sa_layout_dict_clear:
-    ; The old dict is released only after the new one is installed: it may be
-    ; the sole owner of the value being stored back into it.
-    LOAD_INST_DICT r14, rbx, .sa_no_dict_slot
-    STORE_INST_DICT rbx, r13, rcx, .sa_no_dict_slot
+    ; Swap instance dict atomically under OBJ_LOCK; release old dict unlocked.
+    OBJ_LOCK rbx
+    LOAD_INST_DICT r14, rbx, .sa_layout_unlock_no_slot
+    STORE_INST_DICT rbx, r13, rcx, .sa_layout_unlock_no_slot
+    OBJ_UNLOCK rbx
     test r14, r14
     jz .sa_layout_done
     mov rdi, r14
     call obj_decref
 .sa_layout_done:
     jmp .sa_ok
+.sa_layout_unlock_no_slot:
+    OBJ_UNLOCK rbx
+    test r13, r13
+    jz .sa_no_dict_slot
+    mov rdi, r13
+    call obj_decref
+    jmp .sa_no_dict_slot
 
 .sa_layout_dict_bad:
     ; "not a 'int'" -- the quotes are CPython's, and so is naming the type of

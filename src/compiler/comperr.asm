@@ -260,7 +260,7 @@ section .text
 ;; comp_msg_start() -> rax = the message buffer, emptied
 ;; ============================================================================
 DEF_FUNC_BARE comp_msg_start
-    lea rax, [rel comp_msgbuf]
+    TS_LEA rax, ts_errbuf
     mov byte [rax], 0
     ret
 END_FUNC comp_msg_start
@@ -660,7 +660,7 @@ DEF_FUNC_BARE comp_defer_warnings
     test rax, rax
     jz .cdw_done
     mov [rel cpw_file], rax
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     xor edx, edx
 .cdw_copy:
     cmp edx, ecx
@@ -803,10 +803,7 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
     mov rax, [rbp - CLW_MOD]
     test rax, rax
     jz .clw_none
-    mov rdi, rax
-    call obj_incref             ; the cache holds it for the process
-    mov rax, [rbp - CLW_MOD]
-    mov [rel cew_warn_explicit], rax
+    mov [rel cew_warn_explicit], rax    ; cache owns ref from dict_get
 .clw_done:
     leave
     ret

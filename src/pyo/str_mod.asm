@@ -208,6 +208,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     xor r14d, r14d             ; r14 = output pos
     xor r15d, r15d             ; r15 = arg index
     mov qword [rbp-SM_HASKEY], 0
+    mov qword [rbp-SM_KEYVAL], 0
 
     ; Walk format string
     mov rbx, [rbp-SM_FMT]     ; fmt string
@@ -318,6 +319,8 @@ DEF_FUNC str_mod_impl, SM_FRAME
     push rcx
     push r9
     call obj_decref
+    mov rdi, [rbp-SM_KEYVAL]
+    XDECREF_V rdi, rdx
     pop r9
     pop rcx
     mov [rbp-SM_KEYVAL], r9
@@ -924,6 +927,10 @@ DEF_FUNC str_mod_impl, SM_FRAME
     pop rdi                    ; free heap buffer
     call ap_free
 
+    mov rdi, [rbp-SM_KEYVAL]
+    mov qword [rbp-SM_KEYVAL], 0
+    XDECREF_V rdi, rcx
+
     mov rax, rbx               ; return result
     pop r15
     pop r14
@@ -957,7 +964,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
 .sm_bad_conv:
     push rdi
     push rsi
-    lea rdi, [rel sm_convbuf]
+    TS_LEA rdi, ts_errbuf
     CSTRING rsi, "unsupported format character '"
     extern rbt_append_cstr
     call rbt_append_cstr
@@ -981,7 +988,7 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov byte [rax], 0
     add rsp, 16
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel sm_convbuf]
+    TS_LEA rsi, ts_errbuf
     jmp .sm_error
 
 .sm_key_raised:
@@ -1047,6 +1054,9 @@ DEF_FUNC str_mod_impl, SM_FRAME
     mov qword [rbp-SM_BUF], 0
     call ap_free
 .sm_error_ret:
+    mov rdi, [rbp-SM_KEYVAL]
+    mov qword [rbp-SM_KEYVAL], 0
+    XDECREF_V rdi, rcx
     ; A directive that failed part way still holds its spec, and its argument
     ; when a conversion made a new one.  A raise used to leave both behind.
     sub rsp, 8                  ; five pushes: these calls want rsp aligned

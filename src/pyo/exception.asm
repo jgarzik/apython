@@ -102,7 +102,7 @@ DEF_FUNC exc_new, EN_FRAME
     ; sixty-nine builtin ones and false of every class a program writes.  An
     ; uncounted one is freed by the collector out from under live instances,
     ; because a class's only cycle is with its own MRO tuple.
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
     mov qword [rax + PyExceptionObject.exc_tb], 0
@@ -820,7 +820,7 @@ DEF_FUNC exc_getattr_where
     ret
 
 .found_in_dict:
-    INCREF_VAL rax, rdx
+    ; Already owned from dict_get
     pop r14
     pop r13
     pop r12
@@ -846,7 +846,7 @@ DEF_FUNC exc_getattr_where
     je .fit_bind
     mov edx, TAG_PTR
 .fit_raw:
-    INCREF_VAL rax, rdx     ; tag-aware INCREF (rdx = tag from dict_get)
+    ; Already owned from dict_get_mro
     pop r14
     pop r13
     pop r12
@@ -856,10 +856,17 @@ DEF_FUNC exc_getattr_where
     ret
 
 .fit_bind:
+    push rax
+    sub rsp, 8
     mov rdi, rax
     mov rsi, rbx
     extern method_new
     call method_new
+    mov rbx, rax
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; drop owned func from dict_get_mro
+    mov rax, rbx
     mov edx, TAG_PTR
     pop r14
     pop r13
@@ -1872,12 +1879,12 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     ; is what list_append does too.
     V_TEST_PTR rax, rcx
     ja .ean_not_list
-    mov [rbp - EAN_LIST], rax           ; borrowed: the dict owns it
+    mov [rbp - EAN_LIST], rax           ; owned from dict_get
     mov rdi, [rax + PyObject.ob_type]
     lea rsi, [rel list_type]
     call type_is_subtype
     test eax, eax
-    jz .ean_not_list
+    jz .ean_not_list_drop
     jmp .ean_append
 
 .ean_make:
@@ -1885,21 +1892,19 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     call list_new
     test rax, rax
     jz .ean_out
-    mov [rbp - EAN_LIST], rax
+    mov [rbp - EAN_LIST], rax           ; owned until .ean_out
     mov rdi, [rbp - EAN_SELF]
     mov rsi, [rbp - EAN_NAME]
     mov rdx, rax
     xor ecx, ecx
     call exc_setattr                    ; err: __notes__ is no field name
-    ; The dict holds it now.  Dropping the constructor's reference leaves one
-    ; owner, so the list a program reads back is the one appended to here.
-    mov rdi, [rbp - EAN_LIST]
-    call obj_decref
 
 .ean_append:
     mov rdi, [rbp - EAN_LIST]
     mov rsi, [rbp - EAN_NOTE]
     call list_append          ; err: a list built here is not being sorted
+    mov rdi, [rbp - EAN_LIST]
+    call obj_decref
 
 .ean_out:
     mov rdi, [rbp - EAN_NAME]
@@ -1911,6 +1916,9 @@ DEF_FUNC exc_method_add_note, EAN_FRAME
     leave
     ret
 
+.ean_not_list_drop:
+    mov rdi, [rbp - EAN_LIST]
+    call obj_decref
 .ean_not_list:
     mov rdi, [rbp - EAN_NAME]
     call obj_decref
@@ -2178,26 +2186,27 @@ DEF_FUNC exc_user_new, 8            ; 1 push, so rsp is 16-aligned
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel builtin_func_type]
     cmp rcx, rdx
-    je .eun_none                ; a builtin: the default, not a definition
-    ; A staticmethod wrapping a builtin is the same default: BaseException's
-    ; own __new__ is registered that way, and unwrapping is how to see it.
+    je .eun_drop_none           ; a builtin: the default, not a definition
     extern staticmethod_type
     lea rdx, [rel staticmethod_type]
     cmp rcx, rdx
     jne .eun_out
     mov rcx, [rax + PyStaticMethodObject.sm_callable]
     test rcx, rcx
-    jz .eun_none
+    jz .eun_drop_none
     V_TEST_PTR rcx, rdx
     ja .eun_out
     mov rcx, [rcx + PyObject.ob_type]
     lea rdx, [rel builtin_func_type]
     cmp rcx, rdx
-    je .eun_none
+    je .eun_drop_none
 .eun_out:
     pop rbx
     leave
     ret
+.eun_drop_none:
+    mov rdi, rax
+    call obj_decref
 .eun_none:
     xor eax, eax
     pop rbx
@@ -2205,14 +2214,6 @@ DEF_FUNC exc_user_new, 8            ; 1 push, so rsp is 16-aligned
     ret
 END_FUNC exc_user_new
 
-;; ============================================================================
-;; exc_user_init(rdi = the class) -> rax = its Python __init__, borrowed, or 0
-;;
-;; The __init__ to run, found along the MRO rather than in the class's own
-;; slot: it is inherited, and `class F(E): pass` runs E's.  A builtin answer is
-;; BaseException's default and means "no", which is what keeps a class with no
-;; constructor of its own on the fast path.
-;; ============================================================================
 DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
@@ -2234,16 +2235,17 @@ DEF_FUNC exc_user_init, 8            ; 1 push, so rsp is 16-aligned
     cmp rcx, rdx
     jne .eui_found
     test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_OSERROR_SUBCLASS
-    jz .eui_none
-    ; A subclass can explicitly use another builtin initializer, such as
-    ; BaseException.__init__. Only OSError's own initializer is the default.
+    jz .eui_drop_none
     lea rdx, [rel oserror_method_init]
     cmp [rax + PyBuiltinObject.func_ptr], rdx
-    je .eui_none
+    je .eui_drop_none
 .eui_found:
     pop rbx
     leave
     ret
+.eui_drop_none:
+    mov rdi, rax
+    call obj_decref
 .eui_none:
     xor eax, eax
     pop rbx
@@ -2286,6 +2288,8 @@ DEF_FUNC exc_type_call, ETC_FRAME
     call exc_user_init
     test rax, rax
     jz .etc_no_user_init
+    mov rdi, rax
+    call obj_decref
     mov r12, [gs:ThreadState.kw_names_pending]
     test r12, r12
     jz .etc_kw_done
@@ -2782,7 +2786,8 @@ exc_name_EncodingWarning:   db "EncodingWarning", 0
 align 8
 global exc_metatype
 exc_metatype:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq exc_meta_name        ; tp_name
     dq TYPE_OBJECT_SIZE     ; tp_basicsize (PyTypeObject size)
@@ -2841,7 +2846,8 @@ exc_new_name:  db "__new__", 0
 align 8
 global %1
 %1:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq exc_metatype         ; ob_type (metatype with tp_call)
     dq %2                   ; tp_name
     %if %4

@@ -201,7 +201,19 @@ DEF_FUNC_LOCAL mg_getattr_name
     call str_from_cstr_heap
     test rax, rax
     jz .mgn_done                ; 0, and the caller treats it as "no hook"
-    mov [rel mg_name_cached], rax
+    mov rdx, rax
+    xor eax, eax
+    lock cmpxchg [rel mg_name_cached], rdx
+    jz .mgn_installed
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rax
+    pop rdx
+    jmp .mgn_done
+.mgn_installed:
+    mov rax, rdx
 .mgn_done:
     leave
     ret
@@ -220,7 +232,19 @@ DEF_FUNC_LOCAL mg_dir_name
     call str_from_cstr_heap
     test rax, rax
     jz .mdn_done
-    mov [rel mg_dir_cached], rax
+    mov rdx, rax
+    xor eax, eax
+    lock cmpxchg [rel mg_dir_cached], rdx
+    jz .mdn_installed
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rax
+    pop rdx
+    jmp .mdn_done
+.mdn_installed:
+    mov rax, rdx
 .mdn_done:
     leave
     ret
@@ -277,11 +301,7 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     ; The module's own __dir__, called with no arguments.  obj_call_n refuses a
     ; non-callable with a TypeError, which is what CPython answers too.
     ;
-    ; dict_get handed back a BORROWED reference and the call runs arbitrary
-    ; Python, so own it for the duration: a hook whose body is
-    ; `del globals()["__dir__"]` otherwise drops the last reference to the
-    ; function that is executing, and this frame goes on using freed memory.
-    INCREF_V rax, rcx
+    ; dict_get already returned an owned reference; hold it across the call.
     mov [rbp - MDD_HOOK], rax
     mov rdi, rax
     xor esi, esi
@@ -348,7 +368,7 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rax, [rbx + PyModuleObject.mod_dict]
     test rax, rax
     jz .not_found
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -366,10 +386,9 @@ DEF_FUNC module_getattr, MG_FRAME
     ERR_DICT_GET .mg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
-    ; INCREF if found (dict_get returns borrowed ref)
+    ; dict_get already returned an owned Value
     test edx, edx
     jz .not_found
-    INCREF_VAL rax, rdx         ; tag-aware: skip for SmallInt
     pop r12
     pop rbx
     leave
@@ -412,31 +431,31 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, r12
     extern type_lookup_cached
-    call type_lookup_cached     ; rax = payload, edx = tag; borrowed
+    call type_lookup_cached     ; rax = payload (owned), edx = tag
     test edx, edx
-    jnz .mg_really_not_found
+    jz .mg_check_generic
+    DECREF_VAL rax, rdx
+    mov rdi, [rbp - MG_HOOK]
+    DECREF_V rdi, rcx
+    jmp .mg_really_not_found
+.mg_check_generic:
     mov rdi, rbx
     mov rsi, r12
     extern obj_generic_attr
     call obj_generic_attr       ; __class__, which no dict holds; owned, or 0
     test rax, rax
-    jnz .mg_generic
+    jz .mg_call_hook
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MG_HOOK]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    jmp .mg_generic
+.mg_call_hook:
     mov rax, [rbp - MG_HOOK]
 
-    ; The hook, called with the attribute name.  obj_call_n returns rather
-    ; than unwinding, and refuses a non-callable with a TypeError of its own --
-    ; which is CPython's answer for `m.__getattr__ = 5` too, so it is left to
-    ; do that.
-    ;
-    ; dict_get handed back a BORROWED reference, and the call runs arbitrary
-    ; Python -- which may unbind the hook.  A body of
-    ; `del globals()["__getattr__"]` then drops the last reference to the
-    ; function that is currently executing, and every instruction after the
-    ; call reads freed memory.  So own it for the duration.  CPython's own
-    ; Lib/test/test_module/bad_getattr3.py is exactly this, and its comment is
-    ; "these lookups should not crash".
-    INCREF_V rax, rcx
-    mov [rbp - MG_HOOK], rax
+    ; MG_HOOK is already owned from dict_get; hold it across the call.
     mov [rbp - MG_NAME], r12    ; the one-Value argument array
     mov rdi, rax
     lea rsi, [rbp - MG_NAME]
@@ -603,7 +622,11 @@ DEF_FUNC module_repr, MR_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .mr_no_file
+    je .mr_save_file
+    mov rdi, rax
+    call obj_decref
+    jmp .mr_no_file
+.mr_save_file:
     mov [rbp - MR_FILE], rax
 .mr_no_file:
 
@@ -678,6 +701,12 @@ DEF_FUNC module_repr, MR_FRAME
     mov rdi, rbx
     mov rsi, [rbp - MR_FILE]
     call module_repr_from
+    push rax
+    push rdx
+    mov rdi, [rbp - MR_FILE]
+    call obj_decref
+    pop rdx
+    pop rax
     pop rbx
     leave
     ret
@@ -831,7 +860,8 @@ global module_type
 
 
 module_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq module_type_name         ; tp_name
     dq PyModuleObject_size      ; tp_basicsize
@@ -1084,7 +1114,7 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     test eax, eax
     jnz .nsg_lookup
     mov rax, [rbx + PySimpleNamespaceObject.ns_dict]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -1099,7 +1129,6 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jz .nsg_none
-    INCREF_VAL rax, rdx
     pop rbx
     leave
     V_PACK rax, rdx
@@ -1240,21 +1269,20 @@ DEF_FUNC namespace_repr, NR_FRAME
     test rax, rax
     jz .nr_close
     mov [rbp - NR_DICT], rax
-    mov rcx, [rax + PyDictObject.capacity]
-    mov [rbp - NR_CAP], rcx
 
 .nr_scan:
+    mov r10, [rbp - NR_DICT]
+    OBJ_LOCK r10
     mov rcx, [rbp - NR_IDX]
-    cmp rcx, [rbp - NR_CAP]
-    jge .nr_close
-    mov rax, [rbp - NR_DICT]
-    mov rax, [rax + PyDictObject.entries]
+    cmp rcx, [r10 + PyDictObject.capacity]
+    jge .nr_unlock_close
+    mov rax, [r10 + PyDictObject.entries]
     imul rdx, rcx, DICT_ENTRY_SIZE
     mov rsi, [rax + rdx + DictEntry.key]
     test rsi, rsi
-    jz .nr_next
+    jz .nr_unlock_next
     cmp r13, NR_BUF - 64
-    jae .nr_close
+    jae .nr_unlock_close
 
     ; ", " between items
     cmp qword [rbp - NR_COUNT], 0
@@ -1265,7 +1293,7 @@ DEF_FUNC namespace_repr, NR_FRAME
 .nr_no_sep:
     inc qword [rbp - NR_COUNT]
 
-    ; key -- always a str here
+    ; key -- always a str here; copy bytes while OBJ_LOCK holds entry alive
     mov r8, [rsi + PyStrObject.ob_size]
     lea rsi, [rsi + PyStrObject.data]
     xor ecx, ecx
@@ -1274,8 +1302,8 @@ DEF_FUNC namespace_repr, NR_FRAME
     jge .nr_key_done
     cmp r13, NR_BUF - 40
     jae .nr_key_done
-    movzx eax, byte [rsi + rcx]
-    mov [rbx + r13], al
+    movzx r9d, byte [rsi + rcx]
+    mov [rbx + r13], r9b
     inc r13
     inc rcx
     jmp .nr_key
@@ -1283,13 +1311,17 @@ DEF_FUNC namespace_repr, NR_FRAME
     mov byte [rbx + r13], '='
     inc r13
 
-    ; = repr(value)
-    mov rax, [rbp - NR_DICT]
-    mov rax, [rax + PyDictObject.entries]
-    mov rcx, [rbp - NR_IDX]
-    imul rdx, rcx, DICT_ENTRY_SIZE
+    ; Pin value under OBJ_LOCK before calling obj_repr unlocked
     mov rdi, [rax + rdx + DictEntry.value]
+    INCREF_V rdi, rcx
+    OBJ_UNLOCK r10
+    push rdi
+    push rdi                        ; 16-byte align
     call obj_repr
+    pop rdi                         ; pinned value
+    mov [rsp], rax                  ; preserve repr across DECREF_V
+    DECREF_V rdi, rcx
+    pop rax
     V_UNPACK rax, rdx
     test rax, rax
     jz .nr_next
@@ -1309,11 +1341,16 @@ DEF_FUNC namespace_repr, NR_FRAME
 .nr_val_done:
     mov rdi, rax
     call obj_decref
+    jmp .nr_next
 
+.nr_unlock_next:
+    OBJ_UNLOCK r10
 .nr_next:
     inc qword [rbp - NR_IDX]
     jmp .nr_scan
 
+.nr_unlock_close:
+    OBJ_UNLOCK r10
 .nr_close:
     mov byte [rbx + r13], ')'
     inc r13
@@ -1394,7 +1431,8 @@ ns_name_str: db "types.SimpleNamespace", 0
 align 8
 global namespace_type
 namespace_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ns_name_str                  ; tp_name
     dq PySimpleNamespaceObject_size ; tp_basicsize
@@ -1776,7 +1814,7 @@ DEF_FUNC module_method_init, MMI_FRAME
     MMI_SET_NONE mtn_spec_key
 
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx

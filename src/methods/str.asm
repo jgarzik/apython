@@ -1356,19 +1356,14 @@ DEF_FUNC str_method_join
     mov [rbp - SJ_TMP], rax
     mov r12, rax
 .join_seq_ready:
-
+    OBJ_LOCK r12
     mov r13, [r12 + PyListObject.ob_size]  ; item count
     mov r14, [rbx + PyStrObject.ob_size]   ; sep length
 
     ; If list is empty, return empty string
     test r13, r13
-    jz .join_empty
+    jz .join_unlock_empty
 
-    ; One item, already exactly a str: hand back the item itself.  The
-    ; separator never appears between one thing, so there is nothing to build
-    ; and nothing to copy.  CPython takes the same exit in
-    ; _PyUnicode_JoinArray, and for the same reason it is limited to an EXACT
-    ; str -- a subclass has to be converted, or join would return the subclass.
     cmp r13, 1
     jne .join_sized
     mov rax, [r12 + PyListObject.ob_item]
@@ -1383,6 +1378,7 @@ DEF_FUNC str_method_join
     jne .join_sized
     INCREF rax
     mov [rbp - SJ_RESULT], rax
+    OBJ_UNLOCK r12
     jmp .join_return
 
 .join_sized:
@@ -1471,6 +1467,7 @@ DEF_FUNC str_method_join
     jmp .join_copy_loop
 
 .join_make_str:
+    OBJ_UNLOCK r12
 .join_return:
     ; DECREF owned separator
     mov rdi, rbx
@@ -1489,6 +1486,8 @@ DEF_FUNC str_method_join
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.join_unlock_empty:
+    OBJ_UNLOCK r12
 .join_empty:
     ; DECREF owned separator
     mov rdi, rbx
@@ -1538,25 +1537,14 @@ DEF_FUNC str_method_join
     jmp .join_fail
 
 .join_type_error:
-    ; "sequence item 0: expected str instance, int found" -- CPython names the
-    ; item AND its type, and this said neither.  The item's Value is in rax
-    ; and the index on the machine stack; the tail is composed first, into a
-    ; buffer set_type_error_counted does not use.
     pop rcx                 ; the pushed index from len_loop
-    ; The item as it is STORED -- a Value -- read back through the index,
-    ; because the unpacked pair is gone and the temporary tuple is about to
-    ; be.
     mov rax, [r12 + PyListObject.ob_item]
     mov rax, [rax + rcx * 8]
     push rcx
     push rax
-    ; A reference of OUR OWN on the offending item before anything is
-    ; released.  The temporary sequence holds the only one when the argument
-    ; was a generator -- `"".join(C() for _ in range(1))` -- and the message
-    ; names the item's TYPE, so releasing it first read ob_type out of the
-    ; block just freed.  It is given back once the exception is recorded.
     mov rdi, rax
     INCREF_V rdi, rdx
+    OBJ_UNLOCK r12
     mov rdi, rbx
     call obj_decref         ; DECREF owned separator
     JOIN_RELEASE_TMP
@@ -2928,7 +2916,7 @@ DEF_FUNC_LOCAL fm_lookup
 .fml_dict:
     extern dict_get
     call dict_get           ; err: returned as is; the caller tells a miss from a failure by what is pending
-    xor r8d, r8d
+    mov r8d, 1              ; owned, matching mp_subscript
     leave
     ret
 .fml_generic:

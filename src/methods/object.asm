@@ -447,10 +447,7 @@ DEF_FUNC_LOCAL object_reduce_impl, ORI_FRAME
     V_UNPACK rax, rdx
     cmp edx, TAG_PTR
     jne .ori_fail
-    INCREF rax                  ; the cache holds it for the process's life --
-                                ; sys.modules is not an owner anyone can rely
-                                ; on, and import_fresh_module drops entries
-    mov [rel omr_cached], rax
+    mov [rel omr_cached], rax       ; cache owns ref from dict_get
 .ori_out:
     leave
     ret
@@ -1982,32 +1979,32 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     mov rdx, [rax + PyTypeObject.tp_dict]
     test rdx, rdx
     jz .ocs_next_type
-    mov rcx, [rdx + PyDictObject.entries]
-    test rcx, rcx
-    jz .ocs_next_type
-    mov [rbp - OCS_ENT], rcx
-    mov rcx, [rdx + PyDictObject.capacity]
-    mov [rbp - OCS_CAP], rcx
+    mov [rbp - OCS_ENT], rdx        ; save tp_dict ptr
     mov qword [rbp - OCS_IDX], 0
 
 .ocs_entry_loop:
+    mov r8, [rbp - OCS_ENT]
+    OBJ_LOCK r8
     mov rax, [rbp - OCS_IDX]
-    cmp rax, [rbp - OCS_CAP]
-    jge .ocs_next_type
+    cmp rax, [r8 + PyDictObject.capacity]
+    jge .ocs_unlock_next_type
+    mov rcx, [r8 + PyDictObject.entries]
+    test rcx, rcx
+    jz .ocs_unlock_next_type
     imul rax, DICT_ENTRY_SIZE
-    add rax, [rbp - OCS_ENT]
+    add rax, rcx
     mov rdx, [rax + DictEntry.key]
     test rdx, rdx
-    jz .ocs_next_entry
+    jz .ocs_unlock_next_entry
     mov rax, [rax + DictEntry.value]
     V_TEST_PTR rax, rcx
-    ja .ocs_next_entry
+    ja .ocs_unlock_next_entry
     test rax, rax
-    jz .ocs_next_entry
+    jz .ocs_unlock_next_entry
     extern member_descr_type
     lea rcx, [rel member_descr_type]
     cmp [rax + PyObject.ob_type], rcx
-    jne .ocs_next_entry
+    jne .ocs_unlock_next_entry
 
     ; A member descriptor: read the word it names.  0 means never assigned.
     mov rcx, [rax + PyMemberDescrObject.md_offset]
@@ -2015,10 +2012,13 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     SLOT_ADDR rsi, rdi, rcx
     mov rdx, [rsi]
     test rdx, rdx
-    jz .ocs_next_entry
+    jz .ocs_unlock_next_entry
 
-    ; Make the dict on the first slot that is actually set, so a class with
-    ; __slots__ and nothing assigned answers None the way CPython's does.
+    ; Pin member descriptor under OBJ_LOCK before calling dict_new/dict_set_str
+    INCREF rax
+    OBJ_UNLOCK r8
+
+    ; Make the dict on the first slot that is actually set
     push rax
     sub rsp, 8
     cmp qword [rbp - OCS_DICT], 0
@@ -2036,13 +2036,24 @@ DEF_FUNC_LOCAL object_collect_slots, OCS_FRAME
     mov rdx, [rdi]
     mov rsi, [rax + PyMemberDescrObject.md_name]
     mov rdi, [rbp - OCS_DICT]
+    push rax
+    sub rsp, 8
     extern dict_set_str
     call dict_set_str           ; a dict made here, keyed by slot names
+    add rsp, 8
+    pop rdi
+    extern obj_decref
+    call obj_decref
+    jmp .ocs_next_entry
 
+.ocs_unlock_next_entry:
+    OBJ_UNLOCK r8
 .ocs_next_entry:
     inc qword [rbp - OCS_IDX]
     jmp .ocs_entry_loop
 
+.ocs_unlock_next_type:
+    OBJ_UNLOCK r8
 .ocs_next_type:
     mov rax, [rbp - OCS_WALK]
     MRO_NEXT rax, [rbp - OCS_TYPE]
@@ -2337,7 +2348,7 @@ DEF_FUNC object_method_eq
     ret
 .ome_notimpl:
     lea rax, [rel notimpl_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -2347,7 +2358,7 @@ DEF_FUNC object_method_eq
     cmp rdi, rbx
     je .ome_true_pop
     lea rax, [rel notimpl_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -2431,7 +2442,7 @@ DEF_FUNC object_method_ne
 .omn_same:
     lea rax, [rel bool_false]
 .omn_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave

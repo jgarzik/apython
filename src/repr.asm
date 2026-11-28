@@ -262,8 +262,14 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     ; Iterate elements
     xor r12d, r12d             ; index = 0
 .lr_loop:
+    OBJ_LOCK rbx
     cmp r12, [rbx + PyListObject.ob_size]   ; live: a __repr__ can shrink it
-    jge .lr_done
+    jge .lr_unlock_done
+
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r13, [rax + r12 * 8]
+    INCREF_V r13, rax
+    OBJ_UNLOCK rbx
 
     ; If not first element, append ", "
     test r12, r12
@@ -273,12 +279,14 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     BUF_BYTE ' '
 .lr_no_comma:
 
-    ; Get element (payload + tag arrays)
-    mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r12 * 8]      ; payload
-
-    ; Call obj_repr(payload, tag)
-    call repr_held
+    ; Call obj_repr on pinned item, then release pin
+    mov rdi, r13
+    call obj_repr
+    push rax
+    push rax
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     test rax, rax
     jz .lr_elem_failed
 
@@ -305,6 +313,8 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     inc r12
     jmp .lr_loop
 
+.lr_unlock_done:
+    OBJ_UNLOCK rbx
 .lr_done:
     ; Append ']' and NUL
     BUF_ENSURE 2
@@ -522,14 +532,23 @@ DEF_FUNC dict_repr, RB_FRAME
     xor r14d, r14d             ; items printed = 0
 
 .dr_loop:
+    OBJ_LOCK rbx
     cmp r12, [rbx + PyDictObject.capacity]  ; live: a __repr__ can clear it
-    jge .dr_done
+    jge .dr_unlock_done
 
     ; Occupied entries have a non-zero key Value
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
-    cmp qword [rax + rcx + DictEntry.key], 0
-    je .dr_next_entry
+    mov r13, [rax + rcx + DictEntry.key]
+    test r13, r13
+    jz .dr_unlock_next
+
+    ; Pin both key and value under OBJ_LOCK before releasing the lock.
+    mov rdx, [rax + rcx + DictEntry.value]
+    mov [rbp - RB_HELD], rdx
+    INCREF_V r13, rax
+    INCREF_V rdx, rax
+    OBJ_UNLOCK rbx
 
     ; Print separator if not first
     test r14, r14
@@ -539,16 +558,14 @@ DEF_FUNC dict_repr, RB_FRAME
     BUF_BYTE ' '
 .dr_no_comma:
 
-    ; Reload entry data (BUF macros clobber rax, rcx, rdi)
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, DICT_ENTRY_SIZE
-    mov rdi, [rax + rcx + DictEntry.key]
-    ; The value is taken NOW and held: the key's repr may drop the entry.
-    mov rdx, [rax + rcx + DictEntry.value]
-    mov [rbp - RB_HELD], rdx
-    INCREF_V rdx, rax
     push r12                   ; save entry index across calls
-    call repr_held
+    mov rdi, r13
+    call obj_repr
+    push rax
+    push rax                   ; keep rsp 16-aligned across DECREF_V
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     test rax, rax
     jz .dr_key_failed
 
@@ -601,11 +618,16 @@ DEF_FUNC dict_repr, RB_FRAME
 .dr_after_val:
     pop r12                    ; restore entry index
     inc r14                    ; items printed++
+    jmp .dr_next_entry
 
+.dr_unlock_next:
+    OBJ_UNLOCK rbx
 .dr_next_entry:
     inc r12
     jmp .dr_loop
 
+.dr_unlock_done:
+    OBJ_UNLOCK rbx
 .dr_done:
     BUF_ENSURE 2
     BUF_BYTE '}'
@@ -767,14 +789,17 @@ DEF_FUNC set_repr, RB_FRAME
     xor r14d, r14d
 
 .sr_loop:
+    OBJ_LOCK rbx
     cmp r12, [rbx + PyDictObject.capacity]  ; live: a __repr__ can clear it
-    jge .sr_done
+    jge .sr_unlock_done
 
     ; SetEntry is SET_ENTRY_SIZE bytes: hash(8) + key Value(8)
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, SET_ENTRY_SIZE
-    SET_ENTRY_CLASSIFY rax + rcx, .sr_next, .sr_next
-    mov rdi, [rax + rcx + SET_ENTRY_KEY]                      ; key payload
+    SET_ENTRY_CLASSIFY rax + rcx, .sr_unlock_next, .sr_unlock_next
+    mov r13, [rax + rcx + SET_ENTRY_KEY]
+    INCREF_V r13, rax
+    OBJ_UNLOCK rbx
 
     ; Print separator if not first
     test r14, r14
@@ -784,12 +809,14 @@ DEF_FUNC set_repr, RB_FRAME
     BUF_BYTE ' '
 .sr_no_comma:
 
-    ; Reload entry data (BUF macros may clobber rdi, esi)
-    mov rax, [rbx + PyDictObject.entries]
-    imul rcx, r12, SET_ENTRY_SIZE
-    mov rdi, [rax + rcx + SET_ENTRY_KEY]
     push r12
-    call repr_held
+    mov rdi, r13
+    call obj_repr
+    push rax
+    push rax
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     test rax, rax
     jz .sr_elem_failed
 
@@ -810,11 +837,16 @@ DEF_FUNC set_repr, RB_FRAME
 .sr_after_elem:
     pop r12
     inc r14
+    jmp .sr_next
 
+.sr_unlock_next:
+    OBJ_UNLOCK rbx
 .sr_next:
     inc r12
     jmp .sr_loop
 
+.sr_unlock_done:
+    OBJ_UNLOCK rbx
 .sr_done:
     BUF_ENSURE 3
     BUF_BYTE '}'

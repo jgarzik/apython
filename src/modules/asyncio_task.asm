@@ -2848,7 +2848,8 @@ END_FUNC async_task_init
 section .data
 align 8
 task_step_wrapper_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq tname_step_wrapper           ; tp_name
     dq PyTaskStepWrapperObject_size ; tp_basicsize
@@ -2880,7 +2881,8 @@ task_step_wrapper_type:
 
 align 8
 task_wakeup_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq tname_wakeup                 ; tp_name
     dq PyTaskWakeupObject_size      ; tp_basicsize

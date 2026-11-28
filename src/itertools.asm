@@ -41,25 +41,25 @@ extern type_type
 ;; FilterIterObject:    +0 refcnt, +8 type, +16 it_func, +24 it_iter   (32B)
 ;; ReversedIterObject:  +0 refcnt, +8 type, +16 it_seq, +24 it_index   (32B)
 
-; Offsets (all iterator objects)
-%define IT_FIELD1  16     ; first custom field
-%define IT_FIELD2  24     ; second custom field
-%define ITER_OBJ_SIZE 32
+; Offsets (all iterator objects — derived from PyObject_size = 24)
+%define IT_FIELD1       (PyObject_size)
+%define IT_FIELD2       (PyObject_size + 8)
+%define ITER_OBJ_SIZE   (PyObject_size + 16)
 
 ; Extended sizes for zip (with strict flag) and map (with array+count)
-%define ZIP_OBJ_SIZE    40
-%define ZIP_STRICT      32     ; strict flag (0 or 1)
-%define MAP_FUNC        16     ; function pointer
-%define MAP_ITERS       24     ; iterator array pointer
-%define MAP_COUNT       32     ; number of iterators
-%define MAP_OBJ_SIZE    40
+%define ZIP_OBJ_SIZE    (PyObject_size + 24)
+%define ZIP_STRICT      (PyObject_size + 16)
+%define MAP_FUNC        (PyObject_size)
+%define MAP_ITERS       (PyObject_size + 8)
+%define MAP_COUNT       (PyObject_size + 16)
+%define MAP_OBJ_SIZE    (PyObject_size + 24)
 
 ;; ============================================================================
 ;; Common: iter_self(self) -> self with INCREF
 ;; tp_iter for all our iterator types: return self
 ;; ============================================================================
 itertools_iter_self:
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 
@@ -286,10 +286,9 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rcx                   ; type
     extern dunder_next
     lea rsi, [rel dunder_next]
-    extern dunder_lookup
-    call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .iter_bad                   ; no __next__ found
     ; Has __next__, good
 
@@ -332,8 +331,8 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rcx                   ; type
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .no_iter                    ; no __getitem__
     ; Has __getitem__ — create seq_iter
     mov rdi, rbx                   ; obj
@@ -1040,7 +1039,7 @@ DEF_FUNC builtin_zip, ZP_FRAME
 .zip_released:
     mov rdi, r13
     call ap_free
-    xor eax, eax
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -1188,7 +1187,7 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     ; with different lengths" whichever happened -- and the index and the
     ; direction are both in hand at the raise, so it was wording rather than
     ; machinery.  The plural arrives with the third argument.
-    lea rdi, [rel zip_msg_buf]
+    TS_LEA rdi, ts_errbuf
     extern rbt_append_cstr
     CSTRING rsi, "zip() argument "
     call rbt_append_cstr
@@ -1222,7 +1221,7 @@ DEF_FUNC_LOCAL zip_iternext, 8            ; 5 pushes, so rsp is 16-aligned
     ; Set exception without longjmp — return NULL so callers can clean up
     extern exc_from_cstr
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel zip_msg_buf]
+    TS_LEA rsi, ts_errbuf
     call exc_from_cstr
     ; rax = exception object
     push rax
@@ -1394,7 +1393,7 @@ DEF_FUNC builtin_map
 .map_error:
     SET_EXC exc_TypeError_type, "map() must have at least two arguments."
 .map_fail:
-    xor eax, eax
+    RET_NULL
     pop r14
     pop r13
     pop r12
@@ -1841,14 +1840,13 @@ DEF_FUNC builtin_reversed, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [rel .dunder_reversed_name]
     extern dunder_lookup
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .rev_no_dunder      ; not found at all
 
     ; Found __reversed__.  Setting it to None blocks reversal.
     IS_NONE rax, rcx
     je .rev_type_error
-    test rax, rax
-    jz .rev_type_error
+    DECREF_V rax, rcx
 
 .rev_call_dunder:
     ; Call __reversed__ via dunder_call_1
@@ -1921,8 +1919,8 @@ section .text
     mov rdi, rax            ; type
     extern dunder_len
     lea rsi, [rel dunder_len]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     pop rcx                 ; restore type
     jz .rev_type_error      ; no __len__
 
@@ -1930,8 +1928,8 @@ section .text
     mov rdi, rcx            ; type
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .rev_type_error      ; no __getitem__
 
     ; Call __len__ to get length
@@ -2053,12 +2051,11 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .revi_exhausted:
-    ; Drop the sequence at exhaustion, as CPython's listreviter does and as
-    ; every forward iterator here now does.  Clear before releasing --
-    ; list_iter_next carries the reason in full.  reversed_dealloc still
-    ; releases it_seq afterwards, which is fine: obj_decref is NULL-safe.
-    mov rdi, [rbx + IT_FIELD1]
-    mov qword [rbx + IT_FIELD1], 0
+    xor eax, eax
+    xchg [rbx + IT_FIELD1], rax
+    test rax, rax
+    jz .revi_done
+    mov rdi, rax
     call obj_decref
 .revi_done:
     RET_NULL
@@ -2600,7 +2597,8 @@ callable_iter_name:  db "callable_iterator", 0
 align 8
 global enumerate_iter_type
 enumerate_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq enumerate_iter_name      ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2634,7 +2632,8 @@ enumerate_iter_type:
 align 8
 global zip_iter_type
 zip_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq zip_iter_name            ; tp_name
     dq ZIP_OBJ_SIZE             ; tp_basicsize
@@ -2668,7 +2667,8 @@ zip_iter_type:
 align 8
 global map_iter_type
 map_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq map_iter_name            ; tp_name
     dq MAP_OBJ_SIZE             ; tp_basicsize
@@ -2702,7 +2702,8 @@ map_iter_type:
 align 8
 global filter_iter_type
 filter_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq filter_iter_name         ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2737,7 +2738,8 @@ align 8
 align 8
 global callable_iter_type
 callable_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq callable_iter_name       ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2770,7 +2772,8 @@ callable_iter_type:
 align 8
 global seq_iter_type
 seq_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq seq_iter_name            ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2804,7 +2807,8 @@ seq_iter_type:
 align 8
 global reversed_iter_type
 reversed_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq reversed_iter_name       ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize

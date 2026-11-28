@@ -154,22 +154,24 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .irr_no_package
+    jne .irr_drop_no_pkg
     mov [rbp - IRR_PKG], rax
     mov rcx, [rax + PyStrObject.ob_size]
     test rcx, rcx
-    jz .irr_no_package
+    jz .irr_drop_no_pkg
 
     ; Copy the package name, then drop one trailing component per extra level.
     lea rbx, [rbp - IRR_BUF]
     cmp rcx, IRR_BUF - 64
-    jae .irr_no_package
+    jae .irr_drop_no_pkg
     mov [rbp - IRR_LEN], rcx
     mov rdi, rbx
     mov rax, [rbp - IRR_PKG]
     lea rsi, [rax + PyStrObject.data]
     mov rdx, rcx
     call ap_memcpy
+    mov rdi, [rbp - IRR_PKG]
+    call obj_decref             ; drop owned __package__ ref from dict_get
 
     mov r12, [rbp - IRR_LEVEL]
     dec r12
@@ -215,6 +217,9 @@ DEF_FUNC import_resolve_relative, IRR_FRAME
 
 .irr_beyond_top:
     FAIL exc_ImportError_type, "attempted relative import beyond top-level package", .irr_fail
+.irr_drop_no_pkg:
+    mov rdi, rax
+    call obj_decref
 .irr_no_package:
     SET_EXC exc_ImportError_type, "attempted relative import with no known parent package"
 .irr_fail:
@@ -618,6 +623,7 @@ DEF_FUNC_LOCAL import_parent_is_package, IPP_FRAME
     ERR_PENDING .ipp_raised
     test rax, rax
     jz .ipp_no
+    DECREF_V rax, rcx
 .ipp_yes:
     mov eax, 1
     pop rbx
@@ -804,8 +810,15 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, rax
     call dict_get
     ERR_PENDING .walk_get_raised
-    test rax, rax               ; dict_get answers with a Value; 0 is the miss
-    jnz .walk_have_module
+    test rax, rax               ; dict_get answers with an owned Value; 0 is the miss
+    jz .walk_not_in_sysmod
+    push rax
+    sub rsp, 8
+    DECREF_V rax, rcx           ; sys.modules still owns the entry
+    add rsp, 8
+    pop rax
+    jmp .walk_have_module
+.walk_not_in_sysmod:
 
     ; A parent that is not a package cannot have submodules -- but ONLY ask
     ; that once the child's own sys.modules entry has missed, which is
@@ -901,7 +914,7 @@ DEF_FUNC import_module, IF_FRAME
 
 .walk_done:
     mov r12, [rbp - IF_TOPMOD]
-    inc qword [r12 + PyObject.ob_refcnt]
+    INCREF r12
     mov r13, [rbp - IF_LEAF]
 
 .skip_set_parent:
@@ -924,7 +937,7 @@ DEF_FUNC import_module, IF_FRAME
 
     ; fromlist is non-empty -> return leaf module
     mov rax, r13
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     ; DECREF top module
     mov rdi, r12
     call obj_decref
@@ -973,22 +986,35 @@ DEF_FUNC import_module, IF_FRAME
     ; lock; _ensure_initialized (lib/_importlib_bootstrap.py) is that.  With
     ; one thread there is nobody to wait for, and the same test would only
     ; find this thread's own circular import, so it is skipped.
+IMW_ARG equ 0
+IMW_MOD equ 8
+IMW_SZ  equ 16
+IMW_CALL_ARG equ 16
     extern gil_threaded
     cmp qword [rel gil_threaded], 0
     je .cached_ready
-    push rax                    ; the module
-    push rax                    ; and a slot for the helper's one argument
+    push rax                    ; IMW_MOD: the owned module
+    push rax                    ; IMW_ARG: slot for the helper's one argument
     CSTRING rdi, "_ensure_initialized"
     call im_importlib_func
     ERR_PENDING .cached_wait_raised
     test rax, rax
     jz .cached_waited           ; importlib is not up yet: nothing to wait on
     mov rcx, [rbp - IF_NAME]
-    mov [rsp], rcx
+    mov [rsp + IMW_ARG], rcx
+    push rax                    ; save owned helper fn
+    sub rsp, 8
     mov rdi, rax
-    mov rsi, rsp
+    lea rsi, [rsp + IMW_CALL_ARG]
     mov edx, 1
-    call obj_call_n
+    call obj_call_n             ; err: tested below after releasing helper fn
+    add rsp, 8
+    pop rdi                     ; helper fn
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     ERR_NULL .cached_wait_raised
     DECREF_V rax, rcx
     ; The import this waited for may have FAILED and taken the module back
@@ -997,7 +1023,13 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, [rbp - IF_NAME]
     call dict_get
     ERR_PENDING .cached_wait_raised
-    add rsp, 16
+    mov rdi, [rsp + IMW_MOD]    ; release old owned module
+    add rsp, IMW_SZ
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .not_cached
     lea rcx, [rel none_singleton]
@@ -1005,11 +1037,13 @@ DEF_FUNC import_module, IF_FRAME
     je .cached_blocked
     jmp .cached_ready
 .cached_wait_raised:
-    add rsp, 16
+    mov rdi, [rsp + IMW_MOD]    ; release old owned module
+    add rsp, IMW_SZ
+    DECREF_V rdi, rcx
     jmp .import_error
 .cached_waited:
     pop rax
-    pop rax                     ; the module
+    pop rax                     ; the owned module
 .cached_ready:
 
     ; Found in sys.modules.  With an empty fromlist a dotted import still
@@ -1056,9 +1090,14 @@ DEF_FUNC import_module, IF_FRAME
     jnz .cached_have_top
     cmp qword [gs:ThreadState.current_exception], 0
     je .cached_as_is            ; not cached after all; the full one will do
+    DECREF_V rax, rdx           ; drop owned full module on error
     jmp .fail                   ; sys.modules could not be searched
 .cached_have_top:
-    mov rax, rcx
+    push rcx
+    sub rsp, 8
+    DECREF_V rax, rdx           ; drop owned full module; returning owned top
+    add rsp, 8
+    pop rax
     jmp .cached_as_is
 .cached_blocked:
     mov rdi, rbx                ; the name C string, still live from the entry
@@ -1068,7 +1107,7 @@ DEF_FUNC import_module, IF_FRAME
 .cached_pop_as_is:
     pop rax
 .cached_as_is:
-    inc qword [rax + PyObject.ob_refcnt]
+    ; rax is already owned from dict_get
     jmp .done
 
 .import_error:
@@ -1152,10 +1191,19 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     mov [rbp - ISA_T2], rcx
     mov rcx, [rbp - ISA_ATTR]
     mov [rbp - ISA_T1], rcx
+    push rax                    ; save owned _import_submodule fn
+    sub rsp, 8
     mov rdi, rax
     lea rsi, [rbp - ISA_T2]
     mov edx, 2
-    call obj_call_n
+    call obj_call_n             ; err: tested below after releasing fn
+    add rsp, 8
+    pop rdi                     ; owned fn
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     ERR_NULL .isa_out_raw          ; it raised: 0 with the exception pending
     lea rcx, [rel none_singleton]
     cmp rax, rcx
@@ -1205,21 +1253,27 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     cmp qword [rbp - ISA_T2], 0
     je .isa_none
 
-    ; "pkg" + "." + "attr"
+    ; "pkg" + "." + "attr" (ISA_T2 holds owned __name__ from dict_get)
     lea rdi, [rel isa_dot]
     call str_from_cstr_heap
     test rax, rax
-    jz .isa_none
+    jz .isa_drop_t2_none
     mov [rbp - ISA_T1], rax
     mov rdi, [rbp - ISA_T2]
     mov rsi, rax
     mov ecx, TAG_PTR
     call str_concat           ; err: both strs were built from C strings just above
-    mov [rbp - ISA_T2], rax
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ISA_T2]
+    call obj_decref             ; drop owned __name__ from dict_get
     mov rdi, [rbp - ISA_T1]
     call obj_decref
-    cmp qword [rbp - ISA_T2], 0
-    je .isa_none
+    add rsp, 8
+    pop rax
+    mov [rbp - ISA_T2], rax
+    test rax, rax
+    jz .isa_none
 
     mov rdi, [rbp - ISA_T2]
     mov rsi, [rbp - ISA_ATTR]
@@ -1257,6 +1311,9 @@ DEF_FUNC import_submodule_attr, ISA_FRAME
     xor eax, eax
     leave
     ret
+.isa_drop_t2_none:
+    mov rdi, [rbp - ISA_T2]
+    call obj_decref
 .isa_none:
     xor eax, eax
     leave
@@ -1314,14 +1371,26 @@ DEF_FUNC_LOCAL im_importlib_func, IIF_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel module_type]
     cmp rcx, rdx
-    jne .iif_none
+    jne .iif_drop_none
     mov rdi, [rax + PyModuleObject.mod_dict]
     test rdi, rdi
-    jz .iif_none
+    jz .iif_drop_none
+    push rax                    ; owned _importlib_bootstrap module
+    sub rsp, 8
     mov rsi, [rbp - IIF_NAME]
-    call ifl_get                ; err: returned to the caller as is
+    call ifl_get                ; err: returned to the caller as is (owned)
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref             ; drop owned module ref
+    add rsp, 8
+    pop rax
     leave
     ret
+.iif_drop_none:
+    mov rdi, rax
+    call obj_decref
 .iif_none:
     xor eax, eax
     leave
@@ -1356,10 +1425,19 @@ DEF_FUNC import_find_and_load, IFL_FRAME
     jz .ifl_own
     mov rcx, [rbp - IFL_NAME]
     mov [rbp - IFL_ARG], rcx
+    push rax                    ; owned _find_and_load fn
+    sub rsp, 8
     mov rdi, rax
     lea rsi, [rbp - IFL_ARG]
     mov edx, 1
     call obj_call_n             ; err: 0 goes to the caller as it stands
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     leave
     ret
 .ifl_own:
@@ -1400,14 +1478,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     test rax, rax               ; dict_get answers with a Value; 0 is the miss
     jnz .found_in_sysmod
 
-    ; Ensure path buffer is allocated
-    mov rdi, [rel import_path_buf_ptr]
-    test rdi, rdi
-    jnz .have_buf
-    mov edi, PATHBUF_SIZE
-    call ap_malloc
-    mov [rel import_path_buf_ptr], rax
-.have_buf:
+    ; Ensure per-thread path scratch is allocated
+    call ts_get_path_scratch
 
     ; Compute leaf name: last component after final '.'
     ; e.g. "unittest.case" -> leaf="case", "unittest" -> leaf="unittest"
@@ -1469,13 +1541,19 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     pop rdx                     ; restore dict_get tag
     test edx, edx
     jz .fl_parent_miss
+    cmp edx, TAG_PTR
+    jne .search_sys_path
 
     ; Get parent's __path__ attribute (from module dict)
-    ; Module dict is at module.ob_dict (PyModuleObject.ob_dict)
+    ; r13 is an owned ref to parent module from dict_get
     mov rax, [r13 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
-    jz .search_sys_path
+    jnz .fl_parent_has_getattr
+    mov rdi, r13
+    call obj_decref
+    jmp .search_sys_path
+.fl_parent_has_getattr:
 
     ; getattr(parent_module, "__path__")
     ; Save tp_getattr (caller-saved regs clobbered by str_from_cstr)
@@ -1494,6 +1572,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
 .fl_path_ok:
     mov r12, rax                ; r12 = __path__ list (or NULL)
     pop rdi                     ; DECREF "__path__" str
+    call obj_decref
+    mov rdi, r13                ; DECREF owned parent module
     call obj_decref
 
     test r12, r12
@@ -1587,6 +1667,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
 .fl_path_failed:
     pop rdi                     ; the "__path__" string
     call obj_decref
+    mov rdi, r13                ; owned parent module
+    call obj_decref
 .fl_fail:
     lea rsp, [rbp - FL_FRAME - 40]
     xor eax, eax
@@ -1598,8 +1680,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     leave
     ret
 .fis_real:
-    ; Already imported — return INCREF'd reference
-    inc qword [rax + PyObject.ob_refcnt]
+    ; Already imported — already owned from dict_get
     pop r15
     pop r14
     pop r13
@@ -1615,7 +1696,8 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     cmp r12d, 3
     je .load_as_namespace
     mov rdi, [rbp - FL_NAME]
-    mov rsi, [rel import_path_buf_ptr]
+    call ts_get_path_scratch
+    mov rsi, rax
     xor edx, edx
     cmp r12d, 1
     jne .load_as_module
@@ -1657,8 +1739,20 @@ DEF_FUNC import_load_module, IF_FRAME
     push r15
 
     mov rbx, rdi                ; name_str
-    mov r12, rsi                ; path_cstr
     mov r13d, edx               ; is_package
+    ; Copy path_cstr onto a private heap buffer so nested imports (e.g.
+    ; `import warnings` inside comp_emit_warnings) cannot clobber r12.
+    push rsi
+    mov rdi, rsi
+    call ap_strlen
+    lea rdi, [rax + 1]
+    push rdi
+    call ap_malloc
+    mov r12, rax                ; r12 = owned copy of path_cstr
+    mov rdi, rax
+    pop rdx                     ; len + 1
+    pop rsi
+    call ap_memcpy
     DUNDER_EXC_SAVE [rbp - IF_EXC]
 
     ; Save marshal globals
@@ -1934,6 +2028,9 @@ DEF_FUNC import_load_module, IF_FRAME
     call obj_decref
 
 .create_module:
+    ; Done with path_cstr copy before r12 is reused for the execution frame.
+    mov rdi, r12
+    call ap_free
     ; Create module object
     mov rdi, rbx                ; name
     mov rsi, r15                ; dict
@@ -2013,18 +2110,21 @@ DEF_FUNC import_load_module, IF_FRAME
     ; r13` could hand back freed memory.
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx                ; name_str
-    call dict_get           ; borrowed Value, or 0 for a miss
+    call dict_get           ; owned Value, or 0 for a miss
     ERR_PENDING .fl_reread_failed
     test rax, rax
     jz .fl_keep_created         ; the body deleted itself; hand back what we made
     V_TEST_PTR rax, rcx
     ja .fl_keep_created         ; not a pointer -- nothing sane to return
     cmp rax, r13
-    je .fl_keep_created         ; the ordinary case: unchanged
-    INCREF rax                  ; our caller owns what it gets back
-    mov rdi, r13
+    je .fl_drop_dup_keep        ; the ordinary case: unchanged
+    mov rdi, r13                ; rax is already owned from dict_get
     mov r13, rax
     call obj_decref             ; and the object we built is no longer ours
+    jmp .fl_keep_created
+.fl_drop_dup_keep:
+    mov rdi, rax
+    call obj_decref
 .fl_keep_created:
 
     ; Return module (already in sys.modules with INCREF from dict_set)
@@ -2059,6 +2159,8 @@ DEF_FUNC import_load_module, IF_FRAME
     jmp .br_not_cached
 
 .load_failed:
+    mov rdi, r12
+    call ap_free
     ; Free inner import's marshal refs array (if allocated)
     mov rdi, [gs:ThreadState.marshal_refs]
     test rdi, rdi
@@ -2104,8 +2206,9 @@ DEF_FUNC import_load_module, IF_FRAME
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
     call dict_get           ; err: cleanup under the body's exception; a miss and a failure both skip the delete
-    test rax, rax               ; dict_get answers with a Value; 0 is the miss
+    test rax, rax               ; dict_get answers with an owned Value; 0 is the miss
     jz .br_not_cached
+    DECREF_V rax, rcx
     mov rdi, [rel sys_modules_dict]
     mov rsi, rbx
     extern dict_del_opt
@@ -2160,15 +2263,51 @@ im_dot:             db ".", 0
 section .bss
 im_path_key:        resq 1      ; the interned "__path__", built on first use
 
+section .text
+
+;; ============================================================================
+;; ts_get_path_scratch() -> rax = per-thread TS_PATH_SIZE scratch block
+;; Lazily malloc'd per thread and freed on worker exit (src/modules/thread.asm).
+;; ============================================================================
+extern malloc
+global ts_get_path_scratch
+DEF_FUNC_BARE ts_get_path_scratch
+    mov rax, [gs:ThreadState.ts_path_scratch]
+    test rax, rax
+    jnz .tgps_ok
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push r8
+    push r9
+    sub rsp, 8
+    mov edi, TS_PATH_SIZE
+    call malloc wrt ..plt
+    test rax, rax
+    jnz .tgps_store
+    CSTRING rdi, "out of memory allocating import scratch"
+    extern fatal_error
+    call fatal_error
+.tgps_store:
+    mov [gs:ThreadState.ts_path_scratch], rax
+    add rsp, 8
+    pop r9
+    pop r8
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+.tgps_ok:
+    ret
+END_FUNC ts_get_path_scratch
+
 section .bss
 ; The builtins module, borrowed: sys.modules holds the reference for the life
 ; of the interpreter.  A module-level builtin's __self__ is this, as CPython's
 ; is, and pickling one by name reads it.
 global builtins_module_obj
 builtins_module_obj: resq 1
-
-global import_path_buf_ptr
-import_path_buf_ptr: resq 1    ; malloc'd path buffer (lazy-allocated)
 
 
 ; A list searched in place of sys.path by the interpreter's own finder, or 0.

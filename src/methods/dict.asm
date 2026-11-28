@@ -84,8 +84,7 @@ DEF_FUNC dict_method_get
     ret
 
 .dg_found:
-    add rsp, 8              ; discard saved args
-    INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    add rsp, 8              ; discard saved args (dict_get already returned owned Value)
     pop r12
     pop rbx
     leave
@@ -173,20 +172,14 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
 
     mov rdi, rbx
     mov rsi, r13
-    call dict_get
-    ERR_PENDING .dpop2_fail
-    test rax, rax           ; a Value, and 0 is the only miss
-    jz .dpop2_not_found
-
-    INCREF_V rax, rdx       ; dict_get's answer is borrowed
-    mov r15, rax            ; held across dict_del, which can run a __del__
-
-    mov rdi, rbx
-    mov rsi, r13
-    call dict_del
-    ERR_M1 .dpop2_del_failed
-
-    mov rax, r15
+    extern dict_pop_key
+    call dict_pop_key           ; err: rdx=-2 is error, checked below
+    test rax, rax
+    jnz .dpop2_got
+    cmp rdx, -2
+    je .dpop2_fail
+    jmp .dpop2_not_found
+.dpop2_got:
     pop r15
     pop r14
     pop r13
@@ -207,12 +200,6 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     pop rbx
     leave
     ret
-
-.dpop2_del_failed:
-    ; The key's __eq__ raised on the second probe, or took the entry away
-    ; between the two: the value held for the caller goes back.
-    DECREF_V r15, rax
-    jmp .dpop2_fail
 
 .dpop2_error:
     mov rdi, [r14 + 8]         ; the key Value, still in the argument array
@@ -374,14 +361,9 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov [rbp - DU_ORIGN], rax
     xor r14d, r14d
 .du_loop:
-    ; The bound is re-read every turn rather than cached.  dict_set runs user
-    ; code -- __hash__ and __eq__ on the DESTINATION's keys -- and that code
-    ; can clear the SOURCE, which points its entries at the one-slot
-    ; read-only dict_empty_entries.  A cached dk_nentries kept walking to the
-    ; old bound, off the end of a 24-byte .rodata table, and inserted what it
-    ; found there as a key and a value.
+    OBJ_LOCK r12
     cmp r14, [r12 + PyDictObject.dk_nentries]
-    jge .du_kwargs
+    jge .du_unlock_kwargs
 
     mov rax, [r12 + PyDictObject.entries]
     imul rcx, r14, DICT_ENTRY_SIZE
@@ -389,17 +371,15 @@ DEF_FUNC dict_method_update, DU_FRAME
 
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
-    jz .du_next
+    jz .du_unlock_next
 
     mov rdx, [rax + DictEntry.value]
-    ; Both Values are BORROWED from that table, so both are held for the
-    ; duration: the same user code can drop the source's last reference to
-    ; either, and dict_set would then store what it had already read.
-    ; CPython's dict_merge takes the same pair of references.
+    ; Pin both Values under OBJ_LOCK before releasing the lock for dict_set.
     mov [rbp - DU_KEYV], rdi
     mov [rbp - DU_VALV], rdx
     INCREF_V rdi, rcx
     INCREF_V rdx, rcx
+    OBJ_UNLOCK r12
     mov rsi, rdi                    ; key Value
     mov rdi, rbx                    ; self
     call dict_set               ; err: tested once the pair is released
@@ -417,10 +397,16 @@ DEF_FUNC dict_method_update, DU_FRAME
     mov rax, [r12 + PyDictObject.dk_nentries]
     cmp rax, [rbp - DU_ORIGN]
     jne .du_mutated
+    jmp .du_next
 
+.du_unlock_next:
+    OBJ_UNLOCK r12
 .du_next:
     inc r14
     jmp .du_loop
+.du_unlock_kwargs:
+    OBJ_UNLOCK r12
+    jmp .du_kwargs
 
     ; ---- other is an iterable of (key, value) pairs -----------------------
 .du_from_pairs:
@@ -771,8 +757,7 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .sd_found:
-    add rsp, 8              ; discard saved args ptr
-    INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    add rsp, 8              ; discard saved args ptr (dict_get already returned owned Value)
     pop r15
     pop r14
     pop r13
@@ -984,19 +969,16 @@ DEF_FUNC dict_method_popitem
     push r14
 
     mov rbx, [rdi]          ; self (dict)
+    OBJ_LOCK rbx
 
     ; Check if dict is empty
     cmp qword [rbx + PyDictObject.ob_size], 0
-    je .dpopitem_empty
+    je .dpopitem_unlock_empty
 
-    ; The LAST entry, found from the high-water mark.  The scan used to start
-    ; at capacity-1, so on a hundred-entry dict in a 256-slot table it walked
-    ; a hundred and fifty-six empty slots before reaching anything.
-    ; dk_nentries is where the dense array stops.
     mov r12, [rbx + PyDictObject.dk_nentries]
 .dpopitem_scan:
     dec r12
-    js .dpopitem_empty          ; unreachable while ob_size is non-zero
+    js .dpopitem_unlock_empty
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r12, DICT_ENTRY_SIZE
     add rax, rcx
@@ -1004,27 +986,49 @@ DEF_FUNC dict_method_popitem
     test r13, r13
     jz .dpopitem_scan
     mov r14, [rax + DictEntry.value]
+    mov r8, [rax + DictEntry.hash]
 
-    ; The (key, value) pair.  Values throughout: this used to take the key
-    ; apart with V_TAG_OF and V_UNPACK and put it back together with V_PACK
-    ; three times over, to move two words.
+    ; Atomically remove entry under OBJ_LOCK (transfer key/value ownership to tuple)
+    mov qword [rax + DictEntry.key], 0
+    mov qword [rax + DictEntry.value], 0
+    mov qword [rax + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+    ; Find r12 in dk_indices using its stored hash (pure integer probe, leaf)
+    mov r9, [rbx + PyDictObject.capacity]
+    dec r9                              ; mask
+    mov rcx, r8
+    and rcx, r9                         ; slot
+    mov r10, [rbx + PyDictObject.dk_indices]
+.dpopitem_find_ix:
+    cmp [r10 + rcx*8], r12
+    je .dpopitem_clear_ix
+    DICT_PROBE_NEXT rcx, r8, r9
+    jmp .dpopitem_find_ix
+.dpopitem_clear_ix:
+    mov qword [r10 + rcx*8], DICT_IX_DUMMY
+    dec qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_tombstones]
+    extern dict_version_clock
+    cmp byte [rel rt_threaded], 0
+    jne .dpopitem_ver_atomic
+    mov rax, [rel dict_version_clock]
+    inc rax
+    mov [rel dict_version_clock], rax
+    jmp .dpopitem_ver_store
+.dpopitem_ver_atomic:
+    mov eax, 1
+    lock xadd [rel dict_version_clock], rax
+    inc rax
+.dpopitem_ver_store:
+    mov [rbx + PyDictObject.dk_version], rax
+    OBJ_UNLOCK rbx
+
+    ; Build (key, value) 2-tuple; owns r13 and r14 directly
     mov edi, 2
     call tuple_new
-    mov r12, rax
-    mov r9, [r12 + PyTupleObject.ob_item]
-    INCREF_V r13, rcx
-    INCREF_V r14, rcx
+    mov r9, [rax + PyTupleObject.ob_item]
     mov [r9], r13
     mov [r9 + 8], r14
-
-    ; Delete key from dict
-    mov rdi, rbx
-    mov rsi, r13
-    call dict_del
-    ERR_M1 .dpopitem_del_failed
-
-    mov rax, r12
-    mov edx, TAG_PTR         ; tuple is heap ptr
+    mov edx, TAG_PTR
     pop r14
     pop r13
     pop r12
@@ -1033,11 +1037,8 @@ DEF_FUNC dict_method_popitem
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
-.dpopitem_del_failed:
-    mov rdi, r12                ; the pair built for the caller
-    call obj_decref
-    jmp .dpopitem_fail
-
+.dpopitem_unlock_empty:
+    OBJ_UNLOCK rbx
 .dpopitem_empty:
     SET_EXC exc_KeyError_type, "popitem(): dictionary is empty"
 .dpopitem_fail:

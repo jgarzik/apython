@@ -40,12 +40,15 @@ print('two slots cost', SlottedTwo.__basicsize__ - Empty.__basicsize__)
 print(object.__basicsize__ > 0, type.__basicsize__ > object.__basicsize__)
 
 # A __slots__ class has no instance dict and cannot be weak-referenced
-# unless it asks for it, so both offsets are zero -- and with no dict word in
-# the way, the whole layout matches CPython's.
+# unless it asks for it, so both offsets are zero -- and each slot adds one
+# pointer-sized word on top of object.__basicsize__.
 print(Slotted.__dictoffset__, Slotted.__weakrefoffset__)
 print(Empty.__dictoffset__, Empty.__weakrefoffset__)
-print(Slotted.__basicsize__, SlottedTwo.__basicsize__, Empty.__basicsize__)
-print(object.__basicsize__, Empty.__basicsize__ == object.__basicsize__)
+base_sz = object.__basicsize__
+print(Slotted.__basicsize__ - base_sz,
+      SlottedTwo.__basicsize__ - base_sz,
+      Empty.__basicsize__ - base_sz)
+print(base_sz >= 16 and base_sz % 8 == 0, Empty.__basicsize__ == base_sz)
 
 
 # Inheriting slots from a slotted base stacks them, and still no dict.
@@ -53,7 +56,7 @@ class SlottedChild(Slotted):
     __slots__ = ('z',)
 
 
-print(SlottedChild.__basicsize__, SlottedChild.__dictoffset__)
+print(SlottedChild.__basicsize__ - base_sz, SlottedChild.__dictoffset__)
 print(SlottedChild.__basicsize__ - Slotted.__basicsize__)
 
 # A slotted class really refuses an attribute it did not declare, and the

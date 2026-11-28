@@ -453,7 +453,7 @@ DEF_FUNC traceback_here, TH_FRAME
 
     mov edi, PyTracebackObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel traceback_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyTracebackObject.tb_lineno], 0
@@ -472,7 +472,7 @@ DEF_FUNC traceback_here, TH_FRAME
     test rdi, rdi
     jz .th_done
     ; The code object must outlive the frame it came from.
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rsi, [rbp - TH_LASTI]
     call code_addr2line
     movsx rax, eax
@@ -2100,6 +2100,8 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     jz .tpn_out
     call obj_decref
 .tpn_out:
+    mov rdi, [rbp - TPN_NOTES]
+    XDECREF_V rdi, rcx
     mov rax, [rbp - TPN_EXC]
     mov [gs:ThreadState.current_exception], rax
     leave

@@ -670,7 +670,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; token is emitted BETWEEN the NEWLINE and the INDENT, which is where
     ; CPython's grammar looks for it, and the line still counts as blank so
     ; the indentation stack is untouched.
-    mov byte [rel lex_tc_own_line], 1
+    mov byte [gs:ThreadState.ts_lex_tc_own_line], 1
     call .sub_type_comment
     test eax, eax
     jnz .bl_at_eol                      ; r12 is at the end of the line already
@@ -753,7 +753,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; asked for one -- the only comment this lexer ever emits.  It is
     ; recognised here rather than in the parser because the parser never sees
     ; a comment at all: everything else about them is that they are skipped.
-    mov byte [rel lex_tc_own_line], 0
+    mov byte [gs:ThreadState.ts_lex_tc_own_line], 0
     call .sub_type_comment
     test eax, eax
     jnz .scan                           ; r12 is at the end of the line already
@@ -837,7 +837,7 @@ DEF_FUNC lex_run, LR_FRAME
     ; TypeIgnore.tag.
     cmp qword [rsp], TOK_TYPE_IGNORE    ; the kind, pushed above
     jne .tc_no_eol
-    cmp byte [rel lex_tc_own_line], 0
+    cmp byte [gs:ThreadState.ts_lex_tc_own_line], 0
     je .tc_no_eol
     cmp rcx, r13
     jae .tc_no_eol

@@ -86,6 +86,11 @@ extern exc_ValueError_type
 extern exc_MemoryError_type
 
 extern __errno_location
+extern malloc
+extern realloc
+extern free
+extern pthread_mutex_lock
+extern pthread_mutex_unlock
 extern CRYPTO_free
 extern TLS_method
 extern TLS_client_method
@@ -140,12 +145,13 @@ SSL_PW_MAX  equ 1024    ; PEM_BUFSIZE: OpenSSL never asks for more
 
 section .data
 align 8
+align 64
+ssl_handle_lock: dd 0
+align 8
 ssl_handles:     dq 0       ; SslHandle[], grown by doubling
 ssl_handle_cap:  dq 0
 ssl_handle_n:    dq 0
-ssl_last_errno:  dq 0       ; errno as the last engine call left it
-ssl_pw_len:      dq -1      ; -1: no password, so the callback refuses
-ssl_keylog:      dq 0       ; lines the keylog callback has queued
+ssl_keylog:      dq 0       ; lines the keylog callback has queued (libc buf)
 ssl_keylog_len:  dq 0
 ssl_keylog_cap:  dq 0
 
@@ -166,7 +172,8 @@ ssl_free_fns:
     dq 0, SSL_CTX_free, SSL_free, BIO_free, X509_free, SSL_SESSION_free
 
 section .bss
-ssl_pw_buf:      resb SSL_PW_MAX
+align 64
+ssl_keylog_mutex: resb 64   ; pthread_mutex_t guarding ssl_keylog* across threads
 
 section .rodata
 ssl_modname:     db "_sslcore", 0
@@ -188,14 +195,20 @@ DEF_FUNC_BARE ssl_handle_at
     xor eax, eax
     test rdi, rdi
     js .sh_no
+    RT_LOCK_GATED ssl_handle_lock
     cmp rdi, [rel ssl_handle_n]
-    jae .sh_no
+    jae .sh_unlock_no
     imul rax, rdi, SslHandle_size
     add rax, [rel ssl_handles]
     cmp qword [rax + SslHandle.ptr], 0
-    jne .sh_ok
+    jne .sh_unlock_ok
     xor eax, eax
-.sh_ok:
+.sh_unlock_ok:
+    RT_UNLOCK_GATED ssl_handle_lock
+    ret
+.sh_unlock_no:
+    xor eax, eax
+    RT_UNLOCK_GATED ssl_handle_lock
 .sh_no:
     ret
 END_FUNC ssl_handle_at
@@ -214,6 +227,7 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     push rbx
     mov [rbp - SA_PTR], rdi
     mov [rbp - SA_KIND], rsi
+    RT_LOCK_GATED ssl_handle_lock
     xor ebx, ebx
 .sa_scan:
     cmp rbx, [rel ssl_handle_n]
@@ -232,7 +246,7 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     mov rax, [rel ssl_handle_cap]
     test rax, rax
     jnz .sa_double
-    mov eax, 16
+    mov eax, 1024
     jmp .sa_grow
 .sa_double:
     add rax, rax
@@ -242,7 +256,7 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     imul rsi, rax, SslHandle_size
     call ap_realloc
     test rax, rax
-    jz .sa_fail
+    jz .sa_unlock_fail
     mov [rel ssl_handles], rax
     mov rcx, [rbp - SA_CAP]
     mov [rel ssl_handle_cap], rcx
@@ -257,10 +271,13 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     mov rcx, [rbp - SA_KIND]
     mov [rax + SslHandle.kind], rcx
     mov qword [rax + SslHandle.extra], 0
+    RT_UNLOCK_GATED ssl_handle_lock
     mov rax, rbx
     pop rbx
     leave
     ret
+.sa_unlock_fail:
+    RT_UNLOCK_GATED ssl_handle_lock
 .sa_fail:
     mov rax, -1
     pop rbx
@@ -328,7 +345,7 @@ DEF_FUNC_BARE ssl_val_data
     mov rax, [rdi + PyByteArrayObject.ob_bytes]
     test rax, rax
     jnz .vd_ret
-    lea rax, [rel ssl_pw_buf]       ; an empty bytearray: any valid pointer
+    lea rax, [rel ssl_modname]      ; an empty bytearray: any valid pointer
 .vd_ret:
     ret
 .vd_bytes:
@@ -608,7 +625,7 @@ DEF_FUNC_LOCAL ssl_call, SC_FRAME
     ALLOW_THREADS_END
 .sc_called:
     mov rax, [rbp - SC_ERRNO]
-    mov [rel ssl_last_errno], rax
+    mov [gs:ThreadState.ssl_last_errno], rax
 
     mov rcx, [rbp - SC_DESC]
     movzx eax, byte [rcx + SslFn.spec]
@@ -810,7 +827,7 @@ END_FUNC ssl_call
 ;; -- an allocation, a dict lookup -- may change the live one.
 ;; ============================================================================
 DEF_FUNC ssl_errno
-    mov rdi, [rel ssl_last_errno]
+    mov rdi, [gs:ThreadState.ssl_last_errno]
     call int_from_i64
     V_PACK rax, rdx
     leave
@@ -878,6 +895,8 @@ END_FUNC ssl_free
 ;; password, and the callback then refuses rather than letting OpenSSL fall
 ;; back to prompting on the terminal.
 ;; ============================================================================
+SP_DATA  equ 8
+SP_LEN   equ 16
 SP_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
 DEF_FUNC ssl_set_password, SP_FRAME
     cmp rsi, 1
@@ -891,18 +910,34 @@ DEF_FUNC ssl_set_password, SP_FRAME
     jz .sp_type
     cmp rdx, SSL_PW_MAX
     jae .sp_long
-    mov [rel ssl_pw_len], rdx
-    lea rdi, [rel ssl_pw_buf]
-    mov rsi, rax
+    mov [rbp - SP_DATA], rax
+    mov [rbp - SP_LEN], rdx
+    mov rdi, [gs:ThreadState.ssl_pw_buf]
+    test rdi, rdi
+    jnz .sp_have_buf
+    mov edi, SSL_PW_MAX
+    call malloc wrt ..plt
+    test rax, rax
+    jz .sp_nomem
+    mov [gs:ThreadState.ssl_pw_buf], rax
+    mov rdi, rax
+.sp_have_buf:
+    mov rdx, [rbp - SP_LEN]
+    lea rcx, [rdx + 1]
+    mov [gs:ThreadState.ssl_pw_len_plus1], rcx
+    mov rsi, [rbp - SP_DATA]
     call ap_memcpy
     jmp .sp_done
 .sp_clear:
     ; Wipe what was there: a key's password should not outlive its load.
-    lea rdi, [rel ssl_pw_buf]
+    mov rdi, [gs:ThreadState.ssl_pw_buf]
+    test rdi, rdi
+    jz .sp_clear_len
     xor esi, esi
     mov edx, SSL_PW_MAX
     call ap_memset
-    mov qword [rel ssl_pw_len], -1
+.sp_clear_len:
+    mov qword [gs:ThreadState.ssl_pw_len_plus1], 0
 .sp_done:
     RET_NONE
     leave
@@ -911,6 +946,8 @@ DEF_FUNC ssl_set_password, SP_FRAME
     FAIL exc_TypeError_type, "_sslcore: wrong number of arguments", .sp_fail
 .sp_type:
     FAIL exc_TypeError_type, "password should be a string or bytes", .sp_fail
+.sp_nomem:
+    FAIL exc_MemoryError_type, "_sslcore: out of memory", .sp_fail
 .sp_long:
     SET_EXC exc_ValueError_type, "password cannot be longer than 1023 bytes"
 .sp_fail:
@@ -924,12 +961,13 @@ END_FUNC ssl_set_password
 ;;   password's length, or -1 when there is none
 ;;
 ;; OpenSSL's pem_password_cb.  Called from inside a PEM read, with whatever
-;; set_password parked.
+;; set_password parked in this thread's ThreadState.
 ;; ============================================================================
 DEF_FUNC ssl_pw_cb
-    mov rax, [rel ssl_pw_len]
+    mov rax, [gs:ThreadState.ssl_pw_len_plus1]
     test rax, rax
-    js .pw_none
+    jz .pw_none
+    dec rax
     movsxd rdx, esi
     cmp rax, rdx
     jbe .pw_fits
@@ -938,7 +976,7 @@ DEF_FUNC ssl_pw_cb
     push rax
     sub rsp, 8
     mov rdx, rax
-    lea rsi, [rel ssl_pw_buf]
+    mov rsi, [gs:ThreadState.ssl_pw_buf]
     call ap_memcpy
     add rsp, 8
     pop rax
@@ -1095,31 +1133,39 @@ END_FUNC ssl_hello_cb
 ;; ============================================================================
 ;; ssl_keylog_cb(rdi = ssl, rsi = line) -> void
 ;;
-;; The keylog callback.  It cannot write the file itself -- the file is a
-;; Python object's business -- so it queues the line and its newline, and
-;; lib/_ssl.py drains the queue into keylog_filename after each operation.
+;; The keylog callback.  Runs from OpenSSL while the calling thread has
+;; released the GIL, so it MUST NOT call ap_realloc or touch Python state.
+;; Guarded by ssl_keylog_mutex and backed by libc realloc/free.
 ;; ============================================================================
 KL_LINE  equ 8
 KL_LEN   equ 16
+KL_NEWC  equ 24
 KL_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC ssl_keylog_cb, KL_FRAME
     mov [rbp - KL_LINE], rsi
     mov rdi, rsi
     call ap_strlen
     mov [rbp - KL_LEN], rax
+
+    lea rdi, [rel ssl_keylog_mutex]
+    call pthread_mutex_lock wrt ..plt
+
     ; Room for the line and its newline.
+    mov rax, [rbp - KL_LEN]
     mov rcx, [rel ssl_keylog_len]
     lea rcx, [rcx + rax + 1]
     cmp rcx, [rel ssl_keylog_cap]
     jbe .kl_room
     add rcx, rcx
-    mov [rel ssl_keylog_cap], rcx
+    mov [rbp - KL_NEWC], rcx
     mov rdi, [rel ssl_keylog]
     mov rsi, rcx
-    call ap_realloc
+    call realloc wrt ..plt
     test rax, rax
-    jz .kl_lost
+    jz .kl_unlock
     mov [rel ssl_keylog], rax
+    mov rcx, [rbp - KL_NEWC]
+    mov [rel ssl_keylog_cap], rcx
 .kl_room:
     mov rdi, [rel ssl_keylog]
     add rdi, [rel ssl_keylog_len]
@@ -1132,13 +1178,9 @@ DEF_FUNC ssl_keylog_cb, KL_FRAME
     mov byte [rdx + rcx], 10
     inc rcx
     add [rel ssl_keylog_len], rcx
-    leave
-    ret
-.kl_lost:
-    ; Out of memory: the old block is still ours; keep its capacity honest.
-    mov qword [rel ssl_keylog], 0
-    mov qword [rel ssl_keylog_len], 0
-    mov qword [rel ssl_keylog_cap], 0
+.kl_unlock:
+    lea rdi, [rel ssl_keylog_mutex]
+    call pthread_mutex_unlock wrt ..plt
     leave
     ret
 END_FUNC ssl_keylog_cb
@@ -1147,20 +1189,41 @@ END_FUNC ssl_keylog_cb
 ;; _sslcore.keylog_drain() -> bytes
 ;;
 ;; Every line the keylog callback queued since the last drain, and the queue
-;; emptied.
+;; emptied.  Swaps out the libc buffer under ssl_keylog_mutex so bytes_from_data
+;; runs without holding the lock.
 ;; ============================================================================
-KD_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
+KD_BUF   equ 8
+KD_LEN   equ 16
+KD_OBJ   equ 24
+KD_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC ssl_keylog_drain, KD_FRAME
-    mov rdi, [rel ssl_keylog]
-    mov rsi, [rel ssl_keylog_len]
-    test rsi, rsi
-    jz .kd_empty
-    call bytes_from_data
+    lea rdi, [rel ssl_keylog_mutex]
+    call pthread_mutex_lock wrt ..plt
+    mov rax, [rel ssl_keylog]
+    mov rcx, [rel ssl_keylog_len]
+    mov [rbp - KD_BUF], rax
+    mov [rbp - KD_LEN], rcx
+    test rcx, rcx
+    jz .kd_unlock_empty
+    mov qword [rel ssl_keylog], 0
     mov qword [rel ssl_keylog_len], 0
+    mov qword [rel ssl_keylog_cap], 0
+    lea rdi, [rel ssl_keylog_mutex]
+    call pthread_mutex_unlock wrt ..plt
+
+    mov rdi, [rbp - KD_BUF]
+    mov rsi, [rbp - KD_LEN]
+    call bytes_from_data
+    mov [rbp - KD_OBJ], rax
+    mov rdi, [rbp - KD_BUF]
+    call free wrt ..plt
+    mov rax, [rbp - KD_OBJ]
     mov edx, TAG_PTR
     leave
     ret
-.kd_empty:
+.kd_unlock_empty:
+    lea rdi, [rel ssl_keylog_mutex]
+    call pthread_mutex_unlock wrt ..plt
     xor edi, edi
     call bytes_new
     mov edx, TAG_PTR

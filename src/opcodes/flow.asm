@@ -144,10 +144,10 @@ DEF_FUNC_BARE op_pop_jump_if_false
     DISPATCH
 
 .pjif_bool_stay:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
     DISPATCH
 .pjif_bool_jump:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
 .pjif_jump:
     lea rbx, [rbx + rcx*2]
     DISPATCH
@@ -193,10 +193,10 @@ DEF_FUNC_BARE op_pop_jump_if_true
     DISPATCH
 
 .pjit_bool_stay:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
     DISPATCH
 .pjit_bool_jump:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
 .pjit_jump:
     lea rbx, [rbx + rcx*2]
     DISPATCH
@@ -580,7 +580,7 @@ DEF_FUNC op_build_string, BS_FRAME
     call ap_malloc
     mov rbx, rax               ; rbx = the answer, across the copies below
 
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     extern str_type
     lea rcx, [rel str_type]
     mov [rbx + PyObject.ob_type], rcx
@@ -1018,9 +1018,9 @@ DEF_FUNC op_send, SND_FRAME
     V_TEST_PTR rdi, rax
     ja .send_no_retval
     mov rax, [rdi + PyObject.ob_type]
-    ; gi_return_value lives at +48, so the object must be at least 56 bytes.
-    ; (Was `jle 56` when the struct still carried a separate tag word.)
-    cmp qword [rax + PyTypeObject.tp_basicsize], 56
+    ; gi_return_value lives at PyGenObject.gi_return_value (+56), so the object
+    ; must be at least PyGenObject.gi_return_value + 8 (64 bytes).
+    cmp qword [rax + PyTypeObject.tp_basicsize], PyGenObject.gi_return_value + 8
     jl .send_no_retval
     mov rax, [rdi + PyGenObject.gi_return_value]
     V_UNPACK rax, rdx

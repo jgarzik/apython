@@ -127,8 +127,11 @@ SRE_MATCH_ERROR      equ -1
 ; SRE_PatternObject layout (64 bytes)
 ; ============================================================================
 struc SRE_PatternObject
-    .ob_refcnt:   resq 1  ; +0
-    .ob_type:     resq 1  ; +8
+    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
+    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
+    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
+    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
+    .ob_type:       resq 1  ; +16: pointer to type object
     .pattern:     resq 1  ; +16: pattern string (PyStrObject*)
     .flags:       resd 1  ; +24: regex flags
     .groups:      resd 1  ; +28: number of groups
@@ -147,8 +150,11 @@ endstruc
 ; SRE_MatchObject layout (80 bytes + variable marks)
 ; ============================================================================
 struc SRE_MatchObject
-    .ob_refcnt:   resq 1  ; +0
-    .ob_type:     resq 1  ; +8
+    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
+    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
+    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
+    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
+    .ob_type:       resq 1  ; +16: pointer to type object
     .pattern:     resq 1  ; +16: SRE_PatternObject* (INCREF'd)
     .string:      resq 1  ; +24: original string (PyStrObject*, INCREF'd)
     .str_begin:   resq 1  ; +32: ptr to start of string data
@@ -255,8 +261,11 @@ endstruc
 ; Used by Pattern.finditer() and Pattern.scanner().
 ; ============================================================================
 struc SRE_ScannerObject
-    .ob_refcnt:   resq 1  ; +0
-    .ob_type:     resq 1  ; +8
+    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
+    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
+    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
+    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
+    .ob_type:       resq 1  ; +16: pointer to type object
     .pattern:     resq 1  ; +16  SRE_PatternObject* (INCREF'd)
     .string:      resq 1  ; +24  PyStrObject* (INCREF'd)
     .pos:         resq 1  ; +32  current search position (i64)

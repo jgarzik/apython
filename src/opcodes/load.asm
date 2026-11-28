@@ -135,6 +135,12 @@ DEF_FUNC_BARE op_load_global
     push rdi
     push rdi
 
+    ; In free-threaded mode, use dict_get directly (returns owned ref under
+    ; OBJ_LOCK) instead of reading entries[idx] unlocked or installing ICs.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lg_threaded
+
     ; Try globals first: dict_get_index(globals, name) -> slot or -1
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
@@ -165,6 +171,29 @@ DEF_FUNC_BARE op_load_global
     mov rax, [rdi + DictEntry.value]
     add rsp, 16                ; discard the saved name and its pad
     jmp .lg_push_result
+
+.lg_threaded:
+    mov rdi, [r12 + PyFrame.globals]
+    mov rsi, [rsp]
+    call dict_get
+    ERR_DICT_GET .lg_threaded_exc
+    test rax, rax
+    jnz .lg_threaded_found
+    mov rdi, [r12 + PyFrame.builtins]
+    mov rsi, [rsp]
+    call dict_get
+    ERR_DICT_GET .lg_threaded_exc
+    test rax, rax
+    jz .not_found
+.lg_threaded_found:
+    add rsp, 16
+    VPUSH rax
+    add rbx, 8
+    DISPATCH
+.lg_threaded_exc:
+    add rsp, 16
+    PUBLISH_SP
+    jmp eval_exception_unwind
 
 .try_builtins:
     ; Try builtins: dict_get_index(builtins, name) -> slot or -1
@@ -327,11 +356,7 @@ DEF_FUNC_BARE op_load_name
 .found:
     add rsp, 16                ; discard saved name and the pad
 .found_no_pop:
-    ; Each of the three probes above used to V_UNPACK dict_get's answer just
-    ; to `test edx, edx` for a miss.  dict_get already returns a bare Value
-    ; and 0 on a miss, and 0 is the only NULL encoding -- integer 0 encodes as
-    ; V_INT_BIAS -- so the raw test is exact.
-    INCREF_V rax, rdx
+    ; dict_get already returns an owned Value.
     VPUSH rax
     DISPATCH
 END_FUNC op_load_name
@@ -487,7 +512,6 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_tag_found:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx
-    INCREF_VAL rax, rdx
     mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 
@@ -635,11 +659,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     test edx, edx
     jz .la_attr_error
 .la_dict_found:
-
-    ; INCREF the result (dict_get returns borrowed ref — may be SmallInt)
+    ; type_lookup_cached already returns an owned reference.
     mov [rbp - LA_ATTR], rax
-    mov [rbp - LA_ATTR_TAG], rdx   ; save tag from dict_get
-    INCREF_VAL rax, rdx
+    mov [rbp - LA_ATTR_TAG], rdx   ; save tag from type_lookup_cached
     mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 
@@ -706,9 +728,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Check if attr's type has __get__
     mov rdi, rcx               ; attr's type
     lea rsi, [rel dunder_get]
-    call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .la_check_flag          ; no __get__, treat normally
 
     ; Has __get__!  Which two arguments it gets depends on where the lookup
@@ -882,17 +904,30 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; __set__ at all -- so what it lets through can never become one.
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    call type_lookup_cached        ; rax = payload, edx = tag
+    call type_lookup_cached        ; rax = payload (owned), edx = tag
     test edx, edx
     jz .la_ic_name_free            ; the MRO does not define it at all
     cmp edx, TAG_PTR
     jne .la_ic_name_free           ; and an immediate is never a descriptor
+    push rax
+    sub rsp, 8
     mov rdi, rax
     extern attr_may_be_data_descr
     call attr_may_be_data_descr
-    test eax, eax
+    mov r8d, eax
+    add rsp, 8
+    pop rdi
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop r8
+    test r8d, r8d
     jnz .la_simple_push
 .la_ic_name_free:
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .la_simple_push
 
     mov rdi, [rbp - LA_OBJ]
     LOAD_INST_DICT rsi, rdi, .la_simple_push
@@ -909,14 +944,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rax, 0xFFFF
     ja .la_simple_push             ; the index does not fit the cache
 
-    ; The handler validates the slot by comparing its KEY against co_names by
-    ; pointer, and dict_set keeps the FIRST writer's key object.  An attribute
-    ; created under a name that is not the interned constant --
-    ; setattr(o, "".join([...]), 1) -- can therefore never satisfy that guard,
-    ; and installing anyway made the site specialize and deopt on every single
-    ; execution: two instruction-stream writes and a dict_get_index per access,
-    ; measured at 41ms against 18ms for the same loop over a constant name.
-    ; Refusing once here is what stops it.
+    ; Ensure stored dict key matches co_names by pointer identity.
     mov rdi, [rbp - LA_OBJ]
     LOAD_INST_DICT rsi, rdi, .la_simple_push   ; rsi did not survive the call
     mov rcx, [rsi + PyDictObject.entries]
@@ -1000,54 +1028,33 @@ DEF_FUNC op_load_attr, LA_FRAME
     jnz .la_not_method             ; class attribute → [NULL, func]
     test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .la_not_method             ; heaptype instance attr → [NULL, func]
-    ; A module's tp_getattr answers out of the module's own namespace, not out
-    ; of a type -- `m.f` is the global f, never a method bound to m.  It is not
-    ; a heaptype, so without this it fell into the built-in case below and was
-    ; called with the module as its first argument.
+    ; Module, function, descriptor wrappers, super, and bound methods answer
+    ; from their own namespace rather than binding self.
     lea rcx, [rel module_type]
     cmp rax, rcx
     je .la_not_method
-    ; A function's tp_getattr is the same shape: it reads out of the
-    ; function's own __dict__, so `f.g` is whatever was stored there and
-    ; calling it must not pass f.  functools.lru_cache hangs cache_info off
-    ; the wrapper exactly like that, and `slow.cache_info()` was called with
-    ; the wrapper as its first argument.
     lea rcx, [rel func_type]
     cmp rax, rcx
     je .la_not_method
-    ; The same for a classmethod or staticmethod wrapper: its __func__ is the
-    ; function it wraps, not a method of the wrapper.
     lea rcx, [rel classmethod_type]
     cmp rax, rcx
     je .la_not_method
     lea rcx, [rel staticmethod_type]
     cmp rax, rcx
     je .la_not_method
-    ; And a super, whose tp_getattr has already done the whole descriptor
-    ; protocol against __self__ -- `super().s` on a staticmethod comes back
-    ; as the plain function, and binding the SUPER OBJECT to it as self made
-    ; `super().s()` a TypeError about an argument nobody wrote.  This is the
-    ; shape CPython avoids wholesale: _PyObject_GetMethod reports "not a
-    ; method" for any type with a tp_getattro of its own.
     extern super_type
     lea rcx, [rel super_type]
     cmp rax, rcx
     je .la_not_method
-    ; And a BOUND METHOD, whose method_getattr answers `__func__` with the
-    ; plain function under it and delegates everything else to that function's
-    ; own __dict__.  Neither is a method OF the bound method, so binding it as
-    ; self passed three arguments where two were written:
-    ; `bm.__func__(a, 1)` was "A.im() takes 2 positional arguments but 3 were
-    ; given".  It matters most for what a decorator hangs off its wrapper --
-    ; `obj.method.cache_clear()` on an lru_cache'd method is this shape.
-    ; The value was never wrong; only the fused call site was, so a two-step
-    ; `m = bm.__func__` worked and hid it.
     lea rcx, [rel method_type]
     cmp rax, rcx
     je .la_not_method
     jmp .la_method_push            ; built-in tp_getattr → [func, self]
 
 .la_ic_check:
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .la_method_push
 
     ; Verify type has tp_dict with valid dk_version
     mov rdi, [rbp - LA_OBJ]       ; obj
@@ -1059,15 +1066,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_method_push             ; no tp_dict, skip
 
     ; Write CACHE: [+0]=type version(32b), [+4]=dk_version(16b), [+6]=descr(64b)
-    ;
-    ; The VERSION, not the type POINTER, is what says "the same class in the
-    ; same state".  Versions come from one global counter and are never
-    ; reused; an address is, and a class freed and another allocated in its
-    ; place passed the pointer compare -- with the dk_version guard only
-    ; sixteen bits wide behind it, and a cached DESCRIPTOR belonging to the
-    ; dead class's dict.  The site then called the wrong class's method, or a
-    ; freed one.  Every other cache in load_ic.asm already guards this way,
-    ; and typecache.asm's header says why.
     mov rax, [rcx + PyTypeObject.tp_flags]
     shr rax, TYPE_VERSION_SHIFT
     test eax, eax
@@ -1197,6 +1195,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_done
 
 .la_property_run:
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .la_prop_call
     ; === IC: try to specialize as LOAD_ATTR_PROPERTY (242) ===
     ;
     ; This is where a @property is actually run, and until now it was the only
@@ -1232,18 +1233,31 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; this is the one place to check that the two agree.
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    call type_lookup_cached        ; rax = payload, edx = tag
+    call type_lookup_cached        ; rax = payload (owned), edx = tag
     cmp edx, TAG_PTR
     jne .la_prop_call
-    cmp rax, [rbp - LA_ATTR]
-    jne .la_prop_call              ; a different answer: do not cache this one
+    mov r8, rax
+    cmp r8, [rbp - LA_ATTR]
+    jne .la_prop_drop_call         ; a different answer: do not cache this one
     ; Exactly property, not a subclass of it: a subclass may define __get__.
     lea rcx, [rel property_type]
-    cmp [rax + PyObject.ob_type], rcx
-    jne .la_prop_call
-    mov rax, [rax + PyPropertyObject.prop_get]
+    cmp [r8 + PyObject.ob_type], rcx
+    jne .la_prop_drop_call
+    mov rax, [r8 + PyPropertyObject.prop_get]
+    push rax
+    sub rsp, 8
+    mov rdi, r8
+    call obj_decref
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .la_prop_call               ; no getter: the generic path raises
+    jmp .la_prop_have_get
+.la_prop_drop_call:
+    mov rdi, r8
+    call obj_decref
+    jmp .la_prop_call
+.la_prop_have_get:
     ; The getter has to be a shape the handler can run inline.  Checking it
     ; here as well as at every hit is what keeps a lambda with a default, a
     ; builtin or a generator from installing and deopting for ever.
@@ -1426,16 +1440,20 @@ END_FUNC op_load_closure
 ;; Raises NameError if cell is empty (ob_ref == NULL).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_deref
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
-    test rax, rax
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]  ; rdi = cell object (payload)
+    test rdi, rdi
     jz .deref_error
-    mov rax, [rax + PyCellObject.ob_ref]       ; rax = contained Value
-    test rax, rax                              ; 0 means an empty cell
-    jz .deref_error
+    OBJ_LOCK rdi
+    mov rax, [rdi + PyCellObject.ob_ref]         ; rax = contained Value
+    test rax, rax                                ; 0 means an empty cell
+    jz .deref_unlock_error
     INCREF_V rax, rdx
+    OBJ_UNLOCK rdi
     VPUSH rax
     DISPATCH
 
+.deref_unlock_error:
+    OBJ_UNLOCK rdi
 .deref_error:
     ; An empty cell is one of CPython's two different exceptions, and which
     ; one depends on whose cell it is: this function's own (a local that a
@@ -1950,9 +1968,8 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp eval_exception_unwind
 
 .lsa_found:
-    ; rax = attribute value, rdx = tag (from dict_get)
-    mov [rbp - LSA_ATTR_TAG], rdx  ; save tag before INCREF/DECREF
-    INCREF_VAL rax, rdx
+    ; rax = attribute value, rdx = tag (owned from dict_get_mro)
+    mov [rbp - LSA_ATTR_TAG], rdx
     push rax                       ; save attr
 
     ; DECREF class
@@ -2426,7 +2443,6 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
 .ga_from_type:
     mov [rbp - GA_ATTR], rax
     mov [rbp - GA_ATTRTAG], rdx
-    INCREF_VAL rax, rdx
     mov qword [rbp - GA_FROMTYPE], 1
     jmp .ga_have_attr
 
@@ -2474,8 +2490,8 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     jz .ga_plain
     mov rdi, rcx
     lea rsi, [rel dunder_get]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .ga_plain
     mov rdi, [rbp - GA_ATTR]
     ; Found in a CLASS's own MRO, it is read through the class: __get__(None,

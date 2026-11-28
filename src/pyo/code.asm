@@ -118,7 +118,7 @@ DEF_FUNC code_new, CN_FRAME
     mov [rbp - CN_CODE], rax
 
     ; --- object header ---
-    mov qword [r12 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r12
     lea rax, [rel code_type]
     mov [r12 + PyObject.ob_type], rax
 
@@ -635,6 +635,11 @@ DEF_FUNC code_getattr
     mov esi, [rbx + PyCodeObject.co_code_len]
     extern bytes_from_data
     call bytes_from_data
+    push rax
+    lea rdi, [rax + PyBytesObject.data]
+    mov rsi, [rax + PyBytesObject.ob_size]
+    call code_despecialize_buf
+    pop rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -937,7 +942,8 @@ code_type_name: db "code", 0
 align 8
 global code_type
 code_type:
-    dq 1                ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type        ; ob_type
     dq code_type_name   ; tp_name
     dq PyCodeObject_size ; tp_basicsize
@@ -1252,6 +1258,17 @@ DEF_FUNC code_method_replace, CR_FRAME
 .cr_build:
     lea rdi, [rbp - CR_SPEC]
     call code_new
+    ; If co_code came from the source code object, despecialize the copy so
+    ; live inline-cache opcodes and raw pointers do not leak into the clone.
+    lea rdx, [rbx + PyCodeObject.co_code]
+    cmp [r12 + CodeSpec.code_bytes], rdx
+    jne .cr_ret
+    push rax
+    lea rdi, [rax + PyCodeObject.co_code]
+    mov esi, [rax + PyCodeObject.co_code_len]
+    call code_despecialize_buf
+    pop rax
+.cr_ret:
     mov edx, TAG_PTR
     pop r13
     pop r12
@@ -1299,6 +1316,74 @@ DEF_FUNC code_method_replace, CR_FRAME
     leave
     ret
 END_FUNC code_method_replace
+
+;; ============================================================================
+;; code_despecialize_buf(rdi = buf, rsi = byte_len) -> nothing
+;;
+;; Reverse in-place bytecode specialization (opcodes 200..243) and zero any
+;; inline-cache payload words written into trailing CACHE entries.
+;; ============================================================================
+DEF_FUNC_LOCAL code_despecialize_buf
+    xor rcx, rcx
+    lea r8, [rel cd_base_op]
+    lea r9, [rel cd_cache_bytes]
+.cdb_loop:
+    lea rdx, [rcx + 2]
+    cmp rdx, rsi
+    ja .cdb_done
+    movzx eax, byte [rdi + rcx]
+    cmp eax, 95                         ; STORE_ATTR backoff counter in CACHE
+    je .cdb_zero8
+    sub eax, 200
+    cmp eax, 44
+    jae .cdb_next
+    movzx r10d, byte [r8 + rax]
+    test r10d, r10d
+    jz .cdb_next
+    mov byte [rdi + rcx], r10b
+    movzx r10d, byte [r9 + rax]
+    test r10d, r10d
+    jz .cdb_next
+    ; Zero r10 bytes starting at rdi + rcx + 2, clamped to rsi.
+    lea r11, [rcx + 2]
+.cdb_zloop:
+    cmp r11, rsi
+    jae .cdb_zdone
+    mov byte [rdi + r11], 0
+    inc r11
+    dec r10d
+    jnz .cdb_zloop
+.cdb_zdone:
+    mov rcx, r11
+    jmp .cdb_loop
+.cdb_zero8:
+    mov r10d, 8
+    lea r11, [rcx + 2]
+    jmp .cdb_zloop
+.cdb_next:
+    add rcx, 2
+    jmp .cdb_loop
+.cdb_done:
+    leave
+    ret
+END_FUNC code_despecialize_buf
+
+section .rodata
+; Generic Python 3.12 opcode for each specialized opcode 200..243 (0 = unused).
+cd_base_op:
+    db 116, 116,   0, 106, 106,   0,   0,   0,   0, 107  ; 200..209
+    db   0, 122, 122,  93,  93, 107, 107, 122, 122, 122  ; 210..219
+    db 122, 122, 122, 107, 107, 107, 122, 122, 122, 122  ; 220..229
+    db 122, 122, 122, 122, 122,  25,  25,  60,  92,  92  ; 230..239
+    db  95, 171, 106,  95                                ; 240..243
+; Trailing CACHE byte count to zero for specialized opcodes 200..243.
+cd_cache_bytes:
+    db   8,   8,   0,  18,  18,   0,   0,   0,   0,   0  ; 200..209
+    db   0,   0,   0,   0,   0,   0,   0,   0,   0,   0  ; 210..219
+    db   0,   0,   0,   0,   0,   0,   0,   0,   0,   0  ; 220..229
+    db   0,   0,   0,   0,   0,   0,   0,   0,   0,   0  ; 230..239
+    db   8,   0,  18,   8                                ; 240..243
+section .text
 
 ;; ============================================================================
 ;; code.co_lines() -> an iterator of (start, end, lineno)

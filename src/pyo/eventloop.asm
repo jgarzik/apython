@@ -207,7 +207,7 @@ DEF_FUNC task_new, 8            ; 1 pushes, so rsp is 16-aligned
     lea rsi, [rel task_type]
     call gc_alloc
 
-    mov qword [rax + AsyncTask.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov [rax + AsyncTask.coro], rbx
     ; INCREF coro
     mov rdi, rbx
@@ -223,7 +223,7 @@ DEF_FUNC task_new, 8            ; 1 pushes, so rsp is 16-aligned
     ; singleton without taking a reference made that release one too many.
     lea rcx, [rel none_singleton]
     mov [rax + AsyncTask.send_value], rcx
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     mov dword [rax + AsyncTask.done], 0
     mov dword [rax + AsyncTask.cancelling], 0
     mov dword [rax + AsyncTask.n_waiters], 0
@@ -466,7 +466,7 @@ DEF_FUNC_BARE ready_enqueue
     cmp dword [rdi + AsyncTask.queued], 0
     jne .re_already
     mov dword [rdi + AsyncTask.queued], 1
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov qword [rdi + AsyncTask.next], 0
     mov rax, [gs:ThreadState.eventloop + EventLoop.ready_tail]
     test rax, rax
@@ -1150,7 +1150,7 @@ END_FUNC task_getattr
 ;; task_iter_self — tp_iter for task: return self
 ;; ============================================================================
 DEF_FUNC_BARE task_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC task_iter_self
@@ -1166,7 +1166,7 @@ DEF_FUNC_BARE task_iternext
     je .ti_done
 
     ; Not done — yield self; task_step identifies it by ob_type
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 
@@ -1351,7 +1351,8 @@ _task_cancelled_cache: dq 0
 align 8
 global task_type
 task_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq task_name_str            ; tp_name
     dq AsyncTask_size           ; tp_basicsize

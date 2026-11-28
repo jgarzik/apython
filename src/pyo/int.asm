@@ -182,13 +182,14 @@ INT_FREELIST_MAX equ 256
 
 DEF_FUNC_BARE int_alloc_raw
 %ifndef NO_INT_FREELIST
-    mov rax, [rel int_freelist]
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_int_freelist]
     test rax, rax
     jz .ial_malloc
-    ; The block is dead, so its refcount word is free to hold the next link.
-    mov rcx, [rax + PyObject.ob_refcnt]
-    mov [rel int_freelist], rcx
-    dec qword [rel int_freelist_count]
+    ; The block is dead, so its header word 0 holds the next link.
+    mov rcx, [rax]
+    mov [rdx + ThreadState.ts_int_freelist], rcx
+    dec qword [rdx + ThreadState.ts_int_freelist_cnt]
     ret
 .ial_malloc:
 %endif
@@ -209,7 +210,7 @@ DEF_FUNC int_new_compact
     push r12
     mov rbx, rdi
     call int_alloc_raw
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyIntObject.ival], rbx
@@ -495,7 +496,7 @@ DEF_FUNC_BARE int_add
     sub rsp, 8              ; the GMP calls want rsp 16-byte aligned
     call int_alloc_raw
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel int_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyIntObject.compact], 0  ; GMP-backed
@@ -554,7 +555,7 @@ DEF_FUNC_BARE int_add
     ; Allocate result
     call int_alloc_raw
     push rax                ; save result ptr
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -661,7 +662,7 @@ DEF_FUNC_BARE int_sub
 .b_ready:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -754,7 +755,7 @@ DEF_FUNC_BARE int_mul
 .b_ready:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -900,7 +901,7 @@ DEF_FUNC_BARE int_floordiv
 
     call int_alloc_raw
     mov [rbp - FD_NEW], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1049,7 +1050,7 @@ DEF_FUNC_BARE int_mod
 
     call int_alloc_raw
     mov [rbp - MD_NEW], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1114,7 +1115,7 @@ DEF_FUNC_BARE int_pos
     mov rax, rdi
     V_TEST_PTR rax, rcx
     ja .ip_immediate
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 .ip_immediate:
     ret
 END_FUNC int_pos
@@ -1139,7 +1140,7 @@ DEF_FUNC_BARE int_neg
     mov rbx, rdi
     call int_alloc_raw
     mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r12
     lea rax, [rel int_type]
     mov [r12 + PyObject.ob_type], rax
     mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
@@ -1570,15 +1571,15 @@ DEF_FUNC_BARE int_dealloc
     add rsp, 8
 .compact:
 %ifndef NO_INT_FREELIST
-    ; Back to the free list rather than to libc.  The mpz has been cleared
-    ; above when there was one, so the block is as raw as a fresh malloc.
-    mov rax, [rel int_freelist_count]
+    ; Back to this thread's free list rather than to ap_free.
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_int_freelist_cnt]
     cmp rax, INT_FREELIST_MAX
     jae .really_free
-    mov rcx, [rel int_freelist]
-    mov [rbx + PyObject.ob_refcnt], rcx     ; the dead refcount is the link
-    mov [rel int_freelist], rbx
-    inc qword [rel int_freelist_count]
+    mov rcx, [rdx + ThreadState.ts_int_freelist]
+    mov [rbx], rcx                          ; dead header word 0 is the link
+    mov [rdx + ThreadState.ts_int_freelist], rbx
+    inc qword [rdx + ThreadState.ts_int_freelist_cnt]
     pop rbx
     pop rbp
     ret
@@ -1590,6 +1591,31 @@ DEF_FUNC_BARE int_dealloc
     pop rbp
     ret
 END_FUNC int_dealloc
+
+;; ============================================================================
+;; int_freelist_drain() -> nothing
+;; Return all cached PyIntObject blocks on this thread's freelist to ap_free.
+;; ============================================================================
+global int_freelist_drain
+DEF_FUNC int_freelist_drain
+    push rbx
+    sub rsp, 8
+    mov rbx, [gs:ThreadState.ts_self]
+.ifd_loop:
+    mov rdi, [rbx + ThreadState.ts_int_freelist]
+    test rdi, rdi
+    jz .ifd_done
+    mov rax, [rdi]
+    mov [rbx + ThreadState.ts_int_freelist], rax
+    call ap_free
+    jmp .ifd_loop
+.ifd_done:
+    mov qword [rbx + ThreadState.ts_int_freelist_cnt], 0
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC int_freelist_drain
 
 ;; ============================================================================
 ;; Bitwise AND: int_and(PyObject *a, PyObject *b) -> rax = Value
@@ -1643,7 +1669,7 @@ DEF_FUNC_BARE int_and
 .b_ok:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1730,7 +1756,7 @@ DEF_FUNC_BARE int_or
 .b_ok:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1818,7 +1844,7 @@ DEF_FUNC_BARE int_xor
 .b_ok:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1871,7 +1897,7 @@ DEF_FUNC_BARE int_invert
     mov rbx, rdi
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2077,7 +2103,7 @@ DEF_FUNC int_lshift
     push rcx
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2215,7 +2241,7 @@ DEF_FUNC int_rshift, RS_FRAME
 .gmp_path:
     call int_alloc_raw
     mov [rbp - RS_NEW], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2406,7 +2432,7 @@ DEF_FUNC int_power, IPW_FRAME
     push rcx
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2778,7 +2804,8 @@ int_number_methods:
 align 8
 global int_type
 int_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq int_name_str         ; tp_name
     dq PyIntObject_size     ; tp_basicsize
@@ -2807,14 +2834,3 @@ int_type:
     dq 0 ; tp_dictoffset
     dq 0                        ; tp_tailslots
     dq 0                        ; tp_as_buffer
-
-section .bss
-;; The free list int_alloc_raw pops from and int_dealloc pushes onto.  A block
-;; on it is dead: its refcount word holds the link to the next one.
-;;
-;; align 8 because a `resd 1` earlier in this file's .bss (type_version_counter)
-;; had left both of these at `addr % 8 == 4`, so every push and pop of the free
-;; list was an unaligned qword access four bytes from a line split.
-align 8
-int_freelist:       resq 1
-int_freelist_count: resq 1

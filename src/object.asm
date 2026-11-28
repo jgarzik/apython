@@ -30,32 +30,44 @@ extern type_call
 
 
 ;; ============================================================================
-;; obj_incref(PyObject *obj)
-;; Increment reference count; NULL-safe.
-;; Callers must only pass heap pointers (not SmallInts).
+;; obj_incref(PyObject *obj) -> nothing
+;; Biased increment reference count; NULL-safe.  Preserves ALL GPRs (matching
+;; the historical single-instruction `inc` contract callers rely on).
 ;; ============================================================================
 DEF_FUNC_BARE obj_incref
     test rdi, rdi
     jz .skip
-    inc qword [rdi + PyObject.ob_refcnt]
+    push rax
+    INCREF_OBJ rdi, rax
+    pop rax
 .skip:
     ret
 END_FUNC obj_incref
 
 ;; ============================================================================
-;; obj_decref(PyObject *obj)
-;; Decrement reference count; deallocate if zero; NULL-safe.
-;; Callers must only pass heap pointers (not SmallInts).
+;; obj_decref(PyObject *obj) -> nothing
+;; Biased decrement reference count; deallocate if zero; NULL-safe.
+;; Preserves ALL GPRs on NULL, immortal, and non-zero fast paths.
 ;; ============================================================================
+extern obj_decref_local_zero
+extern obj_decref_shared_p
 DEF_FUNC_BARE obj_decref
     test rdi, rdi
     jz .skip
-    dec qword [rdi + PyObject.ob_refcnt]
-    jnz .skip
-    ; refcount hit zero - deallocate
-    jmp obj_dealloc
+    push rax
+    mov eax, [rdi + PyObject.ob_tid]
+    cmp eax, [gs:ThreadState.ts_tid]
+    jne .nonlocal
+    pop rax
+    dec dword [rdi + PyObject.ob_ref_local]
+    jz obj_decref_local_zero
 .skip:
     ret
+.nonlocal:
+    test eax, eax
+    pop rax
+    jz .skip
+    jmp obj_decref_shared_p
 END_FUNC obj_decref
 
 ; The trashcan.
@@ -75,7 +87,7 @@ END_FUNC obj_decref
 ; drained object and make no progress in the ordinary case.
 TRASH_LIMIT equ 50
 
-; trash_nesting and trash_later lives in ThreadState (src/include/threadstate.inc).
+; trash_nesting and trash_buf/len/cap live in ThreadState (threadstate.inc).
 
 ;; ============================================================================
 ;; obj_dealloc(PyObject *obj)
@@ -92,11 +104,12 @@ DEF_FUNC_BARE obj_dealloc
     cmp qword [gs:ThreadState.trash_nesting], TRASH_LIMIT
     jl .td_enter
 
-    ; Too deep: set it aside for the outermost dealloc.  It has to leave the
-    ; collector's lists first -- its tp_dealloc has not run, so nothing has
-    ; untracked it, and a collection during the drain would otherwise walk an
-    ; object whose refcount is already zero.  gc_untrack is idempotent, so the
-    ; untrack inside tp_dealloc still runs harmlessly later.
+    ; Too deep: mark definitively dead (MERGED, rc=0) without overwriting the
+    ; header so concurrent weakref obj_try_incref cannot resurrect it, untrack
+    ; from GC, and push onto the per-thread out-of-line trash_buf stack.
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax
     jz .td_no_gc
@@ -106,38 +119,59 @@ DEF_FUNC_BARE obj_dealloc
     mov rdi, rbx
     call gc_untrack
 .td_no_gc:
-    mov rax, [gs:ThreadState.trash_later]
-    mov [rbx + PyObject.ob_refcnt], rax
-    mov [gs:ThreadState.trash_later], rbx
+    mov rcx, [gs:ThreadState.trash_len]
+    cmp rcx, [gs:ThreadState.trash_cap]
+    jb .td_push_slot
+    mov rdx, [gs:ThreadState.trash_cap]
+    test rdx, rdx
+    jnz .td_grow_double
+    mov edx, 64
+    jmp .td_do_realloc
+.td_grow_double:
+    shl rdx, 1
+.td_do_realloc:
+    mov [gs:ThreadState.trash_cap], rdx
+    mov rdi, [gs:ThreadState.trash_buf]
+    lea rsi, [rdx * 8]
+    extern realloc
+    call realloc wrt ..plt
+    test rax, rax
+    jz .td_oom
+    mov [gs:ThreadState.trash_buf], rax
+    mov rcx, [gs:ThreadState.trash_len]
+.td_push_slot:
+    mov rax, [gs:ThreadState.trash_buf]
+    mov [rax + rcx * 8], rbx
+    inc qword [gs:ThreadState.trash_len]
     jmp .td_out
+.td_oom:
+    CSTRING rdi, "out of memory in trashcan"
+    extern fatal_error
+    call fatal_error
 
 .td_enter:
     inc qword [gs:ThreadState.trash_nesting]
+    ; Keep the dying object definitively MERGED with refcount 0 across
+    ; finalization and weakref_clear_for so a concurrent weakref obj_try_incref
+    ; can NEVER resurrect an object that has already entered obj_dealloc.
+    ; INCREF / obj_decref_no_dealloc in obj_call_finalizer & gen_dealloc operate
+    ; atomically on ob_ref_shared while preserving REF_MERGED_BIT.
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
 
-    ; PEP 442: __del__ runs before anything is taken apart -- before the weak
-    ; references are cleared and before tp_dealloc releases a field -- and if
-    ; it brings the object back, nothing below may run at all.  It used to be
-    ; called from inside instance_dealloc, after the weakrefs had already been
-    ; emptied and with no way to say the object had been resurrected, so
-    ; `def __del__(self): survivors.append(self)` freed an object that the
-    ; list it had just been added to still pointed at.
-    ;
-    ; TYPE_FLAG_HAS_DEL is one bit, maintained by type_refresh_attr_flags down
-    ; every subclass, and it is only ever set on a heaptype.
+    ; PEP 442: run __del__ before weakrefs are cleared or fields released.
+    ; TYPE_FLAG_HAS_DEL is maintained down every subclass on heaptypes only.
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax
     jz .no_finalizer
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
     jz .no_finalizer
 
-    ; A finalizer runs at most once, and the collector may have run this one
-    ; already: it finalizes a whole unreachable cycle before clearing any of
-    ; it.  The bit lives in the GC head, which is only there to read while the
-    ; object is still tracked -- gc_untrack happens later, inside gc_dealloc.
+    ; Run each finalizer at most once: GC Phase 4.5 sets GC_PREV_MASK_FINALIZED
+    ; in PyGC_Head.gc_prev and preserves it even when gc_next == 0.
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .td_do_finalize
-    cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
-    je .td_do_finalize              ; untracked: no bit to read
     test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
     jnz .no_finalizer
     or qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
@@ -150,22 +184,13 @@ DEF_FUNC_BARE obj_dealloc
     jnz .td_leave                   ; resurrected: free nothing
 
 .no_finalizer:
+    ; Mark definitively dead (MERGED, rc=0) before weakref_clear_for so a
+    ; concurrent obj_try_incref cannot resurrect the object.
+    mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
 
-    ; The object is dead: take it out of the collector's lists NOW, before a
-    ; single field is released.  This used to happen last, inside gc_dealloc,
-    ; so for the whole of a container's teardown -- every field released and
-    ; every __del__ those releases fire -- it sat in a generation list with a
-    ; refcount of zero, and anything walking the generations from inside one
-    ; of those finalizers found it.  gc.get_objects() took a reference to a
-    ; dead object and freed it a second time when the list went;
-    ; gc.collect() computed gc_refs = 0 for it, cleared it, and left the
-    ; freed block in its own young list.  CPython untracks at the top of
-    ; every tp_dealloc, and this is the one funnel they all come through.
-    ;
-    ; After the finalizer, not before it: __del__ runs with the object
-    ; tracked and held at one, which is what CPython's subtype_dealloc
-    ; arranges by re-tracking around the call.  gc_untrack is idempotent, so
-    ; the one inside gc_dealloc still runs, harmlessly.
+    ; Untrack before releasing fields (after finalization so __del__ saw the
+    ; object tracked). gc_untrack is idempotent for gc_dealloc below.
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax
     jz .no_untrack
@@ -207,23 +232,21 @@ DEF_FUNC_BARE obj_dealloc
 .td_leave:
     dec qword [gs:ThreadState.trash_nesting]
     jnz .td_out
-    cmp qword [gs:ThreadState.trash_later], 0
+    cmp qword [gs:ThreadState.trash_len], 0
     je .td_out
 
-    ; The outermost dealloc empties the chain, one object at a time.  The
-    ; nesting stays at 1 for the whole drain, so each object's own children go
-    ; on the chain rather than onto the machine stack once they are deep
-    ; enough -- which is what keeps this loop, and not the stack, bounded.
+    ; Outermost dealloc drains trash_buf LIFO with nesting held at 1 so deep
+    ; children re-defer rather than overflowing the machine stack.
 .td_drain:
     inc qword [gs:ThreadState.trash_nesting]
 .td_drain_loop:
-    mov rbx, [gs:ThreadState.trash_later]
-    test rbx, rbx
+    mov rcx, [gs:ThreadState.trash_len]
+    test rcx, rcx
     jz .td_drain_done
-    mov rax, [rbx + PyObject.ob_refcnt]
-    mov [gs:ThreadState.trash_later], rax
-    mov qword [rbx + PyObject.ob_refcnt], 0
-    mov rdi, rbx
+    dec rcx
+    mov [gs:ThreadState.trash_len], rcx
+    mov rax, [gs:ThreadState.trash_buf]
+    mov rdi, [rax + rcx * 8]
     call obj_dealloc
     jmp .td_drain_loop
 .td_drain_done:
@@ -341,7 +364,7 @@ DEF_FUNC obj_default_repr
     push r12
     mov rbx, rdi
     mov r12, rsi
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel odr_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -357,7 +380,7 @@ DEF_FUNC obj_default_repr
     mov rdi, rax
     mov rsi, r12
     call obj_repr_address
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     pop r12
     pop rbx
@@ -384,7 +407,7 @@ DEF_FUNC obj_default_repr_named, ODN_FRAME
     mov [rbp - ODN_MOD], rsi
     mov [rbp - ODN_NAME], rdx
 
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel odr_open]
     call rbt_append_cstr
     mov rsi, [rbp - ODN_MOD]
@@ -405,7 +428,7 @@ DEF_FUNC obj_default_repr_named, ODN_FRAME
     mov rdi, rax
     mov rsi, [rbp - ODN_OBJ]
     call obj_repr_address
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -426,7 +449,7 @@ DEF_FUNC obj_repr_named_at, ORN_FRAME
     mov [rbp - ORN_OBJ], rdi
     mov [rbp - ORN_NAME], rdx
     mov rdx, rsi
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel odr_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -446,7 +469,7 @@ DEF_FUNC obj_repr_named_at, ORN_FRAME
     mov rdi, rax
     mov rsi, [rbp - ORN_OBJ]
     call obj_repr_address
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -461,7 +484,7 @@ END_FUNC obj_repr_named_at
 global obj_repr_buf
 DEF_FUNC obj_repr_buf
     mov rsi, rdi
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call rbt_append_cstr
     leave
     ret
@@ -472,7 +495,7 @@ END_FUNC obj_repr_buf
 ;; ============================================================================
 global obj_repr_buf_str
 DEF_FUNC obj_repr_buf_str
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr
     leave
     ret
@@ -1119,7 +1142,7 @@ DEF_FUNC type_name_message
     push r12
     mov rbx, rdi
     mov r12, rsi
-    lea rdi, [rel rtn_buf]
+    TS_LEA rdi, ts_errbuf2
     xor ecx, ecx
 .tnm_copy:
     movzx eax, byte [rbx]
@@ -1158,7 +1181,7 @@ DEF_FUNC type_name_message
     jmp .tnm_name
 .tnm_end:
     mov byte [rdi + rcx], 0
-    lea rax, [rel rtn_buf]
+    TS_LEA rax, ts_errbuf2
     pop r12
     pop rbx
     leave
@@ -1232,7 +1255,7 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     leave
     ret
 .drs_bad:
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel drs_prefix]
     call rbt_append_cstr
     mov rdi, rax
@@ -1265,7 +1288,7 @@ DEF_FUNC dunder_require_self, DRS_FRAME
     lea rsi, [rel rbt_close]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rbt_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     leave
     ret
@@ -1335,7 +1358,7 @@ DEF_FUNC compose_binop_type_error, RBT_FRAME
 .cbt_have_open:
     mov [rbp - RBT_OPEN], rcx
 
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, rbx
     call rbt_append_cstr
     mov rdi, rax
@@ -1354,7 +1377,7 @@ DEF_FUNC compose_binop_type_error, RBT_FRAME
     lea rsi, [rel rbt_close]
     call rbt_append_cstr
 
-    lea rax, [rel rbt_buf]
+    TS_LEA rax, ts_errbuf
     pop rbx
     leave
     ret
@@ -2532,7 +2555,7 @@ DEF_FUNC set_hash_not_implemented
     extern exc_TypeError_type
     push rdi
     sub rsp, 8
-    lea rdi, [rel rbt_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel hni_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -2543,7 +2566,7 @@ DEF_FUNC set_hash_not_implemented
     lea rsi, [rel rbt_close]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel rbt_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     leave
     ret
@@ -2755,14 +2778,14 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_bool]
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .check_dunder_len       ; not found (TAG_NULL) → try __len__
 
     ; Check if __bool__ is None → TypeError
-    ; Handle both inline (0, TAG_NONE) and pointer (none_singleton, TAG_PTR) forms
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .dunder_bool_none_error
+    DECREF_V rax, rcx
 
     ; Call __bool__ via dunder_call_1
     extern dunder_call_1
@@ -2964,13 +2987,14 @@ DEF_FUNC type_repr, TR_FRAME
     jz .tr_name
     cmp edx, TAG_PTR
     jne .tr_name
+    mov [rbp - TR_LEN], rax         ; owned __module__ ref
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .tr_name
+    jne .tr_mod_drop_name
     mov rdx, [rax + PyStrObject.ob_size]
     test rdx, rdx
-    jz .tr_name
+    jz .tr_mod_drop_name
     cmp rdx, 8
     jne .tr_copy_module
     lea rdi, [rax + PyStrObject.data]
@@ -2987,7 +3011,7 @@ DEF_FUNC type_repr, TR_FRAME
     ; <class 'builtins.C'>.  exec(src, {}) is the ordinary way to get one:
     ; the class body's LOAD_NAME __name__ falls through to builtins.
     test ecx, ecx
-    jz .tr_name                 ; module is "builtins": leave it off
+    jz .tr_mod_drop_name        ; module is "builtins": leave it off
 .tr_copy_module:
     lea rsi, [rax + PyStrObject.data]
     xor ecx, ecx
@@ -3004,12 +3028,16 @@ DEF_FUNC type_repr, TR_FRAME
 .tr_mod_done:
     mov byte [rbx + r12], '.'
     inc r12
+.tr_mod_drop_name:
+    mov rdi, [rbp - TR_LEN]
+    call obj_decref
 
 .tr_name:
     ; CPython's repr uses __qualname__, not __name__: a nested class prints
     ; "<class 'M.Inner'>", and a class RENAMED through __name__ keeps the
     ; qualname it was built with.  Only a heaptype records one; a static type
     ; falls through to tp_name, which is the same string.
+    mov qword [rbp - TR_LEN], 0
     mov rax, [rbp - TR_TYPE]
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
@@ -3019,20 +3047,26 @@ DEF_FUNC type_repr, TR_FRAME
     call str_from_cstr
     mov rsi, rax
     mov rdi, [rbp - TR_LEN]
+    mov qword [rbp - TR_LEN], 0
     call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jz .tr_name_from_tp
     cmp edx, TAG_PTR
     jne .tr_name_from_tp
+    mov [rbp - TR_LEN], rax         ; owned __qualname__ ref
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .tr_name_from_tp
+    jne .tr_qual_drop_tp
     cmp qword [rax + PyStrObject.ob_size], 0
-    je .tr_name_from_tp
+    je .tr_qual_drop_tp
     lea rsi, [rax + PyStrObject.data]
     jmp .tr_name_loop
+.tr_qual_drop_tp:
+    mov rdi, [rbp - TR_LEN]
+    mov qword [rbp - TR_LEN], 0
+    call obj_decref
 .tr_name_from_tp:
     mov rax, [rbp - TR_TYPE]
     mov rsi, [rax + PyTypeObject.tp_name]
@@ -3048,6 +3082,11 @@ DEF_FUNC type_repr, TR_FRAME
     jmp .tr_name_loop
 
 .tr_close:
+    mov rdi, [rbp - TR_LEN]
+    test rdi, rdi
+    jz .tr_close_str
+    call obj_decref
+.tr_close_str:
     mov byte [rbx + r12], 0x27
     mov byte [rbx + r12 + 1], '>'
     mov byte [rbx + r12 + 2], 0
@@ -3086,7 +3125,8 @@ section .data
 align 8
 global type_type
 type_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type (self-referential)
     dq type_type_name         ; tp_name
     dq TYPE_OBJECT_SIZE       ; tp_basicsize

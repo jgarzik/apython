@@ -885,12 +885,12 @@ DEF_FUNC future_finalize_impl, FFIN_FRAME
     mov rdi, [rbp - FFIN_FUT]
     mov rax, [rdi + PyObject.ob_type]
     mov rsi, [rax + PyTypeObject.tp_name]
-    lea rdi, [rel fut_fin_buf]
+    TS_LEA rdi, ts_errbuf
     call rbt_append_cstr
     mov rdi, rax
     lea rsi, [rel fmsg_exc_unretrieved]
     call rbt_append_cstr
-    lea rdi, [rel fut_fin_buf]
+    TS_LEA rdi, ts_errbuf
     call str_from_cstr_heap
     mov [rbp - FFIN_MSG], rax
 
@@ -2576,7 +2576,8 @@ section .data
 align 8
 global future_iter_type
 future_iter_type:
-    dq 1                        ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq fname_future_iter        ; tp_name
     dq PyFutureIterObject_size  ; tp_basicsize

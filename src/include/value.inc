@@ -40,6 +40,9 @@
 %ifndef VALUE_INC
 %define VALUE_INC
 
+%include "threadstate.inc"
+%include "sync.inc"
+
 ; --- Encoding constants (assemble-time; see v_* symbols below for the
 ; --- runtime rip-relative copies, since x86-64 has no `cmp r64, imm64`.)
 V_F64_OFF     equ 0x0001000000000000   ; float bias (2^48)
@@ -508,8 +511,16 @@ extern val_unpack_cold
     lea %2, [%1 - 1]
     cmp %2, [rel v_ptr_max_m1]
     ja %%skip
-    inc qword [%1 + PyObject.ob_refcnt]
-    %%skip:
+    mov _R32_%+%2, [%1 + PyObject.ob_tid]
+    cmp _R32_%+%2, [gs:ThreadState.ts_tid]
+    jne %%nonlocal
+    inc dword [%1 + PyObject.ob_ref_local]
+    jmp %%skip
+%%nonlocal:
+    test _R32_%+%2, _R32_%+%2
+    jz %%skip
+    lock add dword [%1 + PyObject.ob_ref_shared], REF_SHARED_ONE
+%%skip:
 %endmacro
 
 ; Clobbers rdi and all caller-saved registers when the object is freed.
@@ -551,13 +562,30 @@ extern val_unpack_cold
     lea %2, [%1 - 1]
     cmp %2, [rel v_ptr_max_m1]
     ja %%skip
-    dec qword [%1 + PyObject.ob_refcnt]
+    mov _R32_%+%2, [%1 + PyObject.ob_tid]
+    cmp _R32_%+%2, [gs:ThreadState.ts_tid]
+    jne %%nonlocal
+    dec dword [%1 + PyObject.ob_ref_local]
     jnz %%skip
 %ifnidni %1, rdi
     mov rdi, %1
 %endif
-    call obj_dealloc
-    %%skip:
+    extern obj_decref_local_zero
+    call obj_decref_local_zero
+    jmp %%skip
+%%nonlocal:
+    test _R32_%+%2, _R32_%+%2
+    jz %%skip
+    push rdi
+    push rdi
+%ifnidni %1, rdi
+    mov rdi, %1
+%endif
+    extern obj_decref_shared_p
+    call obj_decref_shared_p
+    pop rdi
+    pop rdi
+%%skip:
 %endmacro
 
 ; DECREF_V is already NULL-safe; XDECREF_V exists for call-site clarity.

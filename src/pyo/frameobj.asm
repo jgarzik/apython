@@ -451,28 +451,50 @@ END_FUNC frameobj_refresh_locals
 FMD_DST equ 8
 FMD_SRC equ 16
 FMD_I   equ 24
-FMD_FRAME equ 40            ; + 0 pushes = 40... padded below
-DEF_FUNC_LOCAL frameobj_merge_dict, 48
+FMD_KEY equ 32
+FMD_VAL equ 40
+FMD_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+DEF_FUNC_LOCAL frameobj_merge_dict, FMD_FRAME
     mov [rbp - FMD_DST], rdi
     mov [rbp - FMD_SRC], rsi
     mov qword [rbp - FMD_I], 0
 .fmd_loop:
-    mov rsi, [rbp - FMD_SRC]
+    mov r8, [rbp - FMD_SRC]
+    OBJ_LOCK r8
     mov rax, [rbp - FMD_I]
-    cmp rax, [rsi + PyDictObject.dk_nentries]
-    jae .fmd_done
+    cmp rax, [r8 + PyDictObject.dk_nentries]
+    jae .fmd_unlock_done
     imul rcx, rax, DICT_ENTRY_SIZE
-    add rcx, [rsi + PyDictObject.entries]
+    add rcx, [r8 + PyDictObject.entries]
     mov rsi, [rcx + DictEntry.key]
     test rsi, rsi
-    jz .fmd_next                ; empty or a tombstone
+    jz .fmd_unlock_next         ; empty or a tombstone
     mov rdx, [rcx + DictEntry.value]
+    mov [rbp - FMD_KEY], rsi
+    mov [rbp - FMD_VAL], rdx
+    INCREF_V rsi, rax
+    INCREF_V rdx, rax
+    OBJ_UNLOCK r8
     mov rdi, [rbp - FMD_DST]
-    call dict_set
-    ERR_M1 .fmd_fail
+    call dict_set               ; err: checked below after dropping pinned pair
+    push rax
+    push rax
+    mov rdi, [rbp - FMD_KEY]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - FMD_VAL]
+    DECREF_V rdi, rcx
+    pop rax
+    pop rax
+    cmp rax, -1
+    je .fmd_fail
+    jmp .fmd_next
+.fmd_unlock_next:
+    OBJ_UNLOCK r8
 .fmd_next:
     inc qword [rbp - FMD_I]
     jmp .fmd_loop
+.fmd_unlock_done:
+    OBJ_UNLOCK r8
 .fmd_done:
     xor eax, eax
     leave
@@ -529,7 +551,7 @@ DEF_FUNC frameobj_setattr, 48
 
     ; CPython names the attribute and the type:
     ;   attribute 'f_code' of 'frame' objects is not writable
-    lea rdi, [rel fsa_buf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel fsa_ro_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -540,7 +562,7 @@ DEF_FUNC frameobj_setattr, 48
     lea rsi, [rel fsa_ro_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_AttributeError_type]
-    lea rsi, [rel fsa_buf]
+    TS_LEA rsi, ts_errbuf
     extern set_exception
     call set_exception
     jmp .fsa_fail
@@ -951,7 +973,6 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     pop rax
     test rax, rax
     jz .sgm_miss
-    INCREF_V rax, rdx
     pop rbx
     leave
     ret
@@ -1266,7 +1287,8 @@ section .data
 align 8
 global frame_object_type
 frame_object_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq fo_name                  ; tp_name
     dq PyFrameObject_size       ; tp_basicsize

@@ -60,6 +60,18 @@ else
     ERRORS="$ERRORS alloc-selftest"
 fi
 
+# Free-threaded sync, BRC registry, and STW coordinator selftest.
+printf "%-40s " "sync/STW selftest"
+if $APYTHON --selftest-sync > "$WORK/synctest.out" 2>&1; then
+    printf "${GREEN}PASS${NC}\n"
+    PASS=$((PASS + 1))
+else
+    printf "${RED}FAIL${NC}\n"
+    cat "$WORK/synctest.out"
+    FAIL=$((FAIL + 1))
+    ERRORS="$ERRORS sync-selftest"
+fi
+
 # Static checks over the assembly: 64-bit reads of 4-byte struct fields, and
 # calls made with a misaligned rsp.  Both assemble cleanly and fail at runtime
 # far from the cause, so they are checked here rather than discovered.

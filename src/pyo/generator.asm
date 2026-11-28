@@ -233,13 +233,12 @@ DEF_FUNC gen_iternext
     test r12, r12
     jz .exhausted
 
-    ; Check if already running (recursive call)
-    cmp qword [rbx + PyGenObject.gi_running], 1
-    je .running_error
-
-    ; Mark as running, and as started: what gi_suspended asks is whether the
-    ; body has been entered, which instr_ptr cannot say.
-    mov qword [rbx + PyGenObject.gi_running], 1
+    ; Atomically claim gi_running (0 -> 1) so two threads cannot resume the
+    ; same generator simultaneously.
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [rbx + PyGenObject.gi_running], rcx
+    jne .running_error
     mov qword [rbx + PyGenObject.gi_started], 1
 
     ; Push None as the "sent" value onto the frame's value stack
@@ -429,7 +428,7 @@ DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     call ap_malloc
     ; rax = wrapper
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel async_gen_asend_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenASend.ags_gen], rbx
@@ -440,7 +439,7 @@ DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     mov qword [rax + AsyncGenASend.gi_return_value], 0
 
     ; INCREF the async generator (wrapper holds a ref)
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
 
     pop rbx
     leave
@@ -592,11 +591,66 @@ section .text
 
 GD_EXC   equ 8
 GD_FRAME equ 16             ; + 2 pushes = 32, 16-aligned
+;; ============================================================================
+;; gen_gc_finalize(rdi = PyGenObject*) -> nothing
+;; PEP 442 finalizer called by GC Phase 4.5 before tp_clear: closes a
+;; suspended generator/coroutine (running its try/finally) or warns on an
+;; unawaited coroutine.
+;; ============================================================================
+global gen_gc_finalize
+DEF_FUNC gen_gc_finalize, 16            ; + 2 pushes = 32, 16-aligned
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov rdi, [rbx + PyGenObject.gi_frame]
+    test rdi, rdi
+    jz .ggf_done
+    cmp qword [rbx + PyGenObject.gi_started], 0
+    jne .ggf_susp
+    lea rax, [rel coro_type]
+    cmp [rbx + PyObject.ob_type], rax
+    jne .ggf_done
+    DUNDER_EXC_SAVE r12
+    mov qword [gs:ThreadState.current_exception], 0
+    mov rdi, rbx
+    call coro_warn_never_awaited
+    jmp .ggf_after
+.ggf_susp:
+    cmp qword [rdi + PyFrame.instr_ptr], 0
+    je .ggf_done
+    DUNDER_EXC_SAVE r12
+    mov qword [gs:ThreadState.current_exception], 0
+    mov rdi, rbx
+    call gen_dealloc_close
+.ggf_after:
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .ggf_restore
+    mov qword [gs:ThreadState.current_exception], 0
+    push rdi
+    sub rsp, 8
+    mov rsi, rbx
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
+    add rsp, 8
+    pop rdi
+    call obj_decref
+.ggf_restore:
+    mov [gs:ThreadState.current_exception], r12
+.ggf_done:
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC gen_gc_finalize
+
 DEF_FUNC gen_dealloc, GD_FRAME
     push rbx
     push r12
 
     mov rbx, rdi
+    test qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
+    jnz .gd_just_free
 
     ; A generator suspended inside a try/finally has cleanup still to run, and
     ; CPython runs it when the generator is collected.  Doing it here means
@@ -624,7 +678,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     lea rax, [rel coro_type]
     cmp [rbx + PyObject.ob_type], rax
     jne .gd_just_free
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     DUNDER_EXC_SAVE r12
     mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rbx
@@ -634,7 +688,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
 .gd_check_suspended:
     cmp qword [rdi + PyFrame.instr_ptr], 0
     je .gd_just_free
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     ; The pending exception is TAKEN OUT for the cleanup: the global is
     ; cleared, so its reference is the register's now, and .gd_close_done
     ; puts the same one back.  This used to take a second reference as well,
@@ -680,7 +734,10 @@ DEF_FUNC gen_dealloc, GD_FRAME
 .gd_close_done:
     ; Put back the exception taken out above, reference and all.
     mov [gs:ThreadState.current_exception], r12
-    dec qword [rbx + PyObject.ob_refcnt]
+    mov rdi, rbx
+    extern obj_decref_no_dealloc
+    call obj_decref_no_dealloc
+    test eax, eax
     jnz .gd_resurrected         ; someone kept it: free nothing
 
 .gd_just_free:
@@ -765,7 +822,7 @@ END_FUNC async_gen_call_finalizer
 ;; tp_iter for generator: return self
 ;; ============================================================================
 DEF_FUNC_BARE gen_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC gen_iter_self
@@ -846,13 +903,11 @@ DEF_FUNC gen_send
     test r12, r12
     jz .gs_exhausted
 
-    ; Check if already running
-    cmp qword [rbx + PyGenObject.gi_running], 1
-    je .gs_error
-
-    ; Mark as running, and as started: what gi_suspended asks is whether the
-    ; body has been entered, which instr_ptr cannot say.
-    mov qword [rbx + PyGenObject.gi_running], 1
+    ; Atomically claim gi_running (0 -> 1) before resuming
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [rbx + PyGenObject.gi_running], rcx
+    jne .gs_error
     mov qword [rbx + PyGenObject.gi_started], 1
 
     ; INCREF the sent value while its tag is still around, then pack it
@@ -1094,9 +1149,11 @@ DEF_FUNC gen_throw, GT_FRAME
     test r13, r13
     jz .gt_exhausted
 
-    ; Check if already running
-    cmp qword [rbx + PyGenObject.gi_running], 1
-    je .gt_error
+    ; Atomically claim gi_running (0 -> 1) before delegating or throwing
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [rbx + PyGenObject.gi_running], rcx
+    jne .gt_error
 
     ; The caller's pending exception is put aside rather than released: it
     ; belongs to the caller, and DECREFing it here freed an exception that was
@@ -1107,7 +1164,7 @@ DEF_FUNC gen_throw, GT_FRAME
 
     ; --- PEP 380: a `yield from` throws into the SUB-iterator first --------
     mov rdi, rbx
-    call gen_yf
+    call gen_yf_claimed
     mov [rbp - GT_YF], rax
     test rax, rax
     jz .gt_local
@@ -1414,25 +1471,33 @@ END_FUNC gen_throw
 ;; CPython reads exactly the same two facts.
 ;; ============================================================================
 DEF_FUNC_BARE gen_yf
-    mov rax, [rdi + PyGenObject.gi_frame]
-    test rax, rax
-    jz .gyf_none
     cmp qword [rdi + PyGenObject.gi_running], 0
     jne .gyf_none               ; executing: it is not suspended anywhere
-    mov rcx, [rax + PyFrame.instr_ptr]
-    test rcx, rcx
-    jz .gyf_none                ; finished
-    cmp byte [rcx], OP_RESUME
-    jne .gyf_none
-    cmp byte [rcx + 1], 2
-    jb .gyf_none
-    mov rcx, [rax + PyFrame.stack_ptr]
-    mov rax, [rcx - 8]
-    ret
+    jmp gen_yf_claimed
 .gyf_none:
     xor eax, eax
     ret
 END_FUNC gen_yf
+
+;; gen_yf_claimed(rdi = generator already claimed by caller) -> rax = sub-iter Value or 0
+DEF_FUNC_BARE gen_yf_claimed
+    mov rax, [rdi + PyGenObject.gi_frame]
+    test rax, rax
+    jz .gyfc_none
+    mov rcx, [rax + PyFrame.instr_ptr]
+    test rcx, rcx
+    jz .gyfc_none                ; finished
+    cmp byte [rcx], OP_RESUME
+    jne .gyfc_none
+    cmp byte [rcx + 1], 2
+    jb .gyfc_none
+    mov rcx, [rax + PyFrame.stack_ptr]
+    mov rax, [rcx - 8]
+    ret
+.gyfc_none:
+    xor eax, eax
+    ret
+END_FUNC gen_yf_claimed
 
 ;; ============================================================================
 ;; gen_close_iter(rdi = the sub-iterator, as a Value) -> void
@@ -2287,7 +2352,8 @@ _gen_throw_cache: dq 0
 align 8
 global gen_type
 gen_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq gen_name_str             ; tp_name
     dq PyGenObject_size         ; tp_basicsize
@@ -2320,7 +2386,8 @@ gen_type:
 align 8
 global coro_type
 coro_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq coro_name_str            ; tp_name
     dq PyGenObject_size         ; tp_basicsize
@@ -2353,7 +2420,8 @@ coro_type:
 align 8
 global async_gen_type
 async_gen_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq async_gen_name_str       ; tp_name
     dq PyGenObject_size         ; tp_basicsize
@@ -2390,7 +2458,8 @@ agw_name_str: db "async_generator_wrapped_value", 0
 align 8
 global async_gen_wrapped_type
 async_gen_wrapped_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq agw_name_str             ; tp_name
     dq AsyncGenWrapped_size     ; tp_basicsize
@@ -2400,7 +2469,8 @@ async_gen_wrapped_type:
 align 8
 global async_gen_asend_type
 async_gen_asend_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq ags_name_str             ; tp_name
     dq AsyncGenASend_size       ; tp_basicsize
@@ -2434,7 +2504,8 @@ agt_name_str: db "async_generator_athrow", 0
 align 8
 global async_gen_athrow_type
 async_gen_athrow_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq agt_name_str             ; tp_name
     dq AsyncGenASend_size       ; tp_basicsize -- the same box as asend
@@ -2971,7 +3042,8 @@ section .data
 align 8
 global coro_wrapper_type
 coro_wrapper_type:
-    dq 1                        ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq coro_wrapper_name        ; tp_name
     dq PyCoroWrapperObject_size ; tp_basicsize

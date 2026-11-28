@@ -916,10 +916,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rax, [rbp - TSP_MOD]
     test rax, rax
     jz .tsp_no_impl
-    mov rdi, rax
-    call obj_incref
-    mov rax, [rbp - TSP_MOD]
-    mov [rel tm_strptime_impl], rax
+    mov [rel tm_strptime_impl], rax     ; cache owns ref from dict_get
 
     mov rax, [rbp - TSP_KW]
     mov [gs:ThreadState.kw_names_pending], rax
@@ -1169,7 +1166,7 @@ DEF_FUNC time_module_create
     lea rdi, [rel struct_time_type]
     call structseq_init_type
     lea rax, [rel struct_time_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     push rax
     lea rdi, [rel tm_struct_time]
     call str_from_cstr_heap
@@ -1441,7 +1438,8 @@ section .data
 align 8
 global struct_time_type
 struct_time_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq st_name                  ; tp_name
     ; The header plus the named-ONLY tail: two of the eleven fields are not

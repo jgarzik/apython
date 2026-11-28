@@ -6,6 +6,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "eventloop.inc"
+%include "gil.inc"
 
 extern ap_malloc
 extern ap_realloc
@@ -193,16 +194,17 @@ END_FUNC poll_teardown
 ;; ============================================================================
 ;; get_monotonic_ns() -> rax = current time in nanoseconds
 ;; ============================================================================
-DEF_FUNC_LOCAL get_monotonic_ns
+GMN_TS equ 16
+DEF_FUNC_LOCAL get_monotonic_ns, GMN_TS
     mov edi, CLOCK_MONOTONIC
-    lea rsi, [rel timespec_buf]
+    lea rsi, [rbp - GMN_TS]
     call clock_gettime
 
     ; Convert to nanoseconds: tv_sec * 1_000_000_000 + tv_nsec
-    mov rax, [rel timespec_buf]        ; tv_sec
+    mov rax, [rbp - GMN_TS]            ; tv_sec
     mov ecx, 1000000000
     imul rax, rcx
-    add rax, [rel timespec_buf + 8]    ; tv_nsec
+    add rax, [rbp - GMN_TS + 8]        ; tv_nsec
     leave
     ret
 END_FUNC get_monotonic_ns
@@ -466,11 +468,13 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .pwd_do_poll:
-    ; Call poll(poll_fds, nfds, timeout_ms)
+    ; Call poll(poll_fds, nfds, timeout_ms) detached so STW pauses do not wait
+    ALLOW_THREADS_BEGIN
     mov rdi, [gs:ThreadState.poll_fds]
     mov esi, [gs:ThreadState.poll_nfds]
     mov edx, r12d
     call poll
+    ALLOW_THREADS_END
     ; rax = number of fds ready (or -1 on error)
 
     ; Process expired timers first

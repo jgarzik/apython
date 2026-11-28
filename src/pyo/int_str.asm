@@ -657,7 +657,7 @@ DEF_FUNC int_from_cstr_base, IB_FRAME
     ; Allocate PyIntObject
     call int_alloc_raw
     mov [rbp - IB_OBJ], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed

@@ -43,7 +43,7 @@ section .text
 DEF_FUNC traceback_new
     mov edi, PyTracebackObject_size
     call ap_malloc
-    mov qword [rax + PyTracebackObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel traceback_type]
     mov [rax + PyTracebackObject.ob_type], rcx
     mov qword [rax + PyTracebackObject.tb_next], 0
@@ -77,7 +77,10 @@ DEF_FUNC traceback_dealloc
     call ap_free
     test r12, r12
     jz .td_done
-    dec qword [r12 + PyTracebackObject.ob_refcnt]
+    mov rdi, r12
+    extern obj_decref_no_dealloc
+    call obj_decref_no_dealloc
+    test eax, eax
     jnz .td_done                   ; still referenced elsewhere
     mov rbx, r12
     jmp .td_node
@@ -322,7 +325,8 @@ section .data
 align 8
 global traceback_type
 traceback_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq tb_type_name         ; tp_name
     dq PyTracebackObject_size ; tp_basicsize

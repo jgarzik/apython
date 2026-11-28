@@ -112,6 +112,8 @@ AP_NCLASSES      equ AP_SMALL_MAX / AP_ALIGN    ; 32
 ;; --- pools ------------------------------------------------------------------
 AP_POOL_SHIFT    equ 14
 AP_POOL_SIZE     equ 1 << AP_POOL_SHIFT     ; 16 KiB, CPython's POOL_SIZE
+AP_LOCAL_MAX     equ 256                    ; per-thread free-list high-water mark
+AP_BATCH         equ 128                    ; batch size for global spill/refill
 
 ;; --- the span ---------------------------------------------------------------
 ;; A ladder, biggest first.  MAP_NORESERVE is ignored under
@@ -276,26 +278,70 @@ DEF_FUNC_LOCAL ap_span_create, AS_FRAME
 END_FUNC ap_span_create
 
 ;; ============================================================================
-;; ap_new_pool(rdi = szidx) -> rax = 1 if that class now has room, else 0
+;; ap_refill_or_new_pool(rdi = szidx) -> rax = 1 if that class now has room, else 0
 ;;
-;; Cold.  Carves one pool off the span and gives it to a single size class for
-;; the life of the process; the file header says why it is never taken back.
+;; Cold, serialized by ap_global_lock.  First tries to pull up to AP_BATCH
+;; blocks from ap_global_free[szidx] into the calling thread's local freelist;
+;; otherwise carves a fresh 16 KiB pool off the span for this thread's bump ptr.
 ;; ============================================================================
-DEF_FUNC_LOCAL ap_new_pool, 8               ; + 1 push = 16, 16-aligned
+DEF_FUNC_LOCAL ap_refill_or_new_pool
     push rbx
+    push r12
     mov rbx, rdi                            ; szidx
 
+    lea rdi, [rel ap_global_lock]
+    extern rt_mutex_lock
+    call rt_mutex_lock
+
+    ; 1. Try refilling up to AP_BATCH blocks from ap_global_free[szidx].
+    lea r12, [rel ap_global_free]
+    mov rax, [r12 + rbx*8]
+    test rax, rax
+    jz .arnp_carve_pool
+
+    ; Walk up to AP_BATCH nodes starting at head = rax.
+    mov rdx, rax                            ; head
+    mov rsi, rax                            ; tail
+    mov ecx, 1
+.arnp_take:
+    cmp ecx, AP_BATCH
+    jae .arnp_take_done
+    mov r8, [rsi]
+    test r8, r8
+    jz .arnp_take_done
+    mov rsi, r8
+    inc ecx
+    jmp .arnp_take
+.arnp_take_done:
+    mov r8, [rsi]                           ; remainder for ap_global_free
+    mov [r12 + rbx*8], r8
+    mov r10, [gs:ThreadState.ts_self]
+    mov r9, [r10 + ThreadState.ts_sc_free + rbx*8]
+    mov [rsi], r9
+    mov [r10 + ThreadState.ts_sc_free + rbx*8], rdx
+    add [r10 + ThreadState.ts_sc_free_count + rbx*4], ecx
+
+    lea rdi, [rel ap_global_lock]
+    extern rt_mutex_unlock
+    call rt_mutex_unlock
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.arnp_carve_pool:
     cmp dword [rel ap_state], AP_ON
-    je .anp_have_span
+    je .arnp_have_span
     call ap_span_create
     test eax, eax
-    jz .anp_none
+    jz .arnp_none
 
-.anp_have_span:
+.arnp_have_span:
     mov rax, [rel ap_pool_next]
     lea rcx, [rax + AP_POOL_SIZE]
     cmp rcx, [rel ap_pool_end]
-    ja .anp_none                            ; span used up; libc from here on
+    ja .arnp_none                           ; span used up; libc from here on
     mov [rel ap_pool_next], rcx
 
     ; poolno = (pool - span_base) >> POOL_SHIFT.  Written once, never rewritten,
@@ -306,25 +352,79 @@ DEF_FUNC_LOCAL ap_new_pool, 8               ; + 1 push = 16, 16-aligned
     lea rsi, [rel ap_pool_szidx]
     mov [rsi + rdx], bl
 
-    ; The class bumps through the pool from its base.  The carve test is
-    ; `bump + blocksize > end`, so the remainder that does not divide evenly is
-    ; simply never handed out and there is no modulo anywhere.
-    lea rsi, [rel ap_sc_bump]
-    mov [rsi + rbx*8], rax
-    lea rsi, [rel ap_sc_bump_end]
-    mov [rsi + rbx*8], rcx
+    ; Hand the fresh pool to the calling thread's private bump pointer.
+    mov r10, [gs:ThreadState.ts_self]
+    mov [r10 + ThreadState.ts_sc_bump + rbx*8], rax
+    mov [r10 + ThreadState.ts_sc_bump_end + rbx*8], rcx
 
+    lea rdi, [rel ap_global_lock]
+    call rt_mutex_unlock
     mov eax, 1
+    pop r12
     pop rbx
     leave
     ret
 
-.anp_none:
+.arnp_none:
+    lea rdi, [rel ap_global_lock]
+    call rt_mutex_unlock
     xor eax, eax
+    pop r12
     pop rbx
     leave
     ret
-END_FUNC ap_new_pool
+END_FUNC ap_refill_or_new_pool
+
+;; ============================================================================
+;; ap_spill_batch(rdi = szidx) -> nothing
+;;
+;; Cold.  Detaches AP_BATCH blocks from this thread's local freelist for szidx
+;; and prepends them to ap_global_free[szidx] under ap_global_lock.
+;; ============================================================================
+DEF_FUNC_LOCAL ap_spill_batch
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8
+    mov rbx, rdi                            ; szidx
+    mov r10, [gs:ThreadState.ts_self]
+    mov r12, [r10 + ThreadState.ts_sc_free + rbx*8] ; head of batch
+    test r12, r12
+    jz .asb_done
+
+    mov r13, r12                            ; tail of batch
+    mov ecx, 1
+.asb_walk:
+    cmp ecx, AP_BATCH
+    jae .asb_cut
+    mov rax, [r13]
+    test rax, rax
+    jz .asb_cut
+    mov r13, rax
+    inc ecx
+    jmp .asb_walk
+.asb_cut:
+    mov rax, [r13]                          ; remainder stays local
+    mov [r10 + ThreadState.ts_sc_free + rbx*8], rax
+    sub [r10 + ThreadState.ts_sc_free_count + rbx*4], ecx
+
+    lea rdi, [rel ap_global_lock]
+    call rt_mutex_lock
+    lea rax, [rel ap_global_free]
+    mov rdx, [rax + rbx*8]
+    mov [r13], rdx
+    mov [rax + rbx*8], r12
+    lea rdi, [rel ap_global_lock]
+    call rt_mutex_unlock
+
+.asb_done:
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC ap_spill_batch
 
 ;; ============================================================================
 ;; ap_block_size(rdi = ptr) -> rax = the block's size, or 0 if it is not ours
@@ -354,74 +454,55 @@ END_FUNC ap_block_size
 ;; ============================================================================
 ;; ap_malloc(rdi = size) -> rax = a block of at least that many bytes
 ;;
-;; Never returns NULL: out of memory is fatal_error, which is why no call site
-;; in the tree has a failure path.  16-byte aligned, as glibc's is.
-;;
-;; The fast path is twelve instructions, two loads, one store, no call and no
-;; frame.  glibc's tcache path is about forty-five, plus a PLT thunk, a TLS
-;; access and a call/ret pair.
+;; Never returns NULL: out of memory is fatal_error.  16-byte aligned.
+;; Lock-free per-thread fast path (zero gs: stores via ts_self base reg).
 ;; ============================================================================
 DEF_FUNC_BARE ap_malloc
 %ifndef NO_POOL
-    ; size - 1 does double duty: it is the class index once shifted, and its
-    ; wraparound at size 0 sends a zero request to the same place a huge one
-    ; goes, so neither needs a test of its own.
     lea rax, [rdi - 1]
     cmp rax, AP_SMALL_MAX - 1
     ja .aml_big
     shr rax, AP_ALIGN_SHIFT                 ; szidx
-    lea rcx, [rel ap_sc_free]
-    lea rcx, [rcx + rax*8]                  ; RIP-relative addressing has no
-                                            ; SIB byte, so [rel sym + reg*8]
-                                            ; does not exist; two lea do
+    mov r10, [gs:ThreadState.ts_self]
+    lea rcx, [r10 + ThreadState.ts_sc_free + rax*8]
     mov rdx, [rcx]
     test rdx, rdx
     jz .aml_carve
-    ; The link lives in the dead block's own first eight bytes, so there is no
-    ; per-block header and the pointer handed back IS the block.
-    mov rax, [rdx]
-    mov [rcx], rax
+    mov r8, [rdx]
+    mov [rcx], r8
+    dec dword [r10 + ThreadState.ts_sc_free_count + rax*4]
+    inc qword [r10 + ThreadState.ts_alloc_live]
     mov rax, rdx
     ret
 
 .aml_carve:
-    ; Nothing on the free list, so take a virgin block off this class's pool.
-    ; An all-zeroes table -- which is what "the allocator has not started yet"
-    ; looks like -- fails the test below and falls through to the cold path,
-    ; so the fast path needs no is-it-initialised check anywhere.
     lea rdx, [rax + 1]
     shl rdx, AP_ALIGN_SHIFT                 ; blocksize
-    lea rcx, [rel ap_sc_bump]
-    lea rcx, [rcx + rax*8]
+    lea rcx, [r10 + ThreadState.ts_sc_bump + rax*8]
     mov r8, [rcx]
     lea r9, [r8 + rdx]
-    lea rdx, [rel ap_sc_bump_end]
-    cmp r9, [rdx + rax*8]
+    cmp r9, [r10 + ThreadState.ts_sc_bump_end + rax*8]
     ja .aml_newpool                         ; also the uninitialised case
     mov [rcx], r9
-    inc qword [rel ap_carved]               ; once per block, ever: see
-    mov rax, r8                             ; ap_live_blocks
+    inc qword [r10 + ThreadState.ts_alloc_live]
+    mov rax, r8
     ret
 
 .aml_newpool:
     push rbp
     mov rbp, rsp
     push rdi
-    push rdi                                ; the pair keeps rsp 16-aligned
+    push rdi                                ; 16-byte aligned
     mov rdi, rax                            ; szidx
-    call ap_new_pool
+    call ap_refill_or_new_pool
     pop rdi
     pop rdi
     pop rbp
     test eax, eax
     jz .aml_libc
-    jmp ap_malloc                           ; the carve above now succeeds, and
-                                            ; cannot fail twice: a pool holds
-                                            ; at least one block of any class
+    jmp ap_malloc
 
 .aml_big:
-    ; A zero request still has to answer with something unique and freeable,
-    ; because that is what malloc(0) does and what list_new_from leans on.
     test rdi, rdi
     jnz .aml_libc
     mov edi, AP_ALIGN
@@ -434,7 +515,8 @@ DEF_FUNC_BARE ap_malloc
     call malloc wrt ..plt
     test rax, rax
     jz .aml_oom
-    inc qword [rel ap_libc_live]
+    mov r10, [gs:ThreadState.ts_self]
+    inc qword [r10 + ThreadState.ts_alloc_live]
     pop rbp
     ret
 .aml_oom:
@@ -445,32 +527,38 @@ END_FUNC ap_malloc
 ;; ============================================================================
 ;; ap_free(rdi = ptr) -> void
 ;;
-;; NULL-safe.  Fifteen instructions, no call and no frame, and -- unlike every
-;; other scheme that has to decide whether a pointer is its own -- no load from
-;; the page being freed.
+;; NULL-safe.  Lock-free push onto this thread's size-class freelist (valid
+;; for any pool block allocated by any thread because pools are class-for-life).
+;; Spills AP_BATCH blocks to ap_global_free once local count hits AP_LOCAL_MAX.
 ;; ============================================================================
 DEF_FUNC_BARE ap_free
     test rdi, rdi
     jz .afr_done
+    mov r10, [gs:ThreadState.ts_self]
+    dec qword [r10 + ThreadState.ts_alloc_live]
 %ifndef NO_POOL
-    ; One subtraction answers two questions: whether the block is ours, and
-    ; which pool it is in.
     mov rax, rdi
     sub rax, [rel ap_span_base]
     cmp rax, [rel ap_span_len]
     jae .afr_libc
     shr rax, AP_POOL_SHIFT
     lea rcx, [rel ap_pool_szidx]
-    movzx eax, byte [rcx + rax]
-    lea rcx, [rel ap_sc_free]
-    lea rcx, [rcx + rax*8]
+    movzx eax, byte [rcx + rax]             ; szidx
+    lea rcx, [r10 + ThreadState.ts_sc_free + rax*8]
     mov rdx, [rcx]
     mov [rdi], rdx
     mov [rcx], rdi
+    mov edx, [r10 + ThreadState.ts_sc_free_count + rax*4]
+    inc edx
+    mov [r10 + ThreadState.ts_sc_free_count + rax*4], edx
+    cmp edx, AP_LOCAL_MAX
+    jae .afr_spill
     ret
+.afr_spill:
+    mov rdi, rax
+    jmp ap_spill_batch
 .afr_libc:
 %endif
-    dec qword [rel ap_libc_live]
     jmp free wrt ..plt
 .afr_done:
     ret
@@ -479,33 +567,131 @@ END_FUNC ap_free
 ;; ============================================================================
 ;; ap_live_blocks() -> rax = blocks handed out and not yet freed
 ;;
-;; sys.getallocatedblocks().  What a leak test reads: run an operation in a
-;; loop and the number must not climb.  It costs the allocator's fast paths
-;; nothing -- the count is DERIVED: every pool block ever carved, less the
-;; ones sitting on a free list (walked here, which is the whole cost), plus
-;; the blocks libc is holding for us.  A block parked on a freelist above
-;; the allocator -- the int freelist, a frame region -- counts as live, which
-;; is why a test warms up before it takes its first reading.
+;; O(num_threads): sums ap_exited_live + ts_alloc_live across all live
+;; ThreadStates under tstate_list_lock.
 ;; ============================================================================
-DEF_FUNC_BARE ap_live_blocks
-    mov rax, [rel ap_carved]
-    add rax, [rel ap_libc_live]
-    lea rcx, [rel ap_sc_free]
-    xor edx, edx
-.alb_class:
-    mov rsi, [rcx + rdx*8]
-.alb_walk:
-    test rsi, rsi
-    jz .alb_next
-    dec rax
-    mov rsi, [rsi]
-    jmp .alb_walk
-.alb_next:
-    inc edx
-    cmp edx, AP_NCLASSES
-    jb .alb_class
+DEF_FUNC ap_live_blocks
+    push rbx
+    sub rsp, 8
+    extern tstate_list_lock
+    extern tstate_list_head
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_lock
+    mov rbx, [rel ap_exited_live]
+    mov rax, [rel tstate_list_head]
+.alb_loop:
+    test rax, rax
+    jz .alb_done
+    add rbx, [rax + ThreadState.ts_alloc_live]
+    mov rax, [rax + ThreadState.ts_next]
+    jmp .alb_loop
+.alb_done:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+    mov rax, rbx
+    add rsp, 8
+    pop rbx
+    leave
     ret
 END_FUNC ap_live_blocks
+
+;; ============================================================================
+;; alloc_thread_flush() -> nothing
+;;
+;; Called by a worker thread during exit before tstate_unlink: drains all five
+;; per-thread object freelists, then returns all cached local pool blocks and
+;; unused bump-pointer tail blocks to ap_global_free under ap_global_lock.
+;; ============================================================================
+global alloc_thread_flush
+DEF_FUNC alloc_thread_flush
+    push rbx
+    push r12
+    push r13
+    sub rsp, 8
+
+    extern frame_pool_drain
+    extern int_freelist_drain
+    extern list_pool_drain
+    extern slice_pool_drain
+    extern tuple_pool_drain
+    call frame_pool_drain
+    call int_freelist_drain
+    call list_pool_drain
+    call slice_pool_drain
+    call tuple_pool_drain
+
+    lea rdi, [rel ap_global_lock]
+    call rt_mutex_lock
+
+    mov r12, [gs:ThreadState.ts_self]
+    lea r13, [rel ap_global_free]
+    xor ebx, ebx                            ; szidx = 0..AP_NCLASSES-1
+.atf_class:
+    cmp ebx, AP_NCLASSES
+    jae .atf_done
+
+    ; Move ts_sc_free[szidx] list to ap_global_free[szidx].
+    mov rax, [r12 + ThreadState.ts_sc_free + rbx*8]
+    test rax, rax
+    jz .atf_bump
+    mov rcx, rax
+.atf_tail:
+    mov rdx, [rcx]
+    test rdx, rdx
+    jz .atf_link
+    mov rcx, rdx
+    jmp .atf_tail
+.atf_link:
+    mov rdx, [r13 + rbx*8]
+    mov [rcx], rdx
+    mov [r13 + rbx*8], rax
+    mov qword [r12 + ThreadState.ts_sc_free + rbx*8], 0
+    mov dword [r12 + ThreadState.ts_sc_free_count + rbx*4], 0
+
+.atf_bump:
+    ; Carve remaining virgin blocks from [ts_sc_bump, ts_sc_bump_end) into
+    ; ap_global_free[szidx] so short-lived threads never strand pool space.
+    mov rax, [r12 + ThreadState.ts_sc_bump + rbx*8]
+    mov rcx, [r12 + ThreadState.ts_sc_bump_end + rbx*8]
+    lea rdx, [rbx + 1]
+    shl rdx, AP_ALIGN_SHIFT                 ; blocksize
+.atf_carve:
+    lea rsi, [rax + rdx]
+    cmp rsi, rcx
+    ja .atf_bump_done
+    mov r8, [r13 + rbx*8]
+    mov [rax], r8
+    mov [r13 + rbx*8], rax
+    mov rax, rsi
+    jmp .atf_carve
+.atf_bump_done:
+    mov qword [r12 + ThreadState.ts_sc_bump + rbx*8], 0
+    mov qword [r12 + ThreadState.ts_sc_bump_end + rbx*8], 0
+
+    inc ebx
+    jmp .atf_class
+
+.atf_done:
+    lea rdi, [rel ap_global_lock]
+    call rt_mutex_unlock
+    add rsp, 8
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC alloc_thread_flush
+
+;; ============================================================================
+;; alloc_reset_after_fork() -> nothing
+;;
+;; Reset allocator mutex in a forked child.
+;; ============================================================================
+global alloc_reset_after_fork
+DEF_FUNC_BARE alloc_reset_after_fork
+    mov dword [rel ap_global_lock], 0
+    ret
+END_FUNC alloc_reset_after_fork
 
 ;; ============================================================================
 ;; ap_realloc(rdi = ptr, rsi = size) -> rax = the resized block
@@ -519,9 +705,9 @@ END_FUNC ap_live_blocks
 ;; one class -- this hands back the same pointer and copies nothing.
 ;; ============================================================================
 DEF_FUNC_BARE ap_realloc
-%ifndef NO_POOL
     test rdi, rdi
     jz .arl_as_malloc
+%ifndef NO_POOL
     test rsi, rsi
     jnz .arl_sized
     mov esi, 1                              ; realloc(p, 0) must not answer NULL
@@ -565,9 +751,6 @@ DEF_FUNC_BARE ap_realloc
     mov rax, rdi
     ret
 
-.arl_as_malloc:
-    mov rdi, rsi
-    jmp ap_malloc
 .arl_libc:
 %endif
     push rbp
@@ -577,6 +760,9 @@ DEF_FUNC_BARE ap_realloc
     jz .arl_oom
     pop rbp
     ret
+.arl_as_malloc:
+    mov rdi, rsi
+    jmp ap_malloc
 .arl_oom:
     lea rdi, [rel ap_oom_msg]
     call fatal_error        ; never returns
@@ -607,19 +793,21 @@ ap_span_ladder:
     dq AP_SPAN_TRY_2
 
 section .bss
-align 64
-;; Per size class: the free list, and the virgin high-water mark inside the
-;; class's current pool.  Three flat arrays rather than one array of records,
-;; so the class index IS the offset and no multiply is needed.
-ap_sc_free:      resq AP_NCLASSES
-align 64
-ap_sc_bump:      resq AP_NCLASSES
-ap_sc_bump_end:  resq AP_NCLASSES
+alignb 64
+; Global allocator lock (32-bit futex) guarding span creation, pool carving,
+; and ap_global_free batch spill/refill.
+ap_global_lock:  resd 1
+                 resb 60
+; Global overflow free lists per size class (filled by AP_BATCH spills and
+; exiting thread flushes).
+ap_global_free:  resq AP_NCLASSES
+alignb 64
+; Residual live-block delta folded in by exited threads under tstate_list_lock.
+global ap_exited_live
+ap_exited_live:  resq 1
 
 ;; One byte per pool saying which size class it was carved for.  Demand-zero,
 ;; and only the pages for pools that actually exist are ever touched -- they
 ;; are dense, because pools are carved in address order.
-align 64
+alignb 64
 ap_pool_szidx:   resb AP_NPOOLS_MAX
-ap_carved:       resq 1                     ; pool blocks carved, ever
-ap_libc_live:    resq 1                     ; libc blocks out now

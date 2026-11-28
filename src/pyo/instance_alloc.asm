@@ -380,9 +380,18 @@ DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned
     ; DICT_STAMP_VERSION in dict.asm): a zeroed one is shared by every dict
     ; subclass instance that has not been written to yet.
     extern dict_version_clock
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .bsib_ver_atomic
     mov rax, [rel dict_version_clock]
     inc rax
     mov [rel dict_version_clock], rax
+    jmp .bsib_ver_store
+.bsib_ver_atomic:
+    mov eax, 1
+    lock xadd [rel dict_version_clock], rax
+    inc rax
+.bsib_ver_store:
     mov [rbx + PyDictObject.dk_version], rax
     jmp .bsib_done
 
@@ -441,7 +450,7 @@ DEF_FUNC builtin_sub_alloc, BSA_FRAME
 .bsa_plain:
     mov rdi, rsi
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rcx, [rbp - BSA_TYPE]
     mov [rax + PyObject.ob_type], rcx
 
@@ -461,7 +470,7 @@ DEF_FUNC builtin_sub_alloc, BSA_FRAME
 .bsa_zeroed:
     ; The instance holds a reference to its type, as every instance does.
     mov rcx, [rbp - BSA_TYPE]
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .bsa_done
     mov [rbp - BSA_SAVE], rax
@@ -733,9 +742,10 @@ DEF_FUNC type_defines_dunder, TDD_FRAME
     jz .tdd_next
     mov rsi, [rbp - TDD_NAME]
     call dict_get_mro
-    V_UNPACK rax, rdx
-    test edx, edx               ; the tag: a hit may be a false-looking payload
-    jnz .tdd_yes
+    test rax, rax
+    jz .tdd_next
+    DECREF_V rax, rcx
+    jmp .tdd_yes
 .tdd_next:
     MRO_NEXT rbx, [rbp - TDD_TYPE]
     jmp .tdd_walk
@@ -791,9 +801,9 @@ DEF_FUNC object_new_staticbase, ONS_FRAME
     lea rdx, [rbp - ONS_OWNER]
     mov qword [rbp - ONS_OWNER], 0
     call dunder_lookup_owner
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax
     jz .ons_done                ; no __new__ at all: this is the staticbase
+    DECREF_V rax, rcx
     mov rax, [rbp - ONS_OWNER]
     test rax, rax
     jz .ons_done
@@ -924,7 +934,7 @@ DEF_FUNC object_new_fn, ONF_FRAME
     mov rdi, [rbp - ONF_TYPE]
     call object_new_staticbase
     mov [rbp - ONF_BASE], rax
-    lea rdi, [rel onf_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel onf_not_safe_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -942,7 +952,7 @@ DEF_FUNC object_new_fn, ONF_FRAME
     lea rsi, [rel onf_not_safe_tail]
     call rbt_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel onf_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     leave
     ret

@@ -1330,7 +1330,7 @@ DEF_FUNC posix_set_typename, 16     ; + 2 pushes = 32, 16-aligned
     push r12
     mov rbx, rdi
     mov r12, rdx
-    lea rdi, [rel pm_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov byte [rdi], 0x27        ; an apostrophe
     inc rdi
     mov rsi, r12
@@ -1359,7 +1359,7 @@ DEF_FUNC posix_set_typename, 16     ; + 2 pushes = 32, 16-aligned
     mov edx, 80
     call posix_copy_bounded
     mov rdi, rbx
-    lea rsi, [rel pm_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception          ; rax = 0
     pop r12
     pop rbx
@@ -1687,7 +1687,7 @@ DEF_FUNC posix_access, PAC_FRAME
 .pac_false:
     lea rax, [rel bool_false]
 .pac_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1936,7 +1936,7 @@ DEF_FUNC posix_isatty, PIT_FRAME
 .pit_false:
     lea rax, [rel bool_false]
 .pit_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -2418,7 +2418,7 @@ DEF_FUNC posix_get_inheritable, 16
 .pgi_false:
     lea rax, [rel bool_false]
 .pgi_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -2703,7 +2703,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     ret
 .pfs_self:
     mov rax, rdi
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -2724,7 +2724,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     ; same two-name message posix_path_arg composes.
     push rax                    ; the result, released once its name is copied:
     push rax                    ; twice, to keep rsp 16-byte aligned
-    lea rdi, [rel pm_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel pm_msg_expected]
     mov edx, 40
     call posix_copy_bounded
@@ -2742,7 +2742,7 @@ DEF_FUNC posix_fspath, PFS_FRAME
     pop rdi
     DECREF_V rdi, rcx           ; a Value: __fspath__ may answer an immediate
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel pm_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .pfs_propagate
 
@@ -3022,18 +3022,18 @@ DEF_FUNC posix_module_create, 40
     call structseq_init_type
 
     lea rax, [rel stat_result_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     POSIX_ADD_OBJ pm_n_stat_result, rax
     lea rax, [rel terminal_size_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     POSIX_ADD_OBJ pm_n_terminal_size, rax
     lea rdi, [rel uname_result_type]
     call structseq_init_type
     lea rax, [rel uname_result_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     POSIX_ADD_OBJ pm_n_uname_result, rax
     lea rax, [rel exc_OSError_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     POSIX_ADD_OBJ pm_n_error, rax
 
     ; --- environ ---
@@ -3311,7 +3311,8 @@ section .data
 align 8
 global stat_result_type
 stat_result_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sr_name                  ; tp_name
     ; tp_basicsize: the header plus the named-only tail.  Nine now, not six:
@@ -3351,7 +3352,8 @@ stat_result_type:
 align 8
 global uname_result_type
 uname_result_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq un_name
     dq PyTupleObject_size
@@ -3385,7 +3387,8 @@ uname_result_type:
 align 8
 global terminal_size_type
 terminal_size_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq ts_name
     dq PyTupleObject_size

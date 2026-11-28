@@ -93,6 +93,8 @@ DEF_FUNC_LOCAL int_dunder_invoke, IDI_FRAME
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
     jz .idi_uncallable
+    push rax
+    push rax                                ; owned callable; 16-aligned
     cmp qword [rbp - IDI_VERDICT], 0
     jne .idi_bound
     SPUSH_PTR rbx                           ; args[0] = self (fat arg)
@@ -100,34 +102,28 @@ DEF_FUNC_LOCAL int_dunder_invoke, IDI_FRAME
     mov rsi, rsp
     mov edx, 1
     call rcx
-    V_UNPACK rax, rdx                       ; tp_call returns a Value
     add rsp, 16
-    leave
-    ret
+    jmp .idi_release
 .idi_bound:
-    push rax
-    push rax                                ; a pair, so rsp stays aligned
     mov rdi, rax
     xor esi, esi
     xor edx, edx
     call rcx
+.idi_release:
     mov rdi, rax
     mov rsi, rdx
-    pop rax
+    pop rax                                 ; owned callable
     pop rcx
     push rdi
     push rsi
     mov rdi, rax
-    call obj_decref                         ; what __get__ answered was ours
+    call obj_decref                         ; dunder_bind always returns owned
     pop rdx
     pop rax
     V_UNPACK rax, rdx
     leave
     ret
 .idi_uncallable:
-    ; Release what __get__ answered, when that is what this is, and say so.
-    cmp qword [rbp - IDI_VERDICT], 0
-    je .idi_say
     mov rdi, rax
     call obj_decref
 .idi_say:
@@ -271,7 +267,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_int:
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov rax, rbx
     mov edx, TAG_PTR
     jmp .int_ret
@@ -715,17 +711,16 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_call_dunder_trunc:
-    ; rax = __trunc__ func, rbx = self
-    ; CPython 3.12 warns before it does this, and a suite that turns warnings
-    ; into errors reads that as the deprecation firing.  The warning has to
-    ; come first: the filter may make it raise, and then __trunc__ must not
-    ; have run.
+    ; rax = __trunc__ func (owned), rbx = self
     push rax
     lea rdi, [rel int_trunc_deprecated]
     call deprecation_warn
     test eax, eax
     pop rax
-    jz .int_trunc_warn_raised
+    jnz .int_trunc_warn_ok
+    DECREF_V rax, rcx
+    jmp .int_trunc_warn_raised
+.int_trunc_warn_ok:
 
     ; Call __trunc__(self); result must be int-like or have __index__
     ; CPython 3.12: tries __index__ on result, but NOT __int__
@@ -774,22 +769,30 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_trunc_type_error_with_name
 
 .int_call_trunc_index:
-    ; rax = __index__ func, rbx = __trunc__ result
+    ; rax = __index__ func (owned), rbx = __trunc__ result
+    V_TEST_PTR rax, rcx
+    ja .int_trunc_no_index
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .int_trunc_no_index
+    jnz .int_trunc_idx_call
+    mov rdi, rax
+    call obj_decref
+    jmp .int_trunc_no_index
+.int_trunc_idx_call:
+    push rax
+    sub rsp, 8
     SPUSH_PTR rbx                ; args[0] = __trunc__ result (fat arg)
     mov rdi, rax
     mov rsi, rsp
     mov edx, 1
     call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16
-    ; rax = __index__ result, rbx = __trunc__ result (still needs DECREF)
-    ; Save __index__ result and DECREF __trunc__ result first
+    add rsp, 24                 ; drop fat arg (16) + pad (8)
+    pop rdi                     ; owned __index__ func
     push rax
     push rdx
+    call obj_decref
     mov rdi, rbx
     call obj_decref              ; DECREF __trunc__ result
     pop rdx
@@ -952,19 +955,35 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rcx                  ; type
     CSTRING rsi, "__index__"
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .int_base_no_index
+    V_TEST_PTR rax, rcx
+    ja .int_base_no_index
     ; Call __index__(base_obj)
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .int_base_no_index
+    jnz .int_base_idx_call
     mov rdi, rax
-    lea rsi, [rsp]               ; args[0] = base_obj (fat arg on stack)
+    call obj_decref
+    jmp .int_base_no_index
+BI_BASE_ARG equ 16
+.int_base_idx_call:
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    lea rsi, [rsp + BI_BASE_ARG] ; args[0] = base_obj (fat arg on stack)
     mov edx, 1
     call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16                  ; pop fat arg
+    add rsp, 8                  ; drop align pad
+    pop rdi                     ; owned __index__ func
+    add rsp, 16                 ; drop fat arg
+    push rax
+    push rdx
+    call obj_decref
+    pop rdx
+    pop rax
     ; rax = __index__ result, should be int
     test edx, edx
     jz .int_dunder_error         ; __index__ raised exception

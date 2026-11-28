@@ -193,12 +193,36 @@ DEF_FUNC_BARE op_unpack_sequence
     jmp .unpack_fill
 
 .unpack_list:
-    ; Validate count matches size
+    ; Lock list across length check, item read, and INCREF so a concurrent
+    ; mutator cannot shrink or reallocate ob_item mid-unpack.
+    OBJ_LOCK rdi
     mov r8, [rdi + PyListObject.ob_size]
     cmp rcx, r8
-    jne .unpack_count_error
-    ; Items in payload/tag arrays
+    jne .unpack_list_count_error
     mov rsi, [rdi + PyListObject.ob_item]
+    mov edx, ecx
+    shl edx, 3
+    add r13, rdx              ; stack += count * 8
+    mov r10, rcx
+    neg r10
+    mov edx, ecx
+    dec edx                    ; edx = source index (count-1 down to 0)
+.unpack_list_fill_loop:
+    test edx, edx
+    js .unpack_list_done
+    mov eax, edx
+    mov rax, [rsi + rax * 8]  ; items[edx] is already a Value
+    INCREF_V rax, r9
+    mov [r13 + r10*8], rax
+    inc r10
+    dec edx
+    jmp .unpack_list_fill_loop
+.unpack_list_done:
+    OBJ_UNLOCK rdi
+    jmp .unpack_done
+.unpack_list_count_error:
+    OBJ_UNLOCK rdi
+    jmp .unpack_count_error
 
 .unpack_fill:
     ; Pre-advance stack by count (ecx)
@@ -503,6 +527,22 @@ DEF_FUNC op_unpack_ex
     jmp .ue_generic
 
 .ue_list:
+    ; When threaded, snapshot the list with list_copy so concurrent mutations
+    ; cannot resize or invalidate ob_item while unpacking before/rest/after.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    je .ue_list_fast
+    extern list_copy
+    call list_copy
+    mov rdi, [rbp - UEX_IPAY]
+    mov [rbp - UEX_IPAY], rax
+    mov qword [rbp - UEX_ITAG], TAG_PTR
+    push rax
+    push rax
+    call obj_decref
+    pop rdi
+    pop rax
+.ue_list_fast:
     mov rax, [rdi + PyListObject.ob_size]
     jmp .ue_have_len
 .ue_tuple:

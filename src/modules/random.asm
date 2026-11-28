@@ -59,6 +59,9 @@ struc MTState
 endstruc
 
 section .bss
+alignb 64
+rc_handle_lock: resd 1
+alignb 8
 rc_handles:   resq 1        ; MTState*[], grown by doubling
 rc_handle_n:  resq 1
 rc_handle_cap: resq 1
@@ -74,18 +77,24 @@ DEF_FUNC_BARE rc_handle_at
     xor eax, eax
     test rdi, rdi
     js .rha_no
+    RT_LOCK_GATED rc_handle_lock
     cmp rdi, [rel rc_handle_n]
-    jae .rha_no
+    jae .rha_unlock_no
     mov rax, [rel rc_handles]
     test rax, rax
-    jz .rha_no
+    jz .rha_unlock_no
     mov rax, [rax + rdi*8]
     test rax, rax
-    jz .rha_no
+    jz .rha_unlock_no
     cmp qword [rax + MTState.magic], RC_MAGIC
-    je .rha_no_check
+    je .rha_unlock_out
     xor eax, eax
-.rha_no_check:
+.rha_unlock_out:
+    RT_UNLOCK_GATED rc_handle_lock
+    ret
+.rha_unlock_no:
+    xor eax, eax
+    RT_UNLOCK_GATED rc_handle_lock
 .rha_no:
     ret
 END_FUNC rc_handle_at
@@ -135,6 +144,7 @@ DEF_FUNC rc_new, RN_FRAME
     mov qword [rbx + MTState.magic], RC_MAGIC
 
     ; Find a free slot, or grow.
+    RT_LOCK_GATED rc_handle_lock
     xor ecx, ecx
     mov rdx, [rel rc_handles]
     test rdx, rdx
@@ -164,7 +174,7 @@ DEF_FUNC rc_new, RN_FRAME
     mov rdi, [rel rc_handles]
     call ap_realloc
     test rax, rax
-    jz .rn_oom_free
+    jz .rn_unlock_oom_free
     mov [rel rc_handles], rax
     mov rcx, [rbp - RN_ST]
     mov [rel rc_handle_cap], rcx
@@ -175,6 +185,7 @@ DEF_FUNC rc_new, RN_FRAME
 
 .rn_have_slot:
     mov [rdx + rcx*8], rbx
+    RT_UNLOCK_GATED rc_handle_lock
     mov rdi, rcx
     call int_from_i64
     V_PACK rax, rdx
@@ -182,6 +193,8 @@ DEF_FUNC rc_new, RN_FRAME
     leave
     ret
 
+.rn_unlock_oom_free:
+    RT_UNLOCK_GATED rc_handle_lock
 .rn_oom_free:
     mov rdi, rbx
     call ap_free
@@ -206,16 +219,28 @@ DEF_FUNC rc_free, RF_FRAME
     call obj_as_index
     ERR_M1 .idx_fail
     mov [rbp - RF_IDX], rax
-    mov rdi, rax
-    call rc_handle_at
-    mov rcx, [rbp - RF_IDX]
-    test rax, rax
-    jz .rf_done
-    mov qword [rax + MTState.magic], 0
+    RT_LOCK_GATED rc_handle_lock
+    mov rcx, rax
+    test rcx, rcx
+    js .rf_unlock_done
+    cmp rcx, [rel rc_handle_n]
+    jae .rf_unlock_done
     mov rdx, [rel rc_handles]
+    test rdx, rdx
+    jz .rf_unlock_done
+    mov rax, [rdx + rcx*8]
+    test rax, rax
+    jz .rf_unlock_done
+    cmp qword [rax + MTState.magic], RC_MAGIC
+    jne .rf_unlock_done
+    mov qword [rax + MTState.magic], 0
     mov qword [rdx + rcx*8], 0
+    RT_UNLOCK_GATED rc_handle_lock
     mov rdi, rax
     call ap_free
+    jmp .rf_done
+.rf_unlock_done:
+    RT_UNLOCK_GATED rc_handle_lock
 .rf_done:
     RET_NONE
     leave

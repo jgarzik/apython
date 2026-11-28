@@ -86,7 +86,7 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     mov rbx, rdi
 
     ; Temporarily bump refcount to prevent re-entrant dealloc during __del__
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
 
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
@@ -145,10 +145,9 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
 
     ; Undo the bump, without deallocating: whether anything is left is the
     ; answer this function gives.
-    dec qword [rbx + PyObject.ob_refcnt]
-    xor eax, eax
-    cmp qword [rbx + PyObject.ob_refcnt], 0
-    setne al
+    mov rdi, rbx
+    extern obj_decref_no_dealloc
+    call obj_decref_no_dealloc
 
     pop rbx
     leave
@@ -176,8 +175,18 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     je .del_report_have_fn
     xor eax, eax
 .del_report_have_fn:
+    push rax
+    sub rsp, 8
     mov rsi, rax
-    jmp .report
+    mov rdi, [gs:ThreadState.current_exception]
+    extern traceback_print_unraisable
+    call traceback_print_unraisable
+    add rsp, 8
+    pop rdi
+    test rdi, rdi
+    jz .del_restore
+    call obj_decref
+    jmp .del_restore
 .report_generator:
     mov rsi, rbx
 .report:
@@ -586,11 +595,17 @@ DEF_FUNC_LOCAL instance_repr_inner, IR_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel builtin_func_type]
     cmp rcx, r8
-    jne .ir_call_dunder
+    jne .ir_drop_call
     mov rcx, [rax + PyBuiltinObject.func_ptr]
     lea r8, [rel object_method_repr]
     cmp rcx, r8
-    je .ir_no_dunder            ; the inherited default: not an override
+    jne .ir_drop_call
+    mov rdi, rax
+    call obj_decref
+    jmp .ir_no_dunder            ; the inherited default: not an override
+.ir_drop_call:
+    mov rdi, rax
+    call obj_decref
 
 .ir_call_dunder:
     mov rdi, rbx
@@ -825,11 +840,17 @@ DEF_FUNC_LOCAL instance_str_inner, IS_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel builtin_func_type]
     cmp rcx, r8
-    jne .is_call_dunder
+    jne .is_drop_call
     mov rcx, [rax + PyBuiltinObject.func_ptr]
     lea r8, [rel object_method_str]
     cmp rcx, r8
-    je .is_no_dunder
+    jne .is_drop_call
+    mov rdi, rax
+    call obj_decref
+    jmp .is_no_dunder
+.is_drop_call:
+    mov rdi, rax
+    call obj_decref
 
 .is_call_dunder:
     mov rdi, rbx
@@ -1160,14 +1181,14 @@ DEF_FUNC type_call
 .type_of_is_type:
     lea rax, [rel type_type]
 .type_of_have_type:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_smallint:
     lea rax, [rel int_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1175,7 +1196,7 @@ DEF_FUNC type_call
 .type_float:
     extern float_type
     lea rax, [rel float_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1293,7 +1314,7 @@ DEF_FUNC type_call
 .type_bool:
     extern bool_type
     lea rax, [rel bool_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1301,7 +1322,7 @@ DEF_FUNC type_call
 .type_none:
     extern none_type
     lea rax, [rel none_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1403,12 +1424,20 @@ DEF_FUNC type_call
     V_TEST_PTR rax, rcx
     ja .tc_not_abstract
     cmp qword [rax + PyDictObject.ob_size], 0
-    je .tc_not_abstract
+    je .tc_abstract_drop
+    push rax
+    sub rsp, 8
     mov rdi, rbx
     mov rsi, rax
     extern type_abstract_error
     call type_abstract_error    ; rax = 0, the TypeError pending
+    add rsp, 8
+    pop rdi
+    call obj_decref
     jmp .tc_fail
+.tc_abstract_drop:
+    mov rdi, rax
+    call obj_decref
 .tc_not_abstract:
 
     ; Check if this type inherits from an exception type
@@ -1440,15 +1469,16 @@ DEF_FUNC type_call
     ; every time and churned the entry's owned reference on the way past.
     mov rdi, rbx
     mov rsi, r15
-    call type_lookup_cached     ; rax/edx = the value, rcx = the owner
+    call type_lookup_cached     ; rax/edx = the value (owned), rcx = the owner
     test edx, edx
     jz .new_not_found
     ; The hand walk stopped AT object_type and the cache walks past it.
     ; object's own __new__ is instance_new's business, not a definition.
     lea rdi, [rel object_type]
     cmp rcx, rdi
-    je .new_not_found
-    jmp .new_found
+    jne .new_found
+    DECREF_VAL rax, rdx
+    jmp .new_not_found
 
 .new_not_found:
     ; An int subclass carries its value inline, so it cannot come from
@@ -1531,18 +1561,25 @@ DEF_FUNC type_call
     jmp .lookup_init
 
 .new_found:
-    ; rax = __new__ func ptr, edx = tag
-    ; __new__ is conventionally a staticmethod -- it is registered that way
-    ; for the container types, and a user class writing @staticmethod gets
-    ; the same wrapper -- so unwrap before calling.  The wrapper itself has
-    ; no tp_call.
+    ; rax = __new__ func ptr (owned), edx = tag
     cmp edx, TAG_PTR
-    jne .tc_new_unwrapped
+    jne .tc_new_not_ptr
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel staticmethod_type]
     cmp rcx, rdx
     jne .tc_new_unwrapped
-    mov rax, [rax + PyStaticMethodObject.sm_callable]
+    mov rcx, [rax + PyStaticMethodObject.sm_callable]
+    INCREF_V rcx, r8
+    push rcx
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop rax
+    jmp .tc_new_unwrapped
+.tc_new_not_ptr:
+    mov qword [rbp - TC_NEW_FUNC], 0
+    jmp .new_not_callable
 .tc_new_unwrapped:
     mov [rbp - TC_NEW_FUNC], rax
 
@@ -1591,6 +1628,9 @@ DEF_FUNC type_call
     and rax, -2                 ; ...rounded up to a pair, so rsp stays
     shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
+    mov rdi, [rbp - TC_NEW_FUNC]
+    DECREF_V rdi, rcx
+    mov qword [rbp - TC_NEW_FUNC], 0
 
     ; Only call __init__ if __new__ returned an INSTANCE OF cls -- CPython's
     ; type_call asks PyObject_TypeCheck, which is isinstance and not identity.
@@ -1659,41 +1699,21 @@ DEF_FUNC type_call
     ; Only the arm that lands on object's own __init__ takes this exit.  A
     ; class that writes `__init__ = object.__init__` has it in its OWN dict, so
     ; the owner is that class and the call still happens.
-    lea rdx, [rel object_type]
-    cmp rcx, rdx
+    lea r8, [rel object_type]
+    cmp rcx, r8
     jne .init_is_defined
+    DECREF_VAL rax, rdx
     TC_REFUSE_EXTRA_ARGS 0
     jmp .no_init
 .init_is_defined:
-    mov rbx, rax                ; rbx = __init__ func
-
-    ; __init__ reaches its instance through the DESCRIPTOR PROTOCOL, not by
-    ; having self prepended to whatever the class dict holds.
-    ;
-    ; A plain function is the fast path and keeps the manual prepend, which is
-    ; what CPython's lookup_maybe_method does when it reports `unbound`: a
-    ; function's __get__ would only build a bound method for this to take
-    ; apart again.  That equivalence is also why the bug hid -- the one case
-    ; anybody writes is the one case where the two agree.
-    ;
-    ; Everything else is bound first and called with the arguments AS
-    ; WRITTEN.  `__init__ = staticmethod(g)` calls g with no arguments in
-    ; CPython and called it with self here; functools.partial and a callable
-    ; instance are not descriptors at all, and CPython does not bind them.
-    mov qword [rbp - TC_INIT_BOUND], 0
+    mov rbx, rax                ; rbx = __init__ func (owned from type_lookup_cached)
+    mov qword [rbp - TC_INIT_BOUND], 1
     mov qword [rbp - TC_NO_SELF], 0
     mov rax, [rbx + PyObject.ob_type]
     lea rdx, [rel func_type]
     cmp rax, rdx
     je .init_have_callable
 
-    ; A builtin is asked directly rather than through its type.  __get__ used
-    ; to sit in builtin_func_type's tp_dict, where every instance of the type
-    ; shared it, so asking the TYPE said "descriptor" for `len` as loudly as
-    ; for `type.__init__`.  It is answered per object now, and func_kind is
-    ; what answers it: a method or a wrapper binds, a module-level function
-    ; does not -- which is CPython's rule, where the first two have a
-    ; tp_descr_get and builtin_function_or_method has none.
     extern builtin_func_type
     lea rdx, [rel builtin_func_type]
     cmp rax, rdx
@@ -1710,7 +1730,12 @@ DEF_FUNC type_call
     call method_new
     test rax, rax
     jz .init_bind_raised
-    mov rbx, rax
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    call obj_decref                     ; drop original owned __init__
+    add rsp, 8
+    pop rbx
     mov qword [rbp - TC_INIT_BOUND], 1  ; owned; released after the call
     jmp .init_have_callable
 
@@ -1718,14 +1743,13 @@ DEF_FUNC type_call
     ; Does its type define __get__?
     mov rdi, rax
     lea rsi, [rel dunder_get]
-    call dunder_lookup
-    V_UNPACK rax, rdx
+    extern dunder_exists
+    call dunder_exists
     mov qword [rbp - TC_NO_SELF], 1     ; either way, no manual prepend
-    test edx, edx
+    test eax, eax
     jz .init_have_callable              ; not a descriptor: call it as it is
 
-    ; __get__(init, instance, type_of_instance), which is the receiver
-    ; CPython's lookup_maybe_method passes.
+    ; __get__(init, instance, type_of_instance)
     mov rdi, rbx                        ; self = the __init__ object
     mov rsi, r14                        ; arg1 = the instance
     mov rdx, [r14 + PyObject.ob_type]   ; arg2 = its type
@@ -1735,13 +1759,17 @@ DEF_FUNC type_call
     V_UNPACK rax, rdx
     test edx, edx
     jz .init_bind_raised
-    mov rbx, rax
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    call obj_decref                     ; drop original owned __init__
+    add rsp, 8
+    pop rbx
     mov qword [rbp - TC_INIT_BOUND], 1  ; owned; released after the call
     jmp .init_have_callable
 
 .init_bind_raised:
-    ; __get__ raised.  Nothing has been allocated on the stack yet, so this
-    ; only has to drop the half-built instance the way .init_raised does.
+    TC_RELEASE_BOUND_INIT
     mov rax, r14
     mov rsi, [rbp - TC_NEW_TAG]
     DECREF_VAL rax, rsi
@@ -1949,6 +1977,9 @@ DEF_FUNC type_call
     and rax, -2
     shl rax, 3
     add rsp, rax
+    mov rdi, [rbp - TC_NEW_FUNC]
+    call obj_decref
+    mov qword [rbp - TC_NEW_FUNC], 0
     test r14, r14
     jz .exc_sub_new_failed
 
@@ -2017,6 +2048,9 @@ DEF_FUNC type_call
     and rax, -2
     shl rax, 3
     add rsp, rax
+    mov rdi, [rbp - TC_EXCINIT]
+    call obj_decref
+    mov qword [rbp - TC_EXCINIT], 0
     test r15, r15
     jz .exc_sub_init_raised
     DECREF_V r15, rcx           ; __init__'s None
@@ -2030,6 +2064,9 @@ DEF_FUNC type_call
     and rax, -2                 ; ...rounded up to a pair, so rsp stays
     shl rax, 3                  ; 16-aligned for the tp_call below
     add rsp, rax
+    mov rdi, [rbp - TC_EXCINIT]
+    call obj_decref
+    mov qword [rbp - TC_EXCINIT], 0
 
 .exc_sub_new_other:
     ; __new__ answered something that is not an instance of the class asked
@@ -2086,6 +2123,9 @@ DEF_FUNC type_call
 
 .new_not_callable:
     ; No instance yet; .tc_fail cuts the argument carve away with the locals.
+    mov rdi, [rbp - TC_NEW_FUNC]
+    DECREF_V rdi, rcx
+    mov qword [rbp - TC_NEW_FUNC], 0
     SET_EXC exc_TypeError_type, "__new__ is not callable"
 
 .int_sub_error:
@@ -2314,7 +2354,8 @@ user_type_name_str: db "type", 0
 align 8
 global user_type_metatype
 user_type_metatype:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq user_type_metatype       ; ob_type (self-referential)
     dq user_type_name_str       ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
@@ -2355,7 +2396,8 @@ extern object_hash
 
 global object_type
 object_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq object_name_str          ; tp_name
     ; object() has no __dict__, so its instances are the bare header.  This

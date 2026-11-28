@@ -41,7 +41,7 @@ CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
 CL_CFUNC     equ 64            ; the C function, while sys.setprofile is on
-CL_CALL_TAG  equ 72            ; spare: the callable is classified in place
+CL_OWN_FN    equ 72            ; owned __call__ dunder ref to release on cleanup, or 0
 CL_SAVED_R13 equ 80
 CL_FRAME     equ 104         ; + 0 pushes = 96
 
@@ -214,25 +214,22 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, rcx              ; type
     lea rsi, [rel dunder_call]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
+    V_UNPACK rax, rdx           ; owned Value
     test edx, edx
     jz .not_callable
+    cmp edx, TAG_PTR
+    jne .not_callable
     ; Found __call__ — use its tp_call to dispatch
-    mov rcx, rax              ; __call__ func
+    mov rcx, rax              ; owned __call__ func
     mov rax, [rcx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .not_callable
-    ; Rewrite callable: we need to call __call__(self, *args)
-    ; The self is the original callable, prepend it to args
-    ; Actually, we can just call dunder_func's tp_call with [callable, args...]
-    ; But that requires restructuring the args. For simplicity, call it as
-    ; tp_call(dunder_func, args_including_self, nargs+1)
-    ; where args_including_self starts at the callable's slot on the value stack
-    ; The callable is at [r13 - (nargs+1)*8], and args start at [r13 - nargs*8]
-    ; We already have self in the callable's slot... actually this is tricky.
-    ; Save dunder_func in the frame, and keep the original
-    ; callable as first arg by shifting the args pointer back by 1
+    jnz .dunder_have_tp_call
+    mov rdi, rcx
+    call obj_decref
+    jmp .not_callable
+.dunder_have_tp_call:
+    mov [rbp - CL_OWN_FN], rcx           ; released in .cleanup
     mov [rbp - CL_CALLABLE], rcx         ; replace callable with __call__ func
     ; args_ptr should now include the original callable as self
     ; The original callable is already on the value stack at the right position
@@ -257,6 +254,7 @@ DEF_FUNC op_call, CL_FRAME
     jmp .call_with_args
 
 .have_tp_call:
+    mov qword [rbp - CL_OWN_FN], 0
     ; Set up args: tp_call(callable, args_ptr, nargs)
     mov [rbp - CL_TPCALL], rax               ; save tp_call function ptr
     mov rcx, [rbp - CL_NARGS]               ; original nargs
@@ -326,6 +324,12 @@ DEF_FUNC op_call, CL_FRAME
     jmp .cleanup
 
 .cleanup:
+    ; Release owned __call__ dunder reference if the dunder path ran.
+    mov rdi, [rbp - CL_OWN_FN]
+    test rdi, rdi
+    jz .cl_no_own_fn
+    call obj_decref
+.cl_no_own_fn:
     ; Restore value stack pointers (defensive against callee clobber)
     mov r13, [rbp - CL_SAVED_R13]
 
@@ -571,7 +575,14 @@ DEF_FUNC op_call_function_ex
     extern list_type
     lea rdx, [rel list_type]
     cmp rcx, rdx
+    jne .cfex_not_list
+    ; In free-threaded mode, materialise list *args to an immutable tuple so
+    ; concurrent list mutation cannot invalidate ob_item during tp_call.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
     je .cfex_args_ok
+    jmp .cfex_materialise
+.cfex_not_list:
     ; A type with neither tp_iter nor sq_item is refused HERE rather than by
     ; the materialisation below, because CPython's check_args_iterable runs
     ; before the conversion and so has the callable to name: `f(*5)` is
@@ -678,20 +689,15 @@ DEF_FUNC op_call_function_ex
 
 .cfex_merge_kwargs:
     ; --- Merge positional args + keyword args ---
-    ; Get n_kw from kwargs dict — if empty, take simple path
+    ; Lock kwargs dict across size check, key validation, and copy into merged/kwnames.
     mov rax, [rbp - CFX_KWARGS]
+    OBJ_LOCK rax
     mov rcx, [rax + PyDictObject.ob_size]
     test rcx, rcx
-    jz .cfex_empty_kwargs          ; empty dict → treat as no kwargs
+    jz .cfex_unlock_empty_kwargs   ; empty dict → treat as no kwargs
     mov [rbp - CFX_NKW], rcx
 
-    ; Every key has to be a string, and CPython refuses a call where one is
-    ; not before anything else happens.  DictEntry.key is a full Value and a
-    ; dict takes any hashable key, so `f(**{1: 2})` put an int IMMEDIATE in
-    ; the names tuple and the INCREF below wrote through the number itself --
-    ; one line of Python, and a segfault.  Checked here, before the merged
-    ; buffer and the names tuple exist, so the refusal has nothing to release.
-    mov rsi, [rbp - CFX_KWARGS]
+    mov rsi, rax
     mov r8, [rsi + PyDictObject.entries]
     mov r9, [rsi + PyDictObject.capacity]
     xor ecx, ecx
@@ -715,7 +721,12 @@ DEF_FUNC op_call_function_ex
     inc rcx
     jmp .cfex_kwkey_scan
 .cfex_kwkey_bad:
+    mov rax, [rbp - CFX_KWARGS]
+    OBJ_UNLOCK rax
     RAISE exc_TypeError_type, "keywords must be strings"
+.cfex_unlock_empty_kwargs:
+    OBJ_UNLOCK rax
+    jmp .cfex_empty_kwargs
 .cfex_kwkeys_ok:
 
     ; Get n_pos from args tuple
@@ -805,6 +816,7 @@ DEF_FUNC op_call_function_ex
     jmp .cfex_dict_scan
 
 .cfex_dict_done:
+    OBJ_UNLOCK r12
     ; Set kw_names_pending for the callee
     mov rax, [rbp - CFX_KWNAMES]
     mov [gs:ThreadState.kw_names_pending], rax
@@ -943,6 +955,7 @@ DEF_FUNC op_call_function_ex
     pop r12
     pop rbx
     pop rbp
+    CHECK_EVAL_SIGNALS
     DISPATCH
 
 .cfex_propagate_exc:
@@ -1190,12 +1203,16 @@ DEF_FUNC op_before_with
     lea rsi, [rel dunder_enter]
     extern dunder_lookup
     call dunder_lookup
-    mov rsi, rbx
     V_TEST_PTR rax, rcx
-    ja .bw_no_either
+    ja .bw_no_either_set_rsi
+    mov rdi, rax
+    call obj_decref
+    mov rsi, rbx
     CSTRING rdi, `'\x01' object does not support the context manager protocol (missed __exit__ method)`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+.bw_no_either_set_rsi:
+    mov rsi, rbx
 .bw_no_either:
     CSTRING rdi, `'\x01' object does not support the context manager protocol`
     jmp raise_type_error_with_name

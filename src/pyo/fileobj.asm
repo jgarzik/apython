@@ -3,6 +3,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -39,7 +40,7 @@ DEF_FUNC fileobj_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rdi                    ; save obj
 
     ; Fill header
-    mov qword [rdi + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rdi
     lea rax, [rel file_type]
     mov [rdi + PyObject.ob_type], rax
     mov [rdi + PyFileObject.file_fd], rbx
@@ -122,7 +123,7 @@ DEF_FUNC_LOCAL fileobj_repr
     mov rax, [rdi + PyFileObject.file_name]
     test rax, rax
     jz .fallback
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .fallback:
@@ -237,7 +238,7 @@ DEF_FUNC_LOCAL fileobj_write_all, FWA_FRAME
     mov rdi, [rbp - FWA_FD]
     mov rsi, [rbp - FWA_BUF]
     mov rdx, [rbp - FWA_LEN]
-    call sys_write
+    BLOCKING_CALL sys_write
     test rax, rax
     js .fwa_out                 ; rax is already -errno
     jz .fwa_stalled
@@ -266,10 +267,14 @@ END_FUNC fileobj_write_all
 ;; straight out behind whatever is already waiting, which keeps the order
 ;; right without growing the buffer for a single large write.
 ;; ============================================================================
-FE_SELF  equ 8
-FE_DATA  equ 16
-FE_LEN   equ 24
-FE_FRAME equ 32             ; 24 used + 8 pad = 32, 16-aligned
+FE_SELF   equ 8
+FE_DATA   equ 16
+FE_LEN    equ 24
+FE_FD     equ 32
+FE_DLEN   equ 40
+FE_DIRECT equ 48
+FE_DBUF   equ 48 + FILE_BUFSZ
+FE_FRAME  equ FE_DBUF           ; 8240, 16-aligned
 DEF_FUNC fileobj_emit, FE_FRAME
     mov [rbp - FE_SELF], rdi
     mov [rbp - FE_DATA], rsi
@@ -278,22 +283,62 @@ DEF_FUNC fileobj_emit, FE_FRAME
     cmp qword [rdi + PyFileObject.file_buffered], 0
     je .fe_direct
 
-    ; Would it fit?  If not, drain first, and then take the straight path if
-    ; it still would not.
+    OBJ_LOCK rdi
+    ; Would it fit without draining?
     mov rax, [rdi + PyFileObject.file_len]
     add rax, rdx
     cmp rax, FILE_BUFSZ
     jbe .fe_append
-    call fileobj_drain
+
+    ; Snapshot pending buffered bytes onto the stack, then unlock BEFORE
+    ; calling BLOCKING_CALL sys_write (leaf OBJ_LOCK must never be held across
+    ; a detached blocking syscall).
+    mov rax, [rdi + PyFileObject.file_len]
+    mov [rbp - FE_DLEN], rax
+    mov rcx, [rdi + PyFileObject.file_fd]
+    mov [rbp - FE_FD], rcx
+    mov qword [rdi + PyFileObject.file_len], 0
     test rax, rax
-    js .fe_out                  ; the waiting bytes could not go out, so this
-                                ; chunk must not be buffered on top of them --
-                                ; the order would be wrong and the exit-time
-                                ; flush would report the failure a second time
-    mov rdi, [rbp - FE_SELF]
+    jz .fe_no_copy
+    lea rdi, [rbp - FE_DBUF]
+    mov rsi, [rbp - FE_SELF]
+    lea rsi, [rsi + PyFileObject.file_buf]
+    mov rdx, rax
+    call ap_memcpy
+.fe_no_copy:
+    ; If the incoming write fits into the now-empty buffer, stage it under the
+    ; same lock acquisition; otherwise write it directly after the drained head.
     mov rdx, [rbp - FE_LEN]
     cmp rdx, FILE_BUFSZ
-    ja .fe_direct
+    ja .fe_mark_direct
+    mov qword [rbp - FE_DIRECT], 0
+    mov rdi, [rbp - FE_SELF]
+    lea rdi, [rdi + PyFileObject.file_buf]
+    mov rsi, [rbp - FE_DATA]
+    call ap_memcpy
+    mov rdi, [rbp - FE_SELF]
+    mov rax, [rbp - FE_LEN]
+    mov [rdi + PyFileObject.file_len], rax
+    jmp .fe_unlock_flush
+.fe_mark_direct:
+    mov qword [rbp - FE_DIRECT], 1
+    mov rdi, [rbp - FE_SELF]
+.fe_unlock_flush:
+    OBJ_UNLOCK rdi
+    mov rdx, [rbp - FE_DLEN]
+    test rdx, rdx
+    jz .fe_after_drain
+    mov rdi, [rbp - FE_FD]
+    lea rsi, [rbp - FE_DBUF]
+    call fileobj_write_all
+    test rax, rax
+    js .fe_out
+.fe_after_drain:
+    cmp qword [rbp - FE_DIRECT], 0
+    jne .fe_direct
+    xor eax, eax
+    leave
+    ret
 
 .fe_append:
     mov rdi, [rbp - FE_SELF]
@@ -307,6 +352,9 @@ DEF_FUNC fileobj_emit, FE_FRAME
     mov rax, [rbp - FE_LEN]
     add [rdi + PyFileObject.file_len], rax
     xor eax, eax
+.fe_unlock_out:
+    mov rdi, [rbp - FE_SELF]
+    OBJ_UNLOCK rdi
 .fe_out:
     leave
     ret
@@ -325,28 +373,38 @@ END_FUNC fileobj_emit
 ;; fileobj_drain(rdi = self) -> rax = 0, or -errno
 ;;
 ;; Write out whatever is waiting.  Safe on an unbuffered file, where there never
-;; is any.
+;; is any.  Snapshots the buffer under OBJ_LOCK and unlocks before sys_write so
+;; the leaf lock is never held across a detached blocking syscall.
 ;; ============================================================================
+FD_FD    equ 8
+FD_LEN   equ 16
+FD_DBUF  equ 16 + FILE_BUFSZ
+FD_FRAME equ FD_DBUF + 8        ; + 1 push (rbx) = 8224, 16-aligned
 global fileobj_drain
-DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
+DEF_FUNC fileobj_drain, FD_FRAME
     push rbx
     mov rbx, rdi
+    OBJ_LOCK rbx
     mov rdx, [rbx + PyFileObject.file_len]
     test rdx, rdx
-    jz .fd_done
-    ; The buffer is dropped whether or not the write succeeds, which is
-    ; deliberate and is what CPython does: a flush that failed mid-run gives
-    ; exit 1 and one traceback, where a buffer that never got written at all
-    ; gives the "Exception ignored" report at exit.  Keeping the bytes would
-    ; report the same failure twice.
+    jz .fd_unlock_empty
+    mov [rbp - FD_LEN], rdx
+    mov rax, [rbx + PyFileObject.file_fd]
+    mov [rbp - FD_FD], rax
     mov qword [rbx + PyFileObject.file_len], 0
-    mov rdi, [rbx + PyFileObject.file_fd]
+    lea rdi, [rbp - FD_DBUF]
     lea rsi, [rbx + PyFileObject.file_buf]
+    call ap_memcpy
+    OBJ_UNLOCK rbx
+    mov rdi, [rbp - FD_FD]
+    lea rsi, [rbp - FD_DBUF]
+    mov rdx, [rbp - FD_LEN]
     call fileobj_write_all
     pop rbx
     leave
     ret
-.fd_done:
+.fd_unlock_empty:
+    OBJ_UNLOCK rbx
     xor eax, eax
     pop rbx
     leave
@@ -603,7 +661,7 @@ END_FUNC fileobj_seekable
 ;; ============================================================================
 DEF_FUNC fileobj_enter
     mov rax, [rdi]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -711,7 +769,7 @@ DEF_FUNC fileobj_read, FR_FRAME
     lea rsi, [rbp - FR_FRAME]
     mov edx, 8192
     mov edi, r12d
-    call sys_read
+    BLOCKING_CALL sys_read
     ; rax = bytes read
     test rax, rax
     jle .fr_empty
@@ -746,7 +804,7 @@ END_FUNC fileobj_read
 ;; fileobj_readline(PyObject **args, int64_t nargs) -> str
 ;; Read one line from file
 ;; ============================================================================
-FRL_FRAME equ 8208          ; + 3 pushes = 8232, not 16-aligned
+FRL_FRAME equ 8208          ; + 2 pushes at entry = 8224, 16-aligned
 DEF_FUNC fileobj_readline, FRL_FRAME
     push rdi
     push rsi
@@ -780,7 +838,7 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     add rsi, r13
     mov edx, 1
     mov edi, r12d
-    call sys_read
+    BLOCKING_CALL sys_read
     test rax, rax
     jle .frl_done               ; EOF or error
 
@@ -882,7 +940,7 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     cmp qword [gs:ThreadState.current_exception], 0
     jne .fwl_raised
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -1333,7 +1391,7 @@ DEF_FUNC fileobj_getattr
 
 .ret_name:
     mov rax, [rbx + PyFileObject.file_name]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1343,7 +1401,7 @@ DEF_FUNC fileobj_getattr
 
 .ret_mode:
     mov rax, [rbx + PyFileObject.file_mode]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1424,7 +1482,8 @@ section .data
 align 8
 global file_type
 file_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq fileobj_type_name        ; tp_name
     dq PyFileObject_size        ; tp_basicsize

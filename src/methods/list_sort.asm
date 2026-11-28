@@ -73,6 +73,8 @@ extern obj_richcompare_bool
 extern str_type
 extern tuple_type
 extern v_f64_off
+extern stw_requested
+extern stw_safepoint
 
 section .text
 
@@ -582,6 +584,12 @@ DEF_FUNC sort_count_run, SCR_FRAME
     add r12, [rbp - SCR_N]      ; r12 = the next index
     cmp r12, [rbp - SCR_HI]
     jae .scr_done
+    test r12d, 4095
+    jnz .scr_asc_no_stw
+    cmp dword [rel stw_requested], 0
+    je .scr_asc_no_stw
+    call stw_safepoint
+.scr_asc_no_stw:
     ST_LOAD rdi, MS_KEYS, r12
     dec r12
     ST_LOAD rsi, MS_KEYS, r12
@@ -599,6 +607,12 @@ DEF_FUNC sort_count_run, SCR_FRAME
     add r12, [rbp - SCR_N]
     cmp r12, [rbp - SCR_HI]
     jae .scr_desc_done
+    test r12d, 4095
+    jnz .scr_desc_no_stw
+    cmp dword [rel stw_requested], 0
+    je .scr_desc_no_stw
+    call stw_safepoint
+.scr_desc_no_stw:
     ST_LOAD rdi, MS_KEYS, r12
     dec r12
     ST_LOAD rsi, MS_KEYS, r12
@@ -1711,6 +1725,12 @@ DEF_FUNC sort_merge_at, SMA_FRAME
     push r12
     push r13
     mov [rbp - SMA_I], rdi
+
+    cmp dword [rel stw_requested], 0
+    je .sma_no_stw
+    call stw_safepoint
+    mov rdi, [rbp - SMA_I]
+.sma_no_stw:
 
     lea r12, [rbx + MS_PENDING]
     mov rax, rdi

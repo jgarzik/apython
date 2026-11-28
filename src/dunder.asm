@@ -99,11 +99,40 @@ DEF_FUNC dunder_name_obj
 
 .miss:
     mov rdi, rbx
-    call str_intern_cstr        ; kept for the life of the process
+    call str_intern_cstr        ; kept for the life of the process (owned ref)
+    ; Serialize cache fills under dunder_cache_lock; value is published BEFORE
+    ; key so lock-free readers on .probe/.hit always observe a valid value.
+    RT_LOCK_GATED dunder_cache_lock
+.miss_reprobe:
+    lea rcx, [rel dunder_cache_keys]
+    mov rdx, [rcx + r12*8]
+    test rdx, rdx
+    jz .miss_install
+    cmp rdx, rbx
+    je .miss_already
+    inc r12
+    and r12, DUNDER_CACHE_SLOTS - 1
+    jmp .miss_reprobe
+.miss_install:
+    lea rcx, [rel dunder_cache_vals]
+    mov [rcx + r12*8], rax      ; value BEFORE key (x86-64 TSO release)
     lea rcx, [rel dunder_cache_keys]
     mov [rcx + r12*8], rbx
+    RT_UNLOCK_GATED dunder_cache_lock
+    pop r12
+    pop rbx
+    leave
+    ret
+.miss_already:
     lea rcx, [rel dunder_cache_vals]
-    mov [rcx + r12*8], rax
+    mov rdx, [rcx + r12*8]      ; resident string
+    RT_UNLOCK_GATED dunder_cache_lock
+    push rdx
+    push rdx
+    mov rdi, rax
+    call obj_decref             ; drop our duplicate ref from str_intern_cstr
+    pop rax
+    pop rax
     pop r12
     pop rbx
     leave
@@ -111,7 +140,9 @@ DEF_FUNC dunder_name_obj
 END_FUNC dunder_name_obj
 
 section .bss
-align 8
+alignb 64
+dunder_cache_lock: resd 1
+alignb 8
 dunder_cache_keys: resq DUNDER_CACHE_SLOTS
 dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 
@@ -175,7 +206,7 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
     jz .try_base
 
     mov rsi, r13
-    call dict_get_mro           ; dict_get(tp_dict, name_str) -> borrowed ref
+    call dict_get_mro           ; dict_get_mro(tp_dict, name_str) -> owned Value
     test rax, rax               ; a Value already, and 0 is the miss
     jnz .found
 
@@ -194,7 +225,7 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
     pop r12
     pop rbx
     leave
-    ret                     ; rax is the Value dict_get answered with
+    ret                     ; rax is an OWNED Value
 
 .not_found:
     xor eax, eax            ; a NULL Value
@@ -206,6 +237,25 @@ DEF_FUNC dunder_lookup_owner, DLO_FRAME
     leave
     ret
 END_FUNC dunder_lookup_owner
+
+;; ============================================================================
+;; dunder_exists(PyTypeObject *type, const char *name) -> eax = 1 if defined, 0 else
+;; Presence-only lookup helper that drops the owned ref immediately.
+;; ============================================================================
+global dunder_exists
+DEF_FUNC dunder_exists
+    call dunder_lookup
+    test rax, rax
+    jz .de_no
+    DECREF_V rax, rcx
+    mov eax, 1
+    leave
+    ret
+.de_no:
+    xor eax, eax
+    leave
+    ret
+END_FUNC dunder_exists
 
 ;; ============================================================================
 ;; dunder_lookup_after(rdi = the class itself, rsi = name cstr) -> rax = Value
@@ -250,9 +300,10 @@ DEF_FUNC dunder_lookup_after, DLA_FRAME
     jz .dla_next
 
     mov rsi, r13
-    call dict_get_mro           ; a Value already, and 0 is the miss
+    call dict_get_mro           ; owned Value, or 0 on miss
     test rax, rax
-    jnz .dla_done
+    jz .dla_next
+    jmp .dla_done
 
 .dla_next:
     MRO_NEXT rbx, r14
@@ -328,12 +379,12 @@ DEF_FUNC dunder_bind, DB_FRAME
     je .db_unbound              ; its own convention is args[0] = self
 
     ; Anything else: bind it if its type says how, and otherwise take it
-    ; exactly as it stands.
+    ; exactly as it stands (consuming the owned rdi passed in).
     mov rdi, rax
     lea rsi, [rel dunder_get]
-    call dunder_lookup
-    V_TEST_PTR rax, rcx
-    ja .db_as_is                ; no __get__: not a descriptor
+    call dunder_exists
+    test eax, eax
+    jz .db_as_is                ; no __get__: not a descriptor
 
     mov rdi, [rbp - DB_FOUND]
     mov rsi, [rbp - DB_SELF]
@@ -341,6 +392,12 @@ DEF_FUNC dunder_bind, DB_FRAME
     lea rcx, [rel dunder_get]
     mov r8d, TAG_PTR            ; both are heap pointers
     call dunder_call_3          ; err: 0, absent or raised, goes to .db_raised
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - DB_FOUND]
+    call obj_decref             ; drop consumed descriptor ref
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .db_raised
     mov edx, 1
@@ -348,17 +405,14 @@ DEF_FUNC dunder_bind, DB_FRAME
     ret
 
 .db_unbound:
-    mov rax, [rbp - DB_FOUND]
+    mov rax, [rbp - DB_FOUND]   ; transfer owned ref to caller
     xor edx, edx
     leave
     ret
 
 .db_as_is:
-    ; Not a descriptor, so there is nothing to bind and nothing to prepend.
-    ; edx = 1 promises the caller an OWNED reference -- it releases what it
-    ; was handed -- and what dunder_lookup found is borrowed from a tp_dict.
+    ; Not a descriptor: transfer owned ref straight to caller (edx = 1).
     mov rax, [rbp - DB_FOUND]
-    INCREF rax
     mov edx, 1
     leave
     ret
@@ -372,13 +426,7 @@ END_FUNC dunder_bind
 
 ;; ============================================================================
 ;; dunder_lookup_special(rdi = the object, rsi = the dunder name C string)
-;;   -> rax = an OWNED callable that takes no self, or 0 (with an exception
-;;      pending only when __get__ raised)
-;;
-;; CPython's _PyObject_LookupSpecial: the type's own MRO, then the descriptor
-;; protocol, and a plain function becomes a bound method.  BEFORE_WITH needs
-;; the RESULT rather than the call, because __exit__ is pushed and invoked
-;; later; everything else goes through dunder_call_*.
+;;   -> rax = an OWNED callable that takes no self, or 0
 ;; ============================================================================
 DLS_OBJ   equ 8
 DLS_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
@@ -392,17 +440,27 @@ DEF_FUNC dunder_lookup_special, DLS_FRAME
 
     mov rdi, rax
     mov rsi, [rbp - DLS_OBJ]
-    call dunder_bind            ; err: edx = 2 is the raise, tested below
+    call dunder_bind            ; err: edx = 2 is the raise, tested below (consumes rdi)
     cmp edx, 2
     je .dls_raised
     test edx, edx
     jnz .dls_owned
 
-    ; A plain function: bind it the way an attribute access would.
+    ; A plain function (owned): bind it via method_new, then drop unbound ref.
+    push rax
+    sub rsp, 8
     mov rdi, rax
     mov rsi, [rbp - DLS_OBJ]
     extern method_new
     call method_new
+    mov rcx, rax
+    add rsp, 8
+    pop rdi
+    push rcx
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
 .dls_owned:
     leave
     ret
@@ -497,11 +555,10 @@ DEF_FUNC dunder_call_1
     add rsp, 16             ; pop args
     ; rax = result payload, rdx = result tag
 
-    test r13, r13
-    jz .dc1_done
+    ; dunder_bind ALWAYS returns an owned callable (both edx=0 and edx=1).
     push rax
     sub rsp, 8
-    mov rdi, r12            ; the bound callable was ours
+    mov rdi, r12
     DECREF_V rdi, rcx
     add rsp, 8
     pop rax
@@ -514,20 +571,11 @@ DEF_FUNC dunder_call_1
     ret                     ; rax is already the Value
 
 .lookup_uncallable:
-    ; The dunder is there and is an immediate.  .bind_uncallable words this
-    ; already; it only needs telling that this one is BORROWED from a tp_dict,
-    ; so r13 = 0 and nothing is released.
+    ; The dunder is there and is an immediate (not refcounted; DECREF_V is no-op).
     mov r12, rax
-    xor r13d, r13d
     jmp .bind_uncallable
 
 .bind_uncallable:
-    ; A bound result that is not callable, or a descriptor object with no
-    ; __call__.  The caller reads a NULL as "absent", and a slot wrapper turns
-    ; that into "failed without an exception", so say what is wrong.
-    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
-    ; and this is usually its last reference, so naming it afterwards read a
-    ; freed object.
     mov rdi, r12
     extern value_type
     call value_type
@@ -538,8 +586,6 @@ DEF_FUNC dunder_call_1
     extern type_name_message
     call type_name_message      ; rax = the composed C string
     mov r14, rax
-    test r13, r13
-    jz .dc1_raise_composed
     mov rdi, r12
     DECREF_V rdi, rcx
 .dc1_raise_composed:
@@ -553,8 +599,6 @@ DEF_FUNC dunder_call_1
     CSTRING rdi, `'\x01' object is not callable`
     extern set_type_error_with_name
     call set_type_error_with_name
-    test r13, r13
-    jz .bind_raised
     mov rdi, r12
     DECREF_V rdi, rcx
     jmp .bind_raised
@@ -685,11 +729,9 @@ DEF_FUNC dunder_call_2
 
     pop rcx
     pop rcx                 ; the bound flag
-    test rcx, rcx
-    jz .dc2_done
     push rax
     sub rsp, 8
-    mov rdi, r13            ; the bound callable was ours
+    mov rdi, r13            ; dunder_bind always returns an owned callable
     DECREF_V rdi, rcx
     add rsp, 8
     pop rax
@@ -702,8 +744,7 @@ DEF_FUNC dunder_call_2
     ret                     ; rax is already the Value
 
 .lookup_uncallable:
-    ; As dunder_call_1's: the value is borrowed, and .bind_uncallable reads the
-    ; owned flag off the stack, where the bound path pushes it twice.
+    ; Immediate (not refcounted; DECREF_V is a no-op).
     mov r13, rax
     xor ecx, ecx
     push rcx
@@ -713,27 +754,14 @@ DEF_FUNC dunder_call_2
 .bind_uncallable:
     pop rcx
     pop rcx
-    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
-    ; and this is usually its last reference, so naming it afterwards read a
-    ; freed object.
-    push rcx
-    push rcx
     mov rdi, r13
     call value_type
-    pop rcx
-    pop rcx
     test rax, rax
     jz .dc2_name_it
-    push rcx
-    push rcx
     mov rsi, rax
     CSTRING rdi, `'\x01' object is not callable`
     call type_name_message      ; rax = the composed C string
-    pop rcx
-    pop rcx
     mov r14, rax
-    test rcx, rcx
-    jz .dc2_raise_composed
     mov rdi, r13
     DECREF_V rdi, rcx
 .dc2_raise_composed:
@@ -742,12 +770,9 @@ DEF_FUNC dunder_call_2
     call set_exception
     jmp .bind_raised
 .dc2_name_it:
-    mov r14, rcx                ; the owned flag, across the call
     mov rsi, r13
     CSTRING rdi, `'\x01' object is not callable`
     call set_type_error_with_name
-    test r14, r14
-    jz .bind_raised
     mov rdi, r13
     DECREF_V rdi, rcx
     jmp .bind_raised
@@ -909,11 +934,9 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     add rsp, 32             ; pop args
     ; rax = result payload, rdx = result tag
 
-    cmp qword [rbp - DC3_BOUND], 0
-    je .dc3_done
     push rax
     sub rsp, 8
-    mov rdi, r14            ; the bound callable was ours
+    mov rdi, r14            ; dunder_bind always returns an owned callable
     DECREF_V rdi, rcx
     add rsp, 8
     pop rax
@@ -928,15 +951,10 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     ret                     ; rax is already the Value
 
 .lookup_uncallable:
-    ; As dunder_call_1's; here the owned flag is a frame slot.
     mov r14, rax
-    mov qword [rbp - DC3_BOUND], 0
     jmp .bind_uncallable
 
 .bind_uncallable:
-    ; COMPOSE FIRST, then release: the message names the bound object's TYPE
-    ; and this is usually its last reference, so naming it afterwards read a
-    ; freed object.
     mov rdi, r14
     call value_type
     test rax, rax
@@ -945,8 +963,6 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     CSTRING rdi, `'\x01' object is not callable`
     call type_name_message      ; rax = the composed C string
     mov r15, rax
-    cmp qword [rbp - DC3_BOUND], 0
-    je .dc3_raise_composed
     mov rdi, r14
     DECREF_V rdi, rcx
 .dc3_raise_composed:
@@ -958,8 +974,6 @@ DEF_FUNC dunder_call_3, DC3_FRAME
     mov rsi, r14
     CSTRING rdi, `'\x01' object is not callable`
     call set_type_error_with_name
-    cmp qword [rbp - DC3_BOUND], 0
-    je .bind_raised
     mov rdi, r14
     DECREF_V rdi, rcx
     jmp .bind_raised
@@ -1060,7 +1074,7 @@ DEF_FUNC obj_call_n, OCN_FRAME
     mov [rbp - OCN_FN], rax
 
     cmp r13, OCN_MAX
-    ja .not_callable
+    ja .ocn_drop_not_callable
 
     ; args' = [self, args...]
     lea rdi, [rbp - OCN_BUF]
@@ -1078,13 +1092,22 @@ DEF_FUNC obj_call_n, OCN_FRAME
     mov rcx, [rax + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .not_callable
+    jz .ocn_drop_not_callable
     mov rdi, rax
     lea rsi, [rbp - OCN_BUF]
     lea rdx, [r13 + 1]
     call rcx
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - OCN_FN]
+    call obj_decref
+    add rsp, 8
+    pop rax
     jmp .ret
 
+.ocn_drop_not_callable:
+    mov rdi, [rbp - OCN_FN]
+    call obj_decref
 .not_callable:
     ; CPython names the type: "'int' object is not callable" is what tells a
     ; caller WHICH of its values was not a function.

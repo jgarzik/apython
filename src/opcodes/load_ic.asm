@@ -70,6 +70,9 @@ section .text
 ;; CACHE layout at rbx: [+0]=counter [+2]=index
 ;; ============================================================================
 DEF_FUNC_BARE op_load_global_module
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lgm_deopt
     mov rdi, [r12 + PyFrame.globals]
     movzx eax, word [rbx + 2]  ; CACHE[1] = index
     cmp rax, [rdi + PyDictObject.dk_nentries]
@@ -120,6 +123,9 @@ END_FUNC op_load_global_module
 ;; CACHE layout at rbx: [+0]=counter [+2]=index [+4]=globals version (32b)
 ;; ============================================================================
 DEF_FUNC_BARE op_load_global_builtin
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lgb_deopt
     ; Guard 1: nothing has been written to the globals dict
     mov rdi, [r12 + PyFrame.globals]
     mov rax, [rdi + PyDictObject.dk_version]
@@ -183,6 +189,9 @@ END_FUNC op_load_global_builtin
 ;; (obj stays as self, cached method pushed on top)
 ;; ============================================================================
 DEF_FUNC_BARE op_load_attr_method
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lam_deopt
     ; ecx = arg (name_index << 1 | flag=1)
     ; VPEEK obj (don't pop -- stays as self if guards pass, or for deopt)
     VPEEK rdi
@@ -359,6 +368,9 @@ END_FUNC op_load_attr_method
 ;; it down every subclass.
 ;; ============================================================================
 DEF_FUNC_BARE op_load_attr_instance
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lai_deopt
     ; ecx is the oparg and MUST survive to .lai_deopt, which hands it to
     ; op_load_attr -- so nothing below touches rcx.  Getting that wrong is not
     ; a wrong answer, it is op_load_attr reading co_names out of bounds with a
@@ -492,6 +504,9 @@ LAP_FRAME equ 40                ; a handler is entered with rsp 16-aligned, so
                                 ; push rbp + 40 brings it back to aligned
 
 DEF_FUNC op_load_attr_property, LAP_FRAME
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lap_deopt
     ; ecx is the oparg and must survive to .lap_deopt, which hands it to
     ; op_load_attr, so nothing before the last guard touches rcx.
     VPEEK rdi                       ; the object; not popped until it is a hit
@@ -713,6 +728,9 @@ END_FUNC op_load_attr_property
 ;; nothing guards on an instance dict's version anyway.
 ;; ============================================================================
 DEF_FUNC_BARE op_store_attr_instance
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .sai_deopt
     ; ecx is the oparg and must survive to .sai_deopt, so nothing before it
     ; touches rcx.  Stack: ... value, obj -- obj on top.
     mov rdi, [r13 - 8]              ; the object
@@ -834,6 +852,9 @@ END_FUNC op_store_attr_instance
 ;;     [+6]   the deopt backoff counter
 ;; ============================================================================
 DEF_FUNC_BARE op_store_attr_slot
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .sas_deopt
     ; ecx is the oparg and must survive to .sas_deopt, which hands it to
     ; op_store_attr -- so nothing below touches rcx until the last guard has
     ; passed.  Stack: ... value, obj -- obj on top.

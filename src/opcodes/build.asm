@@ -269,18 +269,27 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj (the type itself)
     CSTRING rsi, "__class_getitem__"
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .subscr_error
+    V_TEST_PTR rax, rcx
+    ja .subscr_error
 
-    ; rax = __class_getitem__ attr (borrowed ref)
-    ; Check if it's a classmethod wrapper — unwrap if so
+    ; Check if it's a classmethod wrapper — unwrap keeping an owned ref.
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel classmethod_type]
     cmp rcx, rdx
     jne .cgi_not_classmethod
 
-    ; Unwrap classmethod: get cm_callable, call with (cls, key)
-    mov rax, [rax + PyClassMethodObject.cm_callable]
+    mov r8, [rax + PyClassMethodObject.cm_callable]
+    INCREF_V r8, rcx
+    push r8
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop rax
+    V_TEST_PTR rax, rcx
+    ja .subscr_error
 
 .cgi_not_classmethod:
     ; Call func(cls, key): tp_call(func, &[cls, key], 2)
@@ -288,21 +297,33 @@ DEF_FUNC_BARE op_binary_subscr
     mov rcx, [rdi + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .subscr_error
-
-    ; Build the args array: [cls, key]
+    jnz .cgi_do_call
+    call obj_decref
+    jmp .subscr_error
+.cgi_do_call:
+    ; Save owned callable + build args array [cls, key]
+    push rdi
+    sub rsp, 8
     sub rsp, 16
-    mov rax, [rsp + 16 + BSUB_OBJ]  ; obj (type/cls) — always a pointer
+    mov rax, [rsp + 32 + BSUB_OBJ]  ; obj (type/cls) — always a pointer
     mov [rsp], rax                   ; args[0] = cls
-    mov rax, [rsp + 16 + BSUB_KEY]  ; key
-    mov r8, [rsp + 16 + BSUB_KTAG]  ; key tag
+    mov rax, [rsp + 32 + BSUB_KEY]  ; key
+    mov r8, [rsp + 32 + BSUB_KTAG]  ; key tag
     V_PACK rax, r8
     mov [rsp + 8], rax               ; args[1] = key
     mov rsi, rsp                     ; args ptr
     mov edx, 2                       ; nargs = 2
     call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                      ; pop args
+    mov r8, rax
+    add rsp, 8
+    pop rdi                          ; owned callable
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     jmp .subscr_done
 
 .subscr_error:
@@ -483,37 +504,52 @@ DEF_FUNC_BARE op_store_subscr
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel dunder_setitem]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
+    V_UNPACK rax, rdx           ; owned Value
     test edx, edx
     jz .store_type_error
+    cmp edx, TAG_PTR
+    jne .store_type_error
 
     ; Call __setitem__(self, key, value) via tp_call
-    mov rcx, rax              ; func
+    mov rcx, rax              ; owned func
     mov rax, [rcx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .store_type_error
-
+    jnz .ssub_do_call
+    mov rdi, rcx
+    call obj_decref
+    jmp .store_type_error
+.ssub_do_call:
+    push rcx
+    sub rsp, 8
     ; Build the args array: [self, key, value]
     sub rsp, 32               ; three Values, rsp stays aligned
-    mov r8, [rsp + 32 + SSUB_OBJ]   ; self (a heap instance, so already a Value)
+    mov r8, [rsp + 48 + SSUB_OBJ]   ; self (a heap instance, so already a Value)
     mov [rsp], r8
-    mov r8, [rsp + 32 + SSUB_KEY]   ; key payload
-    mov r9, [rsp + 32 + SSUB_KTAG]
+    mov r8, [rsp + 48 + SSUB_KEY]   ; key payload
+    mov r9, [rsp + 48 + SSUB_KTAG]
     V_PACK r8, r9
     mov [rsp + 8], r8
-    mov r8, [rsp + 32 + SSUB_VAL]   ; value payload
-    mov r9, [rsp + 32 + SSUB_VTAG]
+    mov r8, [rsp + 48 + SSUB_VAL]   ; value payload
+    mov r9, [rsp + 48 + SSUB_VTAG]
     V_PACK r8, r9
     mov [rsp + 16], r8
     mov rdi, rcx              ; callable
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
-    ERR_NULL_JUMP
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32               ; pop the args array
-    ; rax = result (discard — __setitem__ returns None)
+    mov r8, rax
+    add rsp, 8
+    pop rdi                   ; owned __setitem__ func
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    ERR_NULL_JUMP
+    DECREF_V rax, rcx         ; discard __setitem__ return value
+    xor eax, eax
     jmp .store_done
 
 .store_type_error:
@@ -1133,8 +1169,11 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     jmp .extend_from_array
 
 .extend_list:
-    mov rdx, [rsi + PyListObject.ob_size]
-    mov rsi, [rsi + PyListObject.ob_item]
+    mov rdi, [rbp - LE_LIST]
+    extern list_extend_from_list
+    call list_extend_from_list
+    ERR_M1_JUMP
+    jmp .extend_done
 
 .extend_from_array:
     mov rdi, [rbp - LE_LIST]
@@ -1461,10 +1500,11 @@ DEF_FUNC_BARE op_contains_op
     lea rsi, [rel dunder_contains]
     extern dunder_lookup
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .contains_iter_fallback  ; genuinely not defined
     IS_NONE rax, rcx
     je .contains_type_error
+    DECREF_V rax, rcx
 
 .contains_iter_fallback:
     ; Fallback: iterate container via tp_iter, compare each element
@@ -2151,32 +2191,27 @@ DEF_FUNC op_dict_update
     xor ebx, ebx              ; index
 
 .du_loop:
-    ; The bound AND the entry array come from the source header every turn.
-    ; dict_set runs user code -- __hash__ and __eq__ on the target's keys --
-    ; and that code can clear the source, which frees the table this used to
-    ; hold in a frame slot and points the dict at the one-slot read-only
-    ; dict_empty_entries.  Cached, the walk then read a freed array to a
-    ; stale bound and inserted what it found.
-    mov rax, [rbp - DU_SRC]
-    cmp rbx, [rax + PyDictObject.dk_nentries]
-    jge .du_done
+    mov r10, [rbp - DU_SRC]
+    OBJ_LOCK r10
+    cmp rbx, [r10 + PyDictObject.dk_nentries]
+    jge .du_unlock_done
 
-    ; Check if entry has a key and value_tag != TAG_NULL
-    mov rax, [rax + PyDictObject.entries]
+    ; Check if entry has a key and pin both under OBJ_LOCK
+    mov rax, [r10 + PyDictObject.entries]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
-    jz .du_next
+    jz .du_unlock_next
     mov rdx, [rax + DictEntry.value]
 
-    ; Both are borrowed out of that table, so both are held for the call.
     mov [rbp - DU_KEYV], rsi
     mov [rbp - DU_VALV], rdx
     INCREF_V rsi, rcx
     INCREF_V rdx, rcx
+    OBJ_UNLOCK r10
 
-    ; dict_set(target, key, value, value_tag, key_tag)
+    ; dict_set(target, key, value)
     push rbx
     mov rdi, [rbp - DU_DICT]
     call dict_set
@@ -2195,11 +2230,16 @@ DEF_FUNC op_dict_update
     mov rax, [rax + PyDictObject.dk_nentries]
     cmp rax, [rbp - DU_ORIGN]
     jne .du_mutated
+    jmp .du_next
 
+.du_unlock_next:
+    OBJ_UNLOCK r10
 .du_next:
     inc rbx
     jmp .du_loop
 
+.du_unlock_done:
+    OBJ_UNLOCK r10
 .du_done:
     ; DECREF the mapping.  The pad is the alignment: the loop above reaches
     ; its calls one push deep, so the frame is sized for that, and a call made
@@ -2385,36 +2425,36 @@ DEF_FUNC op_dict_merge
     xor ebx, ebx              ; index
 
 .dm_loop:
-    ; Read from the source header every turn, and hold the two Values across
-    ; both calls; see op_dict_update above for what a cached table costs.
-    ; This loop makes TWO calls into user code per entry, dict_get's probe
-    ; and dict_set's, so it had two chances at it.
-    mov rax, [rbp - DM_SRC]
-    cmp rbx, [rax + PyDictObject.dk_nentries]
-    jge .dm_done
+    mov r10, [rbp - DM_SRC]
+    OBJ_LOCK r10
+    cmp rbx, [r10 + PyDictObject.dk_nentries]
+    jge .dm_unlock_done
 
-    mov rax, [rax + PyDictObject.entries]
+    mov rax, [r10 + PyDictObject.entries]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
-    jz .dm_next
+    jz .dm_unlock_next
     mov rdx, [rax + DictEntry.value]
     mov [rbp - DM_KEYV], rsi
     mov [rbp - DM_VALV], rdx
     INCREF_V rsi, rcx
     INCREF_V rdx, rcx
+    OBJ_UNLOCK r10
 
-    ; Check for duplicate: dict_get(target, key, key_tag).  dict_get returns
-    ; its tag in edx, so the key tag must not be restored over it.
+    ; Check for duplicate: dict_get(target, key)
     push rbx
     mov rdi, [rbp - DM_DICT]          ; target dict
     call dict_get
     ERR_DICT_GET_JUMP
-    test rax, rax               ; dict_get answers with a Value; 0 is the miss
-    jnz .dm_dup_error          ; key already exists in target
+    test rax, rax               ; dict_get answers with an owned Value; 0 is the miss
+    jz .dm_no_dup
+    DECREF_V rax, rcx
+    jmp .dm_dup_error           ; key already exists in target
+.dm_no_dup:
 
-    ; dict_set(target, key, value, value_tag, key_tag)
+    ; dict_set(target, key, value)
     pop rbx
     mov rsi, [rbp - DM_KEYV]
     mov rdx, [rbp - DM_VALV]
@@ -2434,11 +2474,16 @@ DEF_FUNC op_dict_merge
     mov rax, [rax + PyDictObject.dk_nentries]
     cmp rax, [rbp - DM_ORIGN]
     jne .dm_mutated
+    jmp .dm_next
 
+.dm_unlock_next:
+    OBJ_UNLOCK r10
 .dm_next:
     inc rbx
     jmp .dm_loop
 
+.dm_unlock_done:
+    OBJ_UNLOCK r10
 .dm_done:
     ; DECREF the mapping.  The pad is the alignment: the loop above reaches
     ; its calls one push deep, so the frame is sized for that, and a call made
@@ -2843,28 +2888,46 @@ DEF_FUNC op_set_update
 .su_set_loop:
     test r14, r14
     jz .su_set_done
-    cmp rbx, [rbp - SU_CAP]
-    jge .su_set_done
+    mov r10, [rbp - SU_SET]         ; source set
+    OBJ_LOCK r10
+    cmp rbx, [r10 + PyDictObject.capacity]
+    jge .su_set_unlock_done
 
-    mov rax, [rbp - SU_SET]         ; source set
-    mov rax, [rax + PyDictObject.entries]
+    mov rax, [r10 + PyDictObject.entries]
     lea rcx, [rbx + rbx]      ; SET_ENTRY_SIZE = 16, which two lea reach
 
-    ; Check if entry has a key
+    ; Check if entry has a key and pin under OBJ_LOCK
     mov rsi, [rax + rcx*8 + 8]      ; SET_ENTRY_KEY offset = 8
     test rsi, rsi
-    jz .su_set_next
+    jz .su_set_unlock_next
     dec r14
+    INCREF_V rsi, rcx
+    OBJ_UNLOCK r10
 
-    ; The loop index is callee-saved, so the call needs no push.
+    push rsi
+    push rsi                        ; keep 16-byte aligned (odd frame + 2 pushes)
     mov rdi, [rbp - SU_SOURCE]
-    call set_add
+    call set_add                    ; err: checked below after dropping pinned key
+    pop rdi                         ; pinned key
+    mov [rsp], rax                  ; preserve set_add result across DECREF_V
+    DECREF_V rdi, rcx
+    pop rax
+    cmp rax, -1
+    je .su_set_add_err
+    jmp .su_set_next
+
+.su_set_add_err:
+    mov rax, -1
     ERR_M1_JUMP
 
+.su_set_unlock_next:
+    OBJ_UNLOCK r10
 .su_set_next:
     inc rbx
     jmp .su_set_loop
 
+.su_set_unlock_done:
+    OBJ_UNLOCK r10
 .su_set_done:
     ; DECREF iterable (tag-aware)
     mov rdi, [rbp - SU_SET]

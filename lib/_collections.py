@@ -21,6 +21,7 @@
 __all__ = ["deque", "defaultdict"]
 
 from _operator import index as _index
+import _thread
 from types import GenericAlias as _GenericAlias
 
 # OrderedDict is deliberately NOT here.  CPython's collections/__init__.py
@@ -119,7 +120,7 @@ class deque:
     "__dict__ slot disallowed: we already got one".
     """
 
-    __slots__ = ("_items", "_head", "_tail", "_maxlen")
+    __slots__ = ("_items", "_head", "_tail", "_maxlen", "_lock")
 
     # CPython's C deque has tp_name "collections.deque" even though the type
     # lives in _collections, and repr(), __class_getitem__ and pickle all
@@ -131,18 +132,28 @@ class deque:
     # doubles, so the work is amortised.
     _MINSPARE = 8
 
+    def __new__(cls, *args, **kwargs):
+        self = object.__new__(cls)
+        self._lock = _thread.allocate_lock()
+        self._items = []
+        self._head = 0
+        self._tail = 0
+        self._maxlen = None
+        return self
+
     def __init__(self, iterable=(), maxlen=None):
         if maxlen is not None:
             maxlen = _index(maxlen)
             if maxlen < 0:
                 raise ValueError("maxlen must be non-negative")
-        self._maxlen = maxlen
-        self._items = []
-        self._head = 0
-        self._tail = 0
+        with self._lock:
+            self._maxlen = maxlen
+            self._items = []
+            self._head = 0
+            self._tail = 0
         self.extend(iterable)
 
-    # --- the window ----------------------------------------------------
+    # --- the window (caller holds self._lock) --------------------------
     def _compact(self):
         """Drop the dead prefix and suffix, keeping the live window."""
         self._items = self._items[self._head:self._tail]
@@ -157,89 +168,99 @@ class deque:
         self._head += spare
         self._tail += spare
 
+    def _popleft_locked(self):
+        x = self._items[self._head]
+        self._items[self._head] = None
+        self._head += 1
+        if self._head > self._MINSPARE and self._head * 2 > len(self._items):
+            self._compact()
+        return x
+
+    def _pop_locked(self):
+        self._tail -= 1
+        x = self._items[self._tail]
+        self._items[self._tail] = None      # drop the reference
+        return x
+
     @property
     def maxlen(self):
         return self._maxlen
 
     # --- adding --------------------------------------------------------
     def append(self, x):
-        if self._maxlen == 0:
-            return
-        if self._tail == len(self._items):
-            self._items.append(x)
-        else:
-            self._items[self._tail] = x
-        self._tail += 1
-        if self._maxlen is not None and self._tail - self._head > self._maxlen:
-            self.popleft()
+        with self._lock:
+            if self._maxlen == 0:
+                return
+            if self._tail == len(self._items):
+                self._items.append(x)
+            else:
+                self._items[self._tail] = x
+            self._tail += 1
+            if self._maxlen is not None and self._tail - self._head > self._maxlen:
+                self._popleft_locked()
 
     def appendleft(self, x):
-        if self._maxlen == 0:
-            return
-        if self._head == 0:
-            self._reserve_front()
-        self._head -= 1
-        self._items[self._head] = x
-        if self._maxlen is not None and self._tail - self._head > self._maxlen:
-            self.pop()
+        with self._lock:
+            if self._maxlen == 0:
+                return
+            if self._head == 0:
+                self._reserve_front()
+            self._head -= 1
+            self._items[self._head] = x
+            if self._maxlen is not None and self._tail - self._head > self._maxlen:
+                self._pop_locked()
 
     def extend(self, iterable):
         if iterable is self:
-            iterable = list(iterable)
+            iterable = self._as_list()
         for x in iterable:
             self.append(x)
 
     def extendleft(self, iterable):
         if iterable is self:
-            iterable = list(iterable)
+            iterable = self._as_list()
         for x in iterable:
             self.appendleft(x)
 
     def insert(self, i, x):
-        n = self._tail - self._head
-        if self._maxlen is not None and n >= self._maxlen:
-            raise IndexError("deque already at its maximum size")
         i = _index(i)
-        if i < 0:
-            i += n
+        with self._lock:
+            n = self._tail - self._head
+            if self._maxlen is not None and n >= self._maxlen:
+                raise IndexError("deque already at its maximum size")
             if i < 0:
-                i = 0
-        elif i > n:
-            i = n
-        self._compact()
-        self._items.insert(i, x)
-        self._tail += 1
+                i += n
+                if i < 0:
+                    i = 0
+            elif i > n:
+                i = n
+            self._compact()
+            self._items.insert(i, x)
+            self._tail += 1
 
     # --- removing ------------------------------------------------------
     def pop(self):
-        if self._head == self._tail:
-            raise IndexError("pop from an empty deque")
-        self._tail -= 1
-        x = self._items[self._tail]
-        self._items[self._tail] = None      # drop the reference
-        return x
+        with self._lock:
+            if self._head == self._tail:
+                raise IndexError("pop from an empty deque")
+            return self._pop_locked()
 
     def popleft(self):
-        if self._head == self._tail:
-            raise IndexError("pop from an empty deque")
-        x = self._items[self._head]
-        self._items[self._head] = None
-        self._head += 1
-        # Reclaim once the dead prefix is more than half the backing list, so
-        # a long run of popleft does not hold every popped slot for ever.
-        if self._head > self._MINSPARE and self._head * 2 > len(self._items):
-            self._compact()
-        return x
+        with self._lock:
+            if self._head == self._tail:
+                raise IndexError("pop from an empty deque")
+            return self._popleft_locked()
 
     def clear(self):
-        self._items = []
-        self._head = 0
-        self._tail = 0
+        with self._lock:
+            self._items = []
+            self._head = 0
+            self._tail = 0
 
     def remove(self, x):
-        n = self._tail - self._head
-        for i in range(n):
-            if self._items[self._head + i] == x:
+        snap = self._as_list()
+        for i in range(len(snap)):
+            if snap[i] == x:
                 del self[i]
                 return
         raise ValueError(repr(x) + " is not in deque")
@@ -247,65 +268,66 @@ class deque:
     # --- reading -------------------------------------------------------
     def count(self, x):
         c = 0
-        for i in range(self._head, self._tail):
-            if self._items[i] == x:
+        for item in self._as_list():
+            if item == x:
                 c += 1
         return c
 
     def index(self, x, start=0, stop=None):
-        n = self._tail - self._head
         start = _index(start)
+        if stop is not None:
+            stop = _index(stop)
+        snap = self._as_list()
+        n = len(snap)
         if start < 0:
             start = max(0, start + n)
         if stop is None:
             stop = n
-        else:
-            stop = _index(stop)
-            if stop < 0:
-                stop += n
+        elif stop < 0:
+            stop += n
         if stop > n:
             stop = n
         for i in range(start, stop):
-            if self._items[self._head + i] == x:
+            if snap[i] == x:
                 return i
         raise ValueError(repr(x) + " is not in deque")
 
     def reverse(self):
-        i, j = self._head, self._tail - 1
-        items = self._items
-        while i < j:
-            items[i], items[j] = items[j], items[i]
-            i += 1
-            j -= 1
+        with self._lock:
+            i, j = self._head, self._tail - 1
+            items = self._items
+            while i < j:
+                items[i], items[j] = items[j], items[i]
+                i += 1
+                j -= 1
 
     def rotate(self, n=1):
         n = _index(n)
-        size = self._tail - self._head
-        if size == 0 or n == 0:
-            return
-        n = n % size
-        if not n:
-            return
-        # n rightward rotations: move n from the back to the front.
-        for _ in range(n):
-            self.appendleft(self.pop())
+        with self._lock:
+            size = self._tail - self._head
+            if size == 0 or n == 0:
+                return
+            n = n % size
+            if not n:
+                return
+            self._compact()
+            self._items = self._items[-n:] + self._items[:-n]
 
     def copy(self):
-        return type(self)(self, self._maxlen)
+        return type(self)(self._as_list(), self._maxlen)
 
     __copy__ = copy
 
     def __reduce__(self):
         if self._maxlen is None:
-            return (type(self), (list(self),))
-        return (type(self), (list(self), self._maxlen))
+            return (type(self), (self._as_list(),))
+        return (type(self), (self._as_list(), self._maxlen))
 
     def __class_getitem__(cls, item):
         return _GenericAlias(cls, item)
 
-    def _index_check(self, i):
+    def _index_check_locked(self, i):
         n = self._tail - self._head
-        i = _index(i)
         if i < 0:
             i += n
         if i < 0 or i >= n:
@@ -313,40 +335,49 @@ class deque:
         return self._head + i
 
     def __len__(self):
-        return self._tail - self._head
+        with self._lock:
+            return self._tail - self._head
 
     def __iter__(self):
         # A copy of the window, so mutating the deque while iterating cannot
         # walk off the end -- and not list(self), which would call this.
-        return iter(self._items[self._head:self._tail])
+        return iter(self._as_list())
 
     def __reversed__(self):
-        return iter(self._items[self._head:self._tail][::-1])
+        return iter(self._as_list()[::-1])
 
     def __getitem__(self, i):
-        return self._items[self._index_check(i)]
+        i = _index(i)
+        with self._lock:
+            return self._items[self._index_check_locked(i)]
 
     def __setitem__(self, i, v):
-        self._items[self._index_check(i)] = v
+        i = _index(i)
+        with self._lock:
+            self._items[self._index_check_locked(i)] = v
 
     def __delitem__(self, i):
-        at = self._index_check(i)
-        self._compact()
-        del self._items[at - (self._head + 0)]
-        self._tail -= 1
+        i = _index(i)
+        with self._lock:
+            idx = self._index_check_locked(i) - self._head
+            self._compact()
+            del self._items[idx]
+            self._tail -= 1
 
     def __contains__(self, x):
-        for i in range(self._head, self._tail):
-            if self._items[i] == x:
+        for item in self._as_list():
+            if item == x:
                 return True
         return False
 
     def __bool__(self):
-        return self._tail != self._head
+        with self._lock:
+            return self._tail != self._head
 
     # --- comparison ----------------------------------------------------
     def _as_list(self):
-        return self._items[self._head:self._tail]
+        with self._lock:
+            return self._items[self._head:self._tail]
 
     def __eq__(self, other):
         if isinstance(other, deque):

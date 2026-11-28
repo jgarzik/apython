@@ -426,27 +426,45 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     mov [rbp - CA_DICT], rax
     mov qword [rbp - CA_IDX], 0
 .ca_own_loop:
-    mov rax, [rbp - CA_DICT]
+    mov r8, [rbp - CA_DICT]
+    OBJ_LOCK r8
     mov rcx, [rbp - CA_IDX]
-    cmp rcx, [rax + PyDictObject.dk_nentries]
-    jge .ca_bases
-    mov rdx, [rax + PyDictObject.entries]
+    cmp rcx, [r8 + PyDictObject.dk_nentries]
+    jge .ca_own_unlock_bases
+    mov rdx, [r8 + PyDictObject.entries]
     imul rcx, rcx, DICT_ENTRY_SIZE
     mov rbx, [rdx + rcx + DictEntry.key]
     mov r12, [rdx + rcx + DictEntry.value]
     inc qword [rbp - CA_IDX]
     test rbx, rbx
-    jz .ca_own_loop
+    jz .ca_own_unlock_next
+    INCREF_V rbx, rax
+    INCREF_V r12, rax
+    OBJ_UNLOCK r8
     mov rdi, r12
-    call abc_is_abstract
-    ERR_M1 .ca_fail
+    call abc_is_abstract        ; err: checked below after dropping pins
+    cmp rax, -1
+    je .ca_own_fail_pins
     test eax, eax
-    jz .ca_own_loop
+    jz .ca_own_drop_pins
     mov rdi, [rbp - CA_SET]
     mov rsi, rbx
-    call set_add
-    ERR_M1 .ca_fail
+    call set_add                ; err: checked below after dropping pins
+    cmp rax, -1
+    je .ca_own_fail_pins
+.ca_own_drop_pins:
+    DECREF_V rbx, rcx
+    DECREF_V r12, rcx
     jmp .ca_own_loop
+.ca_own_fail_pins:
+    DECREF_V rbx, rcx
+    DECREF_V r12, rcx
+    jmp .ca_fail
+.ca_own_unlock_next:
+    OBJ_UNLOCK r8
+    jmp .ca_own_loop
+.ca_own_unlock_bases:
+    OBJ_UNLOCK r8
 
 .ca_bases:
     ; Anything a base left abstract and this class did not define concretely.
@@ -467,24 +485,27 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     ja .ca_base_loop
     mov qword [rbp - CA_IDX], 0
 .ca_names_loop:
+    OBJ_LOCK r12
     mov rcx, [rbp - CA_IDX]
     cmp rcx, [r12 + PyDictObject.capacity]
-    jge .ca_base_loop
+    jge .ca_names_unlock_drop
     mov rdx, [r12 + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rax, [rdx + rcx + 8]    ; the key (the hash sits at +0)
     inc qword [rbp - CA_IDX]
     test rax, rax
-    jz .ca_names_loop
+    jz .ca_names_unlock_next
     V_TEST_PTR rax, rcx
-    ja .ca_names_loop
+    ja .ca_names_unlock_next
+    INCREF rax
+    OBJ_UNLOCK r12
     mov [rbp - CA_KEY], rax
     mov rdi, [rbp - CA_CLS]
     mov rsi, rax
     call type_getattr
     V_UNPACK rax, rdx
     test edx, edx
-    jz .ca_names_loop
+    jz .ca_names_drop_key
     push rax
     push rdx
     mov rdi, rax
@@ -497,14 +518,34 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     DECREF_VAL rdi, rdx
     pop rcx
     cmp rcx, -1                 ; never an answer
-    je .ca_fail
+    je .ca_fail_drop_key
     test ecx, ecx
-    jz .ca_names_loop
+    jz .ca_names_drop_key
     mov rdi, [rbp - CA_SET]
     mov rsi, [rbp - CA_KEY]
-    call set_add
-    ERR_M1 .ca_fail
+    call set_add                ; err: checked below after dropping key pin
+    cmp rax, -1
+    je .ca_fail_drop_key
+.ca_names_drop_key:
+    mov rdi, [rbp - CA_KEY]
+    call obj_decref
     jmp .ca_names_loop
+.ca_names_unlock_next:
+    OBJ_UNLOCK r12
+    jmp .ca_names_loop
+.ca_names_unlock_drop:
+    OBJ_UNLOCK r12
+.ca_base_drop:
+    mov rdi, r12
+    call obj_decref
+    jmp .ca_base_loop
+.ca_fail_drop_key:
+    mov rdi, [rbp - CA_KEY]
+    call obj_decref
+.ca_fail_drop:
+    mov rdi, r12
+    call obj_decref
+    jmp .ca_fail
 
 .ca_store:
     mov rax, [rbp - CA_SET]
@@ -571,7 +612,7 @@ DEF_FUNC abc_init_func, AI_FRAME
     ERR_M1 .ai_fail
 
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .bad:
@@ -633,6 +674,8 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     push r12
     mov [rbp - SC_CLS], rdi
     mov [rbp - SC_SUB], rsi
+    mov qword [rbp - SC_CACHE], 0
+    mov qword [rbp - SC_NEG], 0
 
     ; 1. the positive cache
     CSTRING rsi, "_abc_cache"
@@ -662,13 +705,20 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache_version"
     call abc_state_get
+    mov rcx, rax
     V_TO_I64 rax
+    push rax
+    sub rsp, 8
+    DECREF_V rcx, rdx
+    add rsp, 8
+    pop rax
     cmp rax, [rel abc_invalidation_counter]
     jge .neg_current
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache"
     call abc_fresh_set
     ERR_NULL .error
+    INCREF rax                  ; own a ref uniformly with abc_state_get
     mov [rbp - SC_NEG], rax
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache_version"
@@ -807,48 +857,80 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov [rbp - SC_REG], rax
     mov qword [rbp - SC_IDX], 0
 .reg_loop:
-    mov rax, [rbp - SC_REG]
+    mov r8, [rbp - SC_REG]
+    OBJ_LOCK r8
     mov rcx, [rbp - SC_IDX]
-    cmp rcx, [rax + PyDictObject.capacity]
-    jge .subclasses
-    mov rdx, [rax + PyDictObject.entries]
+    cmp rcx, [r8 + PyDictObject.capacity]
+    jge .reg_unlock_done_drop
+    mov rdx, [r8 + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rdi, [rdx + rcx + 8]    ; the entry's key Value (hash sits at +0)
     inc qword [rbp - SC_IDX]
     V_TEST_PTR rdi, rax
-    ja .reg_loop
+    ja .reg_unlock_next
     test rdi, rdi
-    jz .reg_loop
+    jz .reg_unlock_next
+    INCREF rdi
+    OBJ_UNLOCK r8
+    push rdi
+    push rdi                    ; 16-byte align
     call abc_deref              ; a weak reference, unless it could not be one
     test rax, rax
-    jz .reg_loop                ; the registered class has been collected
+    jz .reg_drop_pin            ; the registered class has been collected
     mov rsi, rax                ; the registered class
     mov rdi, [rbp - SC_SUB]
-    call abc_call_issubclass
+    call abc_call_issubclass    ; err: checked below after dropping pin
+    mov rcx, rax
+    pop rdi
+    pop rdi
+    push rcx
+    push rcx
+    call obj_decref
+    pop rax
+    pop rax
     cmp eax, -1
-    je .error
+    je .reg_error_drop
     test eax, eax
     jz .reg_loop
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
     jmp .cache_yes
+.reg_drop_pin:
+    pop rdi
+    pop rdi
+    call obj_decref
+    jmp .reg_loop
+.reg_unlock_next:
+    OBJ_UNLOCK r8
+    jmp .reg_loop
+.reg_unlock_done_drop:
+    OBJ_UNLOCK r8
+    jmp .reg_done_drop
+.reg_error_drop:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
+    jmp .error
+.reg_done_drop:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
 
 .subclasses:
-    ; 6. a subclass of one of THIS class's subclasses.  A registration made
-    ; against a subclass of the ABC counts for the ABC too, and this is the
-    ; only step that can find it: without it, `B.register(X)` for a B deriving
-    ; from A left issubclass(X, A) answering False.  It was missing because
-    ; nothing kept a list of subclasses; type.__subclasses__ does now.
+    ; 6. a subclass of one of THIS class's subclasses.  Snapshot the SubList
+    ; under subclass_lock so concurrent class creation/dealloc cannot invalidate
+    ; the array while abc_call_issubclass runs arbitrary Python.
     mov rdi, [rbp - SC_CLS]
-    call sub_list_for_type
+    extern sub_list_snapshot
+    call sub_list_snapshot
     test rax, rax
     jz .cache_no
-    mov [rbp - SC_REG], rax     ; the SubList, reusing the registry slot
+    mov [rbp - SC_REG], rax     ; owned snapshot list
     mov qword [rbp - SC_IDX], 0
 .sub_loop:
     mov rax, [rbp - SC_REG]
     mov rcx, [rbp - SC_IDX]
-    cmp rcx, [rax + SubList.count]
-    jge .cache_no
-    mov rdx, [rax + SubList.items]
+    cmp rcx, [rax + PyListObject.ob_size]
+    jge .sub_done_no
+    mov rdx, [rax + PyListObject.ob_item]
     mov rsi, [rdx + rcx*8]
     inc qword [rbp - SC_IDX]
     cmp rsi, [rbp - SC_CLS]
@@ -856,10 +938,20 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_SUB]
     call abc_call_issubclass
     cmp eax, -1
-    je .error
+    je .sub_error
     test eax, eax
     jz .sub_loop
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
     jmp .cache_yes
+.sub_done_no:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
+    jmp .cache_no
+.sub_error:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
+    jmp .error
 
 .cache_yes:
     mov rdi, [rbp - SC_CACHE]
@@ -876,6 +968,16 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     pop rdi
     call obj_decref
 .yes:
+    mov rdi, [rbp - SC_CACHE]
+    test rdi, rdi
+    jz .yes_neg
+    call obj_decref
+.yes_neg:
+    mov rdi, [rbp - SC_NEG]
+    test rdi, rdi
+    jz .yes_ret
+    call obj_decref
+.yes_ret:
     mov eax, 1
     pop r12
     pop rbx
@@ -897,6 +999,16 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     pop rdi
     call obj_decref
 .no:
+    mov rdi, [rbp - SC_CACHE]
+    test rdi, rdi
+    jz .no_neg
+    call obj_decref
+.no_neg:
+    mov rdi, [rbp - SC_NEG]
+    test rdi, rdi
+    jz .no_ret
+    call obj_decref
+.no_ret:
     xor eax, eax
     pop r12
     pop rbx
@@ -919,6 +1031,16 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     pop rdi
     call obj_decref
 .error:
+    mov rdi, [rbp - SC_CACHE]
+    test rdi, rdi
+    jz .err_neg
+    call obj_decref
+.err_neg:
+    mov rdi, [rbp - SC_NEG]
+    test rdi, rdi
+    jz .err_ret
+    call obj_decref
+.err_ret:
     mov eax, -1
     pop r12
     pop rbx
@@ -955,13 +1077,13 @@ DEF_FUNC abc_subclasscheck_func, SCF_FRAME
     test eax, eax
     jz .false
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop rbx
     leave
     ret
 .false:
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop rbx
     leave
     ret
@@ -1006,13 +1128,14 @@ DEF_FUNC type_abstract_error, TAE_FRAME
 
     ; --- collect the keys, up to TAE_MAX of them ---
     xor r13d, r13d              ; how many collected
+    OBJ_LOCK r12
     mov rcx, [r12 + PyDictObject.entries]
     xor r8d, r8d                ; the slot index
 .tae_scan:
     cmp r8, [r12 + PyDictObject.capacity]
-    jge .tae_sort
+    jge .tae_unlock_sort
     cmp r13, TAE_MAX
-    jge .tae_sort
+    jge .tae_unlock_sort
     mov rax, r8
     shl rax, 4                  ; SET_ENTRY_SIZE
     mov rdx, [rcx + rax + SET_ENTRY_KEY]
@@ -1026,6 +1149,8 @@ DEF_FUNC type_abstract_error, TAE_FRAME
 .tae_scan_next:
     inc r8
     jmp .tae_scan
+.tae_unlock_sort:
+    OBJ_UNLOCK r12
 
     ; --- insertion sort, by the bytes of the names ---
 .tae_sort:
@@ -1148,7 +1273,10 @@ IC_CLS   equ 8
 IC_SUB   equ 16
 IC_INST  equ 24
 IC_DECL  equ 32             ; instance.__class__, when it is a class and differs
-IC_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+IC_CACHE equ 40             ; owned _abc_cache set
+IC_REF   equ 48             ; owned weakref to IC_SUB
+IC_RES   equ 56             ; set_contains result across decrefs
+IC_FRAME equ 64             ; + 0 pushes = 64, 16-aligned
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
     jne .bad
@@ -1195,21 +1323,20 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     call abc_state_get
     test rax, rax
     jz .full
-    mov rdi, rax
-    mov rsi, [rbp - IC_SUB]
-    push rdi
-    mov rdi, rsi
+    mov [rbp - IC_CACHE], rax
+    mov rdi, [rbp - IC_SUB]
     call abc_ref
-    pop rdi
-    push rax
+    mov [rbp - IC_REF], rax
+    mov rdi, [rbp - IC_CACHE]
     mov rsi, rax
     call set_contains
-    ERR_M1 .propagate_ref
-    push rax
-    mov rdi, [rsp + 8]
+    ERR_M1 .propagate_ref_cache
+    mov [rbp - IC_RES], rax
+    mov rdi, [rbp - IC_REF]
     call obj_decref
-    pop rax
-    add rsp, 8
+    mov rdi, [rbp - IC_CACHE]
+    call obj_decref
+    mov rax, [rbp - IC_RES]
     test eax, eax
     jnz .true
 
@@ -1236,17 +1363,19 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
 .true:
     call .ic_release_declared
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .false:
     call .ic_release_declared
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
-.propagate_ref:
-    pop rdi                     ; the weak reference being looked up
+.propagate_ref_cache:
+    mov rdi, [rbp - IC_REF]
+    call obj_decref
+    mov rdi, [rbp - IC_CACHE]
     call obj_decref
 .propagate:
     call .ic_release_declared
@@ -1275,7 +1404,9 @@ END_FUNC abc_instancecheck_func
 ;; ============================================================================
 RG_CLS   equ 8
 RG_SUB   equ 16
-RG_FRAME equ 16             ; + 0 pushes = 16
+RG_REG   equ 24             ; owned _abc_registry set
+RG_REF   equ 32             ; owned weakref to RG_SUB
+RG_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC abc_register_func, RG_FRAME
     cmp rsi, 2
     jne .bad
@@ -1313,16 +1444,17 @@ DEF_FUNC abc_register_func, RG_FRAME
     call abc_state_get
     test rax, rax
     jz .done
-    mov rdi, rax
-    push rdi
+    mov [rbp - RG_REG], rax
     mov rdi, [rbp - RG_SUB]
     call abc_ref
-    pop rdi
-    push rax
+    mov [rbp - RG_REF], rax
+    mov rdi, [rbp - RG_REG]
     mov rsi, rax
     call set_add
     ERR_M1 .raised_ref
-    pop rdi
+    mov rdi, [rbp - RG_REF]
+    call obj_decref
+    mov rdi, [rbp - RG_REG]
     call obj_decref
     inc qword [rel abc_invalidation_counter]
 
@@ -1334,7 +1466,9 @@ DEF_FUNC abc_register_func, RG_FRAME
     leave
     ret
 .raised_ref:
-    pop rdi                     ; the weak reference being added
+    mov rdi, [rbp - RG_REF]
+    call obj_decref
+    mov rdi, [rbp - RG_REG]
     call obj_decref
     xor eax, eax
     leave
@@ -1384,8 +1518,8 @@ DEF_FUNC abc_get_dump_func, GD_FRAME
     test rax, rax
     jnz %%have
     lea rax, [rel none_singleton]
+    INCREF rax
     %%have:
-    INCREF_V rax, rcx
     mov rcx, [rbp - GD_TUP]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rcx + %1 * 8], rax
@@ -1419,7 +1553,7 @@ DEF_FUNC abc_reset_registry_func
     call abc_fresh_set
     ERR_NULL .fail
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .fail:
@@ -1449,7 +1583,7 @@ DEF_FUNC abc_reset_caches_func, RC_FRAME
     call abc_fresh_set
     ERR_NULL .fail
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .fail:

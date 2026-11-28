@@ -281,16 +281,15 @@ DEF_FUNC op_store_attr, SA_FRAME
     jz .sa_no_property
     mov rdi, rcx
     mov rsi, [rbp - SA_NAME]
-    call type_lookup_cached     ; rax = payload, edx = tag
+    call type_lookup_cached     ; rax = payload (owned), edx = tag
     test edx, edx
-    jnz .sa_found_in_type
-    jmp .sa_no_property
+    jz .sa_no_property
 
 .sa_found_in_type:
-
     ; Check if it's a descriptor (only TAG_PTR can be a descriptor)
     cmp edx, TAG_PTR
     jne .sa_no_property           ; non-pointer — not a descriptor
+    mov [rbp - SA_DESC], rax      ; owned ref from type_lookup_cached
     mov rcx, [rax + PyObject.ob_type]
 
     ; Check property first (fast path)
@@ -305,23 +304,23 @@ DEF_FUNC op_store_attr, SA_FRAME
     mov ecx, [rbp - SA_VTAG]     ; value tag
     V_PACK rdx, rcx              ; property_descr_set takes a value Value
     call property_descr_set     ; err: .sa_descr_cleanup asks whether anything was raised
+    mov rdi, [rbp - SA_DESC]
+    call obj_decref
     jmp .sa_descr_cleanup
 
 .sa_check_general_set:
     ; Check for general __set__ on heaptype descriptor
     mov rdx, [rcx + PyTypeObject.tp_flags]
     test rdx, TYPE_FLAG_HEAPTYPE
-    jz .sa_no_property
-
-    ; Save the descriptor for potential __set__ call
-    mov [rbp - SA_DESC], rax      ; save descriptor (borrowed ref, still in dict)
+    jz .sa_drop_no_property
 
     ; Check if descriptor's type has __set__
     mov rdi, rcx                  ; descriptor's type
     lea rsi, [rel dunder_set]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
-    jz .sa_no_property
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
+    jz .sa_drop_no_property
 
     ; Has __set__! Call descriptor.__set__(obj, value)
     mov rdi, [rbp - SA_DESC]     ; descriptor
@@ -333,8 +332,17 @@ DEF_FUNC op_store_attr, SA_FRAME
     V_UNPACK rax, rdx           ; returns a Value
     ; DECREF result if non-NULL
     test edx, edx
-    jz .sa_descr_cleanup
+    jz .sa_drop_descr_cleanup
     DECREF_VAL rax, rdx
+.sa_drop_descr_cleanup:
+    mov rdi, [rbp - SA_DESC]
+    call obj_decref
+    jmp .sa_descr_cleanup
+
+.sa_drop_no_property:
+    mov rdi, [rbp - SA_DESC]
+    call obj_decref
+    jmp .sa_no_property
 
 .sa_descr_cleanup:
 
@@ -426,8 +434,10 @@ DEF_FUNC_BARE op_store_deref
     mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
 
     ; Ownership transfers from stack to cell - no INCREF needed
+    OBJ_LOCK rdx
     mov rdi, [rdx + PyCellObject.ob_ref]        ; old Value
     mov [rdx + PyCellObject.ob_ref], rax
+    OBJ_UNLOCK rdx
     DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_store_deref
@@ -439,8 +449,10 @@ END_FUNC op_store_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_deref
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
+    OBJ_LOCK rax
     mov rdi, [rax + PyCellObject.ob_ref]
     mov qword [rax + PyCellObject.ob_ref], 0
+    OBJ_UNLOCK rax
     DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_delete_deref
@@ -816,38 +828,45 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     ; once, at install; the version guard is what keeps the answer true.
     mov rdi, rax
     mov rsi, r13
-    call type_lookup_cached         ; rax = payload, edx = tag
+    call type_lookup_cached         ; rax = payload (owned), edx = tag
     test edx, edx
     jz .sts_name_free               ; the MRO does not define it at all
     cmp edx, TAG_PTR
     jne .sts_name_free              ; and an immediate is never a descriptor
     mov rdi, rax
 
-    ; A __slots__ member is a data descriptor too, and refusing it above is
-    ; what keeps STORE_ATTR_INSTANCE -- which writes into the instance dict --
-    ; away from a name that lives in a slot.  But a slot has a cache of its
-    ; own, and a simpler one: the offset is fixed by the CLASS, so there is no
-    ; index to distrust and no key to compare, and the same version guard
-    ; covers it.  Without this a class with __slots__ specialized nothing at
-    ; all, and every `self.x = v` in its __init__ ran the generic handler.
     mov rcx, [rdi + PyObject.ob_type]
     lea rdx, [rel member_descr_type]
     cmp rcx, rdx
     je .sts_member
 
+    push rdi
+    sub rsp, 8
     call attr_may_be_data_descr
-    test eax, eax
+    mov r8d, eax
+    add rsp, 8
+    pop rdi
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop r8
+    test r8d, r8d
     jnz .sts_out
     jmp .sts_name_free
 
 .sts_member:
-    ; The offset has to fit the 16-bit cache field, and it is SIGNED: a str
-    ; subclass addresses its slots from the tail with a negative one.  An
-    ; instance is never big enough for it not to fit, but an offset that did
-    ; not would be silently truncated, so it is checked rather than assumed.
     mov rax, [rdi + PyMemberDescrObject.md_offset]
+    push rax
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
     movsx rdx, ax
     cmp rdx, rax
+    jne .sts_out
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
     jne .sts_out
     mov rcx, [rbp - STS_IP]
     mov edx, [rbp - STS_VER]
@@ -884,6 +903,10 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     je .sts_out
 
     ; Install: version, index, then the opcode byte last.
+    ; Multi-word inline caches are disabled in free-threaded mode.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .sts_out
     mov rcx, [rbp - STS_IP]
     mov eax, [rbp - STS_VER]
     mov dword [rcx], eax

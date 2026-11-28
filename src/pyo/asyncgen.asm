@@ -103,12 +103,11 @@ DEF_FUNC ags_iternext
     test rdi, rdi
     jz .agsi_gen_exhausted
 
-    ; Check if already running
-    cmp qword [r12 + PyGenObject.gi_running], 1
-    je .agsi_error
-
-    ; Mark as running
-    mov qword [r12 + PyGenObject.gi_running], 1
+    ; Atomically claim gi_running (0 -> 1) before resuming across threads
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [r12 + PyGenObject.gi_running], rcx
+    jne .agsi_error
     mov qword [r12 + PyGenObject.gi_started], 1
 
     ; Push the sent value onto the generator's frame stack.  None unless
@@ -329,7 +328,7 @@ END_FUNC ags_iternext
 ;; tp_iter for AsyncGenASend: return self (it IS the iterator)
 ;; ============================================================================
 DEF_FUNC_BARE ags_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     mov edx, TAG_PTR
     ret
@@ -345,7 +344,7 @@ DEF_FUNC async_gen_wrap_value, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov edi, AsyncGenWrapped_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel async_gen_wrapped_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenWrapped.agw_value], rbx
@@ -557,7 +556,7 @@ DEF_FUNC async_gen_athrow_new               ; 2 pushes, so rsp is 16-aligned
     mov edi, AsyncGenASend_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel async_gen_athrow_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenASend.ags_gen], rbx
@@ -576,7 +575,7 @@ DEF_FUNC async_gen_athrow_new               ; 2 pushes, so rsp is 16-aligned
 .agan_mode_set:
     mov qword [rax + AsyncGenASend.gi_return_value], 0
 
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     INCREF_V r12, rcx
 
     pop r12
@@ -824,7 +823,7 @@ DEF_FUNC throw_args_exc, TA_FRAME
 
 .arity:
     ; _PyArg_CheckPositional's wording, which names the count it got.
-    lea rdi, [rel aat_buf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - TA_NAME]
     extern rbt_append_cstr
     call rbt_append_cstr
@@ -842,7 +841,7 @@ DEF_FUNC throw_args_exc, TA_FRAME
     extern msg_append_i64
     call msg_append_i64
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel aat_buf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .raised
 END_FUNC throw_args_exc

@@ -32,6 +32,7 @@
 %include "object.inc"
 %include "threadstate.inc"
 %include "gil.inc"
+%include "sync.inc"
 
 ASM_INIT
 
@@ -59,6 +60,9 @@ extern tstate_unlink
 extern gil_take
 extern gil_drop
 extern gil_threaded
+extern rt_enable_threading
+extern rt_mutex_lock
+extern rt_mutex_unlock
 extern signal_run_pending
 extern signal_mark_pending
 extern systrace_install
@@ -66,6 +70,8 @@ extern sysprofile_install
 
 extern pthread_create
 extern pthread_self
+extern pthread_setspecific
+extern rt_tstate_key
 extern pthread_attr_init
 extern pthread_attr_destroy
 extern pthread_attr_setdetachstate
@@ -93,6 +99,7 @@ CLOCK_MONOTONIC         equ 1
 EINTR_ERRNO             equ 4
 NS_PER_SEC              equ 1000000000
 SEM_SIZE                equ 32          ; sizeof(sem_t) on x86-64 glibc
+LOCK_ALLOC_SIZE         equ SEM_SIZE + 8 ; sem_t + 32-bit release guard futex
 TSTATE_ALLOC            equ (ThreadState_size + 63) & ~63
 
 ; What start() hands the new thread.
@@ -141,15 +148,30 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
 
     mov rdi, [rbx + ThreadStart.tstate]
     call tstate_install
+    mov edi, [rel rt_tstate_key]
+    mov rsi, [gs:ThreadState.ts_self]
+    call pthread_setspecific
+    extern rt_tid_alloc
+    call rt_tid_alloc
+    mov [gs:ThreadState.ts_tid], eax
+    mov ecx, eax
+    shl rcx, 40
+    mov [gs:ThreadState.ts_dict_ver], rcx
+    mov dword [gs:ThreadState.ts_state], TS_STATE_DETACHED
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_register_thread
+    call brc_register_thread
     call pthread_self
     mov [gs:ThreadState.ts_ident], rax
     mov eax, SYS_gettid
     syscall
     mov [gs:ThreadState.ts_native_id], rax
 
-    call gil_take
+    ; Link while DETACHED, then attach via gil_take (waits out any active STW
+    ; or parks permanently if shutdown already began).
     call tstate_link
-    inc qword [rel tc_running]
+    call gil_take
+    lock inc qword [rel tc_running]
 
     mov rdi, [rbx + ThreadStart.bootstrap]
     lea rsi, [rbx + ThreadStart.argv]
@@ -183,6 +205,14 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     ; Release Python state while the thread still owns the GIL.
     extern native_asyncio_clear_running_loop
     call native_asyncio_clear_running_loop
+    extern sre_cpcache_clear_thread
+    call sre_cpcache_clear_thread
+    mov rdi, [gs:ThreadState.ts_import_ns_portions]
+    test rdi, rdi
+    jz .te_no_ns_portions
+    mov qword [gs:ThreadState.ts_import_ns_portions], 0
+    call obj_decref
+.te_no_ns_portions:
     mov rdi, [gs:ThreadState.ts_dict]
     test rdi, rdi
     jz .te_no_dict
@@ -192,6 +222,9 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     mov rdi, [gs:ThreadState.frame_datastack_base]
     test rdi, rdi
     jz .te_no_stack
+    mov qword [gs:ThreadState.frame_datastack_base], 0
+    mov qword [gs:ThreadState.frame_datastack_top], 0
+    mov qword [gs:ThreadState.frame_datastack_end], 0
     call ap_free
 .te_no_stack:
     mov rdi, [gs:ThreadState.repr_stack]
@@ -207,13 +240,37 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     mov rdi, [gs:ThreadState.ts_self]
     xor esi, esi
     call sysprofile_install
-    call tstate_unlink
-    dec qword [rel tc_running]
-
-    ; Past this line the thread holds no GIL and touches no object.  The
-    ; ThreadState came from libc, so freeing it needs no lock of ours.
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_drain_thread
+    call brc_drain_thread
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_unregister_thread
+    call brc_unregister_thread
+    mov rdi, [gs:ThreadState.ts_self]
+    call brc_drain_thread
+    extern alloc_thread_flush
+    call alloc_thread_flush
     mov r12, [gs:ThreadState.ts_self]
-    call gil_drop
+    ; tstate_unlink atomically detaches (notifying STW if waiting) and unlinks.
+    call tstate_unlink
+    lock dec qword [rel tc_running]
+
+    ; Past this line the thread is detached/unlinked and touches no Python state.
+    mov rdi, [r12 + ThreadState.trash_buf]
+    test rdi, rdi
+    jz .te_no_trash_buf
+    call free
+.te_no_trash_buf:
+    mov rdi, [r12 + ThreadState.ssl_pw_buf]
+    test rdi, rdi
+    jz .te_no_ssl_pw
+    call free
+.te_no_ssl_pw:
+    mov rdi, [r12 + ThreadState.ts_path_scratch]
+    test rdi, rdi
+    jz .te_no_path_scratch
+    call free
+.te_no_path_scratch:
     mov rdi, r12
     call free
 
@@ -275,8 +332,8 @@ DEF_FUNC tc_start, TS_FRAME
     xor eax, eax
     rep stosq
 
-    ; From here the GIL is real: blocking calls give it up.
-    mov qword [rel gil_threaded], 1
+    ; Enable free-threaded synchronization BEFORE spawning the first worker.
+    call rt_enable_threading
 
     lea rdi, [rbp - TS_ATTR]
     call pthread_attr_init
@@ -458,9 +515,10 @@ END_FUNC tc_interrupt_main
 LN_FRAME equ 8                  ; + 1 push = 16, 16-aligned
 DEF_FUNC tc_lock_new, LN_FRAME
     push rbx
-    mov edi, SEM_SIZE
+    mov edi, LOCK_ALLOC_SIZE
     call ap_malloc
     mov rbx, rax
+    mov dword [rbx + SEM_SIZE], 0       ; release guard futex = unlocked
     mov rdi, rax
     xor esi, esi                ; not shared between processes
     mov edx, 1                  ; one holder at a time
@@ -509,6 +567,7 @@ DEF_FUNC tc_lock_reinit
     xor esi, esi
     call tc_int_arg
     ERR_M1 .fail
+    mov dword [rax + SEM_SIZE], 0
     mov rdi, rax
     xor esi, esi
     mov edx, 1
@@ -641,6 +700,9 @@ DEF_FUNC tc_lock_release, LR_FRAME
     call tc_int_arg
     ERR_M1 .fail
     mov rbx, rax
+    ; Serialize sem_getvalue + sem_post against concurrent double-release.
+    lea rdi, [rbx + SEM_SIZE]
+    call rt_mutex_lock
     mov rdi, rbx
     lea rsi, [rbp - LR_VAL]
     call sem_getvalue
@@ -648,12 +710,16 @@ DEF_FUNC tc_lock_release, LR_FRAME
     jg .lr_unlocked
     mov rdi, rbx
     call sem_post
+    lea rdi, [rbx + SEM_SIZE]
+    call rt_mutex_unlock
     RET_NONE
     pop rbx
     leave
     V_PACK rax, rdx
     ret
 .lr_unlocked:
+    lea rdi, [rbx + SEM_SIZE]
+    call rt_mutex_unlock
     SET_EXC exc_RuntimeError_type, "release unlocked lock"
 .fail:
     xor eax, eax

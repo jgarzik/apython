@@ -474,9 +474,10 @@ DEF_FUNC bytesio_readinto_fn, BRI_FRAME
     call bytesio_check
     ERR_M1 .fail
     mov rdi, rsi
-    mov qword [rel io_readinto_msg], io_msg_binto
+    lea rax, [rel io_msg_binto]
+    mov [gs:ThreadState.ts_io_readinto_msg], rax
     call fileio_writable_buffer   ; rax = data, r10 = length
-    mov qword [rel io_readinto_msg], io_msg_readinto
+    mov qword [gs:ThreadState.ts_io_readinto_msg], 0
     ERR_PENDING .fail
 
     mov rdi, [rbp - BRI_SELF]
@@ -539,19 +540,18 @@ DEF_FUNC bytesio_write_fn, BW_FRAME
     mov [rbp - BW_LEN], r10
 
     mov rdi, [rbp - BW_SELF]
+    OBJ_LOCK rdi
+    cmp qword [rdi + PyBytesIOObject.bio_buf], 0
+    je .bw_unlock_closed
+    cmp qword [rdi + PyBytesIOObject.bio_exports], 0
+    jne .bw_unlock_exported
     mov rsi, [rdi + PyBytesIOObject.bio_pos]
     add rsi, r10
-    ; A cursor near 2^63 plus a length overflows to negative, and
-    ; bytesio_reserve's `jle` then read that as "the buffer is already big
-    ; enough".  The gap-fill below duly ran `rep stosb` with rcx around 2^63
-    ; over a 64-byte allocation.
-    jo .bw_toolarge
+    jo .bw_unlock_toolarge
     call bytesio_reserve
     test eax, eax
-    jz .bw_nomem
+    jz .bw_unlock_nomem
 
-    ; Zero the gap between the old end and the cursor.  Without it a seek
-    ; past the end followed by a write leaves whatever realloc handed back.
     mov rdi, [rbp - BW_SELF]
     mov rcx, [rdi + PyBytesIOObject.bio_pos]
     mov rdx, [rdi + PyBytesIOObject.bio_size]
@@ -579,15 +579,26 @@ DEF_FUNC bytesio_write_fn, BW_FRAME
     jle .bw_size_ok
     mov [rdi + PyBytesIOObject.bio_size], rax
 .bw_size_ok:
+    OBJ_UNLOCK rdi
     mov rdx, [rbp - BW_LEN]
     V_PACK_I64 rdx, rcx
     mov rax, rdx
     leave
     ret
+.bw_unlock_closed:
+    OBJ_UNLOCK rdi
+    call bytesio_check          ; err: sets ValueError on closed buffer
+    jmp .fail
+.bw_unlock_exported:
+    OBJ_UNLOCK rdi
 .bw_exported:
     FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .fail
+.bw_unlock_toolarge:
+    OBJ_UNLOCK rdi
 .bw_toolarge:
     FAIL exc_OverflowError_type, "new buffer size too large", .fail
+.bw_unlock_nomem:
+    OBJ_UNLOCK rdi
 .bw_nomem:
     FAIL exc_OSError_type, "out of memory", .fail
 .bw_type:
@@ -647,7 +658,7 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     je .bs_cur
     cmp r8, SEEK_END
     je .bs_end
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel io_msg_whence]
     mov edx, 100
     push r8
@@ -655,15 +666,15 @@ DEF_FUNC bytesio_seek_fn, BS_FRAME
     pop rsi
     mov rdi, rax
     call io_append_i64
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     call ap_strlen
-    lea rdi, [rel io_msgbuf]
+    TS_LEA rdi, ts_errbuf
     add rdi, rax
     lea rsi, [rel io_msg_whence2]
     mov edx, 40
     call io_copy_bounded
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel io_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .fail
 .bs_cur:
@@ -747,10 +758,11 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     mov [rbp - BTR_SIZE], rax
 .btr_have_size:
     mov rdi, [rbp - BTR_SELF]
-    call bytesio_check
-    ERR_M1 .fail
+    OBJ_LOCK rdi
+    cmp qword [rdi + PyBytesIOObject.bio_buf], 0
+    je .btr_unlock_closed
     cmp qword [rdi + PyBytesIOObject.bio_exports], 0
-    jne .btr_exported
+    jne .btr_unlock_exported
     mov rax, [rbp - BTR_SIZE]
     test rax, rax
     jge .btr_do
@@ -762,11 +774,18 @@ DEF_FUNC bytesio_truncate_fn, BTR_FRAME
     jge .btr_out
     mov [rdi + PyBytesIOObject.bio_size], rax
 .btr_out:
+    OBJ_UNLOCK rdi
     mov rdx, rax
     V_PACK_I64 rdx, rcx
     mov rax, rdx
     leave
     ret
+.btr_unlock_closed:
+    OBJ_UNLOCK rdi
+    call bytesio_check          ; err: sets ValueError on closed buffer
+    jmp .fail
+.btr_unlock_exported:
+    OBJ_UNLOCK rdi
 .btr_exported:
     FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .fail
 .btr_negative:
@@ -790,15 +809,28 @@ END_FUNC bytesio_truncate_fn
 DEF_FUNC bytesio_getvalue_fn
     test rsi, rsi
     jz .bg_argerr
-    mov rdi, [rdi]
-    call bytesio_check
-    ERR_M1 .fail
-    mov rsi, [rdi + PyBytesIOObject.bio_size]
-    mov rdi, [rdi + PyBytesIOObject.bio_buf]
+    push rbx
+    sub rsp, 8
+    mov rbx, [rdi]
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyBytesIOObject.bio_buf], 0
+    je .bg_unlock_closed
+    mov rsi, [rbx + PyBytesIOObject.bio_size]
+    mov rdi, [rbx + PyBytesIOObject.bio_buf]
     call bytes_from_data
+    OBJ_UNLOCK rbx
     mov edx, TAG_PTR
+    add rsp, 8
+    pop rbx
     leave
     ret
+.bg_unlock_closed:
+    OBJ_UNLOCK rbx
+    mov rdi, rbx
+    call bytesio_check          ; err: sets ValueError on closed buffer
+    add rsp, 8
+    pop rbx
+    jmp .fail
 .bg_argerr:
     SET_EXC exc_TypeError_type, "getvalue() takes no arguments"
 .fail:
@@ -822,12 +854,15 @@ DEF_FUNC bytesio_getbuffer_fn
     call ap_malloc
     test rax, rax
     jz .bgb_nomem
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov [rax + PyMemoryViewObject.mv_source], rbx
-    inc qword [rbx + PyObject.ob_refcnt]
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyBytesIOObject.bio_buf], 0
+    je .bgb_unlock_closed
+    INCREF rbx
     mov rcx, [rbx + PyBytesIOObject.bio_buf]
     mov [rax + PyMemoryViewObject.mv_buf], rcx
     mov rcx, [rbx + PyBytesIOObject.bio_size]
@@ -838,10 +873,18 @@ DEF_FUNC bytesio_getbuffer_fn
     mov [rax + PyMemoryViewObject.mv_format], rcx
     mov qword [rax + PyMemoryViewObject.mv_readonly], 0
     inc qword [rbx + PyBytesIOObject.bio_exports]
+    OBJ_UNLOCK rbx
     mov edx, TAG_PTR
     pop rbx
     leave
     ret
+.bgb_unlock_closed:
+    OBJ_UNLOCK rbx
+    mov rdi, rax
+    call ap_free
+    mov rdi, rbx
+    call bytesio_check          ; err: sets ValueError on closed buffer
+    jmp .fail
 .bgb_nomem:
     FAIL exc_OSError_type, "out of memory", .fail
 .bgb_argerr:
@@ -863,17 +906,22 @@ DEF_FUNC bytesio_close_fn
     test rsi, rsi
     jz .bc_argerr
     mov rdi, [rdi]
+    OBJ_LOCK rdi
     cmp qword [rdi + PyBytesIOObject.bio_exports], 0
-    jne .bc_exported
+    jne .bc_unlock_exported
     mov rax, [rdi + PyBytesIOObject.bio_buf]
     test rax, rax
-    jz .bc_done
+    jz .bc_unlock_done
     mov qword [rdi + PyBytesIOObject.bio_buf], 0
     mov qword [rdi + PyBytesIOObject.bio_cap], 0
     mov qword [rdi + PyBytesIOObject.bio_size], 0
     mov qword [rdi + PyBytesIOObject.bio_pos], 0
+    OBJ_UNLOCK rdi
     mov rdi, rax
     call ap_free
+    jmp .bc_done
+.bc_unlock_done:
+    OBJ_UNLOCK rdi
 .bc_done:
     LOAD_NONE rax
     mov rdi, rax
@@ -882,6 +930,8 @@ DEF_FUNC bytesio_close_fn
     mov edx, TAG_PTR
     leave
     ret
+.bc_unlock_exported:
+    OBJ_UNLOCK rdi
 .bc_exported:
     FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .fail
 .bc_argerr:
@@ -903,7 +953,7 @@ DEF_FUNC bytesio_closed_get_fn
 .bcg_true:
     lea rax, [rel bool_true]
 .bcg_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -925,7 +975,7 @@ DEF_FUNC bytesio_true_fn
     call bytesio_check
     ERR_M1 .fail
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1063,7 +1113,9 @@ DEF_FUNC_BARE io_buffer_acquired
     jz .iba_out
     cmp [rdi + PyObject.ob_type], rax
     jne .iba_out
+    OBJ_LOCK rdi
     inc qword [rdi + PyBytesIOObject.bio_exports]
+    OBJ_UNLOCK rdi
 .iba_out:
     ret
 END_FUNC io_buffer_acquired
@@ -1076,9 +1128,12 @@ DEF_FUNC_BARE io_buffer_released
     jz .ibr_out
     cmp [rdi + PyObject.ob_type], rax
     jne .ibr_out
+    OBJ_LOCK rdi
     cmp qword [rdi + PyBytesIOObject.bio_exports], 0
-    jle .ibr_out
+    jle .ibr_unlock
     dec qword [rdi + PyBytesIOObject.bio_exports]
+.ibr_unlock:
+    OBJ_UNLOCK rdi
 .ibr_out:
     ret
 END_FUNC io_buffer_released

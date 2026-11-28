@@ -34,6 +34,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 
 ASM_INIT
 
@@ -71,12 +72,6 @@ extern ffi_closure_free
 extern ffi_prep_closure_loc
 
 CX_CLOSURE_SIZE equ 64          ; sizeof(ffi_closure) is 56 on x86-64
-
-section .bss
-; The ctypes-private errno, which a function made with use_errno=True swaps
-; with the real one around the call -- CPython keeps it per thread, and there
-; is one thread.
-cx_errno: resq 1
 
 section .text
 
@@ -161,7 +156,7 @@ END_FUNC cx_ret_int
 ;; ============================================================================
 DEF_FUNC_BARE cx_ret_none
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     ret
 END_FUNC cx_ret_none
 
@@ -496,9 +491,9 @@ END_FUNC cx_prep_cif_var
 DEF_FUNC cx_swap_errno
     call __errno_location wrt ..plt
     mov ecx, [rax]
-    mov edx, [rel cx_errno]
+    mov edx, [gs:ThreadState.cx_errno]
     mov [rax], edx
-    mov [rel cx_errno], ecx
+    mov [gs:ThreadState.cx_errno], ecx
     leave
     ret
 END_FUNC cx_swap_errno
@@ -517,11 +512,13 @@ DEF_FUNC cx_call, PC_FRAME
     je .cc_call
     call cx_swap_errno
 .cc_call:
+    ALLOW_THREADS_BEGIN
     mov rdi, [rbp - PC_V]
     mov rsi, [rbp - PC_V + 8]
     mov rdx, [rbp - PC_V + 16]
     mov rcx, [rbp - PC_V + 24]
     call ffi_call wrt ..plt
+    ALLOW_THREADS_END
     cmp qword [rbp - PC_V + 32], 0
     je .cc_done
     call cx_swap_errno
@@ -561,7 +558,11 @@ DEF_FUNC cx_closure, PC_FRAME
     test rax, rax
     jz .cl_fail
     mov [rbp - PC_V + 32], rax
-    mov rdi, rax
+    ; Enable concurrent runtime mode before handing a Python callback pointer
+    ; to native C code (which may invoke it from a foreign pthread).
+    extern rt_enable_threading
+    call rt_enable_threading
+    mov rdi, [rbp - PC_V + 32]
     mov rsi, [rbp - PC_V]
     lea rdx, [rel cx_tramp]
     mov rcx, [rbp - PC_V + 16]
@@ -616,11 +617,17 @@ CT_UD    equ 8
 CT_ARGS  equ 16
 CT_V1    equ 24                 ; the Value pair, V0 below V1
 CT_V0    equ 32
-CT_FRAME equ 32                 ; + 0 pushes = 32, 16-aligned
+CT_RET   equ 40
+CT_FLAG  equ 48                 ; rt_foreign_enter flag (0/1/2)
+CT_FRAME equ 48                 ; + 0 pushes = 48, 16-aligned
 DEF_FUNC cx_tramp, CT_FRAME
     mov [rbp - CT_UD], rcx
     mov [rbp - CT_ARGS], rdx
-    mov rdi, rsi
+    mov [rbp - CT_RET], rsi
+    extern rt_foreign_enter
+    call rt_foreign_enter
+    mov [rbp - CT_FLAG], eax
+    mov rdi, [rbp - CT_RET]
     call int_from_i64
     V_PACK rax, rdx
     mov [rbp - CT_V0], rax
@@ -648,6 +655,9 @@ DEF_FUNC cx_tramp, CT_FRAME
     DECREF_V rax, rcx
     mov rax, [rbp - CT_V1]
     DECREF_V rax, rcx
+    mov edi, [rbp - CT_FLAG]
+    extern rt_foreign_leave
+    call rt_foreign_leave
     leave
     ret
 END_FUNC cx_tramp
@@ -656,7 +666,7 @@ END_FUNC cx_tramp
 ;; _ctypescore.errno_get() -> int, the ctypes-private errno
 ;; ============================================================================
 DEF_FUNC cx_errno_get
-    movsxd rdi, dword [rel cx_errno]
+    movsxd rdi, dword [gs:ThreadState.cx_errno]
     call cx_ret_int
     leave
     ret
@@ -670,12 +680,12 @@ ES_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
 DEF_FUNC cx_errno_set, ES_FRAME
     cmp rsi, 1
     jne cx_nargs
-    movsxd rax, dword [rel cx_errno]
+    movsxd rax, dword [gs:ThreadState.cx_errno]
     mov [rbp - ES_OLD], rax
     xor esi, esi
     call cx_arg_i64
     ERR_M1 cx_fail
-    mov [rel cx_errno], eax
+    mov [gs:ThreadState.cx_errno], eax
     mov rdi, [rbp - ES_OLD]
     call cx_ret_int
     leave

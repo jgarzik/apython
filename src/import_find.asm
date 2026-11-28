@@ -69,7 +69,7 @@ extern exc_ModuleNotFoundError_type
 extern str_concat
 
 ; What src/import.asm keeps and this reads
-extern import_path_buf_ptr
+extern ts_get_path_scratch
 extern im_dunder_name
 extern im_dunder_file
 extern im_dunder_loader
@@ -292,16 +292,17 @@ DEF_FUNC import_source_path
     cmp rdx, ISP_BUFSZ
     jae .isp_keep
 
-    lea rdi, [rel isp_buf]
+    push rax                    ; save first byte offset of <name>
+    push rcx                    ; save name length
+    call ts_get_path_scratch
+    lea r13, [rax + TS_PATH_ISP]
+    mov rdi, r13
     mov rsi, rbx
     mov rdx, r14
-    push rcx
-    push rax
     call ap_memcpy              ; <dir>, without the trailing slash
-    pop rax
     pop rcx
-    lea rdi, [rel isp_buf]
-    add rdi, r14
+    pop rax
+    lea rdi, [r13 + r14]
     mov byte [rdi], '/'
     inc rdi
     lea rsi, [rbx + rax]
@@ -309,12 +310,11 @@ DEF_FUNC import_source_path
     push rcx
     call ap_memcpy
     pop rcx
-    lea rdi, [rel isp_buf]
-    add rdi, r14
+    lea rdi, [r13 + r14]
     add rdi, rcx
     inc rdi
     mov dword [rdi], `.py\0`
-    lea rax, [rel isp_buf]
+    mov rax, r13
     pop r14
     pop r13
     pop r12
@@ -454,7 +454,8 @@ DEF_FUNC import_search_dirs, SD_FRAME
     jz .sd_next
 
     ; Build path in import_path_buf_ptr
-    mov r12, [rel import_path_buf_ptr]  ; r12 = dest buf
+    call ts_get_path_scratch
+    lea r12, [rax + TS_PATH_IMPORT]     ; r12 = dest buf
 
     ; Bound the assembled path before writing any of it.  Nothing checked
     ; it: a sys.path entry longer than the buffer memcpy'd straight past the
@@ -786,7 +787,8 @@ DEF_FUNC import_search_syspath, SS_FRAME
     test rbx, rbx
     jz .ss_next
 
-    mov r12, [rel import_path_buf_ptr]  ; dest buf
+    call ts_get_path_scratch
+    lea r12, [rax + TS_PATH_IMPORT]     ; dest buf
 
     ; Same bound as the search loop above.
     lea rsi, [rbx + PyStrObject.data]
@@ -1069,7 +1071,7 @@ DEF_FUNC import_search_syspath, SS_FRAME
 .ss_not_found:
     ; Nothing regular answered to the name anywhere, so the bare directories
     ; recorded along the way are the package.
-    mov rax, [rel import_ns_portions]
+    mov rax, [gs:ThreadState.ts_import_ns_portions]
     test rax, rax
     jz .ss_really_not_found
     cmp qword [rax + PyListObject.ob_size], 0
@@ -1104,10 +1106,10 @@ END_FUNC import_search_syspath
 ;; of the shape already there rather than a new one.
 ;; ============================================================================
 DEF_FUNC_LOCAL import_ns_portions_clear
-    mov rdi, [rel import_ns_portions]
+    mov rdi, [gs:ThreadState.ts_import_ns_portions]
     test rdi, rdi
     jz .inpc_done
-    mov qword [rel import_ns_portions], 0
+    mov qword [gs:ThreadState.ts_import_ns_portions], 0
     call obj_decref
 .inpc_done:
     leave
@@ -1128,14 +1130,14 @@ DEF_FUNC_LOCAL import_ns_portions_add, INPA_FRAME
     mov [rbp - INPA_PATH], rdi
     mov [rbp - INPA_LEN], rsi
 
-    mov rax, [rel import_ns_portions]
+    mov rax, [gs:ThreadState.ts_import_ns_portions]
     test rax, rax
     jnz .inpa_have_list
     xor edi, edi
     call list_new
     test rax, rax
     jz .inpa_done
-    mov [rel import_ns_portions], rax
+    mov [gs:ThreadState.ts_import_ns_portions], rax
 .inpa_have_list:
     mov rdi, [rbp - INPA_PATH]
     mov rsi, [rbp - INPA_LEN]
@@ -1143,7 +1145,7 @@ DEF_FUNC_LOCAL import_ns_portions_add, INPA_FRAME
     test rax, rax
     jz .inpa_done
     mov [rbp - INPA_STR], rax
-    mov rdi, [rel import_ns_portions]
+    mov rdi, [gs:ThreadState.ts_import_ns_portions]
     mov rsi, rax
     call list_append          ; err: a list built here is not being sorted
     ; list_append took its own reference.
@@ -1189,7 +1191,7 @@ DEF_FUNC_LOCAL import_make_namespace, IMN_FRAME
     call .imn_set
     ; __path__ = the portions
     lea rdi, [rel im_dunder_path]
-    mov rsi, [rel import_ns_portions]
+    mov rsi, [gs:ThreadState.ts_import_ns_portions]
     call .imn_set
     ; __file__, __loader__ and __spec__ are all None here.  None rather than
     ; absent for __file__: CPython leaves the name bound, and code that asks
@@ -1281,17 +1283,20 @@ DEF_FUNC import_abspath, IAP_FRAME
     cmp byte [rdi], '/'
     je .iap_asis
 
-    lea rdi, [rel iap_buf]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_IAP]
     mov esi, IAP_BUFSZ - 1
     call sys_getcwd
     test rax, rax
     js .iap_asis
-    lea rdi, [rel iap_buf]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_IAP]
     call ap_strlen
     mov rbx, rax
     cmp rbx, 1
     jbe .iap_have_cwd                   ; "/" already ends in a slash
-    lea rdi, [rel iap_buf]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_IAP]
     mov byte [rdi + rbx], '/'
     inc rbx
 .iap_have_cwd:
@@ -1308,13 +1313,15 @@ DEF_FUNC import_abspath, IAP_FRAME
     lea rcx, [rbx + rax]
     cmp rcx, IAP_BUFSZ - 1
     jae .iap_asis
-    lea rdi, [rel iap_buf]
-    add rdi, rbx
     mov rdx, rax
-    add rbx, rax                        ; ap_memcpy answers the DEST, not the
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_IAP]
+    add rdi, rbx
+    add rbx, rdx                        ; ap_memcpy answers the DEST, not the
                                         ; length, so the sum is taken first
     call ap_memcpy
-    lea rdi, [rel iap_buf]
+    call ts_get_path_scratch
+    lea rdi, [rax + TS_PATH_IAP]
     mov byte [rdi + rbx], 0
     mov rax, rdi
     pop rbx
@@ -1364,11 +1371,5 @@ isp_suffix: db ".cpython-312.pyc", 0
 isp_ap_suffix: db ".apython-312.pyc", 0
 isp_marker: db "/__pycache__/", 0
 
-section .bss
 ISP_BUFSZ equ 4096
-isp_buf: resb ISP_BUFSZ
 IAP_BUFSZ equ 4096
-iap_buf: resb IAP_BUFSZ
-; The PEP 420 portion directories the last search collected, as a list of
-; str, or 0.  Owned; cleared at the start of every search.
-import_ns_portions: resq 1

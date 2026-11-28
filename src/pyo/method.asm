@@ -895,7 +895,8 @@ method_name_str:    db "method", 0
 align 8
 global method_type
 method_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq method_name_str          ; tp_name
     dq PyMethodObject_size      ; tp_basicsize

@@ -861,20 +861,20 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     ; CPython words a bad ELEMENT differently from a bad argument: "a
     ; bytes-like object is required, not 'str'" rather than "first arg must
     ; be bytes or a tuple of bytes".
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel baf_msg_item]
     call bj_append_cstr
     mov rdi, rax
     mov rsi, [rbp - BAF_BAD]
     call baf_append_quoted_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .baf_fail
 .baf_arg_type:
     ; CPython names the method and the offending type: "startswith first arg
     ; must be bytes or a tuple of bytes, not str".
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - BAF_NAME]
     call bj_append_cstr
     mov rdi, rax
@@ -884,13 +884,13 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     mov rsi, [rbp - BAF_BAD]
     call baf_append_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .baf_fail
 .baf_argerr:
     ; CPython counts the affix and the window, not self: "takes at least 1
     ; argument (0 given)" and "takes at most 3 arguments (4 given)".
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - BAF_NAME]
     call bj_append_cstr
     mov rdi, rax
@@ -908,7 +908,7 @@ DEF_FUNC_LOCAL bytes_method_affix, BAF_FRAME
     lea rsi, [rel baf_msg_given]
     call bj_append_cstr
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .baf_fail
 .baf_fail:
@@ -997,10 +997,10 @@ END_FUNC bytes_method_endswith
 ;; ============================================================================
 BC_SELF   equ 8
 BC_SUB    equ 16
-BC_ONE    equ 56            ; a one-byte bytes header, for an int needle
-BC_ARGS   equ 64
-BC_NARGS  equ 72
-BC_FRAME  equ 80            ; + 0 pushes = 80
+BC_ONE    equ 64            ; a one-byte bytes header (33B), for an int needle
+BC_ARGS   equ 72
+BC_NARGS  equ 80
+BC_FRAME  equ 96            ; + 0 pushes = 96, 16-aligned
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
@@ -1198,7 +1198,7 @@ BF_SELF   equ 8
 BF_SUB    equ 16
 BF_ARGS   equ 24
 BF_NARGS  equ 32
-BF_ONE    equ 72            ; a one-byte bytes header, for an int needle
+BF_ONE    equ 80            ; a one-byte bytes header (33B), for an int needle
 ; Derived, not picked: the fabricated header above runs from rbp-BF_ONE
 ; upward, so a hand-chosen 48 landed on its data byte and the int-needle
 ; find() searched for a length instead of a character.
@@ -2683,17 +2683,17 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov [rbp - BJ_LIST], rax
     mov rcx, rax
 .bj_seq_ready:
-
+    OBJ_LOCK rcx
     ; Get count
     mov r12, [rcx + PyListObject.ob_size]   ; count
     test r12, r12
-    jz .bj_empty
+    jz .bj_unlock_empty
 
     ; Compute total length: sum of all item sizes + (count-1)*sep_len
     mov rdi, [rbp - BJ_SEP]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .bj_item_error
+    jz .bj_unlock_item_error
     mov r14, r10                            ; sep_len
 
     xor r13d, r13d              ; total = 0
@@ -2781,6 +2781,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     jmp .bj_copy_loop
 
 .bj_make_bytes:
+    mov rcx, [rbp - BJ_LIST]
+    OBJ_UNLOCK rcx
     mov rdi, [rbp - BJ_BUF]
     mov rsi, [rbp - BJ_TOTAL]
     call bytes_from_data
@@ -2801,6 +2803,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bj_unlock_empty:
+    OBJ_UNLOCK rcx
 .bj_empty:
     ; Return empty bytes
     BJ_RELEASE_TMP
@@ -2816,21 +2820,21 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bj_unlock_item_error:
+    mov rcx, [rbp - BJ_LIST]
+    OBJ_UNLOCK rcx
+    jmp .bj_item_error
+
 .bj_error:
     SET_EXC exc_TypeError_type, "join() argument must be a list of bytes"
     jmp .bj_fail
 
 .bj_bad_item:
-    ; CPython names the position and the type, which is the whole difference
-    ; between "one of these is wrong" and "the second one is a str".
-    mov [rbp - BJ_TOTAL], rcx   ; the index, free until the lengths are summed
+    mov [rbp - BJ_TOTAL], rcx
     mov rax, [rbp - BJ_LIST]
     mov rax, [rax + PyListObject.ob_item]
     mov rcx, [rbp - BJ_TOTAL]
     mov rax, [rax + rcx*8]
-    ; The NAME, not the object: BJ_RELEASE_TMP frees the converted list, and
-    ; for `b"".join("ab")` that list holds the only reference to the item --
-    ; reading its type afterwards reads freed memory.  A type outlives it.
     V_TEST_PTR rax, rdx
     ja .bj_name_int
     test rax, rax
@@ -2841,6 +2845,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
 .bj_name_int:
     lea rax, [rel bj_name_int]
 .bj_name_have:
+    mov rcx, [rbp - BJ_LIST]
+    OBJ_UNLOCK rcx
     mov [rbp - BJ_WPOS], rax
     BJ_RELEASE_TMP
     lea rdi, [rel bj_msg_item]
@@ -2853,7 +2859,7 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov rsi, [rbp - BJ_WPOS]
     call bj_append_typename
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel bj_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     jmp .bj_fail
 
@@ -2915,11 +2921,12 @@ DEF_FUNC_LOCAL bj_append_i64    ; (rdi = prefix cstr, rsi = n) -> rax = the NUL
     push r12
     mov r12, rsi
     mov rsi, rdi
-    lea rdi, [rel bj_msgbuf]
+    TS_LEA rdi, ts_errbuf
     call bj_append_cstr
     mov rbx, rax
     mov rax, r12
-    lea r8, [rel bj_numbuf + 24]
+    TS_LEA r8, ts_numbuf
+    add r8, 24
     mov byte [r8], 0
     mov r9d, 10
 .bai_loop:

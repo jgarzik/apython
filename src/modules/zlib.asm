@@ -115,6 +115,9 @@ ZC_INITIAL_OUT  equ 16384
 
 section .data
 align 8
+align 64
+zc_handle_lock: dd 0
+align 8
 zc_handles:     dq 0        ; ZHandle*[], grown by doubling
 zc_handle_cap:  dq 0
 zc_handle_n:    dq 0
@@ -163,7 +166,7 @@ DEF_FUNC_LOCAL zc_set_z, ZE_FRAME
     movsxd rsi, esi
     mov [rbp - ZE_CODE], rsi
 
-    lea rdi, [rel zc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     lea rsi, [rel zc_e_open]
     call rbt_append_cstr
     mov rdi, rax
@@ -190,7 +193,7 @@ DEF_FUNC_LOCAL zc_set_z, ZE_FRAME
     call rbt_append_cstr
 .zez_raise:
     lea rdi, [rel exc_ValueError_type]
-    lea rsi, [rel zc_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     leave
     ret
@@ -283,20 +286,22 @@ DEF_FUNC_BARE zc_handle_at
     xor eax, eax
     test rdi, rdi
     js .zh_no
+    RT_LOCK_GATED zc_handle_lock
     cmp rdi, [rel zc_handle_n]
-    jae .zh_no
+    jae .zh_unlock_no
     mov rax, [rel zc_handles]
     mov rax, [rax + rdi*8]
     test rax, rax
-    jz .zh_no
-    ; A handle whose magic is gone is a freed one whose slot was handed back
-    ; and whose memory may since have been reused.  libz's own state pointer
-    ; is dangling by then, and inflate() dereferences it: the fault landed
-    ; inside libz with a z_stream that still read plausibly.
+    jz .zh_unlock_no
     cmp qword [rax + ZHandle.magic], ZC_MAGIC
-    je .zh_ok
+    je .zh_unlock_ok
     xor eax, eax
-.zh_ok:
+.zh_unlock_ok:
+    RT_UNLOCK_GATED zc_handle_lock
+    ret
+.zh_unlock_no:
+    xor eax, eax
+    RT_UNLOCK_GATED zc_handle_lock
 .zh_no:
     ret
 END_FUNC zc_handle_at
@@ -548,6 +553,7 @@ ZA_FRAME equ 32             ; + 1 push = 40... padded below
 DEF_FUNC_LOCAL zc_handle_alloc, 40
     push rbx
     mov [rbp - ZA_H], rdi
+    RT_LOCK_GATED zc_handle_lock
     xor ebx, ebx
 .za_scan:
     cmp rbx, [rel zc_handle_n]
@@ -560,6 +566,7 @@ DEF_FUNC_LOCAL zc_handle_alloc, 40
 .za_take:
     mov rcx, [rbp - ZA_H]
     mov [rax + rbx*8], rcx
+    RT_UNLOCK_GATED zc_handle_lock
     mov rax, rbx
     pop rbx
     leave
@@ -583,7 +590,7 @@ DEF_FUNC_LOCAL zc_handle_alloc, 40
     shl rsi, 3
     call ap_realloc
     test rax, rax
-    jz .za_fail
+    jz .za_unlock_fail
     mov [rel zc_handles], rax
     mov rcx, [rbp - ZA_CAP]
     mov [rel zc_handle_cap], rcx
@@ -593,9 +600,12 @@ DEF_FUNC_LOCAL zc_handle_alloc, 40
     mov rdx, [rbp - ZA_H]
     mov [rcx + rax*8], rdx
     inc qword [rel zc_handle_n]
+    RT_UNLOCK_GATED zc_handle_lock
     pop rbx
     leave
     ret
+.za_unlock_fail:
+    RT_UNLOCK_GATED zc_handle_lock
 .za_fail:
     mov rax, -1
     pop rbx
@@ -1104,14 +1114,26 @@ DEF_FUNC zc_stream_free, ZR_FRAME
     call zc_arg_int
     ERR_M1 .zr_fail
     mov [rbp - ZR_IDX], rax
-    mov rdi, rax
-    call zc_handle_at
     test rax, rax
-    jz .zr_none                 ; freeing twice is not an error
+    js .zr_none
+    RT_LOCK_GATED zc_handle_lock
+    cmp rax, [rel zc_handle_n]
+    jae .zr_unlock_none
     mov rcx, [rel zc_handles]
-    mov rdx, [rbp - ZR_IDX]
+    mov rdx, rax
+    mov rax, [rcx + rdx*8]
+    test rax, rax
+    jz .zr_unlock_none
+    cmp qword [rax + ZHandle.magic], ZC_MAGIC
+    jne .zr_unlock_none
     mov qword [rcx + rdx*8], 0
     mov qword [rax + ZHandle.magic], 0
+    RT_UNLOCK_GATED zc_handle_lock
+    jmp .zr_free_detached
+.zr_unlock_none:
+    RT_UNLOCK_GATED zc_handle_lock
+    jmp .zr_none
+.zr_free_detached:
 
     push rax
     sub rsp, 8

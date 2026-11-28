@@ -122,8 +122,9 @@ DEF_FUNC_LOCAL async_awaitable_iter, AAI_FRAME
     mov rdi, [rbp - AAI_OBJ]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel gaw_await_name]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .aai_try_iter
 
     mov rdi, [rbp - AAI_OBJ]
@@ -643,12 +644,16 @@ DEF_FUNC op_before_async_with, BAW_FRAME
     lea rsi, [rel baw_str_aenter]
     extern dunder_lookup
     call dunder_lookup
-    mov rsi, rbx
     V_TEST_PTR rax, rcx
-    ja .baw_no_either
+    ja .baw_no_either_set_rsi
+    mov rdi, rax
+    call obj_decref
+    mov rsi, rbx
     CSTRING rdi, `'\x01' object does not support the asynchronous context manager protocol (missed __aexit__ method)`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+.baw_no_either_set_rsi:
+    mov rsi, rbx
 .baw_no_either:
     CSTRING rdi, `'\x01' object does not support the asynchronous context manager protocol`
     jmp raise_type_error_with_name

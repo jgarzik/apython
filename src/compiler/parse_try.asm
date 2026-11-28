@@ -35,8 +35,6 @@ extern par_suite
 extern par_suite_into
 extern par_name_obj
 extern par_last_pushed
-extern psu_what
-extern psu_line
 
 section .text
 

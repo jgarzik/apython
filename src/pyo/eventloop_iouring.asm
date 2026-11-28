@@ -6,6 +6,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "eventloop.inc"
+%include "gil.inc"
 
 extern sys_io_uring_setup
 extern sys_io_uring_enter
@@ -46,23 +47,19 @@ URING_RING_ENTRIES equ 256
 ; The ring -- its fd, the mmap'd SQ/CQ/SQE regions and the pointers and masks
 ; cached from them -- belongs to the loop, and the loop is per thread, so it
 ; is in ThreadState (uring_*, src/include/threadstate.inc).
-section .bss
-align 8
-; Setup params (on stack in init, but we need the offsets)
-uring_params_buf: resb IoUringParams_size
-
 section .text
 
 ;; ============================================================================
 ;; uring_init() -> 0 ok, -1 fail
 ;; Try to set up io_uring. Returns -1 if unavailable.
 ;; ============================================================================
-DEF_FUNC uring_init
+UI_PARAMS equ (IoUringParams_size + 15) & ~15
+DEF_FUNC uring_init, UI_PARAMS
     push rbx
     push r12
 
     ; Zero params
-    lea rdi, [rel uring_params_buf]
+    lea rdi, [rbp - UI_PARAMS]
     xor eax, eax
     mov ecx, IoUringParams_size
 .zi_loop:
@@ -72,7 +69,7 @@ DEF_FUNC uring_init
 
     ; io_uring_setup(entries=256, params)
     mov edi, URING_RING_ENTRIES
-    lea rsi, [rel uring_params_buf]
+    lea rsi, [rbp - UI_PARAMS]
     call sys_io_uring_setup
     ; rax = fd or -errno
 
@@ -83,7 +80,7 @@ DEF_FUNC uring_init
     mov ebx, eax              ; save fd
 
     ; Calculate mmap sizes from params
-    lea r12, [rel uring_params_buf]
+    lea r12, [rbp - UI_PARAMS]
 
     ; SQ ring size = sq_off.array + sq_entries * 4
     mov eax, [r12 + 40 + SQOFF_ARRAY]         ; sq_off.array offset
@@ -446,7 +443,7 @@ DEF_FUNC uring_wait_and_drain
     mov ecx, IORING_ENTER_GETEVENTS
     xor r8d, r8d
     xor r9d, r9d
-    call sys_io_uring_enter
+    BLOCKING_CALL sys_io_uring_enter
 
     ; Drain CQ ring
     mov rax, [gs:ThreadState.uring_cq_head]

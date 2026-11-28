@@ -92,7 +92,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     jmp .ba_alloc_done
 .ba_plain_alloc:
     call ap_malloc
-    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rdx, [rbp - BA_TYPE]
     mov [rax + PyByteArrayObject.ob_type], rdx
 .ba_alloc_done:
@@ -112,7 +112,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     rep stosq
 .ba_no_tail:
     mov rdx, [rbp - BA_TYPE]
-    inc qword [rdx + PyObject.ob_refcnt]
+    INCREF rdx
 
     mov rdi, rbx
     mov rsi, [rbp - BA_LEN]
@@ -266,23 +266,27 @@ END_FUNC bytearray_resize
 ;; sq_item, the counterpart of bytes_getitem.
 ;; ============================================================================
 DEF_FUNC_BARE bytearray_getitem
+    OBJ_LOCK rdi
     test rsi, rsi
     jns .bag_positive
     add rsi, [rdi + PyByteArrayObject.ob_size]
 .bag_positive:
     cmp rsi, [rdi + PyByteArrayObject.ob_size]
-    jge .bag_index_error
+    jge .bag_unlock_index_error
     test rsi, rsi
-    jl .bag_index_error
+    jl .bag_unlock_index_error
 
     mov rax, [rdi + PyByteArrayObject.ob_bytes]
     test rax, rax
-    jz .bag_index_error         ; empty: every index is out of range
+    jz .bag_unlock_index_error  ; empty: every index is out of range
     movzx eax, byte [rax + rsi]
+    OBJ_UNLOCK rdi
     RET_TAG_SMALLINT
     V_PACK rax, rdx
     ret
 
+.bag_unlock_index_error:
+    OBJ_UNLOCK rdi
 .bag_index_error:
     sub rsp, 8                  ; no frame here: align the call
     SET_EXC exc_IndexError_type, "bytearray index out of range"
@@ -345,14 +349,14 @@ DEF_FUNC bytearray_new, BAN_FRAME
     test rax, rax
     jz .ban_fail
     mov [rbp - BAN_OBJ], rax
-    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytearray_type]
     mov [rax + PyByteArrayObject.ob_type], rcx
     mov qword [rax + PyByteArrayObject.ob_size], 0
     mov qword [rax + PyByteArrayObject.ob_cap], 0
     mov qword [rax + PyByteArrayObject.ob_bytes], 0
     mov qword [rax + PyByteArrayObject.ob_exports], 0
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
 
     mov rdi, rax
     mov rsi, [rbp - BAN_LEN]
@@ -420,20 +424,23 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
     call obj_as_index_seq
     ERR_M1 .bsu_fail
     mov rcx, [rbp - BSU_SELF]
+    OBJ_LOCK rcx
     mov rdx, [rcx + PyByteArrayObject.ob_size]
     test rax, rax
     jns .bsu_have_index
     add rax, rdx                ; a negative index counts from the end
 .bsu_have_index:
     test rax, rax
-    jl .bsu_range
+    jl .bsu_unlock_range
     cmp rax, rdx
-    jge .bsu_range
+    jge .bsu_unlock_range
     push rax
     mov rdi, rcx
     call bytearray_data
     pop rcx
     movzx eax, byte [rax + rcx]
+    mov rcx, [rbp - BSU_SELF]
+    OBJ_UNLOCK rcx
     V_PACK_I64 rax, rcx
     leave
     ret
@@ -441,28 +448,42 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
 .bsu_slice:
     mov rdi, [rbp - BSU_KEY]
     mov rcx, [rbp - BSU_SELF]
-    ; The LIVE length: a bound's __index__ can clear this very bytearray.
     lea rsi, [rcx + PyByteArrayObject.ob_size]
     call slice_indices_live     ; rax = start, rdx = stop, rcx = step
     ERR_M1 .bsu_fail
+    mov r8, [rbp - BSU_SELF]
+    OBJ_LOCK r8
+    ; Re-clamp start/stop against live ob_size under OBJ_LOCK
+    mov r9, [r8 + PyByteArrayObject.ob_size]
+    test rcx, rcx
+    js .bsu_clamp_neg
+    cmp rax, r9
+    cmovg rax, r9
+    cmp rdx, r9
+    cmovg rdx, r9
+    jmp .bsu_clamped
+.bsu_clamp_neg:
+    cmp rax, r9
+    jl .bsu_clamped
+    lea rax, [r9 - 1]
+.bsu_clamped:
     mov [rbp - BSU_START], rax
     mov [rbp - BSU_STEP], rcx
-    ; The element count, which slice_length computes for any step.
     mov rdi, rax
     mov rsi, rdx
-    call slice_length           ; rdi = start, rsi = stop, rcx = step
+    call slice_length
     mov [rbp - BSU_LEN], rax
 
-    xor edi, edi                ; no source: filled below
+    xor edi, edi
     mov rsi, rax
     call bytearray_new
     test rax, rax
-    jz .bsu_fail
+    jz .bsu_unlock_fail
     mov [rbp - BSU_OUT], rax
 
     mov rdi, [rbp - BSU_SELF]
     call bytearray_data
-    mov rsi, rax                ; the source bytes
+    mov rsi, rax
     mov rdx, [rbp - BSU_OUT]
     mov rdx, [rdx + PyByteArrayObject.ob_bytes]
     mov r8, [rbp - BSU_START]
@@ -477,14 +498,22 @@ DEF_FUNC bytearray_subscript, BSU_FRAME
     inc rcx
     jmp .bsu_copy
 .bsu_copied:
+    mov rcx, [rbp - BSU_SELF]
+    OBJ_UNLOCK rcx
     mov rax, [rbp - BSU_OUT]
     leave
     ret
 
+.bsu_unlock_fail:
+    mov rcx, [rbp - BSU_SELF]
+    OBJ_UNLOCK rcx
 .bsu_fail:
     xor eax, eax
     leave
     ret
+.bsu_unlock_range:
+    mov rcx, [rbp - BSU_SELF]
+    OBJ_UNLOCK rcx
 .bsu_range:
     FAIL exc_IndexError_type, "bytearray index out of range", .bsu_fail
 END_FUNC bytearray_subscript
@@ -579,34 +608,31 @@ DEF_FUNC bytearray_ass_subscript, 104
     call obj_as_index_seq
     ERR_M1 .bas_fail
     mov rbx, rax
-    mov rcx, [rbp - BAS_SELF]
-    mov rdx, [rcx + PyByteArrayObject.ob_size]
-    test rbx, rbx
-    jns .bas_int_bounds
-    add rbx, rdx
-.bas_int_bounds:
-    test rbx, rbx
-    jl .bas_range
-    cmp rbx, rdx
-    jge .bas_range
 
     cmp qword [rbp - BAS_VAL], 0
     je .bas_del_one
 
     mov rdi, [rbp - BAS_VAL]
-    call bytearray_index_arg    ; 0..255
+    call bytearray_index_arg    ; 0..255 (runs __index__ unlocked)
     ERR_M1 .bas_fail
     mov rcx, rax
-    ; The value's __index__ ran after the bounds were checked, and it may
-    ; have shortened this very bytearray: ask again before writing.
     mov rdi, [rbp - BAS_SELF]
-    cmp rbx, [rdi + PyByteArrayObject.ob_size]
-    jae .bas_range
-    mov rdi, [rbp - BAS_SELF]
+    OBJ_LOCK rdi
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    test rbx, rbx
+    jns .bas_int_bounds
+    add rbx, rdx
+.bas_int_bounds:
+    test rbx, rbx
+    jl .bas_unlock_range
+    cmp rbx, rdx
+    jge .bas_unlock_range
     push rcx
     call bytearray_data
     pop rcx
     mov [rax + rbx], cl
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
     xor eax, eax
     pop rbx
     leave
@@ -614,9 +640,18 @@ DEF_FUNC bytearray_ass_subscript, 104
 
 .bas_del_one:
     mov rdi, [rbp - BAS_SELF]
-    BA_REFUSE_IF_EXPORTED rdi, .bas_fail   ; the gap is closed before the resize
-    ; Close the gap, then drop the length by one.
-    mov rdi, [rbp - BAS_SELF]
+    OBJ_LOCK rdi
+    mov rdx, [rdi + PyByteArrayObject.ob_size]
+    test rbx, rbx
+    jns .bas_del_bounds
+    add rbx, rdx
+.bas_del_bounds:
+    test rbx, rbx
+    jl .bas_unlock_range
+    cmp rbx, rdx
+    jge .bas_unlock_range
+    cmp qword [rdi + PyByteArrayObject.ob_exports], 0
+    jg .bas_unlock_exported
     call bytearray_data
     mov rcx, [rbp - BAS_SELF]
     mov rdx, [rcx + PyByteArrayObject.ob_size]
@@ -629,10 +664,21 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov rsi, [rdi + PyByteArrayObject.ob_size]
     dec rsi
     call bytearray_resize
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
     xor eax, eax
     pop rbx
     leave
     ret
+
+.bas_unlock_range:
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bas_range
+.bas_unlock_exported:
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bas_span_exported
 
 ;; --- the slice forms -------------------------------------------------------
 .bas_slice:
@@ -686,11 +732,9 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov [rbp - BAS_SLEN], rdx
 
 .bas_have_src:
-    ; Converting the value may have run Python -- an element's __index__ --
-    ; and that may have resized this bytearray under the bounds clamped
-    ; above.  Clamp again against the length it has now; an extended slice
-    ; that no longer fits selects nothing.
+    ; Lock self across re-clamp, export check, resize, and byte mutation.
     mov rcx, [rbp - BAS_SELF]
+    OBJ_LOCK rcx
     mov rax, [rcx + PyByteArrayObject.ob_size]
     cmp qword [rbp - BAS_STEP], 1
     jne .bas_ext_reclamp
@@ -710,7 +754,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     jae .bas_ext_stale
     dec rdx
     imul rdx, [rbp - BAS_STEP]
-    add rdx, [rbp - BAS_START]  ; the last index the slice touches
+    add rdx, [rbp - BAS_START]
     cmp rdx, rax
     jb .bas_reclamped
 .bas_ext_stale:
@@ -724,38 +768,29 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov r9, [rbp - BAS_START]
     cmp r8, r9
     jge .bas_span_ok
-    mov r8, r9                  ; an empty span, as slice_indices allows
+    mov r8, r9
 .bas_span_ok:
-    sub r8, r9                  ; how many bytes go away
-    ; The only arm that changes the length, and it moves the tail before it
-    ; resizes.  Refused here, with the two owned things released first --
-    ; .bas_ext_mismatch below does the same for the same reason.
+    sub r8, r9
     mov rcx, [rbp - BAS_SELF]
     cmp qword [rcx + PyByteArrayObject.ob_exports], 0
     jle .bas_span_exports_ok
     mov rdx, [rcx + PyByteArrayObject.ob_size]
     sub rdx, r8
-    add rdx, [rbp - BAS_SLEN]   ; the length this assignment would produce
+    add rdx, [rbp - BAS_SLEN]
     cmp rdx, [rcx + PyByteArrayObject.ob_size]
-    je .bas_span_exports_ok     ; same size: legal with a view out
-    jmp .bas_span_exported
+    je .bas_span_exports_ok
+    jmp .bas_unlock_exported
 .bas_span_exports_ok:
-    ; To the frame, not left in r8: bytearray_resize and bytearray_data are
-    ; both ahead, both ordinary calls, and r8 is caller-saved.  rdx and rcx
-    ; were already spilled around each of them; this one was not, so the
-    ; memmove below read its source from a garbage offset.
     mov [rbp - BAS_SPAN], r8
-    mov rcx, [rbp - BAS_SLEN]   ; rcx = how many arrive
+    mov rcx, [rbp - BAS_SLEN]
     mov rdi, [rbp - BAS_SELF]
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov rbx, rdx
     sub rbx, r8
-    sub rbx, r9                 ; rbx = the length of the tail after the span
+    sub rbx, r9
     add rdx, rcx
-    sub rdx, r8                 ; rdx = the new length
+    sub rdx, r8
 
-    ; Grow first when the buffer has to be bigger, so the tail is moved into
-    ; space that exists.
     cmp rdx, [rdi + PyByteArrayObject.ob_size]
     jbe .bas_no_grow
     mov rsi, rdx
@@ -765,9 +800,8 @@ DEF_FUNC bytearray_ass_subscript, 104
     pop rcx
     pop rdx
     test eax, eax
-    jz .bas_fail
+    jz .bas_unlock_fail
 .bas_no_grow:
-    ; Move the tail to where it belongs.
     mov rdi, [rbp - BAS_SELF]
     push rdx
     push rcx
@@ -777,9 +811,9 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov rsi, rax
     mov r9, [rbp - BAS_START]
     lea rdi, [rax + r9]
-    add rdi, rcx                ; the tail's new home
+    add rdi, rcx
     lea rsi, [rax + r9]
-    add rsi, [rbp - BAS_SPAN]   ; where it is now
+    add rsi, [rbp - BAS_SPAN]
     push rdx
     push rcx
     mov rdx, rbx
@@ -787,7 +821,6 @@ DEF_FUNC bytearray_ass_subscript, 104
     pop rcx
     pop rdx
 
-    ; Then drop the replacement in.
     test rcx, rcx
     jz .bas_no_fill
     mov rdi, [rbp - BAS_SELF]
@@ -807,22 +840,17 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov rdi, [rbp - BAS_SELF]
     mov rsi, rdx
     call bytearray_resize
-    jmp .bas_done
+    jmp .bas_unlock_done
 
 ;; --- b[i:j:k] = v, which must match the slice length exactly ---------------
 .bas_extended:
     cmp qword [rbp - BAS_VAL], 0
     je .bas_ext_delete
     mov rax, [rbp - BAS_SLEN]
-    ; An EMPTY right-hand side is the one length that does not have to match:
-    ; b[::2] = b'' removes those positions, exactly as del b[::2] does, and
-    ; bytearray(b'abcd') becomes bytearray(b'bd').  This is bytearray's alone
-    ; -- a list raises for L[::2] = [] in CPython too -- and it read as a
-    ; length mismatch here because only a NULL value counted as a delete.
     test rax, rax
     jz .bas_ext_delete
     cmp rax, [rbp - BAS_N]
-    jne .bas_ext_mismatch
+    jne .bas_unlock_ext_mismatch
     mov rdi, [rbp - BAS_SELF]
     call bytearray_data
     mov rdx, [rbp - BAS_SRC]
@@ -831,7 +859,7 @@ DEF_FUNC bytearray_ass_subscript, 104
     xor ecx, ecx
 .bas_ext_loop:
     cmp rcx, [rbp - BAS_N]
-    jge .bas_done
+    jge .bas_unlock_done
     movzx esi, byte [rdx + rcx]
     mov [rax + r8], sil
     add r8, r9
@@ -839,40 +867,33 @@ DEF_FUNC bytearray_ass_subscript, 104
     jmp .bas_ext_loop
 
 .bas_ext_delete:
-    ; An empty selection removes nothing and never resizes.
     cmp qword [rbp - BAS_N], 0
     jle .bas_ext_delete_go
     mov rdi, [rbp - BAS_SELF]
-    BA_REFUSE_IF_EXPORTED rdi, .bas_fail   ; the compaction runs before the resize
+    cmp qword [rdi + PyByteArrayObject.ob_exports], 0
+    jg .bas_unlock_exported
 .bas_ext_delete_go:
-    ; Walk forward, copying the bytes that survive down over the gaps.
     mov rdi, [rbp - BAS_SELF]
     call bytearray_data
     mov rcx, [rbp - BAS_SELF]
     mov r10, [rcx + PyByteArrayObject.ob_size]
     mov r8, [rbp - BAS_START]
     mov r9, [rbp - BAS_STEP]
-    ; The walk below is forward, so a negative step has to be turned into the
-    ; same set of indices counted upward: {start, start+step, ...} with step
-    ; negative is {start+(n-1)*step, ..., start} with it positive.  Without
-    ; this only the first index ever matched, and `del b[::-2]` removed one
-    ; byte instead of three.
     test r9, r9
     jns .bas_extdel_ready
     mov rdx, [rbp - BAS_N]
     dec rdx
-    jl .bas_extdel_ready        ; an empty slice deletes nothing
+    jl .bas_extdel_ready
     imul rdx, r9
     add r8, rdx
     neg r9
 .bas_extdel_ready:
-    xor ecx, ecx                ; how many deleted so far
-    xor rsi, rsi                ; the read cursor
-    xor rdi, rdi                ; the write cursor
+    xor ecx, ecx
+    xor rsi, rsi
+    xor rdi, rdi
 .bas_extdel_loop:
     cmp rsi, r10
     jge .bas_extdel_done
-    ; Is this index one of the slice's?
     cmp rcx, [rbp - BAS_N]
     jge .bas_extdel_keep
     cmp rsi, r8
@@ -892,6 +913,9 @@ DEF_FUNC bytearray_ass_subscript, 104
     mov rdi, [rbp - BAS_SELF]
     call bytearray_resize
 
+.bas_unlock_done:
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
 .bas_done:
     mov rdi, [rbp - BAS_SRC]
     test rdi, rdi
@@ -907,6 +931,15 @@ DEF_FUNC bytearray_ass_subscript, 104
     pop rbx
     leave
     ret
+
+.bas_unlock_fail:
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bas_fail
+.bas_unlock_ext_mismatch:
+    mov rdi, [rbp - BAS_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bas_ext_mismatch
 
 .bas_fail:
     ; The one error exit.  The replacement bytes and the copy made when the
@@ -1005,22 +1038,28 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     jg .bct_range
     mov rbx, rdi
     mov rdi, [rbp - BCT_SELF]
+    OBJ_LOCK rdi
     mov r12, [rdi + PyByteArrayObject.ob_size]
     call bytearray_data
     xor ecx, ecx
 .bct_byte_loop:
     cmp rcx, r12
-    jge .bct_no
+    jge .bct_unlock_no
     movzx edx, byte [rax + rcx]
     cmp rdx, rbx
-    je .bct_yes
+    je .bct_unlock_yes
     inc rcx
     jmp .bct_byte_loop
+.bct_unlock_yes:
+    mov rdi, [rbp - BCT_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bct_yes
+.bct_unlock_no:
+    mov rdi, [rbp - BCT_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bct_no
 
 .bct_object:
-    ; A bytes-like: look for the subsequence.  byteslike_source is the
-    ; CONSTRUCTOR's rule and its refusal says "cannot convert ... to
-    ; bytearray"; membership asks for a bytes-like and says so.
     mov rdi, [rbp - BCT_VAL]
     call bytes_like_ptr_len
     test ecx, ecx
@@ -1037,20 +1076,21 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     mov [rbp - BCT_SLEN], rdx
 
     mov rdi, [rbp - BCT_SELF]
+    OBJ_LOCK rdi
     mov r12, [rdi + PyByteArrayObject.ob_size]
     call bytearray_data
     mov rbx, rax
     mov r8, [rbp - BCT_SLEN]
     test r8, r8
-    jz .bct_yes_free            ; the empty subsequence is in everything
+    jz .bct_unlock_yes_free
     cmp r8, r12
-    ja .bct_no_free
+    ja .bct_unlock_no_free
     xor ecx, ecx
 .bct_scan:
     mov rax, r12
     sub rax, rcx
     cmp rax, r8
-    jl .bct_no_free
+    jl .bct_unlock_no_free
     lea rdi, [rbx + rcx]
     mov rsi, [rbp - BCT_SRC]
     mov rdx, r8
@@ -1060,10 +1100,13 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     pop r8
     pop rcx
     test eax, eax
-    jz .bct_yes_free
+    jz .bct_unlock_yes_free
     inc rcx
     jmp .bct_scan
 
+.bct_unlock_yes_free:
+    mov rdi, [rbp - BCT_SELF]
+    OBJ_UNLOCK rdi
 .bct_yes_free:
     mov rdi, [rbp - BCT_SRC]
     test rdi, rdi
@@ -1075,6 +1118,9 @@ DEF_FUNC bytearray_contains, BCT_FRAME
     pop rbx
     leave
     ret
+.bct_unlock_no_free:
+    mov rdi, [rbp - BCT_SELF]
+    OBJ_UNLOCK rdi
 .bct_no_free:
     mov rdi, [rbp - BCT_SRC]
     test rdi, rdi
@@ -1129,21 +1175,27 @@ DEF_FUNC bytearray_method_append, BAM_FRAME
     ERR_M1 .bap_oom
     mov [rbp - BAM_ARG], rax
     mov rdi, [rbp - BAM_SELF]
+    OBJ_LOCK rdi
     mov rsi, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAM_OLD], rsi
     inc rsi
     call bytearray_resize
     test eax, eax
-    jz .bap_oom
+    jz .bap_unlock_oom
     mov rdi, [rbp - BAM_SELF]
     call bytearray_data
     mov rcx, [rbp - BAM_OLD]
     mov rdx, [rbp - BAM_ARG]
     mov [rax + rcx], dl
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
+.bap_unlock_oom:
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
 .bap_oom:
     ; bytearray_resize's 0 now means "a live memoryview blocks this", with a
     ; BufferError already recorded -- raising a MemoryError over it would
@@ -1176,16 +1228,17 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     mov [rbp - BAM_SLEN], rdx
 
     mov rdi, [rbp - BAM_SELF]
+    OBJ_LOCK rdi
     mov rsi, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAM_OLD], rsi
     add rsi, rdx
     call bytearray_resize
     test eax, eax
-    jz .bef_fail
+    jz .bef_unlock_fail
 
     mov rcx, [rbp - BAM_SLEN]
     test rcx, rcx
-    jz .bef_done
+    jz .bef_unlock_done
     mov rdi, [rbp - BAM_SELF]
     call bytearray_data
     mov rdi, rax
@@ -1193,6 +1246,9 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     mov rsi, [rbp - BAM_SRC]
     mov rdx, [rbp - BAM_SLEN]
     call ap_memcpy
+.bef_unlock_done:
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
 .bef_done:
     mov rdi, [rbp - BAM_SRC]
     test rdi, rdi
@@ -1202,6 +1258,9 @@ DEF_FUNC bytearray_extend_from, BAM_FRAME
     mov eax, 1
     leave
     ret
+.bef_unlock_fail:
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
 .bef_fail:
     mov rdi, [rbp - BAM_SRC]
     test rdi, rdi
@@ -1259,6 +1318,7 @@ DEF_FUNC bytearray_method_insert, BAM_FRAME
 
     ; Clamp, as list.insert does: any index past either end lands at that end.
     mov rdi, [rbp - BAM_SELF]
+    OBJ_LOCK rdi
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov rcx, [rbp - BAM_IDX]
     test rcx, rcx
@@ -1276,7 +1336,7 @@ DEF_FUNC bytearray_method_insert, BAM_FRAME
     lea rsi, [rdx + 1]
     call bytearray_resize
     test eax, eax
-    jz .bin_oom
+    jz .bin_unlock_oom
 
     mov rdi, [rbp - BAM_SELF]
     call bytearray_data
@@ -1291,10 +1351,15 @@ DEF_FUNC bytearray_method_insert, BAM_FRAME
     mov rcx, [rbp - BAM_IDX]
     mov rdx, [rbp - BAM_ARG]
     mov [rax + rcx], dl
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
+.bin_unlock_oom:
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
 .bin_oom:
     ; bytearray_resize's 0 now means "a live memoryview blocks this", with a
     ; BufferError already recorded -- raising a MemoryError over it would
@@ -1320,29 +1385,31 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     jg .bpo_argerr
     mov rax, [rdi]
     mov [rbp - BAM_SELF], rax
-    BA_REFUSE_IF_EXPORTED rax, .bpo_fail   ; the memmove below runs before the resize
-    mov rdx, [rax + PyByteArrayObject.ob_size]
-    test rdx, rdx
-    jz .bpo_empty
-    mov rcx, rdx
-    dec rcx                     ; the default is the last byte
+    mov qword [rbp - BAM_IDX], -1
     cmp rsi, 2
-    jne .bpo_have_idx
-    push rdx
+    jne .bpo_lock
     mov rdi, [rdi + 8]
     V_UNPACK rdi, rdx
     call obj_as_index
-    ERR_M1 .bpo_fail            ; leave resets rsp past the push above
-    pop rdx
-    mov rcx, rax
+    ERR_M1 .bpo_fail
+    mov [rbp - BAM_IDX], rax
+.bpo_lock:
+    mov rax, [rbp - BAM_SELF]
+    OBJ_LOCK rax
+    cmp qword [rax + PyByteArrayObject.ob_exports], 0
+    jg .bpo_unlock_exported
+    mov rdx, [rax + PyByteArrayObject.ob_size]
+    test rdx, rdx
+    jz .bpo_unlock_empty
+    mov rcx, [rbp - BAM_IDX]
     test rcx, rcx
     jns .bpo_have_idx
     add rcx, rdx
 .bpo_have_idx:
     test rcx, rcx
-    jl .bpo_range
+    jl .bpo_unlock_range
     cmp rcx, rdx
-    jge .bpo_range
+    jge .bpo_unlock_range
     mov [rbp - BAM_IDX], rcx
     mov [rbp - BAM_OLD], rdx
 
@@ -1350,7 +1417,7 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     call bytearray_data
     mov rcx, [rbp - BAM_IDX]
     movzx edx, byte [rax + rcx]
-    mov [rbp - BAM_ARG], rdx    ; the answer, before the move
+    mov [rbp - BAM_ARG], rdx
     lea rdi, [rax + rcx]
     lea rsi, [rdi + 1]
     mov rdx, [rbp - BAM_OLD]
@@ -1361,13 +1428,22 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     mov rsi, [rbp - BAM_OLD]
     dec rsi
     call bytearray_resize
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     mov rax, [rbp - BAM_ARG]
     V_PACK_I64 rax, rcx
     mov edx, TAG_PTR
     leave
     ret
+.bpo_unlock_exported:
+    OBJ_UNLOCK rax
+    FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .bpo_fail
+.bpo_unlock_empty:
+    OBJ_UNLOCK rax
 .bpo_empty:
     FAIL exc_IndexError_type, "pop from empty bytearray", .bpo_fail
+.bpo_unlock_range:
+    OBJ_UNLOCK rax
 .bpo_range:
     FAIL exc_IndexError_type, "pop index out of range", .bpo_fail
 .bpo_argerr:
@@ -1378,20 +1454,20 @@ DEF_FUNC bytearray_method_pop, BAM_FRAME
     ret
 END_FUNC bytearray_method_pop
 
-;; bytearray.remove(b) -- the first occurrence, or ValueError
-;; Fails: 0
 DEF_FUNC bytearray_method_remove, BAM_FRAME
     cmp rsi, 2
     jne .brm_argerr
     mov rax, [rdi]
     mov [rbp - BAM_SELF], rax
-    BA_REFUSE_IF_EXPORTED rax, .brm_fail   ; the memmove below runs before the resize
     mov rdi, [rdi + 8]
     call bytearray_index_arg
     ERR_M1 .brm_fail
     mov [rbp - BAM_ARG], rax
 
     mov rdi, [rbp - BAM_SELF]
+    OBJ_LOCK rdi
+    cmp qword [rdi + PyByteArrayObject.ob_exports], 0
+    jg .brm_unlock_exported
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAM_OLD], rdx
     call bytearray_data
@@ -1399,7 +1475,7 @@ DEF_FUNC bytearray_method_remove, BAM_FRAME
     xor esi, esi
 .brm_scan:
     cmp rsi, [rbp - BAM_OLD]
-    jge .brm_missing
+    jge .brm_unlock_missing
     movzx edx, byte [rax + rsi]
     cmp rdx, rcx
     je .brm_found
@@ -1418,10 +1494,18 @@ DEF_FUNC bytearray_method_remove, BAM_FRAME
     mov rsi, [rbp - BAM_OLD]
     dec rsi
     call bytearray_resize
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
+.brm_unlock_exported:
+    OBJ_UNLOCK rdi
+    FAIL exc_BufferError_type, "Existing exports of data: object cannot be re-sized", .brm_fail
+.brm_unlock_missing:
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
 .brm_missing:
     FAIL exc_ValueError_type, "value not found in bytearray", .brm_fail
 .brm_argerr:
@@ -1432,27 +1516,31 @@ DEF_FUNC bytearray_method_remove, BAM_FRAME
     ret
 END_FUNC bytearray_method_remove
 
-;; bytearray.clear()
 DEF_FUNC bytearray_method_clear, BAM_FRAME
     mov rdi, [rdi]
+    mov [rbp - BAM_SELF], rdi
+    OBJ_LOCK rdi
     xor esi, esi
     call bytearray_resize
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     test eax, eax
-    jz .bcl_failed              ; the return was ignored outright
+    jz .bcl_failed
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 .bcl_failed:
-    xor eax, eax                ; a NULL Value, with the exception pending
+    xor eax, eax
     xor edx, edx
     leave
     ret
 END_FUNC bytearray_method_clear
 
-;; bytearray.reverse()
 DEF_FUNC bytearray_method_reverse, BAM_FRAME
     mov rdi, [rdi]
+    mov [rbp - BAM_SELF], rdi
+    OBJ_LOCK rdi
     mov rsi, [rdi + PyByteArrayObject.ob_size]
     call bytearray_data
     xor ecx, ecx
@@ -1469,22 +1557,26 @@ DEF_FUNC bytearray_method_reverse, BAM_FRAME
     dec rdx
     jmp .brv_loop
 .brv_done:
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
 END_FUNC bytearray_method_reverse
 
-;; bytearray.copy() -> a new bytearray
 DEF_FUNC bytearray_method_copy, BAM_FRAME
     mov rdi, [rdi]
     mov [rbp - BAM_SELF], rdi
+    OBJ_LOCK rdi
     mov rsi, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAM_SLEN], rsi
     call bytearray_data
     mov rdi, rax
     mov rsi, [rbp - BAM_SLEN]
     call bytearray_new
+    mov rdi, [rbp - BAM_SELF]
+    OBJ_UNLOCK rdi
     mov edx, TAG_PTR
     leave
     ret
@@ -1521,12 +1613,13 @@ DEF_FUNC bytearray_concat, BAO_FRAME
     mov qword [rbp - BAO_OWNED], 0
 
     mov rdi, [rbp - BAO_SELF]
+    OBJ_LOCK rdi
     mov rsi, [rdi + PyByteArrayObject.ob_size]
     add rsi, [rbp - BAO_SLEN]
     xor edi, edi
     call bytearray_new
     test rax, rax
-    jz .bco_fail
+    jz .bco_unlock_fail
     mov [rbp - BAO_OUT], rax
 
     mov rdi, [rbp - BAO_SELF]
@@ -1543,6 +1636,8 @@ DEF_FUNC bytearray_concat, BAO_FRAME
     call ap_memcpy
     pop r8
     pop r8
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
     mov rax, [rbp - BAO_OUT]
     mov rdi, [rax + PyByteArrayObject.ob_bytes]
     add rdi, r8
@@ -1554,6 +1649,10 @@ DEF_FUNC bytearray_concat, BAO_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.bco_unlock_fail:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bco_fail
 .bco_not_impl:
     ; CPython's bytearray_concat RAISES rather than declining, and names
     ; both types: "can't concat NoneType to bytearray".  Declining left the
@@ -1597,6 +1696,7 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     mov rsi, rax                    ; too big to be an index
 
     mov rdi, [rbp - BAO_SELF]
+    OBJ_LOCK rdi
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAO_SLEN], rdx
     mov rax, rsi
@@ -1606,25 +1706,25 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
 .brp_count_ok:
     mov [rbp - BAO_ARG], rax
     imul rax, rdx
-    jo .brp_toobig              ; as sq_inplace_repeat: the COUNT is what
-    cmp rax, 0x10000000         ; OverflowError is for, and it was checked
-    ja .brp_toobig
+    jo .brp_unlock_toobig
+    cmp rax, 0x10000000
+    ja .brp_unlock_toobig
     mov rsi, rax
     xor edi, edi
     call bytearray_new
     test rax, rax
-    jz .brp_fail
+    jz .brp_unlock_fail
     mov [rbp - BAO_OUT], rax
 
     mov rdi, [rbp - BAO_SELF]
     call bytearray_data
-    mov r9, rax                 ; the source
+    mov r9, rax
     mov rax, [rbp - BAO_OUT]
     mov r10, [rax + PyByteArrayObject.ob_bytes]
     xor ecx, ecx
 .brp_loop:
     cmp rcx, [rbp - BAO_ARG]
-    jge .brp_done
+    jge .brp_unlock_done
     mov rax, rcx
     imul rax, [rbp - BAO_SLEN]
     lea rdi, [r10 + rax]
@@ -1641,11 +1741,21 @@ DEF_FUNC bytearray_repeat, BAO_FRAME
     pop rcx
     inc rcx
     jmp .brp_loop
+.brp_unlock_done:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
 .brp_done:
     mov rax, [rbp - BAO_OUT]
     mov edx, TAG_PTR
     leave
     ret
+.brp_unlock_toobig:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
+    jmp .brp_toobig
+.brp_unlock_fail:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
 .brp_fail:
     xor eax, eax
     xor edx, edx
@@ -1682,7 +1792,7 @@ DEF_FUNC bytearray_inplace_concat, BAO_FRAME
     call bytearray_extend_from
     ERR_NULL .bic2_fail
     mov rax, [rbp - BAO_SELF]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1720,49 +1830,35 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     mov rsi, rax
     mov [rbp - BAO_ARG], rsi
     mov rdi, [rbp - BAO_SELF]
+    OBJ_LOCK rdi
     mov rdx, [rdi + PyByteArrayObject.ob_size]
     mov [rbp - BAO_SLEN], rdx
     test rsi, rsi
     jg .bir_grow
-    ; Zero or negative empties it, as it does for a list.
     mov rdi, [rbp - BAO_SELF]
     xor esi, esi
     call bytearray_resize
-    ; It refuses when a view is out, and the answer was not looked at: there
-    ; used to be an up-front test instead, made BEFORE the count was taken --
-    ; and the count's __index__ is Python, which can take a view of this very
-    ; bytearray.  `b *= V()` then answered b with the BufferError still
-    ; pending.  Asking resize also lets `b *= 1` through with a view out, as
-    ; CPython does: nothing changes size.
     test eax, eax
-    jz .bir_fail
-    jmp .bir_done
+    jz .bir_unlock_fail
+    jmp .bir_unlock_done
 .bir_grow:
     mov rax, rsi
     imul rax, rdx
-    ; The two checks sq_repeat has and this did not.  bytearray_resize hands
-    ; the size to ap_malloc, which does not answer failure -- it calls
-    ; fatal_error -- so `bytearray(b"ab") *= 2**40` printed "Fatal: out of
-    ; memory" and ended the process where every other repetition in the tree
-    ; raises MemoryError.
-    ; A product that overflows is a MemoryError, not an OverflowError:
-    ; CPython keeps OverflowError for a COUNT that will not fit an index,
-    ; which obj_as_index above has already refused.
-    jo .bir_toobig
+    jo .bir_unlock_toobig
     cmp rax, 0x10000000
-    ja .bir_toobig
+    ja .bir_unlock_toobig
     mov rdi, [rbp - BAO_SELF]
     mov rsi, rax
     call bytearray_resize
     test eax, eax
-    jz .bir_fail
+    jz .bir_unlock_fail
     mov rdi, [rbp - BAO_SELF]
     call bytearray_data
     mov r10, rax
-    mov ecx, 1                  ; copy 0 is already in place
+    mov ecx, 1
 .bir_loop:
     cmp rcx, [rbp - BAO_ARG]
-    jge .bir_done
+    jge .bir_unlock_done
     mov rax, rcx
     imul rax, [rbp - BAO_SLEN]
     lea rdi, [r10 + rax]
@@ -1775,12 +1871,22 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     pop rcx
     inc rcx
     jmp .bir_loop
+.bir_unlock_done:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
 .bir_done:
     mov rax, [rbp - BAO_SELF]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
+.bir_unlock_toobig:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
+    jmp .bir_toobig
+.bir_unlock_fail:
+    mov rdi, [rbp - BAO_SELF]
+    OBJ_UNLOCK rdi
 .bir_fail:
     xor eax, eax
     xor edx, edx
@@ -1810,7 +1916,9 @@ DEF_FUNC_BARE bytearray_export_acquired
     lea rax, [rel bytearray_type]
     cmp [rdi + PyObject.ob_type], rax
     jne .bea_out
+    OBJ_LOCK rdi
     inc qword [rdi + PyByteArrayObject.ob_exports]
+    OBJ_UNLOCK rdi
 .bea_out:
     ret
 END_FUNC bytearray_export_acquired
@@ -1823,9 +1931,12 @@ DEF_FUNC_BARE bytearray_export_released
     lea rax, [rel bytearray_type]
     cmp [rdi + PyObject.ob_type], rax
     jne .ber_out
+    OBJ_LOCK rdi
     cmp qword [rdi + PyByteArrayObject.ob_exports], 0
-    jle .ber_out
+    jle .ber_unlock_out
     dec qword [rdi + PyByteArrayObject.ob_exports]
+.ber_unlock_out:
+    OBJ_UNLOCK rdi
 .ber_out:
     ret
 END_FUNC bytearray_export_released
@@ -1870,33 +1981,38 @@ DEF_FUNC bytearray_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov edi, PyBytesIterObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytearray_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyBytesIterObject.it_seq], rbx
     mov qword [rax + PyBytesIterObject.it_index], 0
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     pop rbx
     leave
     ret
 END_FUNC bytearray_tp_iter
 
 DEF_FUNC_BARE bytearray_iter_next
-    mov rax, [rdi + PyBytesIterObject.it_seq]
-    test rax, rax
-    jz .exhausted               ; already dropped, or cleared by the collector
+    mov r11, [rdi + PyBytesIterObject.it_seq]
+    test r11, r11
+    jz .exhausted
+    OBJ_LOCK r11
     mov rcx, [rdi + PyBytesIterObject.it_index]
-    cmp rcx, [rax + PyByteArrayObject.ob_size]
-    jge .exhausted_mark
-    mov rax, [rax + PyByteArrayObject.ob_bytes]
+    cmp rcx, [r11 + PyByteArrayObject.ob_size]
+    jge .unlock_exhausted_mark
+    mov rax, [r11 + PyByteArrayObject.ob_bytes]
     movzx eax, byte [rax + rcx]
     add rax, [rel v_int_bias]
     inc qword [rdi + PyBytesIterObject.it_index]
+    OBJ_UNLOCK r11
     ret
+.unlock_exhausted_mark:
+    OBJ_UNLOCK r11
 .exhausted_mark:
-    ; Drop the bytearray at exhaustion, as bytes_iter_next does.
-    mov rax, [rdi + PyBytesIterObject.it_seq]
-    mov qword [rdi + PyBytesIterObject.it_seq], 0
+    xor eax, eax
+    xchg [rdi + PyBytesIterObject.it_seq], rax
+    test rax, rax
+    jz .exhausted
     push rdi
     mov rdi, rax
     call obj_decref
@@ -1907,7 +2023,7 @@ DEF_FUNC_BARE bytearray_iter_next
 END_FUNC bytearray_iter_next
 
 DEF_FUNC bytearray_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     leave
     ret
@@ -1970,7 +2086,8 @@ bytearray_number_methods:
 align 8
 global bytearray_type
 bytearray_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ba_name_str                  ; tp_name
     dq PyByteArrayObject_size       ; tp_basicsize (the data is out of line)
@@ -2018,7 +2135,8 @@ mv_iter_name_str: db "memory_iterator", 0
 align 8
 global memoryview_iter_type
 memoryview_iter_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq mv_iter_name_str             ; tp_name
     dq PyBytesIterObject_size       ; tp_basicsize
@@ -2051,7 +2169,8 @@ memoryview_iter_type:
 align 8
 global bytearray_iter_type
 bytearray_iter_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ba_iter_name_str             ; tp_name
     dq PyBytesIterObject_size       ; tp_basicsize

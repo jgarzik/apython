@@ -71,8 +71,33 @@ extern bool_true
 extern bool_false
 extern none_singleton
 extern v_int_bias
+extern obj_try_incref
+
+%macro WR_LOCK 0
+    RT_LOCK_GATED weakref_lock
+%endmacro
+%macro WR_UNLOCK 0
+    RT_UNLOCK_GATED weakref_lock
+%endmacro
+
+WR_BLOOM_SIZE equ 2048
+WR_BLOOM_MASK equ (WR_BLOOM_SIZE - 1)
+
+section .bss
+alignb 64
+weakref_bucket_cnt: resd WR_BLOOM_SIZE
 
 section .text
+
+;; ============================================================================
+;; weakref_reset_after_fork() -> nothing
+;; Reset weakref_lock in a forked child.
+;; ============================================================================
+global weakref_reset_after_fork
+DEF_FUNC_BARE weakref_reset_after_fork
+    mov dword [rel weakref_lock], 0
+    ret
+END_FUNC weakref_reset_after_fork
 
 ;; ============================================================================
 ;; weakref_table_get() -> rax = the side table, creating it on first use
@@ -101,6 +126,15 @@ DEF_FUNC_LOCAL weakref_chain, 8            ; 1 pushes, so rsp is 16-aligned
     mov rsi, rbx
     add rsi, [rel v_int_bias]   ; a user address always fits an int immediate
     call dict_get_str
+    test rax, rax
+    jz .none
+    ; Drop dict_get_str's extra ref under weakref_lock (table still owns >=1).
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop rbx
     leave
     ret
@@ -134,85 +168,130 @@ END_FUNC weakref_chain
 ;; Shaped as a tp_getattr because it is registered as a GS_NAMED getset on every
 ;; class that adds weak-referenceability; the name is not read.
 ;; ============================================================================
-WSG_ANY   equ 8             ; the first live entry, whatever its callback
+WSG_LIST  equ 8
 WSG_FRAME equ 24            ; + 1 push = 32, 16-aligned
 global weakref_slot_get
 DEF_FUNC weakref_slot_get, WSG_FRAME
     push rbx
-    mov qword [rbp - WSG_ANY], 0
     V_TEST_PTR rdi, rax
     ja .wsg_none                ; an immediate has no weak references
     test rdi, rdi
     jz .wsg_none
+    mov rbx, rdi
+    WR_LOCK
+    mov rdi, rbx
     call weakref_chain
     test rax, rax
-    jz .wsg_none
+    jz .wsg_none_unlock
+    mov [rbp - WSG_LIST], rax
+    ; Pass 1: prefer a live callback-free weakref (CPython's head).
     mov rcx, [rax + PyListObject.ob_size]
     mov rdx, [rax + PyListObject.ob_item]
     xor r8d, r8d
-.wsg_scan:
+.wsg_pass1:
     cmp r8, rcx
-    jge .wsg_scanned
+    jge .wsg_pass2_init
     mov rbx, [rdx + r8*8]
     test rbx, rbx
-    jz .wsg_next                ; a hole ref_clear left behind
-    cmp qword [rbp - WSG_ANY], 0
-    jne .wsg_have_any
-    mov [rbp - WSG_ANY], rbx
-.wsg_have_any:
+    jz .wsg_p1_next
     cmp qword [rbx + PyWeakRefObject.wr_callback], 0
-    je .wsg_found               ; callback-free: CPython's head
-.wsg_next:
-    inc r8
-    jmp .wsg_scan
-.wsg_scanned:
-    mov rbx, [rbp - WSG_ANY]
-    test rbx, rbx
-    jz .wsg_none
-.wsg_found:
+    jne .wsg_p1_next
+    push rcx
+    push rdx
+    push r8
+    sub rsp, 8
     mov rdi, rbx
-    call obj_incref
+    call obj_try_incref
+    add rsp, 8
+    pop r8
+    pop rdx
+    pop rcx
+    test eax, eax
+    jnz .wsg_found
+.wsg_p1_next:
+    inc r8
+    jmp .wsg_pass1
+
+.wsg_pass2_init:
+    ; Pass 2: first live entry with any callback.
+    mov rax, [rbp - WSG_LIST]
+    mov rcx, [rax + PyListObject.ob_size]
+    mov rdx, [rax + PyListObject.ob_item]
+    xor r8d, r8d
+.wsg_pass2:
+    cmp r8, rcx
+    jge .wsg_none_unlock
+    mov rbx, [rdx + r8*8]
+    test rbx, rbx
+    jz .wsg_p2_next
+    push rcx
+    push rdx
+    push r8
+    sub rsp, 8
+    mov rdi, rbx
+    call obj_try_incref
+    add rsp, 8
+    pop r8
+    pop rdx
+    pop rcx
+    test eax, eax
+    jnz .wsg_found
+.wsg_p2_next:
+    inc r8
+    jmp .wsg_pass2
+
+.wsg_found:
+    WR_UNLOCK
     mov rax, rbx
     pop rbx
     leave
     ret
+.wsg_none_unlock:
+    WR_UNLOCK
 .wsg_none:
-    lea rbx, [rel none_singleton]
-    mov rdi, rbx
-    call obj_incref
-    mov rax, rbx
+    lea rax, [rel none_singleton]
     pop rbx
     leave
     ret
 END_FUNC weakref_slot_get
 
 ;; ============================================================================
-;; weakref_clear_for(rdi = object about to be freed)
+;; weakref_detach_for(rdi = object about to be freed or collected)
+;;   -> rax = owned PyListObject* of pinned weakrefs (wr_object cleared), or 0
 ;;
-;; Called from obj_dealloc, and only when the table is non-empty.  Every
-;; reference to the object is emptied before any callback runs, so a callback
-;; that looks at the reference sees a dead one, as CPython guarantees.
+;; Pure leaf half of weakref_clear_for: acquires weakref_lock, pins live
+;; weakrefs via obj_try_incref, clears wr_object, removes the weakref_table
+;; entry, and unlocks.  Safe to call inside STW (never runs Python callbacks).
 ;; ============================================================================
 WC_OBJ   equ 8
 WC_LIST  equ 16
 WC_IDX   equ 24
 WC_EXC   equ 32
 WC_FRAME equ 48             ; + 2 pushes = 64
-DEF_FUNC weakref_clear_for, WC_FRAME
+global weakref_detach_for
+DEF_FUNC weakref_detach_for, WC_FRAME
     push rbx
     push r12
+    ; Lock-free pre-filter: 99.9% of freed objects have no weakrefs in their
+    ; hash bucket, avoiding global weakref_lock contention on every obj_dealloc.
+    mov rax, rdi
+    shr rax, 4
+    and eax, WR_BLOOM_MASK
+    lea rcx, [rel weakref_bucket_cnt]
+    cmp dword [rcx + rax*4], 0
+    je .wdf_fast_none
+
     mov [rbp - WC_OBJ], rdi
 
+    WR_LOCK
+    mov rdi, [rbp - WC_OBJ]
     call weakref_chain
     test rax, rax
-    jz .done
+    jz .wdf_none
     mov [rbp - WC_LIST], rax
     mov rdi, rax
     call obj_incref             ; hold it past the table entry going away
 
-    ; ...and hold every reference IN it, because the chain's entries are
-    ; borrowed and a callback may drop the last reference to a later one.
-    ; CPython builds a tuple of them for the same reason.
     mov rax, [rbp - WC_LIST]
     mov rbx, [rax + PyListObject.ob_size]
     mov r12, [rax + PyListObject.ob_item]
@@ -223,43 +302,66 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     mov rdi, [r12 + rcx*8]
     test rdi, rdi
     jz .hold_next
-    inc qword [rdi + PyObject.ob_refcnt]
+    push rcx
+    push rdi
+    call obj_try_incref
+    pop rdi
+    pop rcx
+    test eax, eax
+    jz .hold_dying
+    mov qword [rdi + PyWeakRefObject.wr_object], 0
+    jmp .hold_next
+.hold_dying:
+    mov qword [r12 + rcx*8], 0
 .hold_next:
     inc rcx
     jmp .hold_loop
 .hold_done:
 
-    ; Empty every reference first.
-    mov rax, [rbp - WC_LIST]
-    mov rbx, [rax + PyListObject.ob_size]
-    mov r12, [rax + PyListObject.ob_item]
-    xor ecx, ecx
-.clear_loop:
-    cmp rcx, rbx
-    jge .clear_done
-    mov rdx, [r12 + rcx*8]
-    test rdx, rdx
-    jz .clear_next
-    mov qword [rdx + PyWeakRefObject.wr_object], 0
-.clear_next:
-    inc rcx
-    jmp .clear_loop
-.clear_done:
-
-    ; Drop the table entry.  That releases the table's references, so a
-    ; reference nobody else holds is freed here.
     mov rdi, [rel weakref_table]
     test rdi, rdi
     jz .no_entry
     mov rsi, [rbp - WC_OBJ]
     add rsi, [rel v_int_bias]
     call dict_del             ; err: an int key in a table of ints; its entry was found above
+    mov rax, [rbp - WC_OBJ]
+    shr rax, 4
+    and eax, WR_BLOOM_MASK
+    lea rcx, [rel weakref_bucket_cnt]
+    lock dec dword [rcx + rax*4]
     mov rax, [rel weakref_table]
     mov rax, [rax + PyDictObject.ob_size]
     mov [rel weakref_live], rax
 .no_entry:
+    WR_UNLOCK
+    mov rax, [rbp - WC_LIST]
+    pop r12
+    pop rbx
+    leave
+    ret
+.wdf_none:
+    WR_UNLOCK
+.wdf_fast_none:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC weakref_detach_for
 
-    ; Then the callbacks, on whichever references are still alive.
+;; ============================================================================
+;; weakref_run_callbacks(rdi = WC_LIST from weakref_detach_for) -> nothing
+;;
+;; Invokes each weakref's callback strictly outside weakref_lock and STW,
+;; then releases every pinned weakref and the list itself.
+;; ============================================================================
+global weakref_run_callbacks
+DEF_FUNC weakref_run_callbacks, WC_FRAME
+    push rbx
+    push r12
+    test rdi, rdi
+    jz .wrc_done
+    mov [rbp - WC_LIST], rdi
     mov qword [rbp - WC_IDX], 0
 .cb_loop:
     mov rax, [rbp - WC_LIST]
@@ -279,15 +381,9 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     test rax, rax
     jz .cb_loop
 
-    ; A callback that raises has no caller to hand the exception to; report
-    ; nothing and put back whatever was in flight, as __del__ does.  It is
-    ; FETCHED, not snapshotted: the referent may be dying under an unwind,
-    ; and a callback run with that exception still pending has every "-1 AND
-    ; an exception pending" answer inside it read as a failure -- importlib's
-    ; module-lock callback takes a lock with a timeout of -1.
     DUNDER_EXC_SAVE [rbp - WC_EXC]
     mov qword [gs:ThreadState.current_exception], 0
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     sub rsp, 16
     mov [rsp], rbx
     mov rdi, r12
@@ -300,9 +396,8 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jz .cb_no_result
     DECREF_VAL rax, rdx
 .cb_no_result:
-    dec qword [rbx + PyObject.ob_refcnt]
-    ; Whatever the callback left pending is dropped, and the fetched
-    ; reference moves back.
+    mov rdi, rbx
+    call obj_decref
     mov rdi, [gs:ThreadState.current_exception]
     mov rax, [rbp - WC_EXC]
     mov [gs:ThreadState.current_exception], rax
@@ -312,9 +407,6 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jmp .cb_loop
 
 .cb_done:
-    ; Give back what the hold loop took.  wr_object is zero on all of them by
-    ; now, so a ref that dies here does not go looking for a chain that the
-    ; table no longer has.
     mov rax, [rbp - WC_LIST]
     mov rbx, [rax + PyListObject.ob_size]
     xor r12d, r12d
@@ -326,10 +418,6 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     mov rdi, [rax + r12*8]
     test rdi, rdi
     jz .rel_next
-    ; Zeroed BEFORE the release: the list's own dealloc releases every item it
-    ; still holds, and these are borrowed -- the chain gave its reference back
-    ; when it took them.  Emptying the slot is what keeps the two from
-    ; disagreeing.
     mov qword [rax + r12*8], 0
     call obj_decref
 .rel_next:
@@ -338,9 +426,23 @@ DEF_FUNC weakref_clear_for, WC_FRAME
 .rel_done:
     mov rdi, [rbp - WC_LIST]
     call obj_decref
-.done:
+.wrc_done:
     pop r12
     pop rbx
+    leave
+    ret
+END_FUNC weakref_run_callbacks
+
+;; ============================================================================
+;; weakref_clear_for(rdi = object about to be freed) -> nothing
+;; ============================================================================
+DEF_FUNC weakref_clear_for
+    call weakref_detach_for
+    test rax, rax
+    jz .wcf_done
+    mov rdi, rax
+    call weakref_run_callbacks
+.wcf_done:
     leave
     ret
 END_FUNC weakref_clear_for
@@ -372,20 +474,20 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov [rbp - WM_OBJ], rsi
     mov [rbp - WM_CB], rdx
 
-    ; Without a callback the reference is shared, so `ref(x) is ref(x)`, as
-    ; CPython does.  With one it must be distinct: each callback fires once.
+    ; Without a callback the reference is shared, so `ref(x) is ref(x)`.
     test rdx, rdx
     jnz .fresh
-    mov rdi, rsi
+    WR_LOCK
+    mov rdi, [rbp - WM_OBJ]
     call weakref_chain
     test rax, rax
-    jz .fresh
+    jz .reuse_unlock
     mov rcx, [rax + PyListObject.ob_size]
     mov rdx, [rax + PyListObject.ob_item]
     xor r8d, r8d
 .reuse_scan:
     cmp r8, rcx
-    jge .fresh
+    jge .reuse_unlock
     mov rbx, [rdx + r8*8]
     test rbx, rbx
     jz .reuse_next
@@ -394,8 +496,19 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov rax, [rbx + PyObject.ob_type]
     cmp rax, [rbp - WM_TYPE]
     jne .reuse_next
+    push rcx
+    push rdx
+    push r8
+    sub rsp, 8
     mov rdi, rbx
-    call obj_incref
+    call obj_try_incref
+    add rsp, 8
+    pop r8
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .reuse_next
+    WR_UNLOCK
     mov rax, rbx
     pop rbx
     leave
@@ -403,6 +516,8 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
 .reuse_next:
     inc r8
     jmp .reuse_scan
+.reuse_unlock:
+    WR_UNLOCK
 
 .fresh:
     ; A SUBCLASS is a heaptype: it carries TYPE_FLAG_HAVE_GC, so its instance
@@ -435,10 +550,10 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
 .size_ok:
     call ap_malloc
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     mov rax, [rbp - WM_TYPE]
     mov [rbx + PyObject.ob_type], rax
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 
 .fields:
     mov rax, [rbp - WM_OBJ]
@@ -460,7 +575,58 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     mov qword [rbx + rcx], 0
 .no_dict:
 
-    ; Register in the side table.
+    ; Register in the side table under weakref_lock.
+    WR_LOCK
+    ; If callback-free, re-check in case another thread raced and registered
+    ; a shared weakref while we allocated.
+    cmp qword [rbp - WM_CB], 0
+    jne .reg_insert
+    mov rdi, [rbp - WM_OBJ]
+    call weakref_chain
+    test rax, rax
+    jz .reg_insert
+    mov rcx, [rax + PyListObject.ob_size]
+    mov rdx, [rax + PyListObject.ob_item]
+    xor r8d, r8d
+.reg_recheck:
+    cmp r8, rcx
+    jge .reg_insert
+    mov rdi, [rdx + r8*8]
+    test rdi, rdi
+    jz .reg_recheck_next
+    cmp qword [rdi + PyWeakRefObject.wr_callback], 0
+    jne .reg_recheck_next
+    mov r9, [rdi + PyObject.ob_type]
+    cmp r9, [rbp - WM_TYPE]
+    jne .reg_recheck_next
+    push rcx
+    push rdx
+    push r8
+    push rdi
+    call obj_try_incref
+    pop rdi
+    pop r8
+    pop rdx
+    pop rcx
+    test eax, eax
+    jz .reg_recheck_next
+    ; Another thread won the race: drop our unused allocation outside lock.
+    mov qword [rbx + PyWeakRefObject.wr_object], 0
+    push rdi
+    sub rsp, 8
+    WR_UNLOCK
+    mov rdi, rbx
+    call obj_decref
+    add rsp, 8
+    pop rax
+    pop rbx
+    leave
+    ret
+.reg_recheck_next:
+    inc r8
+    jmp .reg_recheck
+
+.reg_insert:
     call weakref_table_get
     mov [rbp - WM_REF], rax
     mov rdi, rax
@@ -468,46 +634,44 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     add rsi, [rel v_int_bias]
     call dict_get_str
     test rax, rax
-    jnz .have_chain
-    xor edi, edi
-    call list_new
-    ; The chain is NOT collector-tracked.  Its entries are borrowed, and
-    ; gc_visit_decref walks a tracked list's items and counts a reference for
-    ; each -- so every weak reference in it looked one reference short of
-    ; reachable, and an explicit gc.collect() freed objects a live frame was
-    ; still holding.  Nothing here can be part of a cycle: the list holds no
-    ; references at all, and the table that holds the list is tracked.
+    jz .mk_new_chain
     push rax
+    sub rsp, 8
     mov rdi, rax
-    extern gc_untrack
-    call gc_untrack
+    call obj_decref             ; table still holds ref under weakref_lock
+    add rsp, 8
     pop rax
+    jmp .have_chain
+.mk_new_chain:
+    xor edi, edi
+    extern list_new_untracked
+    call list_new_untracked
     push rax
     mov rdi, [rbp - WM_REF]
     mov rsi, [rbp - WM_OBJ]
     add rsi, [rel v_int_bias]
     mov rdx, [rsp]
     call dict_set_str
+    mov rax, [rbp - WM_OBJ]
+    shr rax, 4
+    and eax, WR_BLOOM_MASK
+    lea rcx, [rel weakref_bucket_cnt]
+    lock inc dword [rcx + rax*4]
     pop rax
     push rax
     mov rdi, rax
-    call obj_decref             ; the table holds it now
+    call obj_decref             ; the table holds it now (refcnt >= 2)
     pop rax
 .have_chain:
     mov rdi, rax
     mov rsi, rbx
     call list_append          ; err: a chain lives in the side table and is never handed to Python
-    ; The chain holds a BORROWED reference.  list_append took one, and it is
-    ; given straight back: an owned one meant a ref nobody else held stayed
-    ; alive for as long as its referent did, so `r = ref(c, cb); del r; del c`
-    ; still ran the callback -- which CPython does not, because dropping the
-    ; last reference to a ref takes its callback with it.  ref_clear is what
-    ; keeps the slot from dangling.
     mov rdi, rbx
-    call obj_decref
+    call obj_decref             ; undo list_append's ref (refcnt >= 2)
     mov rax, [rel weakref_table]
     mov rax, [rax + PyDictObject.ob_size]
     mov [rel weakref_live], rax
+    WR_UNLOCK
 
     mov rax, rbx
     pop rbx
@@ -534,34 +698,62 @@ DEF_FUNC_LOCAL ref_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 END_FUNC ref_dealloc
 
-; Calling a reference yields the referent, or None once it is gone.
-DEF_FUNC ref_deref
-    mov rax, [rdi + PyWeakRefObject.wr_object]
+; Calling a reference yields an owned referent (via obj_try_incref under
+; weakref_lock), or None once it is gone or dying.
+DEF_FUNC ref_deref, 8               ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    WR_LOCK
+    mov rax, [rbx + PyWeakRefObject.wr_object]
     test rax, rax
-    jz .dead
-    inc qword [rax + PyObject.ob_refcnt]
+    jz .dead_unlock
+    mov rbx, rax
+    mov rdi, rax
+    call obj_try_incref
+    test eax, eax
+    jz .dead_unlock
+    WR_UNLOCK
+    mov rax, rbx
     mov edx, TAG_PTR
+    pop rbx
     leave
     V_PACK rax, rdx
     ret
-.dead:
+.dead_unlock:
+    WR_UNLOCK
     RET_NONE
+    pop rbx
     leave
     V_PACK rax, rdx
     ret
 END_FUNC ref_deref
 
 RR_SELF  equ 8
-RR_BUF   equ 1040
-RR_FRAME equ 1056           ; + 2 pushes = 1072
+RR_OBJ   equ 16
+RR_BUF   equ 1048
+RR_FRAME equ 1056           ; + 2 pushes = 1072, 16-aligned
 DEF_FUNC_LOCAL ref_repr, RR_FRAME
     push rbx
     push r12
     mov [rbp - RR_SELF], rdi
+    mov qword [rbp - RR_OBJ], 0
+    WR_LOCK
+    mov rax, [rbp - RR_SELF]
+    mov rax, [rax + PyWeakRefObject.wr_object]
+    test rax, rax
+    jz .rr_unlock
+    mov rbx, rax
+    mov rdi, rax
+    call obj_try_incref
+    test eax, eax
+    jz .rr_unlock
+    mov [rbp - RR_OBJ], rbx
+.rr_unlock:
+    WR_UNLOCK
+
     lea rbx, [rbp - RR_BUF]
     xor r12d, r12d
-    mov rax, [rdi + PyWeakRefObject.wr_object]
-    test rax, rax
+    cmp qword [rbp - RR_OBJ], 0
     jz .dead
     CSTRING rsi, "<weakref at 0x0; to '"
     jmp .copy_prefix
@@ -576,8 +768,7 @@ DEF_FUNC_LOCAL ref_repr, RR_FRAME
     inc r12
     jmp .copy_prefix
 .prefix_done:
-    mov rax, [rbp - RR_SELF]
-    mov rax, [rax + PyWeakRefObject.wr_object]
+    mov rax, [rbp - RR_OBJ]
     test rax, rax
     jz .finish
     mov rsi, [rax + PyObject.ob_type]
@@ -586,7 +777,7 @@ DEF_FUNC_LOCAL ref_repr, RR_FRAME
     movzx eax, byte [rsi]
     test al, al
     jz .name_done
-    cmp r12, RR_BUF - 8
+    cmp r12, RR_BUF - 16
     jae .name_done
     inc rsi
     mov [rbx + r12], al
@@ -597,6 +788,11 @@ DEF_FUNC_LOCAL ref_repr, RR_FRAME
     mov byte [rbx + r12 + 1], '>'
     add r12, 2
 .finish:
+    mov rdi, [rbp - RR_OBJ]
+    test rdi, rdi
+    jz .rr_make
+    call obj_decref
+.rr_make:
     mov rdi, rbx
     mov rsi, r12
     call str_new_heap
@@ -608,26 +804,43 @@ DEF_FUNC_LOCAL ref_repr, RR_FRAME
 END_FUNC ref_repr
 
 ; A live reference hashes as its referent and caches the result, so it keeps
-; the same hash after the referent dies -- which is what lets a WeakSet find
-; and discard a dead entry.
-DEF_FUNC_LOCAL ref_hash, 8            ; 1 pushes, so rsp is 16-aligned
+; the same hash after the referent dies.
+DEF_FUNC_LOCAL ref_hash
     push rbx
+    push r12
     mov rbx, rdi
     mov rax, [rbx + PyWeakRefObject.wr_hash]
     cmp rax, -1
     jne .cached
-    mov rdi, [rbx + PyWeakRefObject.wr_object]
-    test rdi, rdi
-    jz .dead
+    WR_LOCK
+    mov r12, [rbx + PyWeakRefObject.wr_object]
+    test r12, r12
+    jz .dead_unlock
+    mov rdi, r12
+    call obj_try_incref
+    test eax, eax
+    jz .dead_unlock
+    WR_UNLOCK
+    mov rdi, r12
     call obj_hash               ; err: a -1 is stored as "not cached" and handed up
     mov [rbx + PyWeakRefObject.wr_hash], rax
+    push rax
+    sub rsp, 8
+    mov rdi, r12
+    call obj_decref
+    add rsp, 8
+    pop rax
 .cached:
+    pop r12
     pop rbx
     leave
     ret
+.dead_unlock:
+    WR_UNLOCK
 .dead:
     SET_EXC exc_TypeError_type, "weak object has gone away"
     mov rax, -1                 ; tp_hash: -1 with the exception pending
+    pop r12
     pop rbx
     leave
     ret
@@ -638,8 +851,12 @@ END_FUNC ref_hash
 RC_SELF  equ 8
 RC_OTHER equ 16
 RC_OP    equ 24
-RC_FRAME equ 32             ; + 0 pushes = 32
+RC_O1    equ 32
+RC_O2    equ 40
+RC_FRAME equ 48             ; + 2 pushes = 64, 16-aligned
 DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
+    push rbx
+    push r12
     mov [rbp - RC_SELF], rdi
     mov [rbp - RC_OTHER], rsi
     mov [rbp - RC_OP], rdx
@@ -659,16 +876,57 @@ DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
     mov rax, [rsi + PyObject.ob_type]
     cmp rax, [rdi + PyObject.ob_type]
     jne .not_equal
-    mov rdi, [rdi + PyWeakRefObject.wr_object]
-    mov rsi, [rsi + PyWeakRefObject.wr_object]
-    test rdi, rdi
-    jz .by_identity
-    test rsi, rsi
-    jz .by_identity
-    call obj_richcompare_bool
+
+    mov qword [rbp - RC_O1], 0
+    mov qword [rbp - RC_O2], 0
+    WR_LOCK
+    mov rax, [rbp - RC_SELF]
+    mov rbx, [rax + PyWeakRefObject.wr_object]
+    test rbx, rbx
+    jz .rc_unlock
+    mov rdi, rbx
+    call obj_try_incref
     test eax, eax
+    jz .rc_unlock
+    mov [rbp - RC_O1], rbx
+    mov rax, [rbp - RC_OTHER]
+    mov r12, [rax + PyWeakRefObject.wr_object]
+    test r12, r12
+    jz .rc_unlock
+    mov rdi, r12
+    call obj_try_incref
+    test eax, eax
+    jz .rc_unlock
+    mov [rbp - RC_O2], r12
+.rc_unlock:
+    WR_UNLOCK
+
+    mov rdi, [rbp - RC_O1]
+    mov rsi, [rbp - RC_O2]
+    test rdi, rdi
+    jz .rc_release_ident
+    test rsi, rsi
+    jz .rc_release_ident
+    call obj_richcompare_bool
+    mov ebx, eax
+    mov rdi, [rbp - RC_O1]
+    call obj_decref
+    mov rdi, [rbp - RC_O2]
+    call obj_decref
+    test ebx, ebx
     jz .not_equal
     jmp .equal
+
+.rc_release_ident:
+    mov rdi, [rbp - RC_O1]
+    test rdi, rdi
+    jz .rc_rel2
+    call obj_decref
+.rc_rel2:
+    mov rdi, [rbp - RC_O2]
+    test rdi, rdi
+    jz .by_identity
+    call obj_decref
 .by_identity:
     mov rax, [rbp - RC_SELF]
     cmp rax, [rbp - RC_OTHER]
@@ -686,8 +944,10 @@ DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
 .false:
     lea rax, [rel bool_false]
 .out_ptr:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
+    pop r12
+    pop rbx
     leave
     V_PACK rax, rdx
     ret
@@ -809,9 +1069,9 @@ DEF_FUNC weakref_referenceable, WRR_FRAME
 
     ; A __weakref__ named in __slots__ settles it, at any level.
     lea rsi, [rel wrr_weakref_name]
-    extern dunder_lookup
-    call dunder_lookup
-    test rax, rax
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jnz .wrr_yes
 
     ; Walk down to the first static ancestor, noting whether any heaptype on
@@ -1059,14 +1319,16 @@ END_FUNC ref_traverse
 ;; The other half of the pair above.  Zeroing as it goes is what keeps
 ;; descr_sub_dealloc from releasing the callback a second time.
 ;; ============================================================================
-DEF_FUNC ref_clear, 8               ; 1 push, so rsp is 16-aligned
+DEF_FUNC ref_clear
     push rbx
+    push r12
     mov rbx, rdi
 
-    ; Leave the referent's chain, whose entries are borrowed.  A NULL
-    ; wr_object means the referent has already gone and taken the whole entry
-    ; with it, so there is nothing to leave.
+    ; Unlink from referent's chain and detach callback under weakref_lock,
+    ; then release callback strictly outside the lock.
+    WR_LOCK
     mov rdi, [rbx + PyWeakRefObject.wr_object]
+    mov qword [rbx + PyWeakRefObject.wr_object], 0
     test rdi, rdi
     jz .rc_unlinked
     call weakref_chain
@@ -1085,13 +1347,16 @@ DEF_FUNC ref_clear, 8               ; 1 push, so rsp is 16-aligned
 .rc_hit:
     mov qword [rdx + r8*8], 0
 .rc_unlinked:
-
-    mov rdi, [rbx + PyWeakRefObject.wr_callback]
+    mov r12, [rbx + PyWeakRefObject.wr_callback]
     mov qword [rbx + PyWeakRefObject.wr_callback], 0
-    test rdi, rdi
+    WR_UNLOCK
+
+    test r12, r12
     jz .rc_done
+    mov rdi, r12
     call obj_decref
 .rc_done:
+    pop r12
     pop rbx
     leave
     ret
@@ -1100,65 +1365,100 @@ END_FUNC ref_clear
 ;; ============================================================================
 ;; proxy objects: the same structure, forwarding attribute access
 ;; ============================================================================
-;; proxy_referent(rdi = the proxy) -> rax = its referent, borrowed
+;; proxy_referent(rdi = the proxy) -> rax = OWNED referent, or 0
 ;; Fails: 0
-DEF_FUNC_LOCAL proxy_referent
-    mov rax, [rdi + PyWeakRefObject.wr_object]
+DEF_FUNC_LOCAL proxy_referent, 8        ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    WR_LOCK
+    mov rax, [rbx + PyWeakRefObject.wr_object]
     test rax, rax
-    jz .dead
+    jz .dead_unlock
+    mov rbx, rax
+    mov rdi, rax
+    call obj_try_incref
+    test eax, eax
+    jz .dead_unlock
+    WR_UNLOCK
+    mov rax, rbx
+    pop rbx
     leave
     ret
-.dead:
+.dead_unlock:
+    WR_UNLOCK
     SET_EXC exc_ReferenceError_type, "weakly-referenced object no longer exists"
+    xor eax, eax
+    pop rbx
     leave
     ret
 END_FUNC proxy_referent
 
-DEF_FUNC proxy_getattr, 8            ; 1 pushes, so rsp is 16-aligned
+DEF_FUNC proxy_getattr
     push rbx
+    push r12
     mov rbx, rsi
     call proxy_referent
     ERR_NULL .none              ; 0 with the ReferenceError pending
-    mov rdi, rax
+    mov r12, rax                ; owned referent
+    mov rdi, r12
     mov rsi, rbx
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_getattr]
     test rax, rax
     jz .via_dict
     call rax
+    push rax
+    push rdx
+    mov rdi, r12
+    call obj_decref
+    pop rdx
+    pop rax
+    pop r12
     pop rbx
     leave
     ret
 .via_dict:
-    mov rax, [rdi + PyObject.ob_type]
+    mov rax, [r12 + PyObject.ob_type]
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
-    jz .none
+    jz .none_rel
     mov rsi, rbx
     call dict_get_mro
     test rax, rax
-    jz .none
-    INCREF_V rax, rcx
+    jz .none_rel
+    push rax
+    sub rsp, 8
+    mov rdi, r12
+    call obj_decref
+    add rsp, 8
+    pop rax
+    pop r12
     pop rbx
     leave
     ret
+.none_rel:
+    mov rdi, r12
+    call obj_decref
 .none:
     xor eax, eax
     xor edx, edx
+    pop r12
     pop rbx
     leave
     V_PACK rax, rdx
     ret
 END_FUNC proxy_getattr
 
-DEF_FUNC proxy_setattr
+DEF_FUNC proxy_setattr, 8               ; + 3 pushes = 32, 16-aligned
     push rbx
     push r12
+    push r13
     mov rbx, rsi
     mov r12, rdx
     call proxy_referent
     ERR_NULL .fail
-    mov rdi, rax
+    mov r13, rax                        ; owned referent
+    mov rdi, r13
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_setattr]
     test rax, rax
@@ -1166,38 +1466,59 @@ DEF_FUNC proxy_setattr
     mov rsi, rbx
     mov rdx, r12
     call rax
+    push rax
+    sub rsp, 8
+    mov rdi, r13
+    call obj_decref
+    add rsp, 8
+    pop rax
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 .no_setattr:
+    mov rdi, r13
+    call obj_decref
     SET_EXC exc_TypeError_type, "proxy object does not support attribute assignment"
 .fail:
     mov rax, -1                 ; tp_setattr: -1 with the exception pending
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 END_FUNC proxy_setattr
 
-DEF_FUNC proxy_repr
+DEF_FUNC proxy_repr, 8                  ; + 1 push = 16, 16-aligned
+    push rbx
     call proxy_referent
     ERR_NULL .fail
+    mov rbx, rax
     mov rdi, rax
     call obj_repr
+    push rax
+    push rdx
+    mov rdi, rbx
+    call obj_decref
+    pop rdx
+    pop rax
 .fail:
+    pop rbx
     leave
     ret
 END_FUNC proxy_repr
 
-DEF_FUNC proxy_call
+DEF_FUNC proxy_call, 8                  ; + 3 pushes = 32, 16-aligned
     push rbx
     push r12
+    push r13
     mov rbx, rsi
     mov r12, rdx
     call proxy_referent
     ERR_NULL .fail
-    mov rdi, rax
+    mov r13, rax
+    mov rdi, r13
     mov rax, [rdi + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
@@ -1205,14 +1526,24 @@ DEF_FUNC proxy_call
     mov rsi, rbx
     mov rdx, r12
     call rax
+    push rax
+    push rdx
+    mov rdi, r13
+    call obj_decref
+    pop rdx
+    pop rax
+    pop r13
     pop r12
     pop rbx
     leave
     ret
 .not_callable:
+    mov rdi, r13
+    call obj_decref
     SET_EXC exc_TypeError_type, "proxy object is not callable"
 .fail:
     xor eax, eax
+    pop r13
     pop r12
     pop rbx
     leave
@@ -1273,7 +1604,8 @@ DEF_FUNC wr_proxy_func
     ret
 END_FUNC wr_proxy_func
 
-DEF_FUNC wr_getweakrefcount_func
+DEF_FUNC wr_getweakrefcount_func, 8     ; + 1 push = 16, 16-aligned
+    push rbx
     cmp rsi, 1
     jl .zero
     mov rdi, [rdi]
@@ -1281,11 +1613,12 @@ DEF_FUNC wr_getweakrefcount_func
     ja .zero
     test rdi, rdi
     jz .zero
+    mov rbx, rdi
+    WR_LOCK
+    mov rdi, rbx
     call weakref_chain
     test rax, rax
-    jz .zero
-    ; Count the LIVE ones: a reference that died before its referent left its
-    ; slot empty rather than shortening the chain.
+    jz .zero_unlock
     mov rcx, [rax + PyListObject.ob_size]
     mov rdx, [rax + PyListObject.ob_item]
     xor eax, eax
@@ -1300,59 +1633,86 @@ DEF_FUNC wr_getweakrefcount_func
     inc r8
     jmp .count_loop
 .counted:
+    mov rbx, rax
+    WR_UNLOCK
+    mov rax, rbx
     add rax, [rel v_int_bias]
+    pop rbx
     leave
     ret
+.zero_unlock:
+    WR_UNLOCK
 .zero:
     mov rax, [rel v_int_bias]
+    pop rbx
     leave
     ret
 END_FUNC wr_getweakrefcount_func
 
-DEF_FUNC wr_getweakrefs_func
+WGR_RES   equ 8
+WGR_FRAME equ 16                ; + 2 pushes (rbx, r12) = 32, 16-aligned
+DEF_FUNC wr_getweakrefs_func, WGR_FRAME
     cmp rsi, 1
     jl .empty
     push rbx
-    mov rdi, [rdi]
-    V_TEST_PTR rdi, rax
+    push r12
+    mov r12, [rdi]
+    V_TEST_PTR r12, rax
     ja .empty_pop
-    test rdi, rdi
+    test r12, r12
     jz .empty_pop
-    call weakref_chain
-    test rax, rax
-    jz .empty_pop
-    mov rbx, rax
     xor edi, edi
     call list_new
-    push rax
+    mov [rbp - WGR_RES], rax
+    WR_LOCK
+    mov rdi, r12
+    call weakref_chain
+    test rax, rax
+    jz .copied_unlock
+    mov rbx, rax
     mov rcx, [rbx + PyListObject.ob_size]
     mov rdx, [rbx + PyListObject.ob_item]
     xor r8d, r8d
 .copy:
     cmp r8, rcx
-    jge .copied
+    jge .copied_unlock
     mov rsi, [rdx + r8*8]
     test rsi, rsi
     jz .copy_next               ; a slot a dead reference left behind
     push rcx
     push rdx
     push r8
-    mov rdi, [rsp + 24]
-    call list_append          ; err: a list built here is not being sorted
+    push rsi
+    mov rdi, rsi
+    call obj_try_incref
+    pop rsi
+    test eax, eax
+    jz .copy_skip
+    mov rdi, [rbp - WGR_RES]
+    push rsi
+    sub rsp, 8
+    call list_append            ; err: a list built here is not being sorted
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; drop our temporary try_incref ref (still >= 1 in list)
+.copy_skip:
     pop r8
     pop rdx
     pop rcx
 .copy_next:
     inc r8
     jmp .copy
-.copied:
-    pop rax
+.copied_unlock:
+    WR_UNLOCK
+    mov rax, [rbp - WGR_RES]
     mov edx, TAG_PTR
+    pop r12
     pop rbx
     V_PACK rax, rdx
     leave
     ret
 .empty_pop:
+    pop r12
     pop rbx
 .empty:
     xor edi, edi
@@ -1406,11 +1766,21 @@ DEF_FUNC wr_remove_dead_func, WRD_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel weakref_type]
     cmp rcx, rdx
-    jne .none_pop
+    jne .none_pop_drop
     cmp qword [rax + PyWeakRefObject.wr_object], 0
-    jne .none_pop
+    jne .none_pop_drop
+    push rdi
+    push rsi
+    mov rdi, rax
+    call obj_decref             ; drop owned ref from dict_get
+    pop rsi
+    pop rdi
     call dict_del
     ERR_M1 .wrd_fail
+    jmp .none_pop
+.none_pop_drop:
+    mov rdi, rax
+    call obj_decref
 .none_pop:
     RET_NONE
     pop rbx
@@ -1486,6 +1856,11 @@ DEF_FUNC weakref_module_create, WRM_FRAME
     ret
 END_FUNC weakref_module_create
 
+section .bss
+alignb 64
+weakref_lock:  resd 1
+               resb 60
+
 section .data
 align 8
 weakref_table: dq 0
@@ -1502,7 +1877,8 @@ wrm_cproxy_name: db "weakcallableproxy", 0
 align 8
 global weakref_type
 weakref_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq wrm_ref_name             ; tp_name
     dq PyWeakRefObject_size     ; tp_basicsize
@@ -1535,7 +1911,8 @@ weakref_type:
 align 8
 global proxy_type
 proxy_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq wrm_proxy_name
     dq PyWeakRefObject_size
@@ -1568,7 +1945,8 @@ proxy_type:
 align 8
 global callableproxy_type
 callableproxy_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq wrm_cproxy_name
     dq PyWeakRefObject_size

@@ -257,6 +257,8 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     call str_hash_bytes
     mov [rbp - SIB_HASH], rax
 
+    RT_LOCK_GATED strintern_lock
+
     ; Grow when the table is more than half full, so the probe path stays
     ; short.  There are no tombstones, so this is the only thing that grows it.
     mov rax, [rel si_used]
@@ -266,7 +268,7 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     jbe .sib_search
     call si_grow
     test eax, eax
-    jz .sib_plain               ; out of memory: hand back an ordinary string
+    jz .sib_unlock_plain        ; out of memory: hand back an ordinary string
 
 .sib_search:
     mov rdi, [rbp - SIB_DATA]
@@ -279,6 +281,7 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     mov rbx, rax
     mov rdi, rax
     call obj_incref
+    RT_UNLOCK_GATED strintern_lock
     mov rax, rbx
     jmp .sib_return
 
@@ -287,7 +290,7 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     xor esi, esi                ; counted below: an identifier may be non-ASCII
     call str_alloc_bytes
     test rax, rax
-    jz .sib_plain
+    jz .sib_unlock_plain
     mov rbx, rax
     push rbx
     push rbx                    ; two slots: rsp stays 16-aligned
@@ -307,12 +310,17 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     ; pre-hashed, which is what dict_lookup's fast path wants.
     mov rax, [rbp - SIB_HASH]
     mov [rbx + PyStrObject.ob_hash], rax
-    ; One reference for the table and one for the caller.
-    inc qword [rbx + PyObject.ob_refcnt]
+    ; Interned strings never leave si_slots for the life of the process.
+    ; Marking them immortal eliminates all cross-thread refcount contention
+    ; on identifiers, attribute names, dict keys, and [A-Za-z0-9_] literals.
+    mov dword [rbx + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rbx + PyObject.ob_ref_shared], 0
+    mov dword [rbx + PyObject.ob_tid], REF_TID_IMMORTAL
     mov rdi, rbx
     mov rsi, [rbp - SIB_HASH]
     call si_place
     inc qword [rel si_used]
+    RT_UNLOCK_GATED strintern_lock
     mov rax, rbx
 
 .sib_return:
@@ -322,6 +330,8 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     leave
     ret
 
+.sib_unlock_plain:
+    RT_UNLOCK_GATED strintern_lock
 .sib_plain:
     ; The table could not take it.  An ordinary string is still a correct
     ; answer; it is only not a shared one.
@@ -388,6 +398,7 @@ DEF_FUNC str_intern, SINT_FRAME
     mov [rbx + PyStrObject.ob_hash], rax
 
     ; Same growth rule as str_intern_bytes: never past half full.
+    RT_LOCK_GATED strintern_lock
     mov rax, [rel si_used]
     inc rax
     shl rax, 1
@@ -395,7 +406,7 @@ DEF_FUNC str_intern, SINT_FRAME
     jbe .sint_search
     call si_grow
     test eax, eax
-    jz .sint_asis               ; out of memory: the string is still correct
+    jz .sint_unlock_asis        ; out of memory: the string is still correct
 
 .sint_search:
     mov rdi, [rbp - SINT_SELF]
@@ -407,7 +418,18 @@ DEF_FUNC str_intern, SINT_FRAME
     test rax, rax
     jz .sint_adopt
     mov rbx, rax
+    mov rdi, rbx
+    call obj_incref
+    RT_UNLOCK_GATED strintern_lock
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
 
+.sint_unlock_asis:
+    RT_UNLOCK_GATED strintern_lock
 .sint_asis:
     mov rdi, rbx
     call obj_incref
@@ -422,12 +444,20 @@ DEF_FUNC str_intern, SINT_FRAME
     ; Not present: this object becomes the interned one.  Two references now
     ; exist -- the table's and the caller's.
     mov rdi, [rbp - SINT_SELF]
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rsi, [rbp - SINT_HASH]
     call si_place
     inc qword [rel si_used]
     mov rbx, [rbp - SINT_SELF]
-    jmp .sint_asis
+    mov rdi, rbx
+    call obj_incref
+    RT_UNLOCK_GATED strintern_lock
+    mov rax, rbx
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    ret
 END_FUNC str_intern
 
 ;; ============================================================================
@@ -528,10 +558,12 @@ DEF_FUNC str_is_interned, SII_FRAME
     call str_hash_bytes
     mov rdx, rax
 .sii_lookup:
+    RT_LOCK_GATED strintern_lock
     mov rdi, [rbp - SII_SELF]
     mov rsi, [rdi + PyStrObject.ob_size]
     lea rdi, [rdi + PyStrObject.data]
     call si_lookup
+    RT_UNLOCK_GATED strintern_lock
     xor ecx, ecx
     cmp rax, [rbp - SII_SELF]
     sete cl
@@ -557,6 +589,9 @@ si_name_chars:
 %endrep
 
 section .bss
+alignb 64
+strintern_lock: resd 1
+alignb 8
 si_slots:    resq 1         ; PyStrObject*[capacity]; NULL is empty
 si_capacity: resq 1         ; a power of two, or 0 before the first insert
 si_used:     resq 1

@@ -50,15 +50,16 @@ DEF_FUNC slice_new, 8            ; 5 pushes, so rsp is 16-aligned
     mov r15d, r8d          ; stop_tag
     push r9                ; save step_tag across malloc
 
-    ; Check slice pool first
-    mov rax, [rel slice_pool_head]
+    ; Check this thread's slice pool first
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_slice_pool_head]
     test rax, rax
     jz .alloc_fresh
-    ; Pop from pool: reuse ob_refcnt slot as next-link
-    mov rcx, [rax + PyObject.ob_refcnt]
-    mov [rel slice_pool_head], rcx
-    dec dword [rel slice_pool_count]
-    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    ; Pop from pool: reuse dead header word 0 as next-link
+    mov rcx, [rax]
+    mov [rdx + ThreadState.ts_slice_pool_head], rcx
+    dec dword [rdx + ThreadState.ts_slice_pool_count]
+    INIT_OBJ_RC rax  ; reinit refcount
     jmp .fill_fields
 
 .alloc_fresh:
@@ -117,14 +118,15 @@ DEF_FUNC slice_dealloc, 8            ; 1 push, so rsp is 16-aligned
     mov rdi, rbx
     call gc_untrack
 
-    ; Try to push to pool
-    cmp dword [rel slice_pool_count], SLICE_POOL_MAX
+    ; Try to push to this thread's slice pool
+    mov rdx, [gs:ThreadState.ts_self]
+    cmp dword [rdx + ThreadState.ts_slice_pool_count], SLICE_POOL_MAX
     jge .free_it
-    ; Push to pool: reuse ob_refcnt as next-pointer
-    mov rcx, [rel slice_pool_head]
-    mov [rbx + PyObject.ob_refcnt], rcx
-    mov [rel slice_pool_head], rbx
-    inc dword [rel slice_pool_count]
+    ; Push to pool: reuse dead header word 0 as next-pointer
+    mov rcx, [rdx + ThreadState.ts_slice_pool_head]
+    mov [rbx], rcx
+    mov [rdx + ThreadState.ts_slice_pool_head], rbx
+    inc dword [rdx + ThreadState.ts_slice_pool_count]
     pop rbx
     leave
     ret
@@ -136,6 +138,32 @@ DEF_FUNC slice_dealloc, 8            ; 1 push, so rsp is 16-aligned
     leave
     ret
 END_FUNC slice_dealloc
+
+;; ============================================================================
+;; slice_pool_drain() -> nothing
+;; Return all cached PySliceObject blocks on this thread's pool to ap_free.
+;; ============================================================================
+global slice_pool_drain
+DEF_FUNC slice_pool_drain
+    push rbx
+    sub rsp, 8
+    mov rbx, [gs:ThreadState.ts_self]
+.spd_loop:
+    mov rdi, [rbx + ThreadState.ts_slice_pool_head]
+    test rdi, rdi
+    jz .spd_done
+    mov rax, [rdi]
+    mov [rbx + ThreadState.ts_slice_pool_head], rax
+    sub rdi, GC_HEAD_SIZE
+    call ap_free
+    jmp .spd_loop
+.spd_done:
+    mov dword [rbx + ThreadState.ts_slice_pool_count], 0
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC slice_pool_drain
 
 ;; ============================================================================
 ;; slice_richcompare(rdi = left Value, rsi = right Value, edx = op) -> Value
@@ -863,16 +891,11 @@ section .data
 slice_name_str: db "slice", 0
 slice_repr_str: db "slice", 0
 
-; Slice object pool (freelist)
-align 8
-slice_pool_head:  dq 0       ; freelist head (singly-linked via ob_refcnt slot)
-slice_pool_count: dd 0       ; current count
-                  dd 0       ; padding
-
 align 8
 global slice_type
 slice_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type
     dq slice_name_str         ; tp_name
     dq PySliceObject_size     ; tp_basicsize

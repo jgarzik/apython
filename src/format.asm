@@ -96,7 +96,7 @@ section .text
 ;; ============================================================================
 global format_apply_spec_printf
 DEF_FUNC format_apply_spec_printf
-    mov qword [rel fs_printf_pending], 1
+    mov qword [gs:ThreadState.ts_fs_printf_pending], 1
     leave
     jmp format_apply_spec
 END_FUNC format_apply_spec_printf
@@ -119,9 +119,9 @@ DEF_FUNC format_apply_spec, FS_FRAME
     mov [rbp - FS_VALUE], rdi
     mov qword [rbp - FS_BODY], 0
     mov qword [rbp - FS_SIGNCH], 0
-    mov rax, [rel fs_printf_pending]
+    mov rax, [gs:ThreadState.ts_fs_printf_pending]
     mov [rbp - FS_PRINTF], rax
-    mov qword [rel fs_printf_pending], 0
+    mov qword [gs:ThreadState.ts_fs_printf_pending], 0
 
     ; ---- defaults ----------------------------------------------------------
     mov qword [rbp - FS_FILL], ' '
@@ -954,7 +954,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     add rdi, PyStrObject.data + 8
     call ap_malloc
     mov r15, rax
-    mov qword [r15 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r15
     lea rcx, [rel str_type]
     mov [r15 + PyObject.ob_type], rcx
     mov qword [r15 + PyStrObject.ob_hash], -1
@@ -2229,7 +2229,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 .ffb_dot_append:
     lea rdi, [rcx + PyStrObject.data + 9]
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rdx, [rel str_type]
     mov [rax + PyObject.ob_type], rdx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -2348,7 +2348,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rsi, [rbx + PyStrObject.ob_size]
     lea rdi, [rsi + PyStrObject.data + 9]
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rdx, [rel str_type]
     mov [rax + PyObject.ob_type], rdx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -2673,8 +2673,9 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     jz .fpc_int_bad
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel fpc_name_index]
-    call dunder_lookup
-    test rax, rax
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .fpc_int_bad
     mov rdi, [rbp - FPC_VAL]
     V_UNPACK rdi, rdx
@@ -2709,8 +2710,8 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     jz .fpc_float_bad
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel fpc_name_float]
-    call dunder_lookup
-    test rax, rax
+    call dunder_exists
+    test eax, eax
     jz .fpc_float_bad
     mov rdi, [rbp - FPC_VAL]
     lea rsi, [rel fpc_name_float]
@@ -2770,7 +2771,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     je .fpc_bad_build
     lea rsi, [rel fpc_msg_integer]
 .fpc_bad_build:
-    lea rdi, [rel fpc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rax, [rbp - FPC_CONV]
     mov byte [rdi], '%'
     mov [rdi + 1], al
@@ -2784,7 +2785,7 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     inc rcx
     jmp .fpc_bad_copy
 .fpc_bad_raise:
-    lea rdi, [rel fpc_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov rsi, [rbp - FPC_VAL]
     call set_type_error_with_name
     jmp .fpc_fail

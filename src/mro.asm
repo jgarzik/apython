@@ -23,6 +23,7 @@ extern ap_free
 extern tuple_new
 extern obj_dealloc
 extern obj_incref
+extern obj_decref
 extern object_type
 extern set_exception
 extern exc_TypeError_type
@@ -157,24 +158,37 @@ DEF_FUNC type_custom_check, TCI_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jz .tcc_none
+    cmp edx, TAG_PTR
+    jne .tcc_none
 
-    ; call it as method(cls, obj)
-    mov rdi, rax
-    mov rcx, [rdi + PyObject.ob_type]
+    ; call it as method(cls, obj), releasing owned rax afterwards
+    mov rbx, rax
+    mov rcx, [rbx + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .tcc_none
+    jnz .tcc_do_call
+    mov rdi, rbx
+    call obj_decref
+    jmp .tcc_none
+.tcc_do_call:
     sub rsp, 16
     mov rax, [rbp - TCI_CLS]
     mov [rsp], rax
     mov rax, [rbp - TCI_OBJ]
     mov [rsp + 8], rax
+    mov rdi, rbx
     mov rsi, rsp
     mov edx, 2
     call rcx
-    ERR_PENDING .tcc_raised
-    V_UNPACK rax, rdx
     add rsp, 16
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    call obj_decref
+    add rsp, 8
+    pop rax
+    ERR_PENDING .tcc_none
+    V_UNPACK rax, rdx
     test edx, edx
     jz .tcc_none
 

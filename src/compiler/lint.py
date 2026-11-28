@@ -675,7 +675,9 @@ def type_field_count(headers):
     for path in headers:
         m = re.search(r'struc\s+PyTypeObject(.*?)endstruc', open(path).read(), re.S)
         if m:
-            return len(re.findall(r'^\s*\.\w+:\s*resq\s+1', m.group(1), re.M))
+            nq = len(re.findall(r'^\s*\.\w+:\s*resq\s+1', m.group(1), re.M))
+            nd = len(re.findall(r'^\s*\.\w+:\s*resd\s+1', m.group(1), re.M))
+            return nq + nd // 2
     return None
 
 def check_type_tables(files, nfields):
@@ -757,7 +759,7 @@ def check_macro_type_tables(files, nfields):
         for m in re.finditer(r'^%macro\s+(\w+)\s+\d+\s*$(.*?)^%endmacro',
                              src, re.S | re.M):
             body = m.group(2)
-            if 'ob_refcnt' not in body or 'tp_name' not in body:
+            if ('ob_ref_local' not in body and 'ob_refcnt' not in body) or 'tp_name' not in body:
                 continue
             n = 0
             for L in body.split('\n'):

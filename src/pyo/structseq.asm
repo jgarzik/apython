@@ -77,10 +77,10 @@ DEF_FUNC structseq_new, SSN_FRAME
     jz .ssn_out
     mov [rbp - SSN_OBJ], rax
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rcx, [rbp - SSN_TYPE]
     mov [rax + PyObject.ob_type], rcx
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     mov qword [rax + PyTupleObject.ob_hash], -1
 
     mov rdx, [rbp - SSN_DESC]
@@ -676,7 +676,7 @@ DEF_FUNC structseq_set_length
     mov r12, rdx
     mov r13, rcx
     mov rsi, [rdi + PyTypeObject.tp_name]
-    lea rdi, [rel ssq_msgbuf]
+    TS_LEA rdi, ts_errbuf
     mov edx, 60
     call ssq_copy
     mov rdi, rax
@@ -698,7 +698,7 @@ DEF_FUNC structseq_set_length
     mov edx, 20
     call ssq_copy
     lea rdi, [rel exc_TypeError_type]
-    lea rsi, [rel ssq_msgbuf]
+    TS_LEA rsi, ts_errbuf
     call set_exception
     pop r13
     pop r13
@@ -728,7 +728,8 @@ END_FUNC ssq_copy
 
 DEF_FUNC_LOCAL ssq_append_i64   ; (rdi = dest, rsi = value) -> the NUL
     mov rax, rsi
-    lea r8, [rel ssq_numbuf + 24]
+    TS_LEA r8, ts_numbuf
+    add r8, 24
     mov byte [r8], 0
     mov r9d, 10
 .sqa_loop:
@@ -831,7 +832,8 @@ section .data
 align 8
 global version_info_type
 version_info_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq vi_name                  ; tp_name -- the full dotted name, as CPython's
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -891,7 +893,8 @@ section .data
 align 8
 global asyncgen_hooks_type
 asyncgen_hooks_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq agh_name                 ; tp_name
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -955,7 +958,8 @@ section .data
 align 8
 global unraisable_args_type
 unraisable_args_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq uh_name                  ; tp_name
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -1034,7 +1038,8 @@ section .data
 align 8
 global float_info_type
 float_info_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq float_info_name          ; tp_name
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -1091,7 +1096,8 @@ section .data
 align 8
 global int_info_type
 int_info_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq int_info_name            ; tp_name
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -1158,7 +1164,8 @@ section .data
 align 8
 global hash_info_type
 hash_info_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq hash_info_name           ; tp_name
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -1233,7 +1240,8 @@ section .data
 align 8
 global thread_info_type
 thread_info_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq thread_info_name         ; tp_name
     dq PyTupleObject_size       ; tp_basicsize: no named-only tail
@@ -1328,7 +1336,8 @@ section .data
 align 8
 global flags_type
 flags_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq flags_name               ; tp_name
     dq PyTupleObject_size       ; tp_basicsize

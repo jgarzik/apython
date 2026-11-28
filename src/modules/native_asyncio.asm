@@ -195,11 +195,13 @@ DEF_FUNC async_import, AI_FRAME
     test rax, rax
     jz .done
     cmp rax, [rbp - AI_RESULT]
-    je .done
-    INCREF_V rax, rcx
+    je .done_drop_dup
     mov rdi, [rbp - AI_RESULT]
-    mov [rbp - AI_RESULT], rax
+    mov [rbp - AI_RESULT], rax      ; already owned from dict_get_str
     DECREF_V rdi, rcx
+    jmp .done
+.done_drop_dup:
+    DECREF_V rax, rcx
 .done:
     mov rdi, [rbp - AI_NAME]
     call obj_decref

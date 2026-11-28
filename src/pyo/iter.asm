@@ -99,32 +99,33 @@ END_FUNC list_iter_new
 ;; Return next item or NULL if exhausted
 ;; ============================================================================
 DEF_FUNC_BARE list_iter_next
-    mov rax, [rdi + PyListIterObject.it_seq]      ; list
-    test rax, rax
+    mov r11, [rdi + PyListIterObject.it_seq]      ; list
+    test r11, r11
     jz .exhausted                                  ; already exhausted
+    OBJ_LOCK r11
     mov rcx, [rdi + PyListIterObject.it_index]     ; index
 
     ; Check bounds
-    cmp rcx, [rax + PyListObject.ob_size]
-    jge .exhausted_mark
+    cmp rcx, [r11 + PyListObject.ob_size]
+    jge .unlock_exhausted_mark
 
-    ; Get item
-    mov rdx, [rax + PyListObject.ob_item]
+    ; Get item and pin under OBJ_LOCK
+    mov rdx, [r11 + PyListObject.ob_item]
     mov rax, [rdx + rcx * 8]     ; item Value
     INCREF_V rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
+    OBJ_UNLOCK r11
     ret
 
+.unlock_exhausted_mark:
+    OBJ_UNLOCK r11
 .exhausted_mark:
-    ; Drop the reference BEFORE releasing it.  Releasing first runs the
-    ; list's __del__ inside obj_decref, and a __del__ that calls next() on
-    ; this same iterator then read it_seq while the list was being freed --
-    ; CPython issue 26494, and a segfault here.  Clearing first makes that
-    ; re-entrant next() see an exhausted iterator, which is what it is.
-    mov rax, [rdi + PyListIterObject.it_seq]
-    mov qword [rdi + PyListIterObject.it_seq], 0
+    xor eax, eax
+    xchg [rdi + PyListIterObject.it_seq], rax
+    test rax, rax
+    jz .exhausted
     push rdi
     mov rdi, rax
     call obj_decref
@@ -163,7 +164,7 @@ END_FUNC list_iter_dealloc
 ;; tp_iter for iterators: return self with INCREF
 ;; ============================================================================
 DEF_FUNC_BARE iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC iter_self
@@ -226,12 +227,10 @@ DEF_FUNC_BARE tuple_iter_next
     ret
 
 .exhausted_mark:
-    ; Drop the tuple at exhaustion, the way list_iter_next does and the way
-    ; CPython's tupleiter_next does -- it is what lets a __del__ on the last
-    ; reference run while the iterator can still answer "exhausted".  Clear
-    ; before releasing, for the reason list_iter_next carries in full.
-    mov rax, [rdi + PyTupleIterObject.it_seq]
-    mov qword [rdi + PyTupleIterObject.it_seq], 0
+    xor eax, eax
+    xchg [rdi + PyTupleIterObject.it_seq], rax
+    test rax, rax
+    jz .exhausted
     push rdi
     mov rdi, rax
     call obj_decref
@@ -289,7 +288,7 @@ DEF_FUNC range_new, RN_FRAME
     call ap_malloc
     mov rbx, rax
 
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel range_obj_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyRangeObject.wide], 0
@@ -332,7 +331,7 @@ DEF_FUNC range_new_v, RNV_FRAME
 
     mov edi, PyRangeObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_obj_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyRangeObject.vstart], rbx
@@ -471,7 +470,7 @@ END_FUNC range_iter_dealloc
 ;; Range iterator returns itself
 ;; ============================================================================
 DEF_FUNC_BARE range_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC range_iter_self
@@ -499,7 +498,7 @@ DEF_FUNC range_obj_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov edi, PyRangeIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_iter_type]
     mov [rax + PyObject.ob_type], rcx
 
@@ -538,7 +537,7 @@ DEF_FUNC range_longiter_new, RLN_FRAME
     call ap_malloc
     test rax, rax
     jz .rln_fail_len
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel longrange_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov rcx, [rbx + PyRangeObject.vstart]
@@ -953,7 +952,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     mov edi, PyRangeIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_iter_type]
     mov [rax + PyObject.ob_type], rcx
 
@@ -1017,7 +1016,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     call ap_malloc
     test rax, rax
     jz .rev_wide_fail
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel longrange_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov rcx, [rbp - RREV_CUR]
@@ -1063,7 +1062,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     ; Empty range: create iterator that's immediately exhausted
     mov edi, PyRangeIterObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyRangeIterObject.it_current], 0
@@ -2775,7 +2774,8 @@ range_obj_name: db "range", 0
 align 8
 global list_iter_type
 list_iter_type:
-    dq 1                    ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq list_iter_name       ; tp_name
     dq PyListIterObject_size ; tp_basicsize
@@ -2809,7 +2809,8 @@ list_iter_type:
 align 8
 global tuple_iter_type
 tuple_iter_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq tuple_iter_name
     dq PyTupleIterObject_size
@@ -2843,7 +2844,8 @@ tuple_iter_type:
 align 8
 global longrange_iter_type
 longrange_iter_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq longrange_iter_name
     dq PyLongRangeIterObject_size
@@ -2876,7 +2878,8 @@ longrange_iter_type:
 align 8
 global range_iter_type
 range_iter_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq range_iter_name
     dq PyRangeIterObject_size
@@ -2928,7 +2931,8 @@ range_obj_num_methods:
 
 align 8
 range_obj_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq range_obj_name           ; tp_name
     dq PyRangeObject_size       ; tp_basicsize

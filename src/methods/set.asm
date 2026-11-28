@@ -165,15 +165,13 @@ DEF_FUNC set_method_pop, SMP_FRAME
     jne .smpop_error
 
     mov rbx, [rdi]          ; self (set)
+    OBJ_LOCK rbx
 
     ; Check empty
     cmp qword [rbx + PyDictObject.ob_size], 0
-    je .smpop_empty
+    je .smpop_unlock_empty
 
-    ; Start where the last pop left off.  The cursor is only a hint -- it is
-    ; masked, so a stale one costs a wrong starting slot and nothing more --
-    ; but without it a drain rescans from slot zero every time and is
-    ; O(capacity^2).  CPython calls it `finger`.
+    ; Start where the last pop left off.
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
     mov rcx, [rbx + SET_FINGER]
@@ -182,8 +180,6 @@ DEF_FUNC set_method_pop, SMP_FRAME
     and rcx, rax            ; in bounds, however stale
 
 .smpop_scan:
-    ; The size check above proved at least one slot is occupied, so the wrap
-    ; below always terminates.
     mov rax, rcx
     shl rax, 4              ; * SET_ENTRY_SIZE
     add rax, r12
@@ -196,22 +192,15 @@ DEF_FUNC set_method_pop, SMP_FRAME
     jmp .smpop_scan
 
 .smpop_found:
-    ; rax = the entry, rcx = its slot.  The key comes back as a Value and
-    ; ownership transfers to the caller, so there is no refcount work.
     mov rdx, [rax + SET_ENTRY_KEY]
-
-    ; A TOMBSTONE, not an empty slot.  This wrote only the key and left the
-    ; hash, which SET_ENTRY_CLASSIFY reads as EMPTY -- so any probe run
-    ; passing through the popped slot stopped there, and a colliding key
-    ; further along became unreachable to `in`, to discard() and to remove()
-    ; while still being visible to iteration.  set_remove has always done
-    ; this correctly.
     mov qword [rax + SET_ENTRY_KEY], 0
     mov qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
+    inc qword [rbx + PyDictObject.dk_version]
     inc rcx
     mov [rbx + SET_FINGER], rcx
+    OBJ_UNLOCK rbx
 
     mov rax, rdx
     pop r13
@@ -220,6 +209,8 @@ DEF_FUNC set_method_pop, SMP_FRAME
     leave
     ret
 
+.smpop_unlock_empty:
+    OBJ_UNLOCK rbx
 .smpop_empty:
     SET_EXC exc_KeyError_type, "pop from an empty set"
     xor eax, eax
@@ -412,37 +403,39 @@ DEF_FUNC_LOCAL set_binop_union, SMU_FRAME
     mov r12, [r15 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
 .smu_add_loop:
-    ; The walk ends when every live element has been seen, not when the
-    ; table runs out.  set_resize sizes from the live count and overshoots by
-    ; four, so a set is a quarter full at most and three slots in four are
-    ; empty -- and with the identity hash an int carries, the live ones
-    ; cluster at the bottom and the whole tail is dead.  r12 counts them down.
     test r12, r12
     jz .smu_done
+    OBJ_LOCK r15
     cmp rcx, [r15 + PyDictObject.capacity]
-    jge .smu_done
+    jge .smu_unlock_done
     mov [rbp - SMU_IDX], rcx
 
     mov rdx, [r15 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smu_al_next
+    jz .smu_unlock_next
     dec r12
 
-    INCREF_V rsi, rax                    ; ours across __eq__
+    INCREF_V rsi, rax                    ; pin under OBJ_LOCK across set_add
+    OBJ_UNLOCK r15
     mov [rbp - SMU_KEY], rsi
     mov rdi, rbx
     call set_add
     ERR_M1 .smu_fail_key
     mov rdi, [rbp - SMU_KEY]
     DECREF_V rdi, rax
+    jmp .smu_al_next
 
+.smu_unlock_next:
+    OBJ_UNLOCK r15
 .smu_al_next:
     mov rcx, [rbp - SMU_IDX]
     inc ecx
     jmp .smu_add_loop
 
+.smu_unlock_done:
+    OBJ_UNLOCK r15
 .smu_done:
     mov rdi, r15
     call obj_decref     ; the coerced operand
@@ -571,13 +564,10 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     jmp .supd_done
 
 .supd_from_set:
-    ; An EMPTY destination takes the source's table wholesale.  `s = set();
-    ; s.update(src)` and `set(src)` are the same shape, and both used to
-    ; hash and probe every element of src into a table growing underneath
-    ; them.  CPython's set_merge has this tier too.  If self IS src the
-    ; sizes are equal, so this arm is taken only when both are empty and
-    ; set_clone_into returns at once -- there is no table to free out from
-    ; under the copy.
+    ; Whole-table clone shortcut when single-threaded and dst is empty;
+    ; when threaded, another thread may insert concurrently into rbx.
+    cmp byte [rel rt_threaded], 0
+    jne .supd_reserve
     cmp qword [rbx + PyDictObject.ob_size], 0
     jne .supd_reserve
     mov rdi, rbx
@@ -594,36 +584,39 @@ DEF_FUNC_LOCAL set_update_one, SU_FRAME
     mov r13, [r12 + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx
 .supd_loop:
-    ; The capacity and the entry array are read INSIDE the loop, and the key
-    ; is held for the turn: set_add probes with it, the probe runs __eq__,
-    ; and __eq__ may clear or resize the very set being walked -- taking the
-    ; key's last reference, or the array, with it.  See set_binop_union.
     test r13, r13
     jz .supd_done
+    OBJ_LOCK r12
     cmp rcx, [r12 + PyDictObject.capacity]
-    jge .supd_done
+    jge .supd_unlock_done
     mov [rbp - SU_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .supd_next
+    jz .supd_unlock_next
     dec r13
 
     INCREF_V rsi, rax
+    OBJ_UNLOCK r12
     mov [rbp - SU_KEY], rsi
     mov rdi, [rbp - SU_SELF]
     call set_add
     ERR_M1 .supd_fail_key
     mov rdi, [rbp - SU_KEY]
     DECREF_V rdi, rax
+    jmp .supd_next
 
+.supd_unlock_next:
+    OBJ_UNLOCK r12
 .supd_next:
     mov rcx, [rbp - SU_IDX]
     inc ecx
     jmp .supd_loop
 
+.supd_unlock_done:
+    OBJ_UNLOCK r12
 .supd_done:
     extern none_singleton
     RET_NONE
@@ -718,18 +711,20 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
 .smi_loop:
     test r14, r14
     jz .smi_done
+    OBJ_LOCK r12
     cmp rcx, [r12 + PyDictObject.capacity]
-    jge .smi_done
+    jge .smi_unlock_done
     mov [rbp - SMI_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smi_next
+    jz .smi_unlock_next
     dec r14
 
-    INCREF_V rsi, rax                    ; ours for the rest of this turn
+    INCREF_V rsi, rax                    ; pin under OBJ_LOCK
+    OBJ_UNLOCK r12
     mov [rbp - SMI_KEY], rsi
     mov rdi, r13            ; the side being probed
     call set_contains
@@ -746,12 +741,17 @@ DEF_FUNC_LOCAL set_binop_intersection, SMI_FRAME
 .smi_drop:
     mov rdi, [rbp - SMI_KEY]
     DECREF_V rdi, rax
+    jmp .smi_next
 
+.smi_unlock_next:
+    OBJ_UNLOCK r12
 .smi_next:
     mov rcx, [rbp - SMI_IDX]
     inc ecx
     jmp .smi_loop
 
+.smi_unlock_done:
+    OBJ_UNLOCK r12
 .smi_done:
     mov rdi, r15
     call obj_decref     ; the coerced operand
@@ -843,18 +843,20 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
 .smdf_loop:
     test r12, r12
     jz .smdf_done
+    OBJ_LOCK r14
     cmp rcx, [r14 + PyDictObject.capacity]
-    jge .smdf_done
+    jge .smdf_unlock_done
     mov [rbp - SMDF_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smdf_next
+    jz .smdf_unlock_next
     dec r12
 
     INCREF_V rsi, rax
+    OBJ_UNLOCK r14
     mov [rbp - SMDF_KEY], rsi
     mov rdi, r15
     call set_contains
@@ -871,12 +873,17 @@ DEF_FUNC_LOCAL set_binop_difference, SMDF_FRAME
 .smdf_drop:
     mov rdi, [rbp - SMDF_KEY]
     DECREF_V rdi, rax
+    jmp .smdf_next
 
+.smdf_unlock_next:
+    OBJ_UNLOCK r14
 .smdf_next:
     mov rcx, [rbp - SMDF_IDX]
     inc ecx
     jmp .smdf_loop
 
+.smdf_unlock_done:
+    OBJ_UNLOCK r14
 .smdf_done:
     mov rdi, r15
     call obj_decref     ; the coerced operand
@@ -1311,18 +1318,20 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
 .smsd_self_loop:
     test r12, r12
     jz .smsd_other
+    OBJ_LOCK r14
     cmp rcx, [r14 + PyDictObject.capacity]
-    jge .smsd_other
+    jge .smsd_self_unlock_other
     mov [rbp - SMSD_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smsd_self_next
+    jz .smsd_self_unlock_next
     dec r12
 
     INCREF_V rsi, rax
+    OBJ_UNLOCK r14
     mov [rbp - SMSD_KEY], rsi
     mov rdi, r15
     call set_contains
@@ -1338,12 +1347,17 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
 .smsd_self_drop:
     mov rdi, [rbp - SMSD_KEY]
     DECREF_V rdi, rax
+    jmp .smsd_self_next
 
+.smsd_self_unlock_next:
+    OBJ_UNLOCK r14
 .smsd_self_next:
     mov rcx, [rbp - SMSD_IDX]
     inc ecx
     jmp .smsd_self_loop
 
+.smsd_self_unlock_other:
+    OBJ_UNLOCK r14
 .smsd_other:
     ; Add elements in other but NOT in self
     mov r12, [r15 + PyDictObject.ob_size]   ; live elements still to visit
@@ -1351,18 +1365,20 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
 .smsd_other_loop:
     test r12, r12
     jz .smsd_done
+    OBJ_LOCK r15
     cmp rcx, [r15 + PyDictObject.capacity]
-    jge .smsd_done
+    jge .smsd_other_unlock_done
     mov [rbp - SMSD_IDX], rcx
 
     mov rdx, [r15 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smsd_other_next
+    jz .smsd_other_unlock_next
     dec r12
 
     INCREF_V rsi, rax
+    OBJ_UNLOCK r15
     mov [rbp - SMSD_KEY], rsi
     mov rdi, r14
     call set_contains
@@ -1378,12 +1394,17 @@ DEF_FUNC set_method_symmetric_difference, SMSD_FRAME
 .smsd_other_drop:
     mov rdi, [rbp - SMSD_KEY]
     DECREF_V rdi, rax
+    jmp .smsd_other_next
 
+.smsd_other_unlock_next:
+    OBJ_UNLOCK r15
 .smsd_other_next:
     mov rcx, [rbp - SMSD_IDX]
     inc ecx
     jmp .smsd_other_loop
 
+.smsd_other_unlock_done:
+    OBJ_UNLOCK r15
 .smsd_done:
     mov rdi, r15
     call obj_decref     ; the coerced operand
@@ -1466,18 +1487,20 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
 .smss_loop:
     test r12, r12
     jz .smss_true
+    OBJ_LOCK r14
     cmp rcx, [r14 + PyDictObject.capacity]
-    jge .smss_true
+    jge .smss_unlock_true
     mov [rbp - SMSS_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smss_next
+    jz .smss_unlock_next
     dec r12
 
-    INCREF_V rsi, rax                    ; ours across __eq__
+    INCREF_V rsi, rax                    ; pin under OBJ_LOCK
+    OBJ_UNLOCK r14
     mov [rbp - SMSS_KEY], rsi
     mov rdi, r15
     call set_contains
@@ -1490,12 +1513,17 @@ DEF_FUNC set_method_issubset, SMSS_FRAME
     pop rcx
     test eax, eax
     jz .smss_false          ; not in other
+    jmp .smss_next
 
+.smss_unlock_next:
+    OBJ_UNLOCK r14
 .smss_next:
     mov rcx, [rbp - SMSS_IDX]
     inc ecx
     jmp .smss_loop
 
+.smss_unlock_true:
+    OBJ_UNLOCK r14
 .smss_true:
     mov rdi, r15
     call obj_decref
@@ -1585,18 +1613,20 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
 .smis_loop:
     test r12, r12
     jz .smis_true
+    OBJ_LOCK r14
     cmp rcx, [r14 + PyDictObject.capacity]
-    jge .smis_true
+    jge .smis_unlock_true
     mov [rbp - SMIS_IDX], rcx
 
     mov rdx, [r14 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smis_next
+    jz .smis_unlock_next
     dec r12
 
-    INCREF_V rsi, rax                    ; ours across __eq__
+    INCREF_V rsi, rax                    ; pin under OBJ_LOCK
+    OBJ_UNLOCK r14
     mov [rbp - SMIS_KEY], rsi
     mov rdi, r15            ; check in self
     call set_contains
@@ -1609,12 +1639,17 @@ DEF_FUNC set_method_issuperset, SMIS_FRAME
     pop rcx
     test eax, eax
     jz .smis_false
+    jmp .smis_next
 
+.smis_unlock_next:
+    OBJ_UNLOCK r14
 .smis_next:
     mov rcx, [rbp - SMIS_IDX]
     inc ecx
     jmp .smis_loop
 
+.smis_unlock_true:
+    OBJ_UNLOCK r14
 .smis_true:
     mov rdi, r14
     call obj_decref
@@ -1716,18 +1751,20 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
 .smdj_loop:
     test r14, r14
     jz .smdj_true
+    OBJ_LOCK r12
     cmp rcx, [r12 + PyDictObject.capacity]
-    jge .smdj_true
+    jge .smdj_unlock_true
     mov [rbp - SMDJ_IDX], rcx
 
     mov rdx, [r12 + PyDictObject.entries]
     lea rax, [rcx + rcx]
     mov rsi, [rdx + rax*8 + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .smdj_next
+    jz .smdj_unlock_next
     dec r14
 
-    INCREF_V rsi, rax                    ; ours across __eq__
+    INCREF_V rsi, rax                    ; pin under OBJ_LOCK
+    OBJ_UNLOCK r12
     mov [rbp - SMDJ_KEY], rsi
     mov rdi, r13            ; the side being probed
     call set_contains
@@ -1740,12 +1777,17 @@ DEF_FUNC set_method_isdisjoint, SMDJ_FRAME
     pop rcx
     test eax, eax
     jnz .smdj_false         ; found in other — not disjoint
+    jmp .smdj_next
 
+.smdj_unlock_next:
+    OBJ_UNLOCK r12
 .smdj_next:
     mov rcx, [rbp - SMDJ_IDX]
     inc ecx
     jmp .smdj_loop
 
+.smdj_unlock_true:
+    OBJ_UNLOCK r12
 .smdj_true:
     mov rdi, r15
     call obj_decref

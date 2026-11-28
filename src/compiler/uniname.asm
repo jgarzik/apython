@@ -59,6 +59,8 @@ struc UnIdx
 endstruc
 
 section .bss
+align 64
+unn_index_mutex: resb 64    ; pthread_mutex_t guarding lazy index build
 unn_index:   resq 1     ; UnIdx*, or 0
 unn_index_n: resq 1
 unn_index_tried: resq 1 ; so a failed build is not retried on every call
@@ -266,8 +268,15 @@ DEF_FUNC_LOCAL unn_build_index, UBI_FRAME
     mov rax, [rel unn_index]
     test rax, rax
     jnz .ubi_have
+    extern pthread_mutex_lock
+    extern pthread_mutex_unlock
+    lea rdi, [rel unn_index_mutex]
+    call pthread_mutex_lock wrt ..plt
+    mov rax, [rel unn_index]
+    test rax, rax
+    jnz .ubi_have_unlock
     cmp qword [rel unn_index_tried], 0
-    jne .ubi_none
+    jne .ubi_none_unlock
     mov qword [rel unn_index_tried], 1
 
     ; cap = blob_size / (3 * stride) + 2.  Three bytes is the shortest an
@@ -284,7 +293,7 @@ DEF_FUNC_LOCAL unn_build_index, UBI_FRAME
     imul rdi, rax
     call ap_malloc
     test rax, rax
-    jz .ubi_none
+    jz .ubi_none_unlock
     mov [rbp - UBI_ARR], rax
 
     lea rbx, [rel uniname_blob]
@@ -347,13 +356,21 @@ DEF_FUNC_LOCAL unn_build_index, UBI_FRAME
     jmp .ubi_entry
 
 .ubi_done:
-    mov rax, [rbp - UBI_ARR]
-    mov [rel unn_index], rax
+    ; Publish count before pointer so lock-free readers observing unn_index != 0
+    ; always see a valid unn_index_n (x86-TSO release order).
     mov rax, [rbp - UBI_N]
     mov [rel unn_index_n], rax
+    mov rax, [rbp - UBI_ARR]
+    mov [rel unn_index], rax
+.ubi_have_unlock:
+    lea rdi, [rel unn_index_mutex]
+    call pthread_mutex_unlock wrt ..plt
 .ubi_have:
     mov eax, 1
     jmp .ubi_out
+.ubi_none_unlock:
+    lea rdi, [rel unn_index_mutex]
+    call pthread_mutex_unlock wrt ..plt
 .ubi_none:
     xor eax, eax
 .ubi_out:

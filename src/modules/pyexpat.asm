@@ -139,6 +139,9 @@ extern obj_is_true
 
 section .data
 align 8
+align 64
+px_handle_lock: dd 0
+align 8
 px_handles:     dq 0            ; PxHandle*[], grown by doubling
 px_handle_cap:  dq 0
 px_handle_n:    dq 0
@@ -222,16 +225,20 @@ section .text
 DEF_FUNC px_handle_at
     test rdi, rdi
     js .bad
+    RT_LOCK_GATED px_handle_lock
     cmp rdi, [rel px_handle_n]
-    jae .bad
+    jae .unlock_bad
     mov rax, [rel px_handles]
     mov rax, [rax + rdi*8]
     test rax, rax
-    jz .bad
+    jz .unlock_bad
     cmp qword [rax + PxHandle.magic], PX_MAGIC
-    jne .bad
+    jne .unlock_bad
+    RT_UNLOCK_GATED px_handle_lock
     leave
     ret
+.unlock_bad:
+    RT_UNLOCK_GATED px_handle_lock
 .bad:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel px_e_handle]
@@ -252,6 +259,7 @@ PA_FRAME equ 40                 ; + 1 push = 48, 16-aligned
 DEF_FUNC_LOCAL px_handle_alloc, PA_FRAME
     push rbx
     mov [rbp - PA_H], rdi
+    RT_LOCK_GATED px_handle_lock
     xor ebx, ebx
 .scan:
     cmp rbx, [rel px_handle_n]
@@ -264,6 +272,7 @@ DEF_FUNC_LOCAL px_handle_alloc, PA_FRAME
 .take:
     mov rcx, [rbp - PA_H]
     mov [rax + rbx*8], rcx
+    RT_UNLOCK_GATED px_handle_lock
     mov rax, rbx
     pop rbx
     leave
@@ -287,7 +296,7 @@ DEF_FUNC_LOCAL px_handle_alloc, PA_FRAME
     extern ap_realloc
     call ap_realloc
     test rax, rax
-    jz .fail
+    jz .unlock_fail
     mov [rel px_handles], rax
     mov rcx, [rbp - PA_CAP]
     mov [rel px_handle_cap], rcx
@@ -297,9 +306,12 @@ DEF_FUNC_LOCAL px_handle_alloc, PA_FRAME
     mov rdx, [rbp - PA_H]
     mov [rcx + rax*8], rdx
     inc qword [rel px_handle_n]
+    RT_UNLOCK_GATED px_handle_lock
     pop rbx
     leave
     ret
+.unlock_fail:
+    RT_UNLOCK_GATED px_handle_lock
 .fail:
     mov rax, -1
     pop rbx
@@ -802,7 +814,7 @@ DEF_FUNC px_parser_child, EC_FRAME
     INCREF_V rdx, rcx
     mov rcx, [rbp - EC_LIST]
     mov [rcx + rax*8], rdx
-    dec qword [rel none_singleton + PyObject.ob_refcnt]
+    ; none_singleton is immortal: no refcount update needed.
     mov rcx, [rbp - EC_H]
     mov [rcx + PxHandle.handlers + rax*8], rdx
     mov rdi, [rcx + PxHandle.parser]
@@ -860,24 +872,29 @@ DEF_FUNC px_parser_free, PF_FRAME
     ERR_M1 .fail
     test rax, rax
     js .done
+    RT_LOCK_GATED px_handle_lock
     cmp rax, [rel px_handle_n]
-    jae .done
+    jae .unlock_done
     mov rdx, [rel px_handles]
     mov rcx, [rdx + rax*8]
     test rcx, rcx
-    jz .done
+    jz .unlock_done
     cmp qword [rcx + PxHandle.magic], PX_MAGIC
-    jne .done
+    jne .unlock_done
     cmp qword [rcx + PxHandle.parsing], 0
-    jne .done
+    jne .unlock_done
     cmp qword [rcx + PxHandle.in_callback], 0
-    jne .done
+    jne .unlock_done
     cmp qword [rcx + PxHandle.flushing], 0
-    jne .done
+    jne .unlock_done
     mov qword [rcx + PxHandle.magic], 0
     mov qword [rdx + rax*8], 0
+    RT_UNLOCK_GATED px_handle_lock
     mov rdi, rcx
     call px_handle_release
+    jmp .done
+.unlock_done:
+    RT_UNLOCK_GATED px_handle_lock
 .done:
     mov rsp, rbx
     pop rbx

@@ -651,8 +651,9 @@ DEF_FUNC math_%1, MRD_FRAME
     jz %%coerce
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel %3]
-    call dunder_lookup
-    test rax, rax
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz %%coerce
     mov rdi, [rbp - MRD_VAL]
     lea rsi, [rel %3]
@@ -745,8 +746,8 @@ DEF_FUNC math_trunc, MTR_FRAME
     jz .mtr_type
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel mm_d_trunc]
-    call dunder_lookup
-    test rax, rax
+    call dunder_exists
+    test eax, eax
     jz .mtr_type
     mov rdi, [rbp - MTR_VAL]
     lea rsi, [rel mm_d_trunc]
@@ -935,7 +936,7 @@ DEF_FUNC_LOCAL math_new_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     mov edi, PyIntObject_size
     call ap_malloc
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel int_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyIntObject.compact], 0

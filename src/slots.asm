@@ -247,6 +247,12 @@ DEF_FUNC slot_tp_hash, 8    ; + 1 push = 16, 16-aligned
     jz .sth_go
     IS_NONE rax, rcx
     je .sth_unhashable
+    cmp edx, TAG_PTR
+    jne .sth_go
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
 
 .sth_go:
     lea rsi, [rel sl_hash_name]
@@ -748,18 +754,32 @@ DEF_FUNC slot_binop_reflect_first, SBR_FRAME
     mov rsi, [rbp - SBR_NAME]
     extern dunder_lookup
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; dunder_lookup answers with an owned Value; 0 is the miss
     jz .sbr_no                  ; the right type does not define it
     mov [rbp - SBR_LMETH], rax  ; the right type's, for the compare below
 
     mov rdi, [rbp - SBR_LTYPE]
     mov rsi, [rbp - SBR_NAME]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
-    jz .sbr_call                ; the left type has none: overridden
+    test rax, rax
+    jz .sbr_drop_right_call     ; the left type has none: overridden
     cmp rax, [rbp - SBR_LMETH]
-    je .sbr_no                  ; the same object: inherited, not overridden
+    je .sbr_drop_both_no        ; the same object: inherited, not overridden
+    DECREF_V rax, rcx
+    mov rdi, [rbp - SBR_LMETH]
+    DECREF_V rdi, rcx
+    jmp .sbr_call
+
+.sbr_drop_right_call:
+    mov rdi, [rbp - SBR_LMETH]
+    DECREF_V rdi, rcx
+    jmp .sbr_call
+
+.sbr_drop_both_no:
+    DECREF_V rax, rcx
+    mov rdi, [rbp - SBR_LMETH]
+    DECREF_V rdi, rcx
+    jmp .sbr_no
 
 .sbr_call:
     ; __rop__(right, left).
@@ -1078,6 +1098,12 @@ DEF_FUNC slot_tp_iter, 8    ; + 1 push = 16, 16-aligned
     jz .sti_go                  ; absent: the ordinary path reports it
     IS_NONE rax, rcx
     je .sti_disabled
+    cmp edx, TAG_PTR
+    jne .sti_go
+    push rdi
+    mov rdi, rax
+    call obj_decref
+    pop rdi
 
 .sti_go:
     lea rsi, [rel dunder_iter]
@@ -1276,11 +1302,9 @@ DEF_FUNC slot_tp_call, STC_FRAME
     jz .stc_released
     call ap_free
 .stc_released:
-    cmp qword [rbp - STC_BOUND], 0
-    je .stc_return
     push rbx
     sub rsp, 8
-    mov rdi, [rbp - STC_FUNC]   ; the bound callable was ours
+    mov rdi, [rbp - STC_FUNC]   ; dunder_bind always returns an owned callable
     DECREF_V rdi, rcx
     add rsp, 8
     pop rbx
@@ -1339,6 +1363,7 @@ DEF_FUNC slot_tp_call, STC_FRAME
     mov rdi, [rbp - STC_FUNC]
     DECREF_V rdi, rcx
     mov qword [rbp - STC_BOUND], 0
+    mov qword [rbp - STC_FUNC], 0
     lea rdi, [rel exc_TypeError_type]
     mov rsi, rbx
     call set_exception
@@ -1352,7 +1377,8 @@ DEF_FUNC slot_tp_call, STC_FRAME
     jmp .stc_not_callable
 
 .stc_get_raised:
-    ; __get__ raised; its exception is pending and is the caller's.
+    ; __get__ raised; dunder_bind already released the owned descriptor.
+    mov qword [rbp - STC_FUNC], 0
     jmp .stc_fail
 
 .stc_no_memory:
@@ -1399,6 +1425,11 @@ DEF_FUNC slot_tp_call, STC_FRAME
     SET_EXC exc_TypeError_type, "object is not callable"
 
 .stc_fail:
+    mov rdi, [rbp - STC_FUNC]
+    test rdi, rdi
+    jz .stc_fail_heap
+    DECREF_V rdi, rcx
+.stc_fail_heap:
     mov rdi, [rbp - STC_HEAP]
     test rdi, rdi
     jz .stc_fail_ret
@@ -1447,12 +1478,12 @@ DEF_FUNC type_install_slots, TIS_FRAME
     mov rdi, [rbp - TIS_TYPE]
     mov rsi, rax
     lea rdx, [rbp - TIS_OWNER]
-    call dunder_lookup_owner    ; walks the MRO; returns a Value
+    call dunder_lookup_owner    ; walks the MRO; returns an owned Value
+    mov [rbp - TIS_FOUND], rax
     V_UNPACK rax, rdx
     mov rbx, [rbp - TIS_ENTRY]
     test edx, edx
     jz .not_found               ; nothing in the MRO defines this dunder
-    mov [rbp - TIS_FOUND], rax
 
     ; A dunder a BUILTIN base supplies is not a definition this class made,
     ; and a generic wrapper must not be installed over it.  type_from_parts
@@ -1471,7 +1502,7 @@ DEF_FUNC type_install_slots, TIS_FRAME
     ; nothing static, so the test is one flag on the type that answered.
     mov rcx, [rbp - TIS_OWNER]
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .from_builtin
+    jz .from_builtin_drop
 
     ; A builtin method assigned by NAME into a class body is that builtin's
     ; own slot wearing a name, not a definition this class made.  The owner
@@ -1497,18 +1528,32 @@ DEF_FUNC type_install_slots, TIS_FRAME
     extern builtin_func_type
     lea rdx, [rel builtin_func_type]
     cmp rcx, rdx
-    jne .own_definition
+    jne .own_definition_drop
     mov rcx, [rax + PyBuiltinObject.func_owner]
     test rcx, rcx
-    jz .own_definition
+    jz .own_definition_drop
     mov [rbp - TIS_OWNER], rcx      ; whose slot .from_builtin will install
+    mov rdi, rax
+    call obj_decref
     mov rdi, [rbp - TIS_TYPE]
-    mov rsi, rcx
+    mov rsi, [rbp - TIS_OWNER]
     extern type_is_subtype
     call type_is_subtype
     mov rbx, [rbp - TIS_ENTRY]      ; the walk's cursor, across the call
     test eax, eax
     jnz .from_builtin
+    jmp .own_definition
+
+.from_builtin_drop:
+    mov rdi, [rbp - TIS_FOUND]
+    DECREF_V rdi, rcx
+    mov rbx, [rbp - TIS_ENTRY]
+    jmp .from_builtin
+
+.own_definition_drop:
+    mov rdi, [rbp - TIS_FOUND]
+    call obj_decref
+    mov rbx, [rbp - TIS_ENTRY]
 
 .own_definition:
     ; A dunder explicitly set to None is NOT skipped.  update_one_slot
@@ -1529,8 +1574,6 @@ DEF_FUNC type_install_slots, TIS_FRAME
     ; base type's C-level slot: installing a wrapper here would make
     ; `T((1,)) == (1,)` on a tuple subclass go through object's identity test
     ; instead of tuple's comparison.
-    mov rax, [rbp - TIS_FOUND]
-
     mov rdx, [rbx + SlotEntry.wrapper]
     mov r8d, 2
     jmp .store
@@ -1731,28 +1774,34 @@ DEF_FUNC type_install_slots_tree
     mov rax, [rbx + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_HEAPTYPE
     jz .tist_children
+    extern type_lock
+    RT_LOCK_GATED type_lock
     mov rdi, rbx
     call type_install_slots
+    RT_UNLOCK_GATED type_lock
 .tist_children:
     mov rdi, rbx
-    call sub_list_for_type
+    extern sub_list_snapshot
+    call sub_list_snapshot
     test rax, rax
     jz .tist_out
-    mov r12, [rax + SubList.items]
-    mov r13, [rax + SubList.count]
-    test r12, r12
-    jz .tist_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
     xor r14d, r14d
 .tist_loop:
     cmp r14, r13
-    jge .tist_out
-    mov rdi, [r12 + r14*8]
+    jge .tist_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
     test rdi, rdi
     jz .tist_next
     call type_install_slots_tree
 .tist_next:
     inc r14
     jmp .tist_loop
+.tist_drop:
+    mov rdi, r12
+    call obj_decref
 .tist_out:
     pop r14
     pop r13

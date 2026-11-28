@@ -166,6 +166,8 @@ struc SqTable
 endstruc
 
 section .data
+align 64
+sq_tbl_lock:    dd 0
 align 8
 global sq_db_table
 sq_db_table:    dq 0, 0, 0
@@ -301,6 +303,7 @@ STA_FRAME   equ 16              ; + 0 pushes = 16
 DEF_FUNC sq_tbl_alloc, STA_FRAME
     mov [rbp - STA_TBL], rdi
     mov [rbp - STA_ELEM], rsi
+    RT_LOCK_GATED sq_tbl_lock
 
     mov rax, [rdi + SqTable.arr]
     mov rcx, [rdi + SqTable.n]
@@ -337,7 +340,7 @@ DEF_FUNC sq_tbl_alloc, STA_FRAME
     pop r9
     pop rdx
     test rax, rax
-    jz .oom
+    jz .unlock_oom
     mov rdi, [rbp - STA_TBL]
     mov r8, [rdi + SqTable.cap]
     mov [rdi + SqTable.arr], rax
@@ -359,9 +362,12 @@ DEF_FUNC sq_tbl_alloc, STA_FRAME
 .store:
     mov rsi, [rbp - STA_ELEM]
     mov [rax + rdx*8], rsi
+    RT_UNLOCK_GATED sq_tbl_lock
     mov rax, rdx
     leave
     ret
+.unlock_oom:
+    RT_UNLOCK_GATED sq_tbl_lock
 .oom:
     lea rdi, [rel exc_MemoryError_type]
     lea rsi, [rel sq_e_oom]
@@ -378,16 +384,20 @@ END_FUNC sq_tbl_alloc
 DEF_FUNC sq_tbl_get
     cmp rsi, 1
     jl .bad
+    RT_LOCK_GATED sq_tbl_lock
     cmp rsi, [rdi + SqTable.n]
-    jae .bad
+    jae .unlock_bad
     mov rax, [rdi + SqTable.arr]
     mov rax, [rax + rsi*8]
     test rax, rax
-    jz .bad
+    jz .unlock_bad
     cmp [rax], rdx
-    jne .bad
+    jne .unlock_bad
+    RT_UNLOCK_GATED sq_tbl_lock
     leave
     ret
+.unlock_bad:
+    RT_UNLOCK_GATED sq_tbl_lock
 .bad:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel sq_e_handle]
@@ -406,17 +416,21 @@ END_FUNC sq_tbl_get
 DEF_FUNC sq_tbl_pop
     cmp rsi, 1
     jl .bad
+    RT_LOCK_GATED sq_tbl_lock
     cmp rsi, [rdi + SqTable.n]
-    jae .bad
+    jae .unlock_bad
     mov rcx, [rdi + SqTable.arr]
     mov rax, [rcx + rsi*8]
     test rax, rax
-    jz .bad
+    jz .unlock_bad
     cmp [rax], rdx
-    jne .bad
+    jne .unlock_bad
     mov qword [rcx + rsi*8], 0
+    RT_UNLOCK_GATED sq_tbl_lock
     leave
     ret
+.unlock_bad:
+    RT_UNLOCK_GATED sq_tbl_lock
 .bad:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel sq_e_handle]
@@ -707,6 +721,7 @@ DEF_FUNC sq_open, SO_FRAME
     mov qword [rax + SqlDb.trace_cb], 0
     mov qword [rax + SqlDb.progress_cb], 0
     mov qword [rax + SqlDb.auth_cb], 0
+    mov qword [rax + SqlDb.closing], 0
     mov rsi, rax
     lea rdi, [rel sq_db_table]
     push rsi
@@ -789,6 +804,9 @@ DEF_FUNC sq_close, SC_FRAME
     call sq_tbl_get
     ERR_NULL .fail
     mov [rbp - SC_NODE], rax
+    cmp qword [rax + SqlDb.closing], 0
+    jne .already_closing
+    mov qword [rax + SqlDb.closing], 1
     mov rcx, [rax + SqlDb.db]
     mov [rbp - SC_DB], rcx
 
@@ -823,7 +841,14 @@ DEF_FUNC sq_close, SC_FRAME
     mov [rbp - SC_RC], rax
 
     cmp qword [rbp - SC_RC], SQLITE_OK
-    jne .ret_rc
+    je .finish_close
+    mov rax, [rbp - SC_NODE]
+    mov qword [rax + SqlDb.closing], 0
+    jmp .ret_rc
+.already_closing:
+    mov qword [rbp - SC_RC], SQLITE_BUSY
+    jmp .ret_rc
+.finish_close:
 
     ; Remove slot and free SqlDb plus any stored hook SqlCb structs.
     lea rdi, [rel sq_db_table]

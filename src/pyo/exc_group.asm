@@ -84,7 +84,7 @@ DEF_FUNC eg_new, EGN_FRAME
     ; gc_alloc sets ob_refcnt = 1 and stamps ob_type, but does not COUNT the
     ; type -- and a group's type is as often a program's class as it is one of
     ; the two builtins.  See exc_new.
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov [rax + PyExceptionGroupObject.exc_type], rbx
     mov [rax + PyExceptionGroupObject.exc_value], r12
     mov qword [rax + PyExceptionGroupObject.exc_tb], 0
@@ -1394,14 +1394,14 @@ DEF_FUNC_LOCAL eg_method_split, EMS_FRAME
     test rcx, rcx
     jnz .ems_have_match
     lea rcx, [rel none_singleton]
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
 .ems_have_match:
     mov [r8], rcx
     mov rcx, [rbp - EMS_REST]
     test rcx, rcx
     jnz .ems_have_rest
     lea rcx, [rel none_singleton]
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
 .ems_have_rest:
     mov [r8 + 8], rcx
     mov edx, TAG_PTR
@@ -1463,7 +1463,7 @@ DEF_FUNC_LOCAL eg_method_subgroup, ESG_FRAME
     test rax, rax
     jnz .esg_out
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 .esg_out:
     mov edx, TAG_PTR
     leave
@@ -1786,7 +1786,8 @@ align 8
 global eg_install_methods
 global exc_BaseExceptionGroup_type
 exc_BaseExceptionGroup_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq exc_metatype             ; ob_type
     dq exc_name_BaseExceptionGroup ; tp_name
     dq PyExceptionGroupObject_size ; tp_basicsize
@@ -1824,7 +1825,8 @@ exc_BaseExceptionGroup_type:
 align 8
 global exc_ExceptionGroup_type
 exc_ExceptionGroup_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq exc_metatype             ; ob_type
     dq exc_name_ExceptionGroup  ; tp_name
     dq PyExceptionGroupObject_size ; tp_basicsize
@@ -1870,7 +1872,8 @@ eg_mro_items:
     dq object_type
 align 8
 eg_mro_tuple:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq tuple_type               ; ob_type
     dq 5                        ; ob_size
     dq -1                       ; ob_hash
@@ -1882,7 +1885,8 @@ eg_bases_items:
     dq exc_Exception_type
 align 8
 eg_bases_tuple:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq tuple_type               ; ob_type
     dq 2                        ; ob_size
     dq -1                       ; ob_hash

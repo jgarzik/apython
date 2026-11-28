@@ -21,6 +21,7 @@ SQ_CB_MAGIC     equ 0x53514342      ; "SQCB"
 ; SQLite result codes used by the core shim (from /usr/include/sqlite3.h).
 SQLITE_OK           equ 0
 SQLITE_ERROR        equ 1
+SQLITE_BUSY         equ 5
 SQLITE_NOMEM        equ 7
 SQLITE_TOOBIG       equ 18
 SQLITE_ROW          equ 100
@@ -75,6 +76,7 @@ struc SqlDb
     .trace_cb:      resq 1          ; SqlCb* or 0
     .progress_cb:   resq 1          ; SqlCb* or 0
     .auth_cb:       resq 1          ; SqlCb* or 0
+    .closing:       resq 1          ; 1 while sqlite3_close* is in flight
 endstruc
 
 ; One prepared sqlite3_stmt*.

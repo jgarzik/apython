@@ -82,7 +82,7 @@ DEF_FUNC bytes_new
     mov rbx, rax                ; rbx = new bytes obj
 
     ; Fill header
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rax, [rel bytes_type]
     mov [rbx + PyObject.ob_type], rax
     mov [rbx + PyBytesObject.ob_size], r12
@@ -113,7 +113,7 @@ DEF_FUNC bytes_from_data, 8            ; 3 pushes, so rsp is 16-aligned
     mov rbx, rax                ; rbx = new bytes obj
 
     ; Fill header
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rax, [rel bytes_type]
     mov [rbx + PyObject.ob_type], rax
     mov [rbx + PyBytesObject.ob_size], r13
@@ -776,7 +776,7 @@ DEF_FUNC bytes_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     mov edi, PyBytesIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytes_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyBytesIterObject.it_seq], rbx
@@ -849,7 +849,7 @@ END_FUNC bytes_iter_dealloc
 ;; iter_self - tp_iter for iterators: return self with INCREF
 ;; ============================================================================
 DEF_FUNC_BARE bytes_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC bytes_iter_self
@@ -1117,7 +1117,7 @@ DEF_FUNC bytes_latin1_to_str, BL1_FRAME
     test rax, rax
     jz .bl1_fail
     mov [rbp - BL1_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -1800,7 +1800,7 @@ DEF_FUNC bytes_concat
     add r13, r14
     lea rdi, [r13 + PyBytesObject.data + 8]
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytes_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyBytesObject.ob_size], r13
@@ -1883,7 +1883,7 @@ DEF_FUNC bytes_repeat
     lea rdi, [r14 + PyBytesObject.data + 8]
     call ap_malloc
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytes_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyBytesObject.ob_size], r14
@@ -3028,7 +3028,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     jmp .btc_alloc_done
 .btc_plain_alloc:
     call ap_malloc
-    mov qword [rax + PyBytesObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rdx, [rbp - BTC_TYPE]
     mov [rax + PyBytesObject.ob_type], rdx
 .btc_alloc_done:
@@ -3036,7 +3036,7 @@ DEF_FUNC bytes_type_call, BTC_FRAME
     mov rcx, [rbp - BTC_LEN]
     mov [rbx + PyBytesObject.ob_size], rcx
     mov rdx, [rbp - BTC_TYPE]
-    inc qword [rdx + PyObject.ob_refcnt]
+    INCREF rdx
 
     test rcx, rcx
     jz .btc_no_copy
@@ -3141,7 +3141,8 @@ section .data
 align 8
 global bytes_type
 bytes_type:
-    dq 1                    ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq bytes_name_str       ; tp_name
     dq PyBytesObject.data   ; tp_basicsize (header, without data)
@@ -3177,7 +3178,8 @@ bytes_type:
 align 8
 global bytes_iter_type
 bytes_iter_type:
-    dq 1                        ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq bytes_iter_name_str      ; tp_name
     dq PyBytesIterObject_size   ; tp_basicsize

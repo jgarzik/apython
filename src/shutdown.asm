@@ -28,6 +28,9 @@ extern obj_call_n
 extern traceback_print
 extern fileobj_flush_std
 extern gil_finalizing
+extern rt_threaded
+extern stw_stop_world
+extern stw_start_world
 
 section .text
 
@@ -72,8 +75,7 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     mov rdi, [rbp - SC_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get           ; err: borrowed; a failure is reported at .sc_raised, once the name is released
-    INCREF_V rax, rcx
+    call dict_get           ; err: owned; a failure is reported at .sc_raised, once the name is released
     mov [rbp - SC_FN], rax
     mov rdi, [rbp - SC_NAME]
     call obj_decref
@@ -103,6 +105,8 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .sc_out:
+    mov rdi, [rbp - SC_MOD]
+    XDECREF_V rdi, rcx
     leave
     ret
 END_FUNC shutdown_call
@@ -125,6 +129,16 @@ DEF_FUNC interp_shutdown
     extern native_asyncio_clear_running_loop
     call native_asyncio_clear_running_loop
     mov qword [rel gil_finalizing], 1
+    cmp byte [rel rt_threaded], 0
+    je .sd_done
+    ; Park every live daemon thread permanently at STW safepoints (any thread
+    ; already detached will park on reattach when it sees gil_finalizing == 1),
+    ; then release stw_mutex and drop back to single-threaded teardown so final
+    ; GC and deallocation run without contending or deadlocking.
+    call stw_stop_world
+    call stw_start_world
+    mov byte [rel rt_threaded], 0
+.sd_done:
     leave
     ret
 END_FUNC interp_shutdown

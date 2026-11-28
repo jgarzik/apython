@@ -118,6 +118,9 @@ HC_MAX_DIGEST equ 64
 
 section .data
 align 8
+align 64
+hc_handle_lock: dd 0
+align 8
 hc_handles:     dq 0            ; HcHandle*[], grown by doubling
 hc_handle_cap:  dq 0
 hc_handle_n:    dq 0
@@ -237,25 +240,31 @@ DEF_FUNC_LOCAL hc_handle_at, HAT_FRAME
     mov [rbp - HAT_KIND], rsi
     test rdi, rdi
     js .bad
+    RT_LOCK_GATED hc_handle_lock
     cmp rdi, [rel hc_handle_n]
-    jae .bad
+    jae .unlock_bad
     mov rax, [rel hc_handles]
     mov rax, [rax + rdi*8]
     test rax, rax
-    jz .bad
+    jz .unlock_bad
     cmp qword [rax + HcHandle.magic], HC_MAGIC
-    jne .bad
+    jne .unlock_bad
     mov rcx, [rbp - HAT_KIND]
     cmp [rax + HcHandle.kind], rcx
-    jne .wrong_kind
+    jne .unlock_wrong_kind
+    RT_UNLOCK_GATED hc_handle_lock
     leave
     ret
+.unlock_wrong_kind:
+    RT_UNLOCK_GATED hc_handle_lock
 .wrong_kind:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_kind]
     call set_exception          ; it answers 0, which is this one's failure
     leave
     ret
+.unlock_bad:
+    RT_UNLOCK_GATED hc_handle_lock
 .bad:
     lea rdi, [rel exc_ValueError_type]
     lea rsi, [rel hc_e_handle]
@@ -276,6 +285,7 @@ HA_FRAME equ 32                 ; + 1 push = 40 ... padded to 40 below
 DEF_FUNC_LOCAL hc_handle_alloc, 40
     push rbx
     mov [rbp - HA_H], rdi
+    RT_LOCK_GATED hc_handle_lock
     xor ebx, ebx
 .scan:
     cmp rbx, [rel hc_handle_n]
@@ -288,6 +298,7 @@ DEF_FUNC_LOCAL hc_handle_alloc, 40
 .take:
     mov rcx, [rbp - HA_H]
     mov [rax + rbx*8], rcx
+    RT_UNLOCK_GATED hc_handle_lock
     mov rax, rbx
     pop rbx
     leave
@@ -310,7 +321,7 @@ DEF_FUNC_LOCAL hc_handle_alloc, 40
     shl rsi, 3
     call ap_realloc
     test rax, rax
-    jz .fail
+    jz .unlock_fail
     mov [rel hc_handles], rax
     mov rcx, [rbp - HA_CAP]
     mov [rel hc_handle_cap], rcx
@@ -320,9 +331,12 @@ DEF_FUNC_LOCAL hc_handle_alloc, 40
     mov rdx, [rbp - HA_H]
     mov [rcx + rax*8], rdx
     inc qword [rel hc_handle_n]
+    RT_UNLOCK_GATED hc_handle_lock
     pop rbx
     leave
     ret
+.unlock_fail:
+    RT_UNLOCK_GATED hc_handle_lock
 .fail:
     mov rax, -1
     pop rbx
@@ -337,10 +351,13 @@ END_FUNC hc_handle_alloc
 DEF_FUNC_BARE hc_handle_drop
     test rdi, rdi
     js .out
+    RT_LOCK_GATED hc_handle_lock
     cmp rdi, [rel hc_handle_n]
-    jae .out
+    jae .unlock_out
     mov rax, [rel hc_handles]
     mov qword [rax + rdi*8], 0
+.unlock_out:
+    RT_UNLOCK_GATED hc_handle_lock
 .out:
     ret
 END_FUNC hc_handle_drop
@@ -1172,15 +1189,23 @@ DEF_FUNC hc_free, 40
     ; Not hc_handle_at: that refuses, and this must tolerate a stale index.
     test rax, rax
     js .done
+    RT_LOCK_GATED hc_handle_lock
     cmp rax, [rel hc_handle_n]
-    jae .done
-    mov rcx, [rel hc_handles]
-    mov rcx, [rcx + rax*8]
+    jae .unlock_done
+    mov rdx, [rel hc_handles]
+    mov rcx, [rdx + rax*8]
     test rcx, rcx
-    jz .done
+    jz .unlock_done
     cmp qword [rcx + HcHandle.magic], HC_MAGIC
-    jne .done
+    jne .unlock_done
     mov qword [rcx + HcHandle.magic], 0
+    mov qword [rdx + rax*8], 0
+    RT_UNLOCK_GATED hc_handle_lock
+    jmp .free_detached
+.unlock_done:
+    RT_UNLOCK_GATED hc_handle_lock
+    jmp .done
+.free_detached:
     push rcx
     sub rsp, 8
     mov rdi, [rcx + HcHandle.ctx]

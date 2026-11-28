@@ -166,14 +166,17 @@ PRH_FN    equ 32            ; the hook being called, for the report
 PRH_FRAME equ 32            ; + 1 push = 40... one more word to land right
 DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     push rbx
-    mov rbx, rdi
-    mov [rbp - PRH_LIST], rdi
     mov [rbp - PRH_REV], rsi
     test rdi, rdi
-    jz .prh_done
+    jz .prh_done_nocopy
     mov rax, [rdi + PyListObject.ob_size]
     test rax, rax
-    jz .prh_done
+    jz .prh_done_nocopy
+    extern list_copy
+    call list_copy
+    test rax, rax
+    jz .prh_done_nocopy
+    mov [rbp - PRH_LIST], rax
     mov qword [rbp - PRH_I], 0
 .prh_loop:
     mov rcx, [rbp - PRH_I]
@@ -195,6 +198,7 @@ DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .prh_next
+    INCREF rdi
     mov [rbp - PRH_FN], rdi
     xor esi, esi
     xor edx, edx
@@ -202,23 +206,31 @@ DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     test rax, rax
     jz .prh_raised
     DECREF_V rax, rcx
+    mov rdi, [rbp - PRH_FN]
+    call obj_decref
     jmp .prh_next
 .prh_raised:
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
-    jz .prh_next
+    jz .prh_drop_fn
     mov rsi, [rbp - PRH_FN]
     extern traceback_print_unraisable
     call traceback_print_unraisable
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
-    jz .prh_next
+    jz .prh_drop_fn
     mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+.prh_drop_fn:
+    mov rdi, [rbp - PRH_FN]
     call obj_decref
 .prh_next:
     inc qword [rbp - PRH_I]
     jmp .prh_loop
 .prh_done:
+    mov rdi, [rbp - PRH_LIST]
+    call obj_decref
+.prh_done_nocopy:
     pop rbx
     leave
     ret
@@ -495,12 +507,14 @@ PXV_MAX   equ 256
 ; Two vectors: argv, then envp above it.  Each grows UPWARD from its base, so
 ; each slot names the DEEPEST word -- naming argv's 32 put its first pointer
 ; over PXV_ARGS and its second over PXV_PATH.
-PXV_VEC   equ 48 + (PXV_MAX + 1) * 8
+PXV_ENVBUF_SLOT equ 48
+PXV_VEC   equ 56 + (PXV_MAX + 1) * 8
 PXV_ENV   equ PXV_VEC + (PXV_MAX + 1) * 8
-PXV_FRAME equ ((PXV_ENV + 15) / 16) * 16
+PXV_FRAME equ ((PXV_ENV + 15) / 16) * 16 + 8    ; + 1 push (rbx) = 16-aligned
 DEF_FUNC posix_execv, PXV_FRAME
     push rbx
     mov qword [rbp - PXV_OWNED], 0
+    mov qword [rbp - PXV_ENVBUF_SLOT], 0
     cmp rsi, 2
     jl .pxv_argerr
     mov [rbp - PXV_NARGS], rsi
@@ -526,6 +540,7 @@ DEF_FUNC posix_execv, PXV_FRAME
     jl .pxv_have_env
     mov rdi, [rbx + 16]
     lea rsi, [rbp - PXV_ENV]
+    lea rdx, [rbp - PXV_ENVBUF_SLOT]
     call pxv_env_vector
     ERR_NULL .pxv_fail
     lea rdx, [rbp - PXV_ENV]
@@ -536,6 +551,13 @@ DEF_FUNC posix_execv, PXV_FRAME
     ; Only ever reached on failure.
     POSIX_CHECK_RET rax, 0, .pxv_fail
 .pxv_fail:
+    mov rdi, [rbp - PXV_ENVBUF_SLOT]
+    test rdi, rdi
+    jz .pxv_no_envbuf
+    mov esi, PXV_ENVBUF
+    extern sys_munmap
+    call sys_munmap
+.pxv_no_envbuf:
     ; A PathLike's resolved path: nothing released it on any of these exits.
     mov rdi, [rbp - PXV_OWNED]
     test rdi, rdi
@@ -653,6 +675,8 @@ PEV_OUT   equ 16
 PEV_N     equ 24
 PEV_POS   equ 32
 PEV_I     equ 40
+PEV_BUF   equ 48            ; per-call mmap'd 64 KiB buffer (fork- and thread-safe)
+PEV_BUF_OUT equ 56          ; caller's slot for cleanup on execve failure
 PEV_FRAME equ 64            ; + 2 pushes = 80, 16-aligned
 DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     push rbx
@@ -660,6 +684,8 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     mov rbx, rdi
     mov [rbp - PEV_MAP], rdi
     mov [rbp - PEV_OUT], rsi
+    mov [rbp - PEV_BUF_OUT], rdx
+    mov qword [rbp - PEV_BUF], 0
 
     V_TEST_PTR rbx, rax
     ja .pev_bad
@@ -668,16 +694,33 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     cmp rax, rcx
     jne .pev_sequence
 
+    ; Map a private 64 KiB anonymous buffer via raw syscall (async-signal and
+    ; post-fork safe without touching any allocator lock).
+    xor edi, edi
+    mov esi, PXV_ENVBUF
+    mov edx, 3                          ; PROT_READ | PROT_WRITE
+    mov ecx, 0x22                       ; MAP_PRIVATE | MAP_ANONYMOUS
+    mov r8, -1
+    xor r9d, r9d
+    extern sys_mmap
+    call sys_mmap
+    cmp rax, -4095
+    jae .pev_full
+    mov [rbp - PEV_BUF], rax
+    mov rcx, [rbp - PEV_BUF_OUT]
+    mov [rcx], rax
+
     mov qword [rbp - PEV_POS], 0
     mov qword [rbp - PEV_I], 0
+    OBJ_LOCK rbx
     mov rax, [rbx + PyDictObject.ob_size]
     cmp rax, PXV_MAX
-    jae .pev_toomany
+    jae .pev_unlock_toomany
     xor r12d, r12d                      ; how many pointers are written
 .pev_loop:
     mov rcx, [rbp - PEV_I]
     cmp rcx, [rbx + PyDictObject.capacity]
-    jge .pev_done
+    jge .pev_unlock_done
     mov rax, [rbx + PyDictObject.entries]
     imul rdx, rcx, DictEntry_size
     mov rdi, [rax + rdx + DictEntry.key]
@@ -686,43 +729,33 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     mov rsi, [rax + rdx + DictEntry.value]
 
     V_TEST_PTR rdi, rcx
-    ja .pev_bad
+    ja .pev_unlock_bad
     mov rcx, [rdi + PyObject.ob_type]
     lea rax, [rel str_type]
     cmp rcx, rax
-    jne .pev_bad
+    jne .pev_unlock_bad
     V_TEST_PTR rsi, rcx
-    ja .pev_bad
+    ja .pev_unlock_bad
     mov rcx, [rsi + PyObject.ob_type]
     cmp rcx, rax
-    jne .pev_bad
+    jne .pev_unlock_bad
 
-    ; pev_append copies up to the first NUL, so an embedded one truncates the
-    ; entry where execve reads it -- and a NUL in the KEY produces an entry
-    ; with no '=' in it at all, which is not an environment variable of any
-    ; name.  Both halves are checked here, before anything is written, so a
-    ; refusal leaves no half-built entry in the buffer.
     push rdi
     push rsi                            ; an even count keeps rsp 16-aligned
     mov rsi, [rdi + PyStrObject.ob_size]
     add rdi, PyStrObject.data
     call posix_embedded_nul
     test eax, eax
-    jnz .pev_nul
+    jnz .pev_unlock_nul
     mov rdi, [rsp]                      ; the value
     mov rsi, [rdi + PyStrObject.ob_size]
     add rdi, PyStrObject.data
     call posix_embedded_nul
     test eax, eax
-    jnz .pev_nul
+    jnz .pev_unlock_nul
     pop rsi
     pop rdi
 
-    ; An '=' in the NAME is the same failure wearing a different byte: the
-    ; entry is built as "<key>=<value>", so a key of "FRUIT=ORANGE" with the
-    ; value "lemon" becomes "FRUIT=ORANGE=lemon" -- which sets FRUIT, not the
-    ; variable that was asked for.  CPython refuses it, and names it
-    ; separately because it is not a NUL.
     push rdi
     push rsi                            ; an even count keeps rsp 16-aligned
     mov rcx, [rdi + PyStrObject.ob_size]
@@ -732,7 +765,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     cmp rax, rcx
     jge .pev_eq_ok
     cmp byte [rdi + rax], '='
-    je .pev_badname
+    je .pev_unlock_badname
     inc rax
     jmp .pev_eq_scan
 .pev_eq_ok:
@@ -742,7 +775,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     ; This entry's text starts where the buffer has got to.
     mov rax, [rbp - PEV_OUT]
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
     add rdx, rcx
     mov [rax + r12*8], rdx
     inc r12
@@ -752,23 +785,25 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     call pev_append
     pop rsi
     test eax, eax
-    jz .pev_full
+    jz .pev_unlock_full
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
     mov byte [rdx + rcx], '='
     inc qword [rbp - PEV_POS]
     mov rdi, rsi
     add rdi, PyStrObject.data
     call pev_append
     test eax, eax
-    jz .pev_full
+    jz .pev_unlock_full
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
     mov byte [rdx + rcx], 0
     inc qword [rbp - PEV_POS]
 .pev_next:
     inc qword [rbp - PEV_I]
     jmp .pev_loop
+.pev_unlock_done:
+    OBJ_UNLOCK rbx
 .pev_done:
     mov rax, [rbp - PEV_OUT]
     mov qword [rax + r12*8], 0
@@ -777,6 +812,19 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     pop rbx
     leave
     ret
+.pev_unlock_bad:
+    OBJ_UNLOCK rbx
+    jmp .pev_bad
+.pev_unlock_toomany:
+.pev_unlock_full:
+    OBJ_UNLOCK rbx
+    jmp .pev_full
+.pev_unlock_nul:
+    OBJ_UNLOCK rbx
+    jmp .pev_nul
+.pev_unlock_badname:
+    OBJ_UNLOCK rbx
+    jmp .pev_badname
 
 .pev_sequence:
     mov rdi, rbx
@@ -812,7 +860,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
 .pev_append_body:
 pev_append:
     mov rcx, [rbp - PEV_POS]
-    lea rdx, [rel pxv_envbuf]
+    mov rdx, [rbp - PEV_BUF]
 .pea_loop:
     cmp rcx, PXV_ENVBUF - 2
     jae .pea_full
@@ -833,11 +881,6 @@ pev_append:
 END_FUNC pxv_env_vector
 
 PXV_ENVBUF equ 65536
-
-section .bss
-; The environment a dict is flattened into.  Fixed, because this may run in a
-; freshly forked child where allocating is the one thing not to do.
-pxv_envbuf: resb PXV_ENVBUF
 
 section .text
 
@@ -1145,7 +1188,7 @@ pw_ret_bool:
 .prb_false:
     lea rax, [rel bool_false]
 .prb_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret

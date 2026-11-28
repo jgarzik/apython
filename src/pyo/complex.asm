@@ -66,7 +66,7 @@ DEF_FUNC complex_from_doubles, CFD_FRAME
     movsd [rbp - CFD_IM], xmm1
     mov edi, PyComplexObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel complex_type]
     mov [rax + PyObject.ob_type], rcx
     movsd xmm0, [rbp - CFD_RE]
@@ -1524,7 +1524,8 @@ complex_number_methods:
 align 8
 global complex_type
 complex_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type
     dq complex_name_str       ; tp_name
     dq PyComplexObject_size   ; tp_basicsize

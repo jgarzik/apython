@@ -64,8 +64,21 @@ LIST_POOL_MAX equ 16
 ;; ============================================================================
 DEF_FUNC_BARE list_new
     xor esi, esi                ; zero from slot 0: nothing is promised
+    mov edx, 1                  ; track in GC
     jmp list_new_from
 END_FUNC list_new
+
+;; ============================================================================
+;; list_new_untracked(rdi = capacity) -> rax = PyListObject* (NOT in GC lists)
+;; For callers holding a lock (weakref_lock, subclass_lock, OBJ_LOCK) that must
+;; not enter gc_track/gc_collect_gen while the lock is held.
+;; ============================================================================
+global list_new_untracked
+DEF_FUNC_BARE list_new_untracked
+    xor esi, esi
+    xor edx, edx
+    jmp list_new_from
+END_FUNC list_new_untracked
 
 ;; ============================================================================
 ;; list_new_filled(rdi = n) -> rax = PyListObject*; see list_new above
@@ -73,20 +86,33 @@ END_FUNC list_new
 global list_new_filled
 DEF_FUNC_BARE list_new_filled
     mov rsi, rdi                ; zero from slot n: the caller writes [0, n)
+    mov edx, 1                  ; track in GC
     jmp list_new_from
 END_FUNC list_new_filled
 
 ;; ============================================================================
-;; list_new_from(rdi = capacity, rsi = first slot to zero) -> rax = the list
-;;
-;; The body both of the above share.  Not called from anywhere else: the two
-;; entry points above are the contract.
+;; list_new_filled_untracked(rdi = n) -> rax = PyListObject* (NOT in GC lists)
+;; Caller must call gc_track after releasing its OBJ_LOCK.
 ;; ============================================================================
-DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
+global list_new_filled_untracked
+DEF_FUNC_BARE list_new_filled_untracked
+    mov rsi, rdi
+    xor edx, edx
+    jmp list_new_from
+END_FUNC list_new_filled_untracked
+
+;; ============================================================================
+;; list_new_from(rdi = capacity, rsi = first slot to zero, edx = track) -> rax
+;;
+;; The body the four entry points above share.  Not called from anywhere else.
+;; ============================================================================
+DEF_FUNC list_new_from
     push rbx
     push r12
     push r13
+    push r14
 
+    mov r14d, edx              ; r14d = whether to gc_track
     mov r13, rsi               ; r13 = first slot to zero
     mov r12, rdi               ; r12 = capacity
     test r12, r12
@@ -94,15 +120,16 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     mov r12d, 8                     ; minimum capacity
 .has_cap:
 
-    ; Try list header pool first
-    mov rax, [rel list_pool_head]
+    ; Try this thread's list header pool first
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rax, [rdx + ThreadState.ts_list_pool_head]
     test rax, rax
     jz .alloc_fresh
-    ; Pop from pool: reuse ob_refcnt slot as next-link
-    mov rcx, [rax + PyObject.ob_refcnt]
-    mov [rel list_pool_head], rcx
-    dec dword [rel list_pool_count]
-    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    ; Pop from pool: reuse dead header word 0 as next-link
+    mov rcx, [rax]
+    mov [rdx + ThreadState.ts_list_pool_head], rcx
+    dec dword [rdx + ThreadState.ts_list_pool_count]
+    INIT_OBJ_RC rax  ; reinit refcount
     mov rbx, rax
     jmp .init_fields
 
@@ -131,10 +158,14 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     rep stosq
 .lnf_no_zero:
 
+    test r14d, r14d
+    jz .lnf_no_track
     mov rdi, rbx
     call gc_track
+.lnf_no_track:
 
     mov rax, rbx
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -152,26 +183,22 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
 
     mov rbx, rdi               ; src list
+    OBJ_LOCK rbx
     mov r12, [rbx + PyListObject.ob_size]
 
-    ; Allocate new list.  Every one of the r12 slots is written by the
-    ; ap_memcpy below, so the zeroing is only owed on the tail.
     mov rdi, r12
-    call list_new_filled
+    call list_new_filled_untracked
     mov r13, rax               ; new list
     mov [r13 + PyListObject.ob_size], r12
 
-    ; Bulk copy payloads
+    test r12, r12
+    jz .lc_unlock_done
     mov rdi, [r13 + PyListObject.ob_item]
     mov rsi, [rbx + PyListObject.ob_item]
     mov rdx, r12
     shl rdx, 3
     call ap_memcpy
 
-    ; INCREF each item.  The array pointer is loaded once and the counter
-    ; stays in a register: INCREF_V is a compare, a branch and an increment
-    ; and clobbers only the scratch it is given, so the push/pop bracket that
-    ; was here protected nothing.
     mov rax, [r13 + PyListObject.ob_item]
     xor ecx, ecx
     jmp .lc_incref_test
@@ -183,6 +210,10 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     cmp rcx, r12
     jb .lc_incref
 
+.lc_unlock_done:
+    OBJ_UNLOCK rbx
+    mov rdi, r13
+    call gc_track
 .lc_done:
     mov rax, r13
     pop r13
@@ -191,6 +222,86 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC list_copy
+
+;; list_extend_from_list(rdi = dst list, rsi = src list) -> rax = 0, or -1 (sorting)
+global list_extend_from_list
+DEF_FUNC list_extend_from_list, 16  ; + 4 pushes = 48, 16-aligned
+    push rbx
+    push r12
+    push r13
+    push r14
+
+    mov rbx, rdi                    ; dst
+    mov r12, rsi                    ; src
+    OBJ_LOCK2 rbx, r12
+
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .lefl_sorting
+    mov r13, [r12 + PyListObject.ob_size]
+    test r13, r13
+    jz .lefl_done
+
+    mov r14, [rbx + PyListObject.ob_size]
+    add r14, r13
+    cmp r14, [rbx + PyListObject.allocated]
+    jbe .lefl_have_room
+
+    mov rax, [rbx + PyListObject.allocated]
+    shl rax, 1
+    cmp rax, r14
+    jae .lefl_cap
+    mov rax, r14
+.lefl_cap:
+    mov [rbx + PyListObject.allocated], rax
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rsi, rax
+    shl rsi, 3
+    call ap_realloc
+    mov [rbx + PyListObject.ob_item], rax
+
+.lefl_have_room:
+    mov rdi, [rbx + PyListObject.ob_item]
+    mov rax, [rbx + PyListObject.ob_size]
+    lea rdi, [rdi + rax*8]
+    mov rsi, [r12 + PyListObject.ob_item]
+    mov rdx, r13
+    shl rdx, 3
+    call ap_memcpy
+    mov [rbx + PyListObject.ob_size], r14
+
+    mov rax, [rbx + PyListObject.ob_item]
+    mov rcx, r14
+    sub rcx, r13
+    lea rax, [rax + rcx*8]
+    xor ecx, ecx
+.lefl_incref:
+    cmp rcx, r13
+    jae .lefl_done
+    mov rdi, [rax + rcx*8]
+    INCREF_V rdi, rsi
+    inc rcx
+    jmp .lefl_incref
+
+.lefl_done:
+    OBJ_UNLOCK2 rbx, r12
+    xor eax, eax
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.lefl_sorting:
+    OBJ_UNLOCK2 rbx, r12
+    call set_list_sorting_error
+    mov rax, -1
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC list_extend_from_list
 
 ;; ============================================================================
 ;; list_extend_from_array(rdi = list, rsi = Value[], rdx = count) -> rax = 0
@@ -222,8 +333,9 @@ DEF_FUNC list_extend_from_array, LEFA_FRAME
     mov r12, rsi
     mov r13, rdx
     test r13, r13
-    jz .lefa_done
+    jz .lefa_done_unlocked
 
+    OBJ_LOCK rbx
     ; The sorting sentinel, as every other way into a list checks it.
     cmp qword [rbx + PyListObject.ob_item], 0
     je .lefa_sorting
@@ -282,6 +394,8 @@ DEF_FUNC list_extend_from_array, LEFA_FRAME
     jb .lefa_incref
 
 .lefa_done:
+    OBJ_UNLOCK rbx
+.lefa_done_unlocked:
     xor eax, eax
 .lefa_ret:
     pop r14
@@ -292,6 +406,7 @@ DEF_FUNC list_extend_from_array, LEFA_FRAME
     ret
 
 .lefa_sorting:
+    OBJ_UNLOCK rbx
     call set_list_sorting_error
     mov rax, -1
     jmp .lefa_ret
@@ -310,10 +425,10 @@ DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
     push r13
 
     mov rbx, rdi               ; list
-    ; Check if list is being sorted (ob_item == NULL)
+    mov r12, rsi               ; item Value
+    OBJ_LOCK rbx
     cmp qword [rbx + PyListObject.ob_item], 0
     je .la_sorting
-    mov r12, rsi               ; item Value
 
     ; Check if need to grow
     mov rax, [rbx + PyListObject.ob_size]
@@ -341,6 +456,7 @@ DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
 
     ; Increment size
     inc qword [rbx + PyListObject.ob_size]
+    OBJ_UNLOCK rbx
 
     xor eax, eax
 .la_ret:
@@ -351,19 +467,14 @@ DEF_FUNC list_append, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .la_sorting:
+    OBJ_UNLOCK rbx
     call set_list_sorting_error
     mov rax, -1
     jmp .la_ret
 END_FUNC list_append
 
-;; ============================================================================
-;; list_getitem(PyListObject *list, int64_t index) -> rax = Value
-;; Fails: 0
-;; sq_item: return item at index with bounds check and negative index support
-;; ============================================================================
 DEF_FUNC list_getitem
-
-    ; Check if list is being sorted (ob_item == NULL)
+    OBJ_LOCK rdi
     cmp qword [rdi + PyListObject.ob_item], 0
     je .lgi_sorting
 
@@ -379,47 +490,39 @@ DEF_FUNC list_getitem
     test rsi, rsi
     jl .index_error
 
-    ; Return item with INCREF (payload + tag)
+    ; Return item with INCREF
     mov rax, [rdi + PyListObject.ob_item]
-    mov rax, [rax + rsi * 8]      ; payload
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
+    mov rax, [rax + rsi * 8]
+    INCREF_V rax, rcx
+    OBJ_UNLOCK rdi
 
     leave
-    V_PACK rax, rdx             ; return one Value
     ret
 
 .index_error:
+    OBJ_UNLOCK rdi
     SET_EXC exc_IndexError_type, "list index out of range"
     xor eax, eax
     leave
     ret
 .lgi_sorting:
+    OBJ_UNLOCK rdi
     call set_list_sorting_error
     xor eax, eax
     leave
     ret
 END_FUNC list_getitem
 
-;; ============================================================================
-;; list_setitem(rdi = list, rsi = index, rdx = the value Value) -> rax = 0
-;; Fails: -1
-;; sq_ass_item: set item at index, DECREF old, INCREF new. rcx = value_tag.
-;; ============================================================================
-DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
-                                ; DECREF_V below -- which calls obj_dealloc.
-                                ; The three pushes that used to bracket that
-                                ; release supplied this by accident; storing
-                                ; before releasing removed them.
+DEF_FUNC list_setitem, 8        ; 3 pushes -> 16-aligned
     push rbx
     push r12
     push r13
 
     mov rbx, rdi               ; list
-    ; Check if list is being sorted (ob_item == NULL)
+    mov r12, rdx               ; new value Value
+    OBJ_LOCK rbx
     cmp qword [rbx + PyListObject.ob_item], 0
     je .lsi_sorting
-    mov r12, rdx               ; new value Value
 
     ; Handle negative index
     test rsi, rsi
@@ -433,28 +536,14 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     test rsi, rsi
     jl .index_error
 
-    ; Install the new value BEFORE releasing the old one.
-    ;
-    ; Releasing first was wrong twice over.  A __del__ reached from the release
-    ; saw the slot still holding the object being destroyed, where CPython's
-    ; list_ass_item -- which stores first -- shows it the replacement.  And the
-    ; same __del__ may append to the list or clear it, which reallocates
-    ; ob_item: the address computed above was then written through after the
-    ; block it pointed into had been freed.
+    ; Install new value under OBJ_LOCK, then release old value outside lock.
     mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + rsi * 8]      ; the old occupant
+    mov rdi, [rax + rsi * 8]
     INCREF_V r12, r13
     mov [rax + rsi * 8], r12
-    DECREF_V rdi, rcx             ; nothing below reads rsi
+    OBJ_UNLOCK rbx
+    DECREF_V rdi, rcx
 
-    ; 0 is "assigned", and it has to be SET.  This is an mp_ass_subscript-
-    ; shaped function: op_store_subscr tests the low half of the answer for a
-    ; negative, and what was left in rax here was ob_item -- a heap pointer.
-    ; While that came from glibc's brk arena it was a low address with bit 31
-    ; clear, so the test passed by luck.  It stops being luck the moment
-    ; ob_item comes from anywhere else: a list of two hundred thousand
-    ; elements is served by mmap today, and `a[0] = 1` on one raises
-    ; "item assignment failed without an exception" about a third of the time.
     xor eax, eax
     pop r13
     pop r12
@@ -463,9 +552,11 @@ DEF_FUNC list_setitem, 8        ; 3 pushes, so rsp is 16-aligned at the
     ret
 
 .lsi_sorting:
+    OBJ_UNLOCK rbx
     call set_list_sorting_error
     jmp .lsi_fail
 .index_error:
+    OBJ_UNLOCK rbx
     SET_EXC exc_IndexError_type, "list assignment index out of range"
 .lsi_fail:
     mov rax, -1
@@ -630,40 +721,35 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     ret
 
 .las_int_delete:
-    ; Delete item at index rsi from list rbx
-    ; Handle negative index
+    ; Delete item at index rsi from list rbx under OBJ_LOCK
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .lid_unlock_sorting
     test rsi, rsi
     jns .lid_positive
     add rsi, [rbx + PyListObject.ob_size]
 .lid_positive:
-    ; Bounds check
     cmp rsi, [rbx + PyListObject.ob_size]
-    jge .lid_index_error
+    jge .lid_unlock_index_error
     test rsi, rsi
-    jl .lid_index_error
+    jl .lid_unlock_index_error
 
-    ; Take the old value out; it is released only after the list is whole
-    ; again.  Releasing it first ran its __del__ against a list that still
-    ; held it -- one that cleared the list was a segfault in the shift below.
     mov rax, [rbx + PyListObject.ob_item]
-    mov r12, [rax + rsi * 8]      ; r12 = the old Value (a delete has no new one)
+    mov r12, [rax + rsi * 8]      ; old Value, released after OBJ_UNLOCK
 
-    ; Shift elements down: memmove items[i] = items[i+1] for i..size-2
     mov rcx, [rbx + PyListObject.ob_size]
-    dec rcx                    ; new_size = size - 1
+    dec rcx
     mov r8, rcx
-    sub r8, rsi                ; count = new_size - index
+    sub r8, rsi
 
-    ; Shift payload array
     mov rax, [rbx + PyListObject.ob_item]
-    lea rdi, [rax + rsi * 8]      ; dst
-    lea r9, [rdi + 8]             ; src = dst + 8
+    lea rdi, [rax + rsi * 8]
+    lea r9, [rdi + 8]
     push rcx
     push rsi
     push r8
-    mov rsi, r9               ; src
-    ; rdi already = dst
-    shl r8, 3                 ; count * 8 bytes
+    mov rsi, r9
+    shl r8, 3
     mov rcx, r8
     cld
     rep movsb
@@ -671,18 +757,23 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     pop rsi
     pop rcx
 
-    ; Decrement ob_size
     mov [rbx + PyListObject.ob_size], rcx
+    OBJ_UNLOCK rbx
 
     mov rdi, r12
     DECREF_V rdi, rax
 
-    xor eax, eax                ; deleted; see list_setitem for why this is set
+    xor eax, eax
     pop r12
     pop rbx
     leave
     ret
 
+.lid_unlock_sorting:
+    OBJ_UNLOCK rbx
+    jmp .las_sorting
+.lid_unlock_index_error:
+    OBJ_UNLOCK rbx
 .lid_index_error:
     SET_EXC exc_IndexError_type, "list assignment index out of range"
     jmp .las_fail
@@ -768,10 +859,12 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     cmp rax, rdx
     jne .las_try_tuple
 
-    ; Value is a list — check for self-assignment
+    ; Value is a list — copy on self-assignment or when threaded (so source cannot resize)
     cmp r12, rbx
-    jne .las_list_direct
-    ; Self-assignment: make a shallow copy first
+    je .las_list_copy
+    cmp byte [rel rt_threaded], 0
+    je .las_list_direct
+.las_list_copy:
     push rcx                   ; save old_len (clobbered by list_copy)
     mov rdi, r12
     call list_copy
@@ -907,16 +1000,9 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .las_type_error
 
 .las_have_items:
-    ; rcx = old_len (items being removed)
-    ; r8 = new_len (items being inserted)
-    ; r9 = pointer to new items array
-    ; r13 = start, r14 = stop
-    ; rbx = list
-
-    ; Materialising the value may have run Python -- an iterator, a
-    ; __getitem__ -- and that may have changed this list.  Clamp the bounds
-    ; again, against the length it has NOW, as CPython's list_ass_slice does
-    ; after its PySequence_Fast.
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .las_slice_unlock_sorting
     mov rax, [rbx + PyListObject.ob_size]
     cmp r13, rax
     cmova r13, rax
@@ -1039,7 +1125,7 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
 .las_copy_new:
     ; 3. Copy new items into [start..start+new_len), INCREF each
     test r8, r8
-    jz .las_insert_done
+    jz .las_unlock_insert_done
 
     ; Bulk memcpy payloads: dst = list.ob_item + start*8, src = r9, len = new_len*8
     push r8                   ; save new_len [rsp+16]
@@ -1061,12 +1147,14 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     xor ecx, ecx
 .las_incref_loop:
     cmp rcx, r8
-    jge .las_insert_done
+    jge .las_unlock_insert_done
     mov rdi, [r9 + rcx * 8]
     INCREF_V rdi, rax
     inc rcx
     jmp .las_incref_loop
 
+.las_unlock_insert_done:
+    OBJ_UNLOCK rbx
 .las_insert_done:
     ; Release what the assignment displaced, now that the list is whole.
     mov r14, [rbp - LAS_RECYCLE]
@@ -1222,10 +1310,11 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .ext_check_len
 
 .ext_from_list:
-    ; Self-assignment check: if source == target, make a shallow copy
     cmp r12, rbx
-    jne .ext_list_direct
-    ; Create temp copy of the list for self-assignment
+    je .ext_list_copy
+    cmp byte [rel rt_threaded], 0
+    je .ext_list_direct
+.ext_list_copy:
     mov rdi, r12
     extern list_copy
     call list_copy
@@ -1241,19 +1330,32 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov r12, [r12 + PyTupleObject.ob_item]
 
 .ext_check_len:
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .las_slice_unlock_sorting
+    ; Re-verify bounds under OBJ_LOCK in case another thread shrunk rbx
+    test r14, r14
+    jz .ext_locked_bounds_ok
+    mov rax, [rbx + PyListObject.ob_size]
+    cmp r13, rax
+    jae .ext_locked_stale
+    mov rcx, r14
+    dec rcx
+    imul rcx, r15
+    add rcx, r13
+    cmp rcx, rax
+    jb .ext_locked_bounds_ok
+.ext_locked_stale:
+    xor r14d, r14d
+.ext_locked_bounds_ok:
     mov [rbp - LAS_SRCLEN], r8
     mov [rbp - LAS_SLICELEN], r14
     cmp r8, r14
-    jne .ext_len_mismatch
+    jne .ext_unlock_len_mismatch
 
-    ; Loop: for each position in the slice, replace value
-    ; rbx = list, r12 = source items ptr, r13 = current list index
-    ; r14 = remaining count, r15 = step
     test r14, r14
-    jz .las_insert_done        ; jump to shared exit
+    jz .las_unlock_insert_done
 
-    ; The displaced items go aside and are released at the shared exit, so
-    ; no __del__ runs while the loop is still writing.
     lea rdi, [r14*8]
     call ap_malloc
     mov [rbp - LAS_RECYCLE], rax
@@ -1266,82 +1368,79 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     mov [r8], rdi
     add r8, 8
 
-    ; INCREF the new value from the source
     mov rdi, [r12]
     INCREF_V rdi, rsi
-
-    ; Store at list[r13]
     mov [rax + r13 * 8], rdi
 
-    ; Advance
-    add r13, r15               ; next list index (start + i*step)
-    add r12, 8                 ; next source item
-    dec r14                    ; remaining--
+    add r13, r15
+    add r12, 8
+    dec r14
     jnz .ext_loop
 
-    jmp .las_insert_done       ; shared exit
+    jmp .las_unlock_insert_done
 
 ;; Extended slice deletion: del a[start:stop:step]
-;; r13 = start, r14 = slicelength, r15 = step, rbx = list
 .ext_delete:
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .las_slice_unlock_sorting
     test r14, r14
-    jz .las_insert_done        ; empty slice → no-op
+    jz .las_unlock_insert_done
+    mov rax, [rbx + PyListObject.ob_size]
+    cmp r13, rax
+    jae .las_unlock_insert_done
+    mov rcx, r14
+    dec rcx
+    imul rcx, r15
+    add rcx, r13
+    cmp rcx, rax
+    jae .las_unlock_insert_done
 
-    ; Phase 1: move the items at each slice position aside; they are
-    ; released at the shared exit, after the compaction.
     lea rdi, [r14*8]
     call ap_malloc
     mov [rbp - LAS_RECYCLE], rax
     mov [rbp - LAS_RECN], r14
-    mov rdx, rax               ; the recycle cursor
-    mov rcx, r13               ; cur = start
-    mov r8, r14                ; remaining = slicelength
+    mov rdx, rax
+    mov rcx, r13
+    mov r8, r14
 .ext_del_decref:
     mov rax, [rbx + PyListObject.ob_item]
     mov rdi, [rax + rcx * 8]
     mov [rdx], rdi
     add rdx, 8
-    add rcx, r15              ; cur += step
+    add rcx, r15
     dec r8
     jnz .ext_del_decref
 
-    ; Phase 2: Compact by shifting remaining items into gaps
-    ; For step>0: deleted indices are start, start+step, start+2*step, ...
-    ; For step<0: normalize to ascending order
-    mov rcx, r13               ; first_del = start
-    mov r8, r15                ; abs_step = step
+    mov rcx, r13
+    mov r8, r15
     test r15, r15
     jns .ext_del_pos
-    ; Negative step: lowest index = start + (slicelength-1)*step
     mov rax, r14
     dec rax
     imul rax, r15
-    add rcx, rax              ; first_del = start + (slicelength-1)*step
-    neg r8                    ; abs_step = -step
+    add rcx, rax
+    neg r8
 .ext_del_pos:
-    ; Two-pointer compact: src walks 0..ob_size, dst skips deleted positions
-    ; rcx = next_del, r8 = abs_step
     mov r10, [rbx + PyListObject.ob_size]
-    mov r11, [rbx + PyListObject.ob_item]       ; payloads
-    xor r9d, r9d              ; dst = 0
-    mov rdi, r14               ; del_remaining = slicelength
-    xor esi, esi               ; src = 0
+    mov r11, [rbx + PyListObject.ob_item]
+    xor r9d, r9d
+    mov rdi, r14
+    xor esi, esi
 .ext_compact_loop:
     cmp rsi, r10
     jge .ext_compact_done
-    ; Check if src is a deleted position
     cmp rsi, rcx
     jne .ext_compact_copy
     test rdi, rdi
     jz .ext_compact_copy
-    ; Skip this position
-    add rcx, r8               ; next_del += abs_step
-    dec rdi                    ; del_remaining--
-    inc rsi                    ; src++
+    add rcx, r8
+    dec rdi
+    inc rsi
     jmp .ext_compact_loop
 .ext_compact_copy:
     cmp rsi, r9
-    je .ext_compact_nocopy     ; src == dst, no copy needed
+    je .ext_compact_nocopy
     push rcx
     mov rax, [r11 + rsi * 8]
     mov [r11 + r9 * 8], rax
@@ -1352,8 +1451,15 @@ DEF_FUNC list_ass_subscript, LAS_FRAME
     jmp .ext_compact_loop
 .ext_compact_done:
     mov [rbx + PyListObject.ob_size], r9
-    jmp .las_insert_done
+    jmp .las_unlock_insert_done
 
+.las_slice_unlock_sorting:
+    OBJ_UNLOCK rbx
+    call set_list_sorting_error
+    jmp .las_slice_fail
+
+.ext_unlock_len_mismatch:
+    OBJ_UNLOCK rbx
 .ext_len_mismatch:
     ; The materialised iterable is ours: `L[::2] = G()` for any generic
     ; iterable leaked the temp list built to hold it every time the lengths
@@ -1414,39 +1520,53 @@ DEF_FUNC list_contains, LC_FRAME
 
 .loop:
     mov rax, [rbp - LC_IDX]
-    ; Re-read the size each pass: an __eq__ running below can mutate the
-    ; list, and CPython's own test_equal_operator_modifying_operand relies on
-    ; the search noticing.
-    mov rcx, [rbp - LC_LIST]
-    mov rdx, [rcx + PyListObject.ob_size]
+    mov r8, [rbp - LC_LIST]
+    OBJ_LOCK r8
+    mov rdx, [r8 + PyListObject.ob_size]
     cmp rax, rdx
-    jge .not_found
+    jge .lc_unlock_not_found
 
-    mov rcx, [rcx + PyListObject.ob_item]
+    mov rcx, [r8 + PyListObject.ob_item]
     mov rdi, [rcx + rax * 8]        ; the element Value
     mov rsi, [rbp - LC_VALUE]
 
-    ; The two questions a Value can answer without calling anything.  See
-    ; VALUE_EQ_FAST in src/include/value.inc; index, count and remove use the
-    ; same macro, and until they did they were the slow half of a family whose
-    ; other half was three times CPython's speed.
-    VALUE_EQ_FAST rdi, rsi, rdx, .found, .lc_next
+    VALUE_EQ_FAST rdi, rsi, rdx, .lc_unlock_found, .lc_unlock_next
+    ; Slow __eq__: pin element under OBJ_LOCK before unlocking
+    INCREF_V rdi, rdx
+    OBJ_UNLOCK r8
+    push rdi
+    push rdi                        ; 16-byte align
     mov edx, PY_EQ
-    call obj_richcompare_bool
+    call obj_richcompare_bool       ; err: checked below after dropping pin
+    mov rcx, rax
+    pop rdi
+    pop rdi
+    push rcx
+    push rcx
+    DECREF_V rdi, rdx
+    pop rax
+    pop rax
     cmp eax, -1
     je .contains_error
     test eax, eax
     jnz .found
+    jmp .lc_next
 
+.lc_unlock_next:
+    OBJ_UNLOCK r8
 .lc_next:
     inc qword [rbp - LC_IDX]
     jmp .loop
 
+.lc_unlock_found:
+    OBJ_UNLOCK r8
 .found:
     mov eax, 1
     leave
     ret
 
+.lc_unlock_not_found:
+    OBJ_UNLOCK r8
 .not_found:
     xor eax, eax
     leave
@@ -1484,18 +1604,20 @@ DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, [rbx + PyListObject.ob_item]
     call ap_free
 
-    ; Try to pool list header
-    cmp dword [rel list_pool_count], LIST_POOL_MAX
+    ; Try to pool list header in this thread's freelist
+    mov rdx, [gs:ThreadState.ts_self]
+    cmp dword [rdx + ThreadState.ts_list_pool_count], LIST_POOL_MAX
     jge .free_header
     ; Untrack from GC before pooling
     mov rdi, rbx
     extern gc_untrack
     call gc_untrack
-    ; Push to pool: reuse ob_refcnt as next-pointer
-    mov rcx, [rel list_pool_head]
-    mov [rbx + PyObject.ob_refcnt], rcx
-    mov [rel list_pool_head], rbx
-    inc dword [rel list_pool_count]
+    ; Push to pool: reuse dead header word 0 as next-pointer
+    mov rdx, [gs:ThreadState.ts_self]
+    mov rcx, [rdx + ThreadState.ts_list_pool_head]
+    mov [rbx], rcx
+    mov [rdx + ThreadState.ts_list_pool_head], rbx
+    inc dword [rdx + ThreadState.ts_list_pool_count]
     pop r13
     pop r12
     pop rbx
@@ -1512,6 +1634,31 @@ DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     leave
     ret
 END_FUNC list_dealloc
+
+;; ============================================================================
+;; list_pool_drain() -> nothing
+;; Return all cached PyListObject headers on this thread's pool to gc_dealloc.
+;; ============================================================================
+global list_pool_drain
+DEF_FUNC list_pool_drain
+    push rbx
+    sub rsp, 8
+    mov rbx, [gs:ThreadState.ts_self]
+.lpd_loop:
+    mov rdi, [rbx + ThreadState.ts_list_pool_head]
+    test rdi, rdi
+    jz .lpd_done
+    mov rax, [rdi]
+    mov [rbx + ThreadState.ts_list_pool_head], rax
+    call gc_dealloc
+    jmp .lpd_loop
+.lpd_done:
+    mov dword [rbx + ThreadState.ts_list_pool_count], 0
+    add rsp, 8
+    pop rbx
+    leave
+    ret
+END_FUNC list_pool_drain
 
 ; list_repr is in src/repr.asm
 extern list_repr
@@ -1552,9 +1699,25 @@ DEF_FUNC list_getslice
     mov r14, rdx               ; r14 = stop
     mov r15, rcx               ; r15 = step
 
-    ; Compute slicelength
+    ; Compute slicelength under OBJ_LOCK (re-clamping if list shrunk concurrently)
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .lgs_unlock_sorting
+    mov rax, [rbx + PyListObject.ob_size]
     test r15, r15
-    jg .lgs_pos_step
+    jg .lgs_pos_clamp
+    ; step < 0: valid start is in [-1, ob_size-1], stop in [-1, ob_size-1]
+    cmp r13, rax
+    jl .lgs_neg_step
+    lea r13, [rax - 1]
+    jmp .lgs_neg_step
+.lgs_pos_clamp:
+    cmp r13, rax
+    cmovg r13, rax
+    cmp r14, rax
+    cmovg r14, rax
+    jmp .lgs_pos_step
+.lgs_neg_step:
     ; Negative step: if start <= stop, empty
     mov rax, r13
     sub rax, r14               ; start - stop
@@ -1584,7 +1747,7 @@ DEF_FUNC list_getslice
     ; rax = slicelength
     push rax                   ; save slicelength
     mov rdi, rax
-    call list_new_filled       ; every slot below the length is written below
+    call list_new_filled_untracked ; tracked after OBJ_UNLOCK below
     push rax                   ; save the new list
 
     ; Fill items: for i = 0..slicelength-1, idx = start + i*step
@@ -1676,8 +1839,12 @@ DEF_FUNC list_getslice
     jmp .lgs_loop
 
 .lgs_done:
-    pop rax                    ; new list
+    OBJ_UNLOCK rbx
+    pop rbx                    ; new list (preserve across gc_track)
     add rsp, 8                 ; discard slicelength
+    mov rdi, rbx
+    call gc_track
+    mov rax, rbx
 
     add rsp, 8                 ; undo alignment
     pop r15
@@ -1689,6 +1856,9 @@ DEF_FUNC list_getslice
     leave
     ret
 
+.lgs_unlock_sorting:
+    OBJ_UNLOCK rbx
+    call set_list_sorting_error
 .lgs_fail:
     RET_NULL                    ; a bound was not an index
     add rsp, 8
@@ -1788,7 +1958,14 @@ DEF_FUNC_LOCAL list_incref_range_by
     lea rcx, [rax - 1]
     cmp rcx, [rel v_ptr_max_m1]
     ja .lirb_next
-    add [rax + PyObject.ob_refcnt], rdx
+    push rdi
+    push rsi
+    mov rdi, rax
+    mov rsi, rdx
+    extern obj_addref_bulk
+    call obj_addref_bulk
+    pop rsi
+    pop rdi
 .lirb_next:
     add rdi, 8
     cmp rdi, rsi
@@ -1825,31 +2002,29 @@ DEF_FUNC list_concat, LCC_FRAME
     mov rax, [r12 + PyObject.ob_type]
     REQUIRE_LIST_TYPE rax, rcx, .lc_type_error_ptr
 
-    ; Get sizes
+    ; Get sizes & copy under OBJ_LOCK2 (handles a == b safely)
+    OBJ_LOCK2 rbx, r12
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(a)
     mov r14, [r12 + PyListObject.ob_size]   ; r14 = len(b)
 
-    ; Allocate new list with total capacity.  Both halves are written in
-    ; full below, so only the tail is owed a zero.
     lea rdi, [r13 + r14]
-    call list_new_filled
-    mov [rbp - LCC_NEW], rax    ; one slot, read three times: the loop that
-                            ; used to be here reloaded the list from the stack
-                            ; and then ob_item off it, once per element
+    call list_new_filled_untracked
+    mov [rbp - LCC_NEW], rax
 
     lea rcx, [r13 + r14]
     mov [rax + PyListObject.ob_size], rcx
 
-    ; Both halves move as blocks; the references are taken afterwards, in one
-    ; pass over the result.  Values, so the two are independent -- there is no
-    ; per-element interleaving of a copy with a refcount.
+    test r13, r13
+    jz .lc_skip_a
     mov rdi, [rbp - LCC_NEW]
     mov rdi, [rdi + PyListObject.ob_item]
     mov rsi, [rbx + PyListObject.ob_item]
     mov rdx, r13
     shl rdx, 3
     call ap_memcpy
-
+.lc_skip_a:
+    test r14, r14
+    jz .lc_skip_b
     mov rdi, [rbp - LCC_NEW]
     mov rdi, [rdi + PyListObject.ob_item]
     lea rdi, [rdi + r13*8]
@@ -1857,11 +2032,14 @@ DEF_FUNC list_concat, LCC_FRAME
     mov rdx, r14
     shl rdx, 3
     call ap_memcpy
-
+.lc_skip_b:
     mov rdi, [rbp - LCC_NEW]
     mov rdi, [rdi + PyListObject.ob_item]
     lea rsi, [r13 + r14]
     call list_incref_range
+    OBJ_UNLOCK2 rbx, r12
+    mov rdi, [rbp - LCC_NEW]
+    call gc_track
 
     mov rax, [rbp - LCC_NEW]
     mov edx, TAG_PTR
@@ -1946,47 +2124,40 @@ DEF_FUNC list_repeat, LRP_FRAME
     xor r12d, r12d
 .rep_positive:
 
+    OBJ_LOCK rbx
     mov r13, [rbx + PyListObject.ob_size]   ; r13 = len(list)
     mov r14, r13
     imul r14, r12                            ; r14 = total items
-    jo .rep_overflow                         ; signed overflow → MemoryError
-    ; Sanity check: total_items * 8 must fit in address space
-    cmp r14, 0x10000000                      ; 256M items limit (~2GB)
-    ja .rep_toobig                           ; too large to allocate
+    jo .rep_unlock_overflow
+    cmp r14, 0x10000000
+    ja .rep_unlock_toobig
 
-    ; Allocate new list.  The copies below write every slot.
     mov rdi, r14
-    call list_new_filled
+    call list_new_filled_untracked
     mov [rbp - LRP_NEW], rax
     mov [rax + PyListObject.ob_size], r14
     test r14, r14
-    jz .rep_done
+    jz .rep_unlock_done
 
-    ; One copy of the source, and then the RESULT copied onto itself, each
-    ; time doubling what is written -- CPython's _Py_memory_repeat.  The
-    ; element-at-a-time nest that was here ran the source r12 times and
-    ; touched a refcount at every step; this touches each refcount once and
-    ; moves the rest in log2(r12) block copies.
     mov rdi, [rax + PyListObject.ob_item]
     mov rsi, [rbx + PyListObject.ob_item]
     mov rdx, r13
     shl rdx, 3
     call ap_memcpy
 
-    ; Every source element lands in the result r12 times, so its refcount
-    ; rises by r12 -- one addition, not r12 increments.
     mov rdi, [rbx + PyListObject.ob_item]
     mov rsi, r13
     mov rdx, r12
     call list_incref_range_by
+    OBJ_UNLOCK rbx
 
     mov [rbp - LRP_DONE], r13
 .rep_double:
     mov rcx, [rbp - LRP_DONE]
     cmp rcx, r14
     jae .rep_done
-    mov rdx, rcx                ; as much again as is already written,
-    mov rax, r14                ; or only what is left
+    mov rdx, rcx
+    mov rax, r14
     sub rax, rcx
     cmp rdx, rax
     cmova rdx, rax
@@ -1999,7 +2170,11 @@ DEF_FUNC list_repeat, LRP_FRAME
     call ap_memcpy
     jmp .rep_double
 
+.rep_unlock_done:
+    OBJ_UNLOCK rbx
 .rep_done:
+    mov rdi, [rbp - LRP_NEW]
+    call gc_track
     mov rax, [rbp - LRP_NEW]
     mov edx, TAG_PTR
     pop r14
@@ -2009,6 +2184,13 @@ DEF_FUNC list_repeat, LRP_FRAME
     leave
     V_PACK rax, rdx             ; return one Value
     ret
+
+.rep_unlock_toobig:
+    OBJ_UNLOCK rbx
+    jmp .rep_toobig
+.rep_unlock_overflow:
+    OBJ_UNLOCK rbx
+    jmp .rep_overflow
 
 .rep_decline:
     xor eax, eax
@@ -2079,9 +2261,11 @@ DEF_FUNC list_inplace_concat, LIC_FRAME
     ; included, which is why it handles a source that is the destination's
     ; own array.
 .lic_list:
-    mov rdx, [r12 + PyListObject.ob_size]
-    mov rsi, [r12 + PyListObject.ob_item]
-    jmp .lic_from_array
+    mov rdi, rbx
+    mov rsi, r12
+    call list_extend_from_list
+    ERR_M1 .lic_fail
+    jmp .lic_done
 
 .lic_tuple:
     mov rdx, [r12 + PyTupleObject.ob_size]
@@ -2238,62 +2422,48 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     cmp r12, 1
     je .lir_done
 
-    ; count >= 2: replicate items
+    ; count >= 2: replicate items under OBJ_LOCK
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .lir_unlock_sorting
     mov rax, [rbx + PyListObject.ob_size]
     mov [rbp - LIR_OLDSIZE], rax
     test rax, rax
-    jz .lir_done              ; empty list * n = empty list
+    jz .lir_unlock_done
 
-    ; Grow items array: new_cap = old_size * count
-    mov r13, rax              ; r13 = old_size
-    imul rax, r12             ; rax = old_size * count = new_size
-    ; As sq_repeat: a product too big to allocate is a MemoryError, and
-    ; OverflowError is kept for a COUNT that will not fit an index -- which
-    ; seq_repeat_count above has already refused.
-    jo .lir_toobig
-    cmp rax, 0x10000000        ; 256M items limit
-    ja .lir_toobig
-    push rax                  ; save new_size
+    mov r13, rax
+    imul rax, r12
+    jo .lir_unlock_toobig
+    cmp rax, 0x10000000
+    ja .lir_unlock_toobig
+    push rax
 
-    ; Realloc payloads
     mov rdi, [rbx + PyListObject.ob_item]
     mov rsi, rax
-    shl rsi, 3                ; new_size * 8
+    shl rsi, 3
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
-    pop rax                   ; new_size
+    pop rax
     mov [rbx + PyListObject.ob_size], rax
     mov [rbx + PyListObject.allocated], rax
 
-    ; Copy items (count - 1) more times + INCREF each copy
-    mov rax, [rbx + PyListObject.ob_item]       ; payloads
-    mov ecx, 1                      ; copy number (1-based)
+    mov rax, [rbx + PyListObject.ob_item]
+    mov ecx, 1
 .lir_copy_outer:
     cmp rcx, r12
-    jge .lir_done
+    jge .lir_unlock_done
     push rcx
 
-    ; Destination base index = copy_num * old_size
     mov rdx, rcx
-    imul rdx, r13             ; dest base index
+    imul rdx, r13
 
-    ; Copy old_size elements (16 bytes each)
     xor ecx, ecx
 .lir_copy_inner:
     cmp rcx, r13
     jge .lir_copy_next
-    mov r9, [rax + rcx * 8]       ; src item
+    mov r9, [rax + rcx * 8]
     mov [rax + rdx * 8], r9
-
-    ; INCREF copied item
-    push rax
-    push rcx
-    push rdx
     INCREF_V r9, r10
-    pop rdx
-    pop rcx
-    pop rax
-
     inc rdx
     inc rcx
     jmp .lir_copy_inner
@@ -2302,6 +2472,18 @@ DEF_FUNC list_inplace_repeat, LIR_FRAME
     pop rcx
     inc rcx
     jmp .lir_copy_outer
+
+.lir_unlock_done:
+    OBJ_UNLOCK rbx
+    jmp .lir_done
+
+.lir_unlock_toobig:
+    OBJ_UNLOCK rbx
+    jmp .lir_toobig
+
+.lir_unlock_sorting:
+    OBJ_UNLOCK rbx
+    jmp .lir_sorting
 
 .lir_clear:
     mov rdi, rbx
@@ -2392,8 +2574,13 @@ DEF_FUNC list_type_call, LTC_FRAME
     mov rbx, [rdi + PyTupleObject.ob_item]
     jmp .ltc_from_array
 .ltc_from_list:
-    mov r13, [rdi + PyListObject.ob_size]
-    mov rbx, [rdi + PyListObject.ob_item]
+    call list_copy
+    mov edx, TAG_PTR
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
 .ltc_from_array:
     mov rdi, r13
     call list_new_filled
@@ -2550,12 +2737,6 @@ END_FUNC list_type_call
 ;; ============================================================================
 section .data
 
-; List header pool (freelist, singly-linked via ob_refcnt)
-align 8
-list_pool_head:  dq 0       ; freelist head
-list_pool_count: dd 0       ; current count
-                 dd 0       ; padding
-
 list_name_str: db "list", 0
 ; list_repr_str removed - repr now in src/repr.asm
 
@@ -2646,7 +2827,8 @@ LRC_LEFT     equ 8
 LRC_RIGHT    equ 16
 LRC_OP       equ 24
 LRC_IDX      equ 32
-LRC_FRAME    equ 48         ; + 0 pushes = 48
+LRC_RES      equ 40
+LRC_FRAME    equ 48         ; + 0 pushes = 48, 16-aligned
 
 ;; CPython's list_richcompare, followed exactly.  The old version precomputed
 ;; min(len) once and, on finding an unequal element, returned that element's
@@ -2682,71 +2864,99 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     jne .lrc_ran_out            ; which compares the sizes for this op
 
 .lrc_elem_loop:
-    ; while (i < len(v) && i < len(w))
     mov rax, [rbp - LRC_IDX]
-    mov rcx, [rbp - LRC_LEFT]
-    cmp rax, [rcx + PyListObject.ob_size]
-    jge .lrc_ran_out
-    mov rcx, [rbp - LRC_RIGHT]
-    cmp rax, [rcx + PyListObject.ob_size]
-    jge .lrc_ran_out
+    mov r8, [rbp - LRC_LEFT]
+    mov r9, [rbp - LRC_RIGHT]
+    OBJ_LOCK2 r8, r9
+    cmp rax, [r8 + PyListObject.ob_size]
+    jge .lrc_unlock_ran_out
+    cmp rax, [r9 + PyListObject.ob_size]
+    jge .lrc_unlock_ran_out
 
-    mov rcx, [rbp - LRC_LEFT]
-    mov rcx, [rcx + PyListObject.ob_item]
+    mov rcx, [r8 + PyListObject.ob_item]
     mov rdi, [rcx + rax * 8]
-    mov rcx, [rbp - LRC_RIGHT]
-    mov rcx, [rcx + PyListObject.ob_item]
+    mov rcx, [r9 + PyListObject.ob_item]
     mov rsi, [rcx + rax * 8]
-    ; The two questions a Value can answer without calling anything -- see
-    ; VALUE_EQ_FAST.  For two lists of small integers this is the whole
-    ; comparison, and `a == b` over interned or immediate elements becomes a
-    ; pointer scan with no refcount traffic, which is what CPython's own
-    ; per-element `if (vitem == witem) continue;` buys it.
-    VALUE_EQ_FAST rdi, rsi, rdx, .lrc_next, .lrc_differ
+    VALUE_EQ_FAST rdi, rsi, rdx, .lrc_unlock_next, .lrc_unlock_differ
+    INCREF_V rdi, rdx
+    INCREF_V rsi, rdx
+    OBJ_UNLOCK2 r8, r9
+    push rdi
+    push rsi
     mov edx, PY_EQ
-    call obj_richcompare_bool
+    call obj_richcompare_bool       ; err: checked below after dropping pins
+    mov [rbp - LRC_RES], rax
+    pop rdi                         ; pinned rsi (rsp now 8-aligned)
+    sub rsp, 8
+    DECREF_V rdi, rdx
+    add rsp, 8
+    pop rdi                         ; pinned rdi (rsp now 16-aligned)
+    DECREF_V rdi, rdx
+    mov rax, [rbp - LRC_RES]
     cmp eax, -1
     je .lrc_error
     test eax, eax
-    jz .lrc_differ               ; first differing element
+    jz .lrc_differ
+    jmp .lrc_next
 
+.lrc_unlock_next:
+    OBJ_UNLOCK2 r8, r9
 .lrc_next:
     inc qword [rbp - LRC_IDX]
     jmp .lrc_elem_loop
 
+.lrc_unlock_ran_out:
+    OBJ_UNLOCK2 r8, r9
+    jmp .lrc_ran_out
+
+.lrc_unlock_differ:
+    OBJ_UNLOCK2 r8, r9
 .lrc_differ:
-    ; The comparison may have shortened either list.  If the index is now
-    ; past the end of one of them, there is no element left to compare and
-    ; the sizes decide.
     mov rax, [rbp - LRC_IDX]
-    mov rcx, [rbp - LRC_LEFT]
-    cmp rax, [rcx + PyListObject.ob_size]
-    jge .lrc_ran_out
-    mov rcx, [rbp - LRC_RIGHT]
-    cmp rax, [rcx + PyListObject.ob_size]
-    jge .lrc_ran_out
+    mov r8, [rbp - LRC_LEFT]
+    mov r9, [rbp - LRC_RIGHT]
+    OBJ_LOCK2 r8, r9
+    cmp rax, [r8 + PyListObject.ob_size]
+    jge .lrc_unlock_ran_out
+    cmp rax, [r9 + PyListObject.ob_size]
+    jge .lrc_unlock_ran_out
 
-    ; Elements differ and both are still there: == is False, != is True, and
-    ; an ordering op is decided by this element.
-    mov rdx, [rbp - LRC_OP]
-    cmp edx, PY_EQ
-    je .lrc_return_false
-    cmp edx, PY_NE
-    je .lrc_return_true
-
-    mov rcx, [rbp - LRC_LEFT]
-    mov rcx, [rcx + PyListObject.ob_item]
-    mov rdi, [rcx + rax * 8]
-    mov rcx, [rbp - LRC_RIGHT]
-    mov rcx, [rcx + PyListObject.ob_item]
-    mov rsi, [rcx + rax * 8]
     mov edx, [rbp - LRC_OP]
-    call obj_richcompare_bool
+    cmp edx, PY_EQ
+    je .lrc_unlock_false
+    cmp edx, PY_NE
+    je .lrc_unlock_true
+
+    mov rcx, [r8 + PyListObject.ob_item]
+    mov rdi, [rcx + rax * 8]
+    mov rcx, [r9 + PyListObject.ob_item]
+    mov rsi, [rcx + rax * 8]
+    INCREF_V rdi, rcx
+    INCREF_V rsi, rcx
+    OBJ_UNLOCK2 r8, r9
+    push rdi
+    push rsi
+    mov edx, [rbp - LRC_OP]
+    call obj_richcompare_bool       ; err: checked below after dropping pins
+    mov [rbp - LRC_RES], rax
+    pop rdi                         ; pinned rsi (rsp now 8-aligned)
+    sub rsp, 8
+    DECREF_V rdi, rdx
+    add rsp, 8
+    pop rdi                         ; pinned rdi (rsp now 16-aligned)
+    DECREF_V rdi, rdx
+    mov rax, [rbp - LRC_RES]
     cmp eax, -1
     je .lrc_error
     RET_BOOL_RAX
     leave
     ret
+.lrc_unlock_false:
+    OBJ_UNLOCK2 r8, r9
+    jmp .lrc_return_false
+.lrc_unlock_true:
+    OBJ_UNLOCK2 r8, r9
+    jmp .lrc_return_true
 
 .lrc_ran_out:
     ; No element decided it: compare the current lengths.
@@ -2827,7 +3037,8 @@ list_mapping_methods:
 align 8
 global list_type
 list_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq list_name_str        ; tp_name
     dq PyListObject_size    ; tp_basicsize
@@ -2924,15 +3135,16 @@ DEF_FUNC list_clear
     push r15
 
     mov rbx, rdi
+    OBJ_LOCK rbx
     mov r13, [rbx + PyListObject.ob_size]
     test r13, r13
-    jz .done
+    jz .unlock_done
 
     mov edi, LCL_MINCAP * 8
     call ap_malloc
     xor ecx, ecx
 .zero:
-    mov qword [rax + rcx*8], 0  ; slice operations can read ahead of ob_size
+    mov qword [rax + rcx*8], 0
     inc ecx
     cmp ecx, LCL_MINCAP
     jb .zero
@@ -2941,6 +3153,7 @@ DEF_FUNC list_clear
     mov [rbx + PyListObject.ob_item], rax
     mov qword [rbx + PyListObject.allocated], LCL_MINCAP
     mov qword [rbx + PyListObject.ob_size], 0
+    OBJ_UNLOCK rbx
     mov r12, r15
 .loop:
     mov rdi, [r12]
@@ -2951,6 +3164,9 @@ DEF_FUNC list_clear
 
     mov rdi, r15
     call ap_free
+    jmp .done
+.unlock_done:
+    OBJ_UNLOCK rbx
 .done:
     pop r15
     pop r13

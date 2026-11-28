@@ -173,6 +173,9 @@ LC_ENCODE equ 0
 LC_DECODE equ 1
 
 section .bss
+alignb 64
+lc_handle_lock: resd 1
+alignb 8
 lc_handles:    resq 1
 lc_handle_n:   resq 1
 lc_handle_cap: resq 1
@@ -188,18 +191,24 @@ DEF_FUNC_BARE lc_handle_at
     xor eax, eax
     test rdi, rdi
     js .lha_no
+    RT_LOCK_GATED lc_handle_lock
     cmp rdi, [rel lc_handle_n]
-    jae .lha_no
+    jae .lha_unlock_no
     mov rax, [rel lc_handles]
     test rax, rax
-    jz .lha_no
+    jz .lha_unlock_no
     mov rax, [rax + rdi*8]
     test rax, rax
-    jz .lha_no
+    jz .lha_unlock_no
     cmp qword [rax + LHandle.magic], LC_MAGIC
-    je .lha_out
+    je .lha_unlock_out
     xor eax, eax
-.lha_out:
+.lha_unlock_out:
+    RT_UNLOCK_GATED lc_handle_lock
+    ret
+.lha_unlock_no:
+    xor eax, eax
+    RT_UNLOCK_GATED lc_handle_lock
 .lha_no:
     ret
 END_FUNC lc_handle_at
@@ -378,6 +387,7 @@ LS_FRAME equ 24             ; + 1 push = 32, 16-aligned
 DEF_FUNC_LOCAL lc_slot, LS_FRAME
     push rbx
     mov rbx, rdi
+    RT_LOCK_GATED lc_handle_lock
     xor ecx, ecx
     mov rdx, [rel lc_handles]
     test rdx, rdx
@@ -407,7 +417,7 @@ DEF_FUNC_LOCAL lc_slot, LS_FRAME
     mov rdi, [rel lc_handles]
     call ap_realloc
     test rax, rax
-    jz .ls_oom
+    jz .ls_unlock_oom
     mov [rel lc_handles], rax
     mov rcx, [rbp - LS_CAP]
     mov [rel lc_handle_cap], rcx
@@ -418,6 +428,7 @@ DEF_FUNC_LOCAL lc_slot, LS_FRAME
 
 .ls_have:
     mov [rdx + rcx*8], rbx
+    RT_UNLOCK_GATED lc_handle_lock
     mov rdi, rcx
     call int_from_i64
     V_PACK rax, rdx
@@ -425,6 +436,8 @@ DEF_FUNC_LOCAL lc_slot, LS_FRAME
     leave
     ret
 
+.ls_unlock_oom:
+    RT_UNLOCK_GATED lc_handle_lock
 .ls_oom:
     SET_EXC exc_ValueError_type, "Out of memory"
     xor eax, eax
@@ -1476,11 +1489,13 @@ DEF_FUNC lc_stream_free, LR_FRAME
     jz .lr_no_unused
     call ap_free
 .lr_no_unused:
+    RT_LOCK_GATED lc_handle_lock
     mov rax, [rbp - LR_H]
     mov qword [rax + LHandle.magic], 0
     mov rcx, [rel lc_handles]
     mov rdx, [rbp - LR_IDX]
     mov qword [rcx + rdx*8], 0
+    RT_UNLOCK_GATED lc_handle_lock
     mov rdi, rax
     call ap_free
 

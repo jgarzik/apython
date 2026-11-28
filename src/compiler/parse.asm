@@ -1327,7 +1327,7 @@ DEF_FUNC pf_const, PFN_FRAME
     ; These are ordinary heap singletons, and a pointer is its own Value.  They
     ; are immortal, but comp_free will DECREF the table entry, so take a
     ; reference to keep the accounting uniform.
-    inc qword [rsi + PyObject.ob_refcnt]
+    INCREF rsi
     mov rdi, rbx
     call ast_obj
     mov r8, rax

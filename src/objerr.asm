@@ -1143,7 +1143,9 @@ DEF_FUNC set_attribute_error, RNA_FRAME
     ; as well as missing -- CPython's members are NULL in both cases.
     lea rcx, [rel none_singleton]
     cmp rax, rcx
-    jne .rna_pending_raise
+    je .rna_pending_fill
+    DECREF_V rax, rcx
+    jmp .rna_pending_raise
 .rna_pending_fill:
     CSTRING rdi, "name"
     mov rsi, [rbp - RNA_NAME]

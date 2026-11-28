@@ -128,7 +128,7 @@ endstruc
 ;; ============================================================================
 global udn_ccc_of
 DEF_FUNC_BARE udn_ccc_of
-    mov r11, [rel udn_active]
+    mov r11, [gs:ThreadState.ts_udn_active]
     mov r8, [r11 + UdnTables.ccc]
     mov r9, [r11 + UdnTables.ccc_count]
     xor rcx, rcx                    ; lo
@@ -161,7 +161,7 @@ END_FUNC udn_ccc_of
 ;; ============================================================================
 global udn_row_for
 DEF_FUNC_BARE udn_row_for
-    mov r11, [rel udn_active]
+    mov r11, [gs:ThreadState.ts_udn_active]
     mov r8, [r11 + UdnTables.index]
     mov r9, [r11 + UdnTables.index_count]
     xor rcx, rcx
@@ -241,7 +241,7 @@ DEF_FUNC_BARE udn_compose_pair
     mov r10, rdi
     shl r10, 21
     or r10, rsi                     ; the packed key
-    mov r11, [rel udn_active]
+    mov r11, [gs:ThreadState.ts_udn_active]
     mov r8, [r11 + UdnTables.pairs]
     mov r9, [r11 + UdnTables.pair_count]
     xor rcx, rcx
@@ -418,7 +418,7 @@ DEF_FUNC udn_decompose_cp, UDC_FRAME
     jz .as_is
     mov edx, [r8 + UDN_ROW_CO]
 .have_span:
-    mov rax, [rel udn_active]
+    mov rax, [gs:ThreadState.ts_udn_active]
     mov rax, [rax + UdnTables.pool]
     lea rdx, [rax + rdx*4]
     mov [rbp - UDC_PTR], rdx
@@ -887,14 +887,6 @@ udn_tables_ucd32:
     dq ucd32_index, 0, ucd32_pool, ucd32_pairs, 0, ucd32_ccc, 0
     dq ucd32_raw_index, 0, ucd32_raw_pool, ucd32_tags
 
-section .bss
-;; Which of the two the lookups are reading.  Zero until udn_select runs, and
-;; every entry point runs it first.
-udn_active: resq 1
-;; The database the entry point picked, held across the argument checks so the
-;; two wrappers need no frame of their own.
-udn_pending_tables: resq 1
-
 section .text
 
 extern ucd32_index
@@ -921,28 +913,31 @@ extern ucd32_tags
 ;; ============================================================================
 global udn_select
 DEF_FUNC_BARE udn_select
-    mov [rel udn_active], rdi
+    mov [gs:ThreadState.ts_udn_active], rdi
+    cmp qword [rdi + UdnTables.index_count], 0
+    jne .done
     lea rax, [rel udn_tables_current]
     cmp rdi, rax
     jne .ucd32
-    mov rax, [rel udn_index_count]
-    mov [rdi + UdnTables.index_count], rax
     mov rax, [rel udn_pair_count]
     mov [rdi + UdnTables.pair_count], rax
     mov rax, [rel udn_ccc_count]
     mov [rdi + UdnTables.ccc_count], rax
     mov rax, [rel udn_raw_count]
     mov [rdi + UdnTables.raw_count], rax
+    mov rax, [rel udn_index_count]
+    mov [rdi + UdnTables.index_count], rax
     ret
 .ucd32:
-    mov rax, [rel ucd32_index_count]
-    mov [rdi + UdnTables.index_count], rax
     mov rax, [rel ucd32_pair_count]
     mov [rdi + UdnTables.pair_count], rax
     mov rax, [rel ucd32_ccc_count]
     mov [rdi + UdnTables.ccc_count], rax
     mov rax, [rel ucd32_raw_count]
     mov [rdi + UdnTables.raw_count], rax
+    mov rax, [rel ucd32_index_count]
+    mov [rdi + UdnTables.index_count], rax
+.done:
     ret
 END_FUNC udn_select
 
@@ -974,7 +969,7 @@ END_FUNC udn_normalize_identifier
 global unicodedata_normalize
 DEF_FUNC_BARE unicodedata_normalize
     lea rax, [rel udn_tables_current]
-    mov [rel udn_pending_tables], rax
+    mov [gs:ThreadState.ts_udn_pending_tables], rax
     jmp udn_normalize_body
 END_FUNC unicodedata_normalize
 
@@ -985,7 +980,7 @@ END_FUNC unicodedata_normalize
 global ucd32_normalize
 DEF_FUNC_BARE ucd32_normalize
     lea rax, [rel udn_tables_ucd32]
-    mov [rel udn_pending_tables], rax
+    mov [gs:ThreadState.ts_udn_pending_tables], rax
     jmp udn_normalize_body
 END_FUNC ucd32_normalize
 
@@ -1056,7 +1051,7 @@ DEF_FUNC udn_normalize_body
 .have_form:
     push rdx
     push rsi
-    mov rdi, [rel udn_pending_tables]
+    mov rdi, [gs:ThreadState.ts_udn_pending_tables]
     call udn_select
     pop rsi
     pop rdx
@@ -1189,7 +1184,7 @@ UDN_RAW_OFF    equ 8
 UDN_RAW_LEN    equ 12
 global udn_raw_row_for
 DEF_FUNC_BARE udn_raw_row_for
-    mov r11, [rel udn_active]
+    mov r11, [gs:ThreadState.ts_udn_active]
     mov r8, [r11 + UdnTables.raw_index]
     mov r9, [r11 + UdnTables.raw_count]
     xor rcx, rcx
@@ -1241,7 +1236,7 @@ UDD_FRAME equ 192                   ; + 2 pushes = 208, 16-aligned
 global unicodedata_decomposition
 DEF_FUNC_BARE unicodedata_decomposition
     lea rax, [rel udn_tables_current]
-    mov [rel udn_pending_tables], rax
+    mov [gs:ThreadState.ts_udn_pending_tables], rax
     jmp udn_decomposition_body
 END_FUNC unicodedata_decomposition
 
@@ -1252,7 +1247,7 @@ END_FUNC unicodedata_decomposition
 global ucd32_decomposition
 DEF_FUNC_BARE ucd32_decomposition
     lea rax, [rel udn_tables_ucd32]
-    mov [rel udn_pending_tables], rax
+    mov [gs:ThreadState.ts_udn_pending_tables], rax
     jmp udn_decomposition_body
 END_FUNC ucd32_decomposition
 
@@ -1268,7 +1263,7 @@ DEF_FUNC udn_decomposition_body, UDD_FRAME
     push r12
     push rdi
     push rsi
-    mov rdi, [rel udn_pending_tables]
+    mov rdi, [gs:ThreadState.ts_udn_pending_tables]
     call udn_select
     pop rsi
     pop rdi
@@ -1287,7 +1282,7 @@ DEF_FUNC udn_decomposition_body, UDD_FRAME
     jz .finish                      ; no mapping: the empty string
     mov rbx, rax
     mov eax, [rbx + UDN_RAW_TAG]
-    mov rcx, [rel udn_active]
+    mov rcx, [gs:ThreadState.ts_udn_active]
     mov rcx, [rcx + UdnTables.tags]
     mov rsi, [rcx + rax*8]          ; "" or "<noBreak> ", with its own space
     call .udd_append_cstr
@@ -1303,7 +1298,7 @@ DEF_FUNC udn_decomposition_body, UDD_FRAME
 .no_space:
     mov eax, [rbx + UDN_RAW_OFF]
     add eax, r12d
-    mov rcx, [rel udn_active]
+    mov rcx, [gs:ThreadState.ts_udn_active]
     mov rcx, [rcx + UdnTables.raw_pool]
     mov edi, [rcx + rax*4]
     call .udd_append_hex

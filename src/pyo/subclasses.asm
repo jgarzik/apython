@@ -43,6 +43,7 @@ extern dict_del
 extern list_new
 extern list_append
 extern obj_decref
+extern obj_try_incref
 extern ap_malloc
 extern ap_realloc
 extern ap_free
@@ -56,13 +57,25 @@ extern type_check_is_class
 SUBLIST_INITIAL equ 4
 
 section .bss
-align 8
+alignb 64
+subclass_lock:   resd 1
+alignb 8
 subclass_table:  resq 1      ; base address (an int Value) -> SubList address
 global subclass_live
 subclass_live:   resq 1      ; the table's size, so obj_dealloc can skip with
                              ; one compare
 
 section .text
+
+;; ============================================================================
+;; subclass_reset_after_fork() -> nothing
+;; Reset subclass_lock in a forked child.
+;; ============================================================================
+global subclass_reset_after_fork
+DEF_FUNC_BARE subclass_reset_after_fork
+    mov dword [rel subclass_lock], 0
+    ret
+END_FUNC subclass_reset_after_fork
 
 ;; ============================================================================
 ;; sub_table_refresh() -- keep subclass_live equal to the table's size
@@ -198,6 +211,7 @@ DEF_FUNC subclass_register, SR_FRAME
     push rbx
     push r12
     mov [rbp - SR_TYPE], rdi
+    RT_LOCK_GATED subclass_lock
 
     mov rax, [rdi + PyTypeObject.tp_bases]
     test rax, rax
@@ -232,6 +246,7 @@ DEF_FUNC subclass_register, SR_FRAME
     jmp .sr_loop
 
 .sr_done:
+    RT_UNLOCK_GATED subclass_lock
     pop r12
     pop rbx
     leave
@@ -264,6 +279,9 @@ DEF_FUNC subclass_unregister, SU_FRAME
     push r12
     mov [rbp - SU_TYPE], rdi
 
+    cmp qword [rel subclass_live], 0
+    je .su_ret
+    RT_LOCK_GATED subclass_lock
     cmp qword [rel subclass_live], 0
     je .su_done
     mov rbx, [rel subclass_table]
@@ -328,11 +346,86 @@ DEF_FUNC subclass_unregister, SU_FRAME
     call sub_table_refresh
 
 .su_done:
+    RT_UNLOCK_GATED subclass_lock
+.su_ret:
     pop r12
     pop rbx
     leave
     ret
 END_FUNC subclass_unregister
+
+;; ============================================================================
+;; sub_list_snapshot(rdi = a base type) -> rax = owned PyListObject* of live
+;;   direct subclasses, or 0 when there are none
+;;
+;; Atomically snapshots the base's SubList under subclass_lock, pinning each
+;; still-live subclass via obj_try_incref so dying types waiting in
+;; subclass_unregister are skipped rather than resurrected.
+;; ============================================================================
+SLS_LIST  equ 8
+SLS_SUBS  equ 16
+SLS_IDX   equ 24
+SLS_FRAME equ 32            ; + 2 pushes = 48, 16-aligned
+global sub_list_snapshot
+DEF_FUNC sub_list_snapshot, SLS_FRAME
+    push rbx
+    push r12
+    cmp qword [rel subclass_live], 0
+    je .sls_none
+    RT_LOCK_GATED subclass_lock
+    call sub_list_for_type
+    test rax, rax
+    jz .sls_unlock_none
+    mov rcx, [rax + SubList.count]
+    test rcx, rcx
+    jz .sls_unlock_none
+    mov [rbp - SLS_SUBS], rax
+    mov rdi, rcx
+    extern list_new_untracked
+    call list_new_untracked
+    mov [rbp - SLS_LIST], rax
+    mov qword [rbp - SLS_IDX], 0
+    xor ebx, ebx                ; output count
+.sls_copy:
+    mov rax, [rbp - SLS_SUBS]
+    mov rcx, [rbp - SLS_IDX]
+    cmp rcx, [rax + SubList.count]
+    jge .sls_copy_done
+    inc qword [rbp - SLS_IDX]
+    mov rdx, [rax + SubList.items]
+    mov r12, [rdx + rcx*8]
+    test r12, r12
+    jz .sls_copy
+    mov rdi, r12
+    call obj_try_incref
+    test eax, eax
+    jz .sls_copy
+    mov rax, [rbp - SLS_LIST]
+    mov rdx, [rax + PyListObject.ob_item]
+    mov [rdx + rbx*8], r12
+    inc rbx
+    jmp .sls_copy
+.sls_copy_done:
+    mov rax, [rbp - SLS_LIST]
+    mov [rax + PyListObject.ob_size], rbx
+    RT_UNLOCK_GATED subclass_lock
+    mov rdi, [rbp - SLS_LIST]
+    extern gc_track
+    call gc_track
+    mov rax, [rbp - SLS_LIST]
+    pop r12
+    pop rbx
+    leave
+    ret
+.sls_unlock_none:
+    RT_UNLOCK_GATED subclass_lock
+.sls_none:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC sub_list_snapshot
 
 ;; ============================================================================
 ;; type_method_subclasses(args, nargs) -> a new list of the direct subclasses
@@ -359,38 +452,14 @@ DEF_FUNC type_method_subclasses, TMS_FRAME
     test eax, eax
     jz .tms_type
 
-    ; list_new takes a CAPACITY, and rdi still held whatever
-    ; type_check_is_class left there -- a pointer.  So __subclasses__()
-    ; allocated a list sized by an address: gigabytes, and a different number
-    ; of them on every run, because ASLR moves the address.  It is the reason
-    ; `make check-source` peaked at 22GB and was killed on a CI runner.
+    mov rdi, rbx
+    call sub_list_snapshot
+    test rax, rax
+    jnz .tms_done
     xor edi, edi
     call list_new
-    mov [rbp - TMS_LIST], rax
-
-    mov rdi, rbx
-    call sub_list_for_type
-    test rax, rax
-    jz .tms_done
-    mov [rbp - TMS_SUBS], rax
-    mov qword [rbp - TMS_IDX], 0
-
-    ; A fresh list, and one that owns its entries: the caller may hold it for
-    ; as long as it likes, and may mutate it without disturbing the table.
-.tms_copy:
-    mov rax, [rbp - TMS_SUBS]
-    mov rcx, [rbp - TMS_IDX]
-    cmp rcx, [rax + SubList.count]
-    jge .tms_done
-    mov rdx, [rax + SubList.items]
-    mov rsi, [rdx + rcx*8]
-    mov rdi, [rbp - TMS_LIST]
-    call list_append          ; err: a list built here is not being sorted
-    inc qword [rbp - TMS_IDX]
-    jmp .tms_copy
 
 .tms_done:
-    mov rax, [rbp - TMS_LIST]
     mov edx, TAG_PTR
     pop r12
     pop rbx

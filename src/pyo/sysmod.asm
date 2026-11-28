@@ -250,7 +250,10 @@ DEF_FUNC_LOCAL sm_add_exe_paths, SME_FRAME
     lea rdi, [rel pc_prefix]
     call str_from_cstr_heap
     mov [rbp - SME_STR], rax
-    add qword [rax + PyObject.ob_refcnt], 3
+    mov rdi, rax
+    mov esi, 3
+    extern obj_addref_bulk
+    call obj_addref_bulk
     CSTRING rdi, "prefix"
     mov rsi, [rbp - SME_STR]
     mov rdx, [rbp - SME_DICT]
@@ -860,10 +863,15 @@ DEF_FUNC sys_module_init, 40
     pop rax
     test edx, edx
     jz .no_impl_version
+    push rax
+    push rdx
     mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_version]
     mov rdx, rax
     call namespace_set
+    pop rdx
+    pop rdi
+    DECREF_VAL rdi, rdx
 .no_impl_version:
 
     lea rdi, [rel sm_implementation]
@@ -1007,7 +1015,7 @@ DEF_FUNC sys_module_init, 40
     je .flags_have_bool
     lea rdx, [rel bool_true]
 .flags_have_bool:
-    inc qword [rdx + PyObject.ob_refcnt]
+    INCREF rdx
     mov rdi, rbx
     mov esi, r12d
     call structseq_set
@@ -1242,6 +1250,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC sys_getrefcount_func, sm_getrefcount
     SYS_ADD_FUNC sys_getallocatedblocks_func, sm_getallocatedblocks
     SYS_ADD_FUNC sys_is_finalizing_func, sm_is_finalizing
+    SYS_ADD_FUNC sys_is_gil_enabled_func, sm_is_gil_enabled
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_get_asyncgen_hooks_func, sm_get_asyncgen_hooks
@@ -2258,6 +2267,7 @@ sm_dunder_displayhook: db "__displayhook__", 0
 sm_getrefcount:  db "getrefcount", 0
 sm_getallocatedblocks: db "getallocatedblocks", 0
 sm_is_finalizing: db "is_finalizing", 0
+sm_is_gil_enabled: db "_is_gil_enabled", 0
 sm_underscore:   db "_", 0
 sm_dunder_stdout: db "__stdout__", 0
 sm_dunder_stderr: db "__stderr__", 0
@@ -2379,7 +2389,8 @@ DEF_FUNC sys_getrefcount_func
     ja .sgr_immortal
     test rdi, rdi
     jz .sgr_immortal
-    mov rax, [rdi + PyObject.ob_refcnt]
+    extern obj_get_refcount
+    call obj_get_refcount
     V_PACK_I64 rax, rcx
     leave
     ret
@@ -2393,6 +2404,23 @@ DEF_FUNC sys_getrefcount_func
     leave
     ret
 END_FUNC sys_getrefcount_func
+
+;; ============================================================================
+;; sys_is_gil_enabled_func(args, nargs) -> False (free-threaded runtime)
+;; Fails: 0
+;; ============================================================================
+DEF_FUNC sys_is_gil_enabled_func
+    test rsi, rsi
+    jnz .sge_args
+    RET_FALSE
+    leave
+    V_PACK rax, rdx
+    ret
+.sge_args:
+    SET_EXC exc_TypeError_type, "_is_gil_enabled() takes no arguments"
+    leave
+    ret
+END_FUNC sys_is_gil_enabled_func
 
 ;; ============================================================================
 ;; sys_getallocatedblocks_func(args, nargs) -> Value: live allocator blocks
@@ -2614,7 +2642,7 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
 
 .sah_done:
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
