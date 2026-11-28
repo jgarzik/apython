@@ -788,9 +788,8 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov edx, 1
     call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
-    add rsp, 16
-    mov rdi, [rsp + 8]          ; owned __index__ func
-    add rsp, 16
+    add rsp, 24                 ; drop fat arg (16) + pad (8)
+    pop rdi                     ; owned __index__ func
     push rax
     push rdx
     call obj_decref
@@ -968,16 +967,18 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     mov rdi, rax
     call obj_decref
     jmp .int_base_no_index
+BI_BASE_ARG equ 16
 .int_base_idx_call:
     push rax
     sub rsp, 8
     mov rdi, rax
-    lea rsi, [rsp + 16]          ; args[0] = base_obj (fat arg on stack)
+    lea rsi, [rsp + BI_BASE_ARG] ; args[0] = base_obj (fat arg on stack)
     mov edx, 1
     call rcx
     V_UNPACK rax, rdx           ; tp_call returns a Value
-    mov rdi, [rsp + 8]          ; owned __index__ func
-    add rsp, 32                  ; pop saved func + pad + fat arg
+    add rsp, 8                  ; drop align pad
+    pop rdi                     ; owned __index__ func
+    add rsp, 16                 ; drop fat arg
     push rax
     push rdx
     call obj_decref

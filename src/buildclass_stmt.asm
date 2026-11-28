@@ -1169,8 +1169,8 @@ DEF_FUNC_LOCAL bc_mro_entries, 40           ; + 1 push = 48, 16-aligned
     jz .bme_no
 
     CSTRING rdi, "__mro_entries__"
-    extern str_from_cstr_heap
-    call str_from_cstr_heap
+    extern str_intern_cstr
+    call str_intern_cstr
     test rax, rax
     jz .bme_no
     push rax

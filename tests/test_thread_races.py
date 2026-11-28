@@ -230,3 +230,45 @@ if rlock_target.locked():
     rlock_target.release()
 assert not rlock_target.locked()
 print("lock_release_race ok")
+
+# 8. Concurrent writes to a shared buffered file/pipe while GC runs (no OBJ_LOCK across blocking write)
+import os
+r_fd, w_fd = os.pipe()
+drained = [0]
+pipe_err = []
+
+
+def pipe_reader():
+    try:
+        while True:
+            chunk = os.read(r_fd, 4096)
+            if not chunk:
+                break
+            drained[0] += len(chunk)
+    except BaseException as exc:
+        pipe_err.append(repr(exc))
+
+
+pr = threading.Thread(target=pipe_reader)
+pr.start()
+w_file = open(w_fd, "w", buffering=4096)
+
+
+def pipe_writer(tid):
+    line = f"w{tid}_" + ("x" * 180) + "\n"
+    for i in range(80):
+        w_file.write(line)
+        if i % 10 == 0:
+            w_file.flush()
+            gc.collect()
+
+
+try:
+    run_threads(pipe_writer, 4)
+finally:
+    w_file.close()
+    pr.join()
+    os.close(r_fd)
+assert not pipe_err, f"pipe_err: {pipe_err}"
+assert drained[0] > 0
+print("buffered_file_gc ok")

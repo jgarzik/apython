@@ -81,7 +81,9 @@ struc ThreadState
     .class_metatype_pending: resq 1 ; the metatype type.__new__ was handed
     .instance_getattr_skip: resq 1  ; object object.__getattribute__ resolves
     .trash_nesting:       resq 1  ; dealloc nesting (trashcan)
-    .trash_later:         resq 1  ;   objects deferred until it unwinds
+    .trash_buf:           resq 1  ;   libc-realloc'd PyObject** deferred stack
+    .trash_len:           resq 1  ;   entries currently deferred
+    .trash_cap:           resq 1  ;   allocated capacity of trash_buf
     .repr_depth:          resq 1  ; container repr recursion guard: depth
     .repr_stack:          resq 1  ;   the entries, on the heap
     .repr_stack_cap:      resq 1  ;   their capacity
@@ -200,7 +202,8 @@ struc ThreadState
     ; ---- byte flags, last -------------------------------------------------
     .throw_pending:       resb 1  ; gen_throw set current_exception
     .tb_suppress_frame:   resb 1  ; the next unwind adds no traceback entry
-    .pad:                 resb 6
+    .ts_gc_pending:       resb 1  ; deferred auto-GC requested by this thread
+    .pad:                 resb 5
 endstruc
 
 %endif ; THREADSTATE_INC

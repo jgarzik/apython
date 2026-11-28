@@ -241,10 +241,12 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     xor esi, esi
     call sysprofile_install
     mov rdi, [gs:ThreadState.ts_self]
+    extern brc_drain_thread
+    call brc_drain_thread
+    mov rdi, [gs:ThreadState.ts_self]
     extern brc_unregister_thread
     call brc_unregister_thread
     mov rdi, [gs:ThreadState.ts_self]
-    extern brc_drain_thread
     call brc_drain_thread
     extern alloc_thread_flush
     call alloc_thread_flush
@@ -254,6 +256,11 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     lock dec qword [rel tc_running]
 
     ; Past this line the thread is detached/unlinked and touches no Python state.
+    mov rdi, [r12 + ThreadState.trash_buf]
+    test rdi, rdi
+    jz .te_no_trash_buf
+    call free
+.te_no_trash_buf:
     mov rdi, [r12 + ThreadState.ssl_pw_buf]
     test rdi, rdi
     jz .te_no_ssl_pw

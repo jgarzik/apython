@@ -624,11 +624,13 @@ extern obj_decref
     mov rbx, rdx                      ; save owned value in callee-saved rbx
     mov rdi, [rbp - IS_LOCALS]
     call dict_set                     ; err: checked below after dropping pins
-    mov r10, rax
+    push rax                          ; preserve dict_set rc across DECREF_V
+    sub rsp, 8
     mov rdi, [rbp - IS_SUBNAME]
     DECREF_V rdi, rcx
     DECREF_V rbx, rcx
-    mov rax, r10
+    add rsp, 8
+    pop rax
     ERR_M1_JUMP
     jmp .is_dict_next
 
@@ -644,11 +646,13 @@ extern obj_decref
     mov rsi, [rbp - IS_SUBNAME]
     mov rdx, rbx
     call dict_set                     ; err: checked below after dropping pins
-    mov r10, rax
+    push rax                          ; preserve dict_set rc across DECREF_V
+    sub rsp, 8
     mov rdi, [rbp - IS_SUBNAME]
     DECREF_V rdi, rcx
     DECREF_V rbx, rcx
-    mov rax, r10
+    add rsp, 8
+    pop rax
     ERR_M1_JUMP
     jmp .is_dict_next
 

@@ -381,7 +381,8 @@ DEF_FUNC sub_list_snapshot, SLS_FRAME
     jz .sls_unlock_none
     mov [rbp - SLS_SUBS], rax
     mov rdi, rcx
-    call list_new
+    extern list_new_untracked
+    call list_new_untracked
     mov [rbp - SLS_LIST], rax
     mov qword [rbp - SLS_IDX], 0
     xor ebx, ebx                ; output count
@@ -408,6 +409,10 @@ DEF_FUNC sub_list_snapshot, SLS_FRAME
     mov rax, [rbp - SLS_LIST]
     mov [rax + PyListObject.ob_size], rbx
     RT_UNLOCK_GATED subclass_lock
+    mov rdi, [rbp - SLS_LIST]
+    extern gc_track
+    call gc_track
+    mov rax, [rbp - SLS_LIST]
     pop r12
     pop rbx
     leave

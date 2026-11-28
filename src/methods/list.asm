@@ -58,23 +58,18 @@ section .text
 ;; Fails: 0
 ;; ============================================================================
 DEF_FUNC list_method_append
-
     mov rax, [rdi]          ; self (list)
-    ; Check if list is being sorted (ob_item == NULL)
-    cmp qword [rax + PyListObject.ob_item], 0
-    je .lma_sorting
-    mov rsi, [rdi + 8]     ; item payload
-    V_UNPACK rsi, rdx       ; args[1]
+    mov rsi, [rdi + 8]      ; item Value (args[1])
     mov rdi, rax
-    V_PACK rsi, rdx         ; list_append takes a Value
-    call list_append          ; err: the sorting sentinel was tested just above
+    call list_append
+    ERR_M1 .lma_fail
 
     RET_NONE
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    V_PACK rax, rdx         ; builtins return one Value
     ret
-.lma_sorting:
-    call set_list_sorting_error
+.lma_fail:
+    xor eax, eax
     leave
     ret
 END_FUNC list_method_append

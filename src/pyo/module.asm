@@ -1318,13 +1318,10 @@ DEF_FUNC namespace_repr, NR_FRAME
     push rdi
     push rdi                        ; 16-byte align
     call obj_repr
-    push rax
-    push rax
-    mov rdi, [rsp + 16]
+    pop rdi                         ; pinned value
+    mov [rsp], rax                  ; preserve repr across DECREF_V
     DECREF_V rdi, rcx
     pop rax
-    pop rax
-    add rsp, 16
     V_UNPACK rax, rdx
     test rax, rax
     jz .nr_next

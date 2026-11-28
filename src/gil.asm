@@ -172,6 +172,17 @@ DEF_FUNC tstate_unlink
     mov rdx, [rax + ThreadState.ts_alloc_live]
     mov qword [rax + ThreadState.ts_alloc_live], 0
     add [rel ap_exited_live], rdx
+    cmp byte [rax + ThreadState.ts_gc_pending], 0
+    je .tu_no_gc_pend
+    mov byte [rax + ThreadState.ts_gc_pending], 0
+    extern gc_pending_threads
+    lock dec dword [rel gc_pending_threads]
+    jnz .tu_no_gc_pend
+    lock and qword [rel eval_breaker], ~EB_GC_COLLECT
+    cmp dword [rel gc_pending_threads], 0
+    je .tu_no_gc_pend
+    lock or qword [rel eval_breaker], EB_GC_COLLECT
+.tu_no_gc_pend:
     mov rdi, rax
     call stw_notify_unlink
     lea rdi, [rel tstate_list_lock]
@@ -234,16 +245,17 @@ GA_RAX   equ 8
 GA_RDX   equ 16
 GA_FRAME equ 16                 ; + 0 pushes = 16, 16-aligned
 DEF_FUNC gil_acquire, GA_FRAME
-    cmp byte [rel rt_threaded], 0
-    je .ga_out
     cmp qword [rel gil_finalizing], 0
-    je .ga_attach
+    je .ga_not_fin
     mov rcx, [gs:ThreadState.ts_self]
     cmp rcx, [rel tstate_main_ptr]
     je .ga_out
 .ga_park:
     call pause
     jmp .ga_park
+.ga_not_fin:
+    cmp byte [rel rt_threaded], 0
+    je .ga_out
 .ga_attach:
     mov [rbp - GA_RAX], rax
     mov [rbp - GA_RDX], rdx
@@ -263,6 +275,7 @@ END_FUNC gil_acquire
 ;;   2. EB_SIGNAL: run pending signal handlers on the main thread only
 ;;      (worker threads never yield or block for signals).
 ;;   3. EB_BRC_MERGE: drain this thread's remote BRC merge queue.
+;;   4. EB_GC_COLLECT: run deferred gen0 auto-GC with zero leaf locks held.
 ;; ============================================================================
 DEF_FUNC eval_breaker_slow
     test qword [rel eval_breaker], EB_STOP_WORLD
@@ -278,11 +291,33 @@ DEF_FUNC eval_breaker_slow
     jmp signal_run_pending
 .ebs_brc:
     test qword [rel eval_breaker], EB_BRC_MERGE
-    jz .ebs_none
+    jz .ebs_gc
     mov rdi, [gs:ThreadState.ts_self]
     cmp qword [rdi + ThreadState.ts_brc_len], 0
-    je .ebs_none
+    je .ebs_gc
     call brc_drain_thread
+.ebs_gc:
+    test qword [rel eval_breaker], EB_GC_COLLECT
+    jz .ebs_none
+    cmp byte [gs:ThreadState.ts_gc_pending], 0
+    je .ebs_none
+    mov byte [gs:ThreadState.ts_gc_pending], 0
+    lock dec dword [rel gc_pending_threads]
+    jnz .ebs_gc_run
+    lock and qword [rel eval_breaker], ~EB_GC_COLLECT
+    cmp dword [rel gc_pending_threads], 0
+    je .ebs_gc_run
+    lock or qword [rel eval_breaker], EB_GC_COLLECT
+.ebs_gc_run:
+    extern gc_enabled
+    extern gc_collecting
+    extern gc_collect_gen
+    cmp qword [rel gc_enabled], 0
+    je .ebs_none
+    cmp qword [rel gc_collecting], 0
+    jne .ebs_none
+    xor edi, edi
+    call gc_collect_gen
 .ebs_none:
     xor eax, eax
     leave

@@ -644,12 +644,8 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     jmp .have_chain
 .mk_new_chain:
     xor edi, edi
-    call list_new
-    push rax
-    mov rdi, rax
-    extern gc_untrack
-    call gc_untrack
-    pop rax
+    extern list_new_untracked
+    call list_new_untracked
     push rax
     mov rdi, [rbp - WM_REF]
     mov rsi, [rbp - WM_OBJ]
@@ -1653,7 +1649,9 @@ DEF_FUNC wr_getweakrefcount_func, 8     ; + 1 push = 16, 16-aligned
     ret
 END_FUNC wr_getweakrefcount_func
 
-DEF_FUNC wr_getweakrefs_func
+WGR_RES   equ 8
+WGR_FRAME equ 16                ; + 2 pushes (rbx, r12) = 32, 16-aligned
+DEF_FUNC wr_getweakrefs_func, WGR_FRAME
     cmp rsi, 1
     jl .empty
     push rbx
@@ -1665,8 +1663,7 @@ DEF_FUNC wr_getweakrefs_func
     jz .empty_pop
     xor edi, edi
     call list_new
-    push rax                    ; [rsp] = result list
-    sub rsp, 8                  ; align
+    mov [rbp - WGR_RES], rax
     WR_LOCK
     mov rdi, r12
     call weakref_chain
@@ -1691,7 +1688,7 @@ DEF_FUNC wr_getweakrefs_func
     pop rsi
     test eax, eax
     jz .copy_skip
-    mov rdi, [rsp + 32]         ; result list (3 pushes + pad + res = +32)
+    mov rdi, [rbp - WGR_RES]
     push rsi
     sub rsp, 8
     call list_append            ; err: a list built here is not being sorted
@@ -1707,8 +1704,7 @@ DEF_FUNC wr_getweakrefs_func
     jmp .copy
 .copied_unlock:
     WR_UNLOCK
-    add rsp, 8
-    pop rax
+    mov rax, [rbp - WGR_RES]
     mov edx, TAG_PTR
     pop r12
     pop rbx

@@ -540,9 +540,10 @@ DEF_FUNC type_setattr
     pop rsi
 
 .ts_have_dict:
-    ; In free-threaded mode, bump tp_version down the subclass tree and
-    ; quiesce type_cache readers BEFORE mutating tp_dict so no reader can
-    ; INCREF a displaced entry after dict_set/dict_del_opt frees it.
+    ; In free-threaded mode, clear tp_version to 0 (uncacheable) down the
+    ; subclass tree and quiesce type_cache readers BEFORE mutating tp_dict so
+    ; no reader can cache a displaced entry or INCREF it after dict_set/del
+    ; frees it.  type_refresh_attr_flags stamps a fresh version after mutation.
     extern rt_threaded
     cmp byte [rel rt_threaded], 0
     je .ts_pre_mut_done
@@ -551,8 +552,8 @@ DEF_FUNC type_setattr
     push rdx
     push rdx
     mov rdi, rbx
-    extern type_bump_version_tree
-    call type_bump_version_tree
+    extern type_clear_version_tree
+    call type_clear_version_tree
     extern type_cache_quiesce
     call type_cache_quiesce
     pop rdx
@@ -565,7 +566,7 @@ DEF_FUNC type_setattr
     ; dict_set(dict, name Value, value Value)
     pop rcx
     call dict_set
-    ERR_M1 .ts_fail
+    ERR_M1 .ts_restore_fail
     jmp .ts_wrote
 
 .ts_meta_data:
@@ -631,6 +632,12 @@ DEF_FUNC type_setattr
     mov rdi, rbx                ; the type -- a pointer is its own Value
     extern set_no_attribute_store   ; a delete is a set, as far as the wording goes
     call set_no_attribute_store
+.ts_restore_fail:
+    cmp byte [rel rt_threaded], 0
+    je .ts_fail
+    mov rdi, rbx
+    extern type_bump_version_tree
+    call type_bump_version_tree
     jmp .ts_fail
 
 .ts_rename:

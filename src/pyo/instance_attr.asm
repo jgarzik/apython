@@ -480,6 +480,56 @@ DEF_FUNC type_bump_version_tree
 END_FUNC type_bump_version_tree
 
 ;; ============================================================================
+;; type_clear_version_tree(rdi = a type) -> nothing
+;;
+;; Clear tp_version to 0 on rdi and every subclass so type_lookup_cached will
+;; not populate new cache entries during a concurrent tp_dict mutation.
+;; ============================================================================
+global type_clear_version_tree
+DEF_FUNC type_clear_version_tree
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rdi, rdi
+    jz .tcvt_out
+    mov rbx, rdi
+.tcvt_cas:
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    mov edx, eax                    ; keep low 32 flag bits, version = 0
+    lock cmpxchg [rbx + PyTypeObject.tp_flags], rdx
+    jne .tcvt_cas
+    mov rdi, rbx
+    call sub_list_snapshot
+    test rax, rax
+    jz .tcvt_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
+    xor r14d, r14d
+.tcvt_loop:
+    cmp r14, r13
+    jge .tcvt_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
+    test rdi, rdi
+    jz .tcvt_next
+    call type_clear_version_tree
+.tcvt_next:
+    inc r14
+    jmp .tcvt_loop
+.tcvt_drop:
+    mov rdi, r12
+    call obj_decref
+.tcvt_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_clear_version_tree
+
+;; ============================================================================
 ;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
 ;; Recompute MRO attribute flags and bump version across the subclass tree.
 ;; ============================================================================
@@ -1358,11 +1408,16 @@ DEF_FUNC instance_setattr
     call dunder_lookup          ; rax = the function (owned), or 0
     test rax, rax
     jz .sa_drop_no_slot
-    sub rsp, 32                 ; [descriptor, instance, value, owned_fn]
-    mov [rsp], r14
-    mov [rsp + 8], rbx
-    mov [rsp + 16], r13
-    mov [rsp + 24], rax
+SA_ARG_DESC equ 0
+SA_ARG_INST equ 8
+SA_ARG_VAL  equ 16
+SA_ARG_FN   equ 24
+SA_ARG_SZ   equ 32
+    sub rsp, SA_ARG_SZ
+    mov [rsp + SA_ARG_DESC], r14
+    mov [rsp + SA_ARG_INST], rbx
+    mov [rsp + SA_ARG_VAL], r13
+    mov [rsp + SA_ARG_FN], rax
     mov rdi, rax
     mov rsi, rsp
     mov edx, 3
@@ -1372,8 +1427,8 @@ DEF_FUNC instance_setattr
 .sa_heap_call:
     extern obj_call_n
     call obj_call_n             ; err: checked via ERR_NULL .sa_fail after releasing r14 + fn
-    mov r8, [rsp + 24]          ; owned fn
-    add rsp, 32
+    mov r8, [rsp + SA_ARG_FN]   ; owned fn
+    add rsp, SA_ARG_SZ
     push rax
     push r8
     mov rdi, r8

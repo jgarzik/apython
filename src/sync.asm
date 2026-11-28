@@ -586,13 +586,13 @@ DEF_FUNC_BARE obj_decref_local_zero
     cmp dword [rdi + PyObject.ob_ref_shared], 0
     je obj_dealloc
 .odlz_conc:
+    mov dword [rdi + PyObject.ob_tid], REF_TID_MERGED
     mov eax, [rdi + PyObject.ob_ref_shared]
 .odlz_cas:
     mov edx, eax
     or edx, REF_MERGED_BIT
     lock cmpxchg [rdi + PyObject.ob_ref_shared], edx
     jne .odlz_cas
-    mov dword [rdi + PyObject.ob_tid], REF_TID_MERGED
     cmp edx, REF_MERGED_BIT
     je obj_dealloc
     ret
@@ -629,6 +629,7 @@ DEF_FUNC obj_decref_shared, 8           ; + 1 push (rbx) = 16, 16-aligned
     jnz .ods_done
     mov r8d, [rbx + PyObject.ob_ref_local]
     mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     shl r8d, REF_SHARED_SHIFT
     mov eax, [rbx + PyObject.ob_ref_shared]
 .ods_orphan_cas:
@@ -638,7 +639,6 @@ DEF_FUNC obj_decref_shared, 8           ; + 1 push (rbx) = 16, 16-aligned
     or edx, REF_MERGED_BIT
     lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
     jne .ods_orphan_cas
-    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     cmp edx, REF_MERGED_BIT
     jne .ods_done
     mov rdi, rbx
@@ -710,13 +710,13 @@ DEF_FUNC obj_decref_no_dealloc, 8       ; + 1 push (rbx) = 16, 16-aligned
     jne .odnd_nonlocal
     dec dword [rbx + PyObject.ob_ref_local]
     jnz .odnd_alive
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     mov eax, [rbx + PyObject.ob_ref_shared]
 .odnd_lcas:
     mov edx, eax
     or edx, REF_MERGED_BIT
     lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
     jne .odnd_lcas
-    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     cmp edx, REF_MERGED_BIT
     je .odnd_dead
 .odnd_alive:
@@ -750,6 +750,7 @@ DEF_FUNC obj_decref_no_dealloc, 8       ; + 1 push (rbx) = 16, 16-aligned
     jnz .odnd_alive
     mov r8d, [rbx + PyObject.ob_ref_local]
     mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     shl r8d, REF_SHARED_SHIFT
     mov eax, [rbx + PyObject.ob_ref_shared]
 .odnd_ocas:
@@ -759,7 +760,6 @@ DEF_FUNC obj_decref_no_dealloc, 8       ; + 1 push (rbx) = 16, 16-aligned
     or edx, REF_MERGED_BIT
     lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
     jne .odnd_ocas
-    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     cmp edx, REF_MERGED_BIT
     je .odnd_dead
     jmp .odnd_alive
@@ -879,6 +879,7 @@ DEF_FUNC brc_drain_thread, BDT_FRAME
     inc r13
     mov r8d, [rdi + PyObject.ob_ref_local]
     mov dword [rdi + PyObject.ob_ref_local], 0
+    mov dword [rdi + PyObject.ob_tid], REF_TID_MERGED
     shl r8d, REF_SHARED_SHIFT
     mov eax, [rdi + PyObject.ob_ref_shared]
 .bdt_cas:
@@ -888,7 +889,6 @@ DEF_FUNC brc_drain_thread, BDT_FRAME
     or edx, REF_MERGED_BIT
     lock cmpxchg [rdi + PyObject.ob_ref_shared], edx
     jne .bdt_cas
-    mov dword [rdi + PyObject.ob_tid], REF_TID_MERGED
     cmp edx, REF_MERGED_BIT
     jne .bdt_loop
     call obj_dealloc
@@ -1060,6 +1060,12 @@ END_FUNC rt_detach
 ;; ============================================================================
 global rt_reattach
 DEF_FUNC rt_reattach
+    cmp qword [rel gil_finalizing], 0
+    je .rtr_not_fin
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .rtr_park_forever
+.rtr_not_fin:
     cmp byte [rel rt_threaded], 0
     je .rtr_done
 .rtr_retry:
@@ -1277,7 +1283,7 @@ DEF_FUNC_BARE stw_reset_after_fork
     mov dword [rel stw_requested], 0
     mov dword [rel stw_remaining], 0
     mov qword [rel stw_owner_ts], 0
-    lock and qword [rel eval_breaker], ~EB_STOP_WORLD
+    lock and qword [rel eval_breaker], ~(EB_STOP_WORLD | EB_GC_COLLECT)
     ret
 END_FUNC stw_reset_after_fork
 
@@ -1328,7 +1334,13 @@ DEF_FUNC rt_foreign_enter
     test rax, rax
     jz .rfe_foreign
 
-    ; Known Python thread: check if detached (e.g. inside ALLOW_THREADS ffi_call)
+    ; Known Python thread: check shutdown before rt_threaded early-out, then
+    ; reattach if detached (e.g. inside ALLOW_THREADS ffi_call).
+    cmp qword [rel gil_finalizing], 0
+    je .rfe_not_fin
+    cmp rax, [rel tstate_main_ptr]
+    jne .rfe_park_forever
+.rfe_not_fin:
     cmp byte [rel rt_threaded], 0
     je .rfe_already
     cmp dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
@@ -1347,8 +1359,14 @@ DEF_FUNC rt_foreign_enter
     leave
     ret
 
+.rfe_park_forever:
+    call pause wrt ..plt
+    jmp .rfe_park_forever
+
 .rfe_foreign:
-    ; Foreign C pthread with no ThreadState: allocate, register, and attach.
+    ; Foreign C pthread with no ThreadState: park if interpreter is shutting down.
+    cmp qword [rel gil_finalizing], 0
+    jne .rfe_park_forever
     call rt_enable_threading
     mov edi, 64
     mov esi, TSTATE_ALLOC_SZ
@@ -1439,6 +1457,8 @@ DEF_FUNC rt_foreign_leave, 8            ; + 1 push = 16, 16-aligned
 .rfl_no_repr:
     mov rbx, [gs:ThreadState.ts_self]
     mov rdi, rbx
+    call brc_drain_thread
+    mov rdi, rbx
     call brc_unregister_thread
     mov rdi, rbx
     call brc_drain_thread
@@ -1454,6 +1474,11 @@ DEF_FUNC rt_foreign_leave, 8            ; + 1 push = 16, 16-aligned
     xor esi, esi
     syscall
 
+    mov rdi, [rbx + ThreadState.trash_buf]
+    test rdi, rdi
+    jz .rfl_no_trash
+    call free wrt ..plt
+.rfl_no_trash:
     mov rdi, [rbx + ThreadState.ssl_pw_buf]
     test rdi, rdi
     jz .rfl_no_ssl

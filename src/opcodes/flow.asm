@@ -1018,9 +1018,9 @@ DEF_FUNC op_send, SND_FRAME
     V_TEST_PTR rdi, rax
     ja .send_no_retval
     mov rax, [rdi + PyObject.ob_type]
-    ; gi_return_value lives at +48, so the object must be at least 56 bytes.
-    ; (Was `jle 56` when the struct still carried a separate tag word.)
-    cmp qword [rax + PyTypeObject.tp_basicsize], 56
+    ; gi_return_value lives at PyGenObject.gi_return_value (+56), so the object
+    ; must be at least PyGenObject.gi_return_value + 8 (64 bytes).
+    cmp qword [rax + PyTypeObject.tp_basicsize], PyGenObject.gi_return_value + 8
     jl .send_no_retval
     mov rax, [rdi + PyGenObject.gi_return_value]
     V_UNPACK rax, rdx

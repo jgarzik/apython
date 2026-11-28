@@ -2908,11 +2908,11 @@ DEF_FUNC op_set_update
     push rsi                        ; keep 16-byte aligned (odd frame + 2 pushes)
     mov rdi, [rbp - SU_SOURCE]
     call set_add                    ; err: checked below after dropping pinned key
-    mov r10, rax
-    pop rdi
-    pop rdi
+    pop rdi                         ; pinned key
+    mov [rsp], rax                  ; preserve set_add result across DECREF_V
     DECREF_V rdi, rcx
-    cmp r10, -1
+    pop rax
+    cmp rax, -1
     je .su_set_add_err
     jmp .su_set_next
 

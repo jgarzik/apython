@@ -365,6 +365,7 @@ DEF_FUNC func_call
     jz .pos_defaults_unlock_done
     INCREF rax
     OBJ_UNLOCK rbx
+    mov r11d, [rsp+8]       ; positional_count (read before pinning tuple)
     push rax                ; pin defaults tuple across Phase 5 (and pad)
     push rax
 
@@ -372,8 +373,7 @@ DEF_FUNC func_call
     mov edx, [rdi + PyCodeObject.co_argcount]
 
     ; If all positional slots already filled, skip
-    mov ecx, [rsp+24]       ; positional_count (shifted by 16 for 2 pushes)
-    cmp ecx, edx
+    cmp r11d, edx
     jge .pos_defaults_drop
 
     ; defcount = len(defaults)

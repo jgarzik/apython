@@ -64,8 +64,21 @@ LIST_POOL_MAX equ 16
 ;; ============================================================================
 DEF_FUNC_BARE list_new
     xor esi, esi                ; zero from slot 0: nothing is promised
+    mov edx, 1                  ; track in GC
     jmp list_new_from
 END_FUNC list_new
+
+;; ============================================================================
+;; list_new_untracked(rdi = capacity) -> rax = PyListObject* (NOT in GC lists)
+;; For callers holding a lock (weakref_lock, subclass_lock, OBJ_LOCK) that must
+;; not enter gc_track/gc_collect_gen while the lock is held.
+;; ============================================================================
+global list_new_untracked
+DEF_FUNC_BARE list_new_untracked
+    xor esi, esi
+    xor edx, edx
+    jmp list_new_from
+END_FUNC list_new_untracked
 
 ;; ============================================================================
 ;; list_new_filled(rdi = n) -> rax = PyListObject*; see list_new above
@@ -73,20 +86,33 @@ END_FUNC list_new
 global list_new_filled
 DEF_FUNC_BARE list_new_filled
     mov rsi, rdi                ; zero from slot n: the caller writes [0, n)
+    mov edx, 1                  ; track in GC
     jmp list_new_from
 END_FUNC list_new_filled
 
 ;; ============================================================================
-;; list_new_from(rdi = capacity, rsi = first slot to zero) -> rax = the list
-;;
-;; The body both of the above share.  Not called from anywhere else: the two
-;; entry points above are the contract.
+;; list_new_filled_untracked(rdi = n) -> rax = PyListObject* (NOT in GC lists)
+;; Caller must call gc_track after releasing its OBJ_LOCK.
 ;; ============================================================================
-DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
+global list_new_filled_untracked
+DEF_FUNC_BARE list_new_filled_untracked
+    mov rsi, rdi
+    xor edx, edx
+    jmp list_new_from
+END_FUNC list_new_filled_untracked
+
+;; ============================================================================
+;; list_new_from(rdi = capacity, rsi = first slot to zero, edx = track) -> rax
+;;
+;; The body the four entry points above share.  Not called from anywhere else.
+;; ============================================================================
+DEF_FUNC list_new_from
     push rbx
     push r12
     push r13
+    push r14
 
+    mov r14d, edx              ; r14d = whether to gc_track
     mov r13, rsi               ; r13 = first slot to zero
     mov r12, rdi               ; r12 = capacity
     test r12, r12
@@ -132,10 +158,14 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     rep stosq
 .lnf_no_zero:
 
+    test r14d, r14d
+    jz .lnf_no_track
     mov rdi, rbx
     call gc_track
+.lnf_no_track:
 
     mov rax, rbx
+    pop r14
     pop r13
     pop r12
     pop rbx
@@ -157,7 +187,7 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
     mov r12, [rbx + PyListObject.ob_size]
 
     mov rdi, r12
-    call list_new_filled
+    call list_new_filled_untracked
     mov r13, rax               ; new list
     mov [r13 + PyListObject.ob_size], r12
 
@@ -182,6 +212,8 @@ DEF_FUNC list_copy, 8            ; 3 pushes, so rsp is 16-aligned
 
 .lc_unlock_done:
     OBJ_UNLOCK rbx
+    mov rdi, r13
+    call gc_track
 .lc_done:
     mov rax, r13
     pop r13
@@ -1715,7 +1747,7 @@ DEF_FUNC list_getslice
     ; rax = slicelength
     push rax                   ; save slicelength
     mov rdi, rax
-    call list_new_filled       ; every slot below the length is written below
+    call list_new_filled_untracked ; tracked after OBJ_UNLOCK below
     push rax                   ; save the new list
 
     ; Fill items: for i = 0..slicelength-1, idx = start + i*step
@@ -1808,8 +1840,11 @@ DEF_FUNC list_getslice
 
 .lgs_done:
     OBJ_UNLOCK rbx
-    pop rax                    ; new list
+    pop rbx                    ; new list (preserve across gc_track)
     add rsp, 8                 ; discard slicelength
+    mov rdi, rbx
+    call gc_track
+    mov rax, rbx
 
     add rsp, 8                 ; undo alignment
     pop r15
@@ -1973,7 +2008,7 @@ DEF_FUNC list_concat, LCC_FRAME
     mov r14, [r12 + PyListObject.ob_size]   ; r14 = len(b)
 
     lea rdi, [r13 + r14]
-    call list_new_filled
+    call list_new_filled_untracked
     mov [rbp - LCC_NEW], rax
 
     lea rcx, [r13 + r14]
@@ -2003,6 +2038,8 @@ DEF_FUNC list_concat, LCC_FRAME
     lea rsi, [r13 + r14]
     call list_incref_range
     OBJ_UNLOCK2 rbx, r12
+    mov rdi, [rbp - LCC_NEW]
+    call gc_track
 
     mov rax, [rbp - LCC_NEW]
     mov edx, TAG_PTR
@@ -2096,7 +2133,7 @@ DEF_FUNC list_repeat, LRP_FRAME
     ja .rep_unlock_toobig
 
     mov rdi, r14
-    call list_new_filled
+    call list_new_filled_untracked
     mov [rbp - LRP_NEW], rax
     mov [rax + PyListObject.ob_size], r14
     test r14, r14
@@ -2136,6 +2173,8 @@ DEF_FUNC list_repeat, LRP_FRAME
 .rep_unlock_done:
     OBJ_UNLOCK rbx
 .rep_done:
+    mov rdi, [rbp - LRP_NEW]
+    call gc_track
     mov rax, [rbp - LRP_NEW]
     mov edx, TAG_PTR
     pop r14
@@ -2788,7 +2827,8 @@ LRC_LEFT     equ 8
 LRC_RIGHT    equ 16
 LRC_OP       equ 24
 LRC_IDX      equ 32
-LRC_FRAME    equ 48         ; + 0 pushes = 48
+LRC_RES      equ 40
+LRC_FRAME    equ 48         ; + 0 pushes = 48, 16-aligned
 
 ;; CPython's list_richcompare, followed exactly.  The old version precomputed
 ;; min(len) once and, on finding an unequal element, returned that element's
@@ -2845,15 +2885,14 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     push rsi
     mov edx, PY_EQ
     call obj_richcompare_bool       ; err: checked below after dropping pins
-    mov r8, rax
-    pop rsi
-    pop rdi
-    push r8
-    push r8
+    mov [rbp - LRC_RES], rax
+    pop rdi                         ; pinned rsi (rsp now 8-aligned)
+    sub rsp, 8
     DECREF_V rdi, rdx
-    DECREF_V rsi, rdx
-    pop rax
-    pop rax
+    add rsp, 8
+    pop rdi                         ; pinned rdi (rsp now 16-aligned)
+    DECREF_V rdi, rdx
+    mov rax, [rbp - LRC_RES]
     cmp eax, -1
     je .lrc_error
     test eax, eax
@@ -2899,15 +2938,14 @@ DEF_FUNC_LOCAL list_richcompare_inner, LRC_FRAME
     push rsi
     mov edx, [rbp - LRC_OP]
     call obj_richcompare_bool       ; err: checked below after dropping pins
-    mov r8, rax
-    pop rsi
-    pop rdi
-    push r8
-    push r8
+    mov [rbp - LRC_RES], rax
+    pop rdi                         ; pinned rsi (rsp now 8-aligned)
+    sub rsp, 8
     DECREF_V rdi, rdx
-    DECREF_V rsi, rdx
-    pop rax
-    pop rax
+    add rsp, 8
+    pop rdi                         ; pinned rdi (rsp now 16-aligned)
+    DECREF_V rdi, rdx
+    mov rax, [rbp - LRC_RES]
     cmp eax, -1
     je .lrc_error
     RET_BOOL_RAX

@@ -131,3 +131,52 @@ for t in readers:
 
 assert not errors, f"weakref race errors: {errors}"
 print("weakref_race ok")
+
+# 4. Deep trashcan dealloc (> TRASH_LIMIT) racing concurrent weakref lookups
+tc_refs = []
+tc_stop = threading.Event()
+
+
+def tc_builder():
+    try:
+        for _ in range(40):
+            head = None
+            refs = []
+            for j in range(120):
+                node = Box(j)
+                node.next = head
+                head = node
+                if j >= 45:
+                    refs.append(weakref.ref(node))
+            tc_refs[:] = refs
+            del head, node
+    except BaseException as exc:
+        errors.append(("tc_builder", repr(exc)))
+    finally:
+        tc_stop.set()
+
+
+def tc_reader(tid):
+    try:
+        while not tc_stop.is_set():
+            for r in list(tc_refs):
+                o = r()
+                if o is not None:
+                    assert isinstance(o, Box)
+                    del o
+    except BaseException as exc:
+        errors.append(("tc_reader", tid, repr(exc)))
+
+
+tc_readers = [threading.Thread(target=tc_reader, args=(i,)) for i in range(3)]
+tc_b = threading.Thread(target=tc_builder)
+for t in tc_readers:
+    t.start()
+tc_b.start()
+tc_b.join()
+for t in tc_readers:
+    t.join()
+tc_refs.clear()
+gc.collect()
+assert not errors, f"trashcan weakref errors: {errors}"
+print("trashcan_weakref ok")

@@ -26,6 +26,7 @@
 %include "object.inc"
 %include "threadstate.inc"
 %include "sync.inc"
+%include "gil.inc"
 
 extern ap_malloc
 extern ap_free
@@ -125,6 +126,9 @@ gc_stat_counters: times 9 dq 0
 
 global gc_collecting        ; reentrancy + mutual-exclusion guard for collection
 gc_collecting:  dq 0
+global gc_pending_threads   ; count of threads with ThreadState.ts_gc_pending == 1
+gc_pending_threads: dd 0
+                dd 0
 
 gc_reachable_sentinel: dq 0 ; set by gc_collect_gen before phase 4 / res4
 
@@ -162,6 +166,8 @@ DEF_FUNC_BARE gc_reset_after_fork
     cmp edx, GC_NSHARDS
     jb .graf_loop
     mov qword [rel gc_collecting], 0
+    mov dword [rel gc_pending_threads], 0
+    mov byte [gs:ThreadState.ts_gc_pending], 0
     ret
 END_FUNC gc_reset_after_fork
 
@@ -291,40 +297,70 @@ DEF_FUNC gc_alloc
 END_FUNC gc_alloc
 
 ;; ============================================================================
-;; gc_track(rdi=obj)
+;; gc_track(rdi=obj) -> nothing
 ;; Add object to current thread's shard gen0 tracking list. May trigger GC.
+;; Fast bare leaf path when rt_threaded == 0 (no frame, no callee-saved pushes,
+;; no nested call; shard 1 is fixed for single-threaded main, except post-fork
+;; where ts_tid may differ — still read ts_tid into edx once without frame).
 ;; ============================================================================
-DEF_FUNC gc_track, 8            ; + 3 pushes (rbx, r12, r13) = 32, 16-aligned
+DEF_FUNC_BARE gc_track
+    lea rax, [rdi - GC_HEAD_SIZE]
+    cmp byte [rel rt_threaded], 0
+    jne .gt_threaded
+
+    cmp qword [rax + PyGC_Head.gc_next], 0
+    jne .gt_fast_ret
+
+    mov ecx, [gs:ThreadState.ts_tid]
+    and ecx, GC_SHARD_MASK
+    mov edx, ecx
+    shl edx, 6
+    lea rsi, [rel gc_shards]
+    add rsi, rdx                        ; rsi = &gc_shards[s] (gen0 sentinel)
+
+    ; Inline gc_list_append_shard(node=rax, sentinel=rsi, tag=rcx)
+    mov r8, rsi
+    or r8, rcx
+    mov [rax + PyGC_Head.gc_next], r8   ; node->gc_next = sentinel | s
+    mov r9, [rsi + PyGC_Head.gc_prev]
+    and r9, GC_PREV_MASK                ; r9 = old_tail
+    mov [rax + PyGC_Head.gc_prev], r9   ; node->gc_prev = old_tail
+    mov r8, rax
+    or r8, rcx
+    mov [r9 + PyGC_Head.gc_next], r8    ; old_tail->gc_next = node | s
+    mov [rsi + PyGC_Head.gc_prev], rax  ; sentinel->gc_prev = node
+
+    mov rax, [rsi + GCS_COUNT]
+    inc rax
+    mov [rsi + GCS_COUNT], rax
+    cmp rax, [rel gc_gen0_threshold]
+    jg .gt_fast_trigger
+.gt_fast_ret:
+    xor edx, edx                        ; preserve TAG_PTR(0) expectation
+    ret
+
+.gt_fast_trigger:
+    cmp qword [rel gc_enabled], 0
+    je .gt_fast_ret
+    cmp qword [rel gc_collecting], 0
+    jne .gt_fast_ret
+    push rbp
+    mov rbp, rsp
+    xor edi, edi
+    call gc_collect_gen
+    xor edx, edx
+    leave
+    ret
+
+.gt_threaded:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 8                          ; + 3 pushes = 32, 16-aligned
     push rbx
     push r12
     push r13
 
-    lea rbx, [rdi - GC_HEAD_SIZE]
-
-    ; Fast pre-check when single-threaded (no concurrent track/untrack)
-    cmp byte [rel rt_threaded], 0
-    jne .gt_threaded
-
-    cmp qword [rbx + PyGC_Head.gc_next], 0
-    jne .gt_done
-
-    mov r13d, [gs:ThreadState.ts_tid]
-    and r13d, GC_SHARD_MASK
-    mov eax, r13d
-    shl eax, 6
-    lea r12, [rel gc_shards]
-    add r12, rax
-
-    mov rdi, rbx
-    lea rsi, [r12 + GCS_GEN0]
-    mov rdx, r13
-    call gc_list_append_shard
-
-    inc qword [r12 + GCS_COUNT]
-    mov rax, [r12 + GCS_COUNT]
-    jmp .gt_check_thresh
-
-.gt_threaded:
+    mov rbx, rax
     mov r13d, [gs:ThreadState.ts_tid]
     and r13d, GC_SHARD_MASK
     mov eax, r13d
@@ -356,8 +392,6 @@ DEF_FUNC gc_track, 8            ; + 3 pushes (rbx, r12, r13) = 32, 16-aligned
     test eax, 63
     jnz .gt_done
     call gc_get_gen0_count
-
-.gt_check_thresh:
     cmp rax, [rel gc_gen0_threshold]
     jle .gt_done
 
@@ -366,9 +400,18 @@ DEF_FUNC gc_track, 8            ; + 3 pushes (rbx, r12, r13) = 32, 16-aligned
     je .gt_done
     cmp qword [rel gc_collecting], 0
     jne .gt_done
+    cmp byte [gs:ThreadState.ts_gc_pending], 0
+    jne .gt_done
 
-    xor edi, edi
-    call gc_collect_gen
+    ; Never run stw_stop_world() synchronously from gc_track() while threaded:
+    ; the caller may hold a leaf OBJ_LOCK (e.g. list_copy, list_slice), which
+    ; would ABBA-deadlock with an attached thread waiting on that same lock.
+    ; Defer auto-GC to THIS thread's next VM safepoint (ts_gc_pending) so
+    ; peer threads returning from lock.acquire() never steal our GC trigger.
+    mov byte [gs:ThreadState.ts_gc_pending], 1
+    lock inc dword [rel gc_pending_threads]
+    extern eval_breaker
+    lock or qword [rel eval_breaker], EB_GC_COLLECT
     jmp .gt_done
 
 .gt_unlock_already:
@@ -385,38 +428,51 @@ DEF_FUNC gc_track, 8            ; + 3 pushes (rbx, r12, r13) = 32, 16-aligned
 END_FUNC gc_track
 
 ;; ============================================================================
-;; gc_untrack(rdi=obj)
+;; gc_untrack(rdi=obj) -> nothing
 ;; Remove object from its GC tracking shard list.
+;; Fast bare leaf path when rt_threaded == 0 (no frame, no pushes, no calls).
 ;; ============================================================================
-DEF_FUNC gc_untrack, 8          ; + 3 pushes (rbx, r12, r13) = 32, 16-aligned
-    push rbx
-    push r12
-    push r13
-
-    lea rbx, [rdi - GC_HEAD_SIZE]
-    mov rax, [rbx + PyGC_Head.gc_next]
-    test rax, rax
-    jz .gu_done
+DEF_FUNC_BARE gc_untrack
+    lea rdi, [rdi - GC_HEAD_SIZE]
+    mov rcx, [rdi + PyGC_Head.gc_next]
+    test rcx, rcx
+    jz .gu_fast_ret
 
     cmp byte [rel rt_threaded], 0
     jne .gu_threaded
 
-    and eax, GC_SHARD_MASK
-    shl eax, 6
-    lea r12, [rel gc_shards]
-    add r12, rax
+    ; Inline gc_list_remove(rdi)
+    mov rax, [rdi + PyGC_Head.gc_prev]
+    and rax, GC_PREV_MASK               ; prev ptr
+    mov [rax + PyGC_Head.gc_next], rcx  ; prev->gc_next = tagged next
+    mov r8, rcx
+    and r8, GC_NEXT_MASK                ; untagged next ptr
+    mov rdx, [r8 + PyGC_Head.gc_prev]
+    and rdx, ~GC_PREV_MASK
+    or rax, rdx
+    mov [r8 + PyGC_Head.gc_prev], rax
+    mov qword [rdi + PyGC_Head.gc_next], 0
+    and qword [rdi + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
 
-    mov rdi, rbx
-    call gc_list_remove
-    mov qword [rbx + PyGC_Head.gc_next], 0
-    and qword [rbx + PyGC_Head.gc_prev], GC_PREV_MASK_FINALIZED
-
-    dec qword [r12 + GCS_COUNT]
-    jns .gu_done
-    mov qword [r12 + GCS_COUNT], 0
-    jmp .gu_done
+    and ecx, GC_SHARD_MASK
+    shl ecx, 6
+    lea rdx, [rel gc_shards]
+    add rdx, rcx
+    dec qword [rdx + GCS_COUNT]
+    jns .gu_fast_ret
+    mov qword [rdx + GCS_COUNT], 0
+.gu_fast_ret:
+    ret
 
 .gu_threaded:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 8                          ; + 3 pushes = 32, 16-aligned
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+
 .gu_retry:
     mov rax, [rbx + PyGC_Head.gc_next]
     test rax, rax

@@ -5,22 +5,22 @@
 
 ; PyObject base structure
 struc PyObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
 endstruc
 
 OBJ_HEADER_SIZE equ PyObject_size  ; 24
 
 ; PyVarObject (variable-size objects)
 struc PyVarObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: number of items
 endstruc
 
@@ -38,11 +38,11 @@ PYHASH_MODULUS equ 0x1FFFFFFFFFFFFFFF
 ; which promotes in place.  .mpz stays at +16 so existing GMP code is
 ; unaffected.
 struc PyIntObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .mpz:       resb 16   ; +16: inline mpz_t (alloc:4, size:4, *d:8)
     .ival:      resq 1    ; +32: int64 value      (valid iff .compact != 0)
     .compact:   resq 1    ; +40: 1 = compact, 0 = GMP-backed
@@ -74,11 +74,11 @@ endstruc
 
 ; Float object
 struc PyFloatObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .value:     resq 1    ; +16: double value
 endstruc
 
@@ -92,11 +92,11 @@ endstruc
 ; rather than gc_alloc (gc_alloc hands back raw + GC_HEAD_SIZE, which
 ; obj_dealloc's plain-free path would hand to ap_free unshifted).
 struc PyComplexObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .cval_real: resq 1    ; +16: double
     .cval_imag: resq 1    ; +24: double
 endstruc
@@ -108,11 +108,11 @@ endstruc
 ; the two are equal, which is the fast path every code-point-aware operation
 ; checks first.
 struc PyStrObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: length in bytes
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
     .ob_length: resq 1    ; +32: length in code points
@@ -121,11 +121,11 @@ endstruc
 
 ; Bytes object
 struc PyBytesObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: length in bytes
     .data:                 ; +24: raw bytes (variable)
 endstruc
@@ -146,11 +146,11 @@ endstruc
 ; tp_clear: there is nothing in there for the collector to follow, and giving
 ; it one would have it read integers as pointers.
 struc PyArrayObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:    resq 1   ; +16: item COUNT, not bytes
     .ob_cap:     resq 1   ; +24: items that fit in ob_data
     .ob_data:    resq 1   ; +32: the buffer, or 0 when empty
@@ -161,11 +161,11 @@ struc PyArrayObject
 endstruc
 
 struc PyByteArrayObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: length in bytes
     .ob_cap:    resq 1    ; +24: usable bytes at ob_bytes, excluding the NUL
     .ob_bytes:  resq 1    ; +32: the buffer
@@ -174,11 +174,11 @@ endstruc
 
 ; MemoryView object — reference to a slice of a bytes-like object
 struc PyMemoryViewObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .mv_source: resq 1    ; +16: the source object, strong; 0 once released
     .mv_buf:    resq 1    ; +24: the start of the data; 0 once released
     .mv_len:    resq 1    ; +32: the view's length in BYTES, not items
@@ -202,11 +202,11 @@ MV_RELEASED equ 0
 
 ; List object
 struc PyListObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: item count
     .allocated: resq 1    ; +24: capacity
     .ob_item:   resq 1    ; +32: ptr to payload (u64[]) array
@@ -215,11 +215,11 @@ endstruc
 ; Weak reference (src/pyo/weakrefmod.asm).  The referent is borrowed and is
 ; zeroed when it dies; the side table in that file owns the reference objects.
 struc PyWeakRefObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .wr_object:   resq 1  ; +16: the referent, 0 once it is gone
     .wr_callback: resq 1  ; +24: owned callable, or 0
     .wr_hash:     resq 1  ; +32: cached hash, -1 until computed
@@ -227,11 +227,11 @@ endstruc
 
 ; Tuple object
 struc PyTupleObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: item count
     .ob_hash:   resq 1    ; +24: cached hash (-1 = not computed)
     .ob_item:   resq 1     ; +32: ptr to payload (u64[]) array
@@ -239,11 +239,11 @@ endstruc
 
 ; Dict object
 struc PyDictObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_size:   resq 1    ; +16: item count
     .capacity:  resq 1    ; +24: hash table capacity
     .entries:   resq 1    ; +32: ptr to entry array
@@ -352,11 +352,11 @@ SET_HASH equ PyDictObject.dk_nentries  ; the word PyDictObject calls dk_nentries
 
 ; Function object
 struc PyFuncObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .func_code:     resq 1  ; +16: ptr to code object
     .func_globals:  resq 1  ; +24: ptr to globals dict
     .func_name:     resq 1  ; +32: ptr to str object
@@ -385,11 +385,11 @@ endstruc
 
 ; Code object
 struc PyCodeObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .co_argcount:       resd 1  ; +16
     .co_kwonlyargcount: resd 1  ; +20
     .co_nlocals:        resd 1  ; +24
@@ -447,11 +447,11 @@ endstruc
 
 ; Module object
 struc PyModuleObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .mod_name:    resq 1  ; +16: ptr to str
     .mod_dict:    resq 1  ; +24: ptr to module dict
 endstruc
@@ -460,11 +460,11 @@ endstruc
 ; PEP 585 generic alias: list[int].  _collections_abc takes GenericAlias from
 ; `type(list[int])`, and every annotation-bearing stdlib module needs it.
 struc PyGenericAliasObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ga_origin: resq 1  ; +16: the type being subscripted (owned)
     .ga_args:   resq 1  ; +24: the argument, a tuple if it was one (owned)
     ; PEP 646's `*tuple[int, str]`: iterating a GenericAlias yields one item,
@@ -477,11 +477,11 @@ endstruc
 ; CPython exposes func.__code__, code.co_name and friends this way, and
 ; types.py takes GetSetDescriptorType from one of them.
 struc PyGetSetDescrObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .gs_get:    resq 1  ; +16: C getter(self) -> Value, or 0
     .gs_set:    resq 1  ; +24: C setter(self, value) -> int, or 0
     .gs_name:   resq 1  ; +32: ptr to the name (PyStrObject*, owned)
@@ -517,31 +517,31 @@ GS_LAYOUT   equ 2
 
 ; types.SimpleNamespace: attributes are the entries of a dict.
 struc PySimpleNamespaceObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ns_dict:   resq 1  ; +16: the attribute dict (owned)
 endstruc
 
 ; Read-only view of a mapping.  type.__dict__ is one of these in CPython,
 ; and types.py takes MappingProxyType from it.
 struc PyMappingProxyObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .mp_mapping: resq 1 ; +16: the wrapped dict (owned)
 endstruc
 
 struc PyMemberDescrObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     ; The byte offset of the slot within an instance.  NEGATIVE for a slot at
     ; the instance's TAIL, which is where a str subclass's go; SLOT_ADDR is
     ; the one place that knows.
@@ -555,62 +555,62 @@ endstruc
 
 ; Class instance object
 struc PyInstanceObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inst_dict:   resq 1  ; +16: ptr to instance __dict__
 endstruc
 
 ; Int subclass instance (class MyInt(int): ...)
 struc PyIntSubclassObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inst_dict:   resq 1  ; +16: ptr to instance __dict__
     .int_value:   resq 1  ; +24: the wrapped integer, as a Value
 endstruc
 
 ; Iterator objects
 struc PyListIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_seq:    resq 1    ; +16: ptr to list
     .it_index:  resq 1    ; +24: current index
 endstruc
 
 struc PyTupleIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_seq:    resq 1
     .it_index:  resq 1
 endstruc
 
 struc PyStrIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_seq:    resq 1    ; +16: ptr to str
     .it_index:  resq 1    ; +24: current byte index
 endstruc
 
 struc PyDictIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_dict:    resq 1    ; +16: ptr to dict
     .it_index:   resq 1    ; +24: current entry index
     .it_kind:    resq 1    ; +32: 0=keys, 1=values, 2=items
@@ -623,11 +623,11 @@ struc PyDictIterObject
 endstruc
 
 struc PyDictViewObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .dv_dict:   resq 1    ; +16: ptr to dict (INCREF'd)
     .dv_kind:   resq 1    ; +24: 0=keys, 1=values, 2=items
 endstruc
@@ -639,11 +639,11 @@ endstruc
 ; checks .wide and takes a slower path built on the Values when it is set.
 ; The three Values are OWNED references -- a wide bound is a heap int.
 struc PyRangeObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .start:     resq 1    ; +16: start value (raw i64), exact unless .wide
     .stop:      resq 1    ; +24: stop value (raw i64), exact unless .wide
     .step:      resq 1    ; +32: step value (raw i64), exact unless .wide
@@ -654,11 +654,11 @@ struc PyRangeObject
 endstruc
 
 struc PyRangeIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_current: resq 1   ; +16: current value
     .it_stop:    resq 1   ; +24: stop value
     .it_step:    resq 1   ; +32: step value
@@ -670,33 +670,33 @@ endstruc
 ; are owned Values, and .it_len counts DOWN, as CPython's does: a wide range
 ; has no int64 length to compare against.
 struc PyLongRangeIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_current: resq 1   ; +16: the next value to yield
     .it_step:    resq 1   ; +24
     .it_len:     resq 1   ; +32: how many are left
 endstruc
 
 struc PyBytesIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .it_seq:    resq 1    ; +16: ptr to bytes obj
     .it_index:  resq 1    ; +24: current index
 endstruc
 
 ; Slice object
 struc PySliceObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .start:       resq 1    ; +16: Value
     .stop:        resq 1    ; +24: Value
     .step:        resq 1    ; +32: Value
@@ -704,11 +704,11 @@ endstruc
 
 ; Cell object (for closures)
 struc PyCellObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ob_ref:    resq 1    ; +16: contained Value (0 if empty)
 endstruc
 
@@ -719,11 +719,11 @@ endstruc
 ; diamond, where the class after B in type(self).__mro__ is a sibling of B and
 ; not one of its bases at all.
 struc PySuperObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .su_type:     resq 1  ; +16: __thisclass__, owned
     .su_obj:      resq 1  ; +24: __self__, owned, or 0 for super(B)
     .su_obj_type: resq 1  ; +32: __self_class__, owned, or 0
@@ -731,42 +731,42 @@ endstruc
 
 ; Bound method
 struc PyMethodObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .im_func:   resq 1    ; +16: function
     .im_self:   resq 1    ; +24: instance
 endstruc
 
 ; StaticMethod wrapper (descriptor)
 struc PyStaticMethodObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .sm_callable: resq 1  ; +16: wrapped function
 endstruc
 
 ; ClassMethod wrapper (descriptor)
 struc PyClassMethodObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .cm_callable: resq 1  ; +16: wrapped function
 endstruc
 
 ; Property descriptor
 struc PyPropertyObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .prop_get:    resq 1  ; +16: fget function or NULL
     .prop_set:    resq 1  ; +24: fset function or NULL
     .prop_del:    resq 1  ; +32: fdel function or NULL
@@ -782,11 +782,11 @@ endstruc
 
 ; Generator object
 struc PyGenObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .gi_frame:  resq 1    ; +16: suspended frame
     .gi_running: resq 1   ; +24: 1 if currently executing
     .gi_code:   resq 1    ; +32: code object
@@ -814,11 +814,11 @@ endstruc
 FILE_BUFSZ equ 8192
 
 struc PyFileObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .file_fd:     resq 1  ; +16: OS file descriptor
     .file_name:   resq 1  ; +24: name string ('<stdout>' etc)
     .file_mode:   resq 1  ; +32: mode string ('w', 'r')
@@ -846,11 +846,11 @@ endstruc
 ; allocates tp_basicsize and zero-fills, so the fields below start where the
 ; base's layout ends and cost nothing but a patched tp_basicsize.
 struc PyFileIOObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inst_dict:   resq 1  ; +16: the tp_dictoffset _RawIOBase hands down
     .fio_fd:      resq 1  ; +24: the descriptor, meaningless unless FIO_OPEN
     .fio_flags:   resq 1  ; +32
@@ -875,11 +875,11 @@ FIO_SEEKABLE   equ 0x80
 ; heaptype over _BufferedIOBase whose tp_basicsize is patched, so the fields
 ; below sit past the instance header the base hands down.
 struc PyBytesIOObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inst_dict:   resq 1  ; +16
     .bio_buf:     resq 1  ; +24: the storage, or 0 once closed
     .bio_size:    resq 1  ; +32: bytes written, which is what getvalue returns
@@ -890,11 +890,11 @@ endstruc
 
 ; Async task object (for event loop)
 struc AsyncTask
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .coro:         resq 1  ; +16: PyGenObject* (coroutine)
     .result:       resq 1  ; +24: result Value
     .pad_result:   resq 1  ; +32: (was result_tag)
@@ -924,22 +924,22 @@ endstruc
 ; sentinel once, which suspends the running task on the descriptor, and is
 ; exhausted after that.  The Python stream layer is built on it.
 struc IOWaitAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .fd_events:  resq 1  ; +16: fd | (poll mask << 32), the sentinel payload
     .yielded:    resd 1  ; +24: 0 = not yet, 1 = done
     .pad:        resd 1  ; +28
 endstruc
 
 struc SleepAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .delay_ns:  resq 1  ; +16
     .yielded:   resd 1  ; +24: 0=not yet, 1=done
     .pad:       resd 1  ; +28
@@ -957,11 +957,11 @@ endstruc
 ; +48 must line up with PyGenObject.gi_return_value: op_send reads that offset
 ; on the exhaustion path, the same reason WaitForAwaitable does.
 struc GatherAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     ; A plain ap_malloc'd AsyncTask*[], each entry owned, NOT a list: this
     ; object is not GC-visible, and a collection that ran while only this
     ; field referenced a list freed it under us.  Tasks are not collectable,
@@ -977,11 +977,11 @@ endstruc
 
 ; WaitFor awaitable object (for asyncio.wait_for)
 struc WaitForAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inner_task:      resq 1  ; +16: AsyncTask* being waited on
     .timeout_ns:      resq 1  ; +24: timeout in nanoseconds
     .state:           resd 1  ; +32: 0=init, 1=yielded, 2=done
@@ -996,11 +996,11 @@ endstruc
 
 ; ReadAwaitable — awaitable for stream.read(n)
 struc ReadAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .fd:        resd 1  ; +16: socket fd
     .nbytes:    resd 1  ; +20: bytes to read
     .yielded:   resd 1  ; +24: 0=not yet, 1=done
@@ -1009,11 +1009,11 @@ endstruc
 
 ; WriteAwaitable — awaitable for stream.write(data)
 struc WriteAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .fd:        resd 1  ; +16: socket fd
     .pad1:      resd 1  ; +20
     .data:      resq 1  ; +24: string Value (INCREF'd)
@@ -1023,11 +1023,11 @@ endstruc
 
 ; DrainAwaitable — awaitable for stream.drain()
 struc DrainAwaitable
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .fd:        resd 1  ; +16: socket fd
     .yielded:   resd 1  ; +20: 0=not yet, 1=done
 endstruc
@@ -1041,11 +1041,11 @@ endstruc
 ;; reasons -- an item for its consumer, and an `await` passing through to the
 ;; event loop -- and this box is the only thing that tells them apart.
 struc AsyncGenWrapped
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .agw_value:     resq 1  ; +16: the wrapped Value, owned
 endstruc
 
@@ -1058,11 +1058,11 @@ FUT_STATE_CANCELLED equ 1
 FUT_STATE_FINISHED  equ 2
 
 struc PyFutureObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inst_dict:          resq 1  ; +16: instance __dict__ (tp_dictoffset = 16)
     .fut_loop:           resq 1  ; +24: event loop (owned Value, 0 = uninitialized)
     .fut_callback0:      resq 1  ; +32: first done callback (owned Value, or 0)
@@ -1084,11 +1084,11 @@ endstruc
 ; Prefix matches PyFutureObject byte-for-byte so every Future method works
 ; directly on Task instances and Task subclasses.
 struc PyTaskObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .inst_dict:          resq 1  ; +16
     .fut_loop:           resq 1  ; +24
     .fut_callback0:      resq 1  ; +32
@@ -1118,11 +1118,11 @@ endstruc
 ; gi_return_value sits at +48 (matching PyGenObject.gi_return_value) so op_send
 ; and builtin_next_fn read the Future's result directly when tp_iternext exhausts.
 struc PyFutureIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .fi_future:          resq 1  ; +16: PyFutureObject* (owned, 0 once exhausted/closed)
     .fi_pad1:            resq 1  ; +24
     .fi_pad2:            resq 1  ; +32
@@ -1134,11 +1134,11 @@ endstruc                         ; 56 bytes
 ; gi_return_value sits at +48 so op_send and builtin_next_fn read the wrapped
 ; coroutine's return value directly when tp_iternext exhausts.
 struc PyCoroWrapperObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .cw_coro:            resq 1  ; +16: PyGenObject* (owned)
     .cw_pad1:            resq 1  ; +24
     .cw_pad2:            resq 1  ; +32
@@ -1148,11 +1148,11 @@ endstruc                         ; 56 bytes
 
 ; _asyncio.TaskStepMethWrapper — callable scheduled via loop.call_soon for Task._step
 struc PyTaskStepWrapperObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .sw_task:            resq 1  ; +16: PyTaskObject* (owned)
     .sw_arg:             resq 1  ; +24: exception Value or 0 (owned)
     .sw_eager:           resq 1  ; +32: 1 when invoked from eager_start (skips enter/leave)
@@ -1160,20 +1160,20 @@ endstruc                         ; 40 bytes
 
 ; Callable bound wrapper for Task._wakeup (used in add_done_callback)
 struc PyTaskWakeupObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .tw_task:            resq 1  ; +16: PyTaskObject* (owned)
 endstruc                         ; 24 bytes
 
 struc AsyncGenASend
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .ags_gen:       resq 1  ; +16: pointer to async generator (INCREF'd)
     .ags_state:     resd 1  ; +24: 0=initial, 1=yielded, 2=closed
     .ags_aclose:    resd 1  ; +28: 1 when this athrow came from aclose() rather
@@ -1198,11 +1198,11 @@ endstruc
 
 ; Type object layout
 struc PyTypeObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .tp_name:        resq 1  ; +16  ptr to C string
     .tp_basicsize:   resq 1  ; +24
     .tp_dealloc:     resq 1  ; +32  function ptr
@@ -1438,11 +1438,11 @@ S_IFIFO  equ 0o010000
 ; is_dir()/is_file() questions cost no syscall at all, which is the whole point
 ; of scandir over listdir + stat.
 struc PyDirEntryObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .de_name:   resq 1      ; +16: PyStrObject*, owned
     .de_path:   resq 1      ; +24: PyStrObject*, owned -- the scandir argument
                             ;      joined to the name, which is what .path is
@@ -1455,11 +1455,11 @@ endstruc
 ; the directory is read in one pass, where CPython reads it lazily -- and a
 ; context manager's close() drops them.
 struc PyScandirIterObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .sd_list:   resq 1      ; +16: PyListObject* of DirEntry, owned; 0 = closed
     .sd_index:  resq 1      ; +24
 endstruc
@@ -1804,11 +1804,11 @@ FRAME_HEADER_SIZE equ PyFrame.localsplus
 ; so an object holding one would be looking at a later call's frame; this
 ; copies what a caller can read and outlives the frames.
 struc PyFrameObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .f_back:      resq 1  ; +16: the next snapshot outward, owned, or 0
     .f_code:      resq 1  ; +24
     .f_globals:   resq 1  ; +32
@@ -1870,11 +1870,11 @@ EXC_TIMEOUT_ERROR          equ 28
 
 ; Exception object
 struc PyExceptionObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .exc_type:      resq 1  ; +16: ptr to exception type object
     .exc_value:     resq 1  ; +24: value, as a Value
     .exc_tb:        resq 1  ; +32: ptr to traceback or NULL
@@ -1897,11 +1897,11 @@ endstruc
 
 ; Exception group object (extends PyExceptionObject with eg_exceptions)
 struc PyExceptionGroupObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .exc_type:      resq 1  ; +16
     .exc_value:     resq 1  ; +24 (message, as a Value)
     .exc_tb:        resq 1  ; +32
@@ -1915,11 +1915,11 @@ endstruc
 
 ; Traceback object
 struc PyTracebackObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .tb_next:   resq 1  ; +16: ptr to next traceback or NULL
     .tb_lineno: resq 1  ; +24: line number (i64), 0 when unknown
     .tb_code:   resq 1  ; +32: owned ref to the PyCodeObject, or NULL
@@ -1937,11 +1937,11 @@ endstruc
 
 ; Builtin C function object
 struc PyBuiltinObject
-    .ob_ref_local:  resd 1  ; +0:  owner-local refcount (0xFFFFFFFF=immortal)
-    .ob_ref_shared: resd 1  ; +4:  (shared_rc << 2) | flags (MERGED=1, QUEUED=2)
-    .ob_tid:        resd 1  ; +8:  owner ts_tid (0=immortal, 0xFFFFFFFF=merged)
-    .ob_mutex:      resd 1  ; +12: 32-bit direct futex lock
-    .ob_type:       resq 1  ; +16: pointer to type object
+    .ob_ref_local:  resd 1
+    .ob_ref_shared: resd 1
+    .ob_tid:        resd 1
+    .ob_mutex:      resd 1
+    .ob_type:       resq 1
     .func_id:     resq 1  ; +16: builtin function ID
     .func_name:   resq 1  ; +24: ptr to name string
     .func_ptr:    resq 1  ; +32: ptr to C implementation

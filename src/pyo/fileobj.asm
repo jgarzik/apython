@@ -267,10 +267,14 @@ END_FUNC fileobj_write_all
 ;; straight out behind whatever is already waiting, which keeps the order
 ;; right without growing the buffer for a single large write.
 ;; ============================================================================
-FE_SELF  equ 8
-FE_DATA  equ 16
-FE_LEN   equ 24
-FE_FRAME equ 32             ; 24 used + 8 pad = 32, 16-aligned
+FE_SELF   equ 8
+FE_DATA   equ 16
+FE_LEN    equ 24
+FE_FD     equ 32
+FE_DLEN   equ 40
+FE_DIRECT equ 48
+FE_DBUF   equ 48 + FILE_BUFSZ
+FE_FRAME  equ FE_DBUF           ; 8240, 16-aligned
 DEF_FUNC fileobj_emit, FE_FRAME
     mov [rbp - FE_SELF], rdi
     mov [rbp - FE_DATA], rsi
@@ -280,19 +284,61 @@ DEF_FUNC fileobj_emit, FE_FRAME
     je .fe_direct
 
     OBJ_LOCK rdi
-    ; Would it fit?  If not, drain first, and then take the straight path if
-    ; it still would not.
+    ; Would it fit without draining?
     mov rax, [rdi + PyFileObject.file_len]
     add rax, rdx
     cmp rax, FILE_BUFSZ
     jbe .fe_append
-    call fileobj_drain_locked
+
+    ; Snapshot pending buffered bytes onto the stack, then unlock BEFORE
+    ; calling BLOCKING_CALL sys_write (leaf OBJ_LOCK must never be held across
+    ; a detached blocking syscall).
+    mov rax, [rdi + PyFileObject.file_len]
+    mov [rbp - FE_DLEN], rax
+    mov rcx, [rdi + PyFileObject.file_fd]
+    mov [rbp - FE_FD], rcx
+    mov qword [rdi + PyFileObject.file_len], 0
     test rax, rax
-    js .fe_unlock_out
-    mov rdi, [rbp - FE_SELF]
+    jz .fe_no_copy
+    lea rdi, [rbp - FE_DBUF]
+    mov rsi, [rbp - FE_SELF]
+    lea rsi, [rsi + PyFileObject.file_buf]
+    mov rdx, rax
+    call ap_memcpy
+.fe_no_copy:
+    ; If the incoming write fits into the now-empty buffer, stage it under the
+    ; same lock acquisition; otherwise write it directly after the drained head.
     mov rdx, [rbp - FE_LEN]
     cmp rdx, FILE_BUFSZ
-    ja .fe_unlock_direct
+    ja .fe_mark_direct
+    mov qword [rbp - FE_DIRECT], 0
+    mov rdi, [rbp - FE_SELF]
+    lea rdi, [rdi + PyFileObject.file_buf]
+    mov rsi, [rbp - FE_DATA]
+    call ap_memcpy
+    mov rdi, [rbp - FE_SELF]
+    mov rax, [rbp - FE_LEN]
+    mov [rdi + PyFileObject.file_len], rax
+    jmp .fe_unlock_flush
+.fe_mark_direct:
+    mov qword [rbp - FE_DIRECT], 1
+    mov rdi, [rbp - FE_SELF]
+.fe_unlock_flush:
+    OBJ_UNLOCK rdi
+    mov rdx, [rbp - FE_DLEN]
+    test rdx, rdx
+    jz .fe_after_drain
+    mov rdi, [rbp - FE_FD]
+    lea rsi, [rbp - FE_DBUF]
+    call fileobj_write_all
+    test rax, rax
+    js .fe_out
+.fe_after_drain:
+    cmp qword [rbp - FE_DIRECT], 0
+    jne .fe_direct
+    xor eax, eax
+    leave
+    ret
 
 .fe_append:
     mov rdi, [rbp - FE_SELF]
@@ -313,8 +359,6 @@ DEF_FUNC fileobj_emit, FE_FRAME
     leave
     ret
 
-.fe_unlock_direct:
-    OBJ_UNLOCK rdi
 .fe_direct:
     mov rdi, [rbp - FE_SELF]
     mov rdi, [rdi + PyFileObject.file_fd]
@@ -326,41 +370,42 @@ DEF_FUNC fileobj_emit, FE_FRAME
 END_FUNC fileobj_emit
 
 ;; ============================================================================
-;; fileobj_drain_locked(rdi = self, caller holds OBJ_LOCK self) -> rax = 0, or -errno
+;; fileobj_drain(rdi = self) -> rax = 0, or -errno
+;;
+;; Write out whatever is waiting.  Safe on an unbuffered file, where there never
+;; is any.  Snapshots the buffer under OBJ_LOCK and unlocks before sys_write so
+;; the leaf lock is never held across a detached blocking syscall.
 ;; ============================================================================
-DEF_FUNC_LOCAL fileobj_drain_locked, 8
+FD_FD    equ 8
+FD_LEN   equ 16
+FD_DBUF  equ 16 + FILE_BUFSZ
+FD_FRAME equ FD_DBUF + 8        ; + 1 push (rbx) = 8224, 16-aligned
+global fileobj_drain
+DEF_FUNC fileobj_drain, FD_FRAME
     push rbx
     mov rbx, rdi
+    OBJ_LOCK rbx
     mov rdx, [rbx + PyFileObject.file_len]
     test rdx, rdx
-    jz .fdl_done
+    jz .fd_unlock_empty
+    mov [rbp - FD_LEN], rdx
+    mov rax, [rbx + PyFileObject.file_fd]
+    mov [rbp - FD_FD], rax
     mov qword [rbx + PyFileObject.file_len], 0
-    mov rdi, [rbx + PyFileObject.file_fd]
+    lea rdi, [rbp - FD_DBUF]
     lea rsi, [rbx + PyFileObject.file_buf]
+    call ap_memcpy
+    OBJ_UNLOCK rbx
+    mov rdi, [rbp - FD_FD]
+    lea rsi, [rbp - FD_DBUF]
+    mov rdx, [rbp - FD_LEN]
     call fileobj_write_all
     pop rbx
     leave
     ret
-.fdl_done:
-    xor eax, eax
-    pop rbx
-    leave
-    ret
-END_FUNC fileobj_drain_locked
-
-;; ============================================================================
-;; fileobj_drain(rdi = self) -> rax = 0, or -errno
-;;
-;; Write out whatever is waiting.  Safe on an unbuffered file, where there never
-;; is any.
-;; ============================================================================
-global fileobj_drain
-DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
-    push rbx
-    mov rbx, rdi
-    OBJ_LOCK rbx
-    call fileobj_drain_locked
+.fd_unlock_empty:
     OBJ_UNLOCK rbx
+    xor eax, eax
     pop rbx
     leave
     ret

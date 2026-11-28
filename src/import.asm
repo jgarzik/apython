@@ -986,22 +986,26 @@ DEF_FUNC import_module, IF_FRAME
     ; lock; _ensure_initialized (lib/_importlib_bootstrap.py) is that.  With
     ; one thread there is nobody to wait for, and the same test would only
     ; find this thread's own circular import, so it is skipped.
+IMW_ARG equ 0
+IMW_MOD equ 8
+IMW_SZ  equ 16
+IMW_CALL_ARG equ 16
     extern gil_threaded
     cmp qword [rel gil_threaded], 0
     je .cached_ready
-    push rax                    ; the owned module ([rsp + 8])
-    push rax                    ; and a slot for the helper's one argument
+    push rax                    ; IMW_MOD: the owned module
+    push rax                    ; IMW_ARG: slot for the helper's one argument
     CSTRING rdi, "_ensure_initialized"
     call im_importlib_func
     ERR_PENDING .cached_wait_raised
     test rax, rax
     jz .cached_waited           ; importlib is not up yet: nothing to wait on
     mov rcx, [rbp - IF_NAME]
-    mov [rsp], rcx
+    mov [rsp + IMW_ARG], rcx
     push rax                    ; save owned helper fn
     sub rsp, 8
     mov rdi, rax
-    lea rsi, [rsp + 16]
+    lea rsi, [rsp + IMW_CALL_ARG]
     mov edx, 1
     call obj_call_n             ; err: tested below after releasing helper fn
     add rsp, 8
@@ -1019,8 +1023,8 @@ DEF_FUNC import_module, IF_FRAME
     mov rsi, [rbp - IF_NAME]
     call dict_get
     ERR_PENDING .cached_wait_raised
-    mov rdi, [rsp + 8]          ; release old owned module
-    add rsp, 16
+    mov rdi, [rsp + IMW_MOD]    ; release old owned module
+    add rsp, IMW_SZ
     push rax
     sub rsp, 8
     DECREF_V rdi, rcx
@@ -1033,8 +1037,8 @@ DEF_FUNC import_module, IF_FRAME
     je .cached_blocked
     jmp .cached_ready
 .cached_wait_raised:
-    mov rdi, [rsp + 8]          ; release old owned module
-    add rsp, 16
+    mov rdi, [rsp + IMW_MOD]    ; release old owned module
+    add rsp, IMW_SZ
     DECREF_V rdi, rcx
     jmp .import_error
 .cached_waited:

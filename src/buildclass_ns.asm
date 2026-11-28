@@ -79,11 +79,13 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     jz .unlock_done
     mov [rbp - TSN_N], rbx
     mov rdi, rbx
-    call tuple_new
+    extern list_new_filled_untracked
+    call list_new_filled_untracked
     test rax, rax
     jz .unlock_ns_done
+    mov [rax + PyListObject.ob_size], rbx
     mov [rbp - TSN_KEYS], rax
-    mov rdx, [rax + PyTupleObject.ob_item]
+    mov rdx, [rax + PyListObject.ob_item]
     mov rsi, [rbp - TSN_NS]
     mov r12, [rsi + PyDictObject.capacity]
     mov r13, [rsi + PyDictObject.entries]
@@ -104,6 +106,9 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     jmp .fill
 .filled:
     OBJ_UNLOCK rsi
+    mov rdi, [rbp - TSN_KEYS]
+    extern gc_track
+    call gc_track
     jmp .apply_loop
 .unlock_ns_done:
     mov rsi, [rbp - TSN_NS]
@@ -119,7 +124,7 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     cmp rax, [rbp - TSN_N]
     jae .release
     mov rcx, [rbp - TSN_KEYS]
-    mov rcx, [rcx + PyTupleObject.ob_item]
+    mov rcx, [rcx + PyListObject.ob_item]
     mov rcx, [rcx + rax*8]
     mov [rbp - TSN_NAME], rcx
 

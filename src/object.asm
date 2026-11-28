@@ -87,7 +87,7 @@ END_FUNC obj_decref
 ; drained object and make no progress in the ordinary case.
 TRASH_LIMIT equ 50
 
-; trash_nesting and trash_later lives in ThreadState (src/include/threadstate.inc).
+; trash_nesting and trash_buf/len/cap live in ThreadState (threadstate.inc).
 
 ;; ============================================================================
 ;; obj_dealloc(PyObject *obj)
@@ -104,11 +104,12 @@ DEF_FUNC_BARE obj_dealloc
     cmp qword [gs:ThreadState.trash_nesting], TRASH_LIMIT
     jl .td_enter
 
-    ; Too deep: set it aside for the outermost dealloc.  It has to leave the
-    ; collector's lists first -- its tp_dealloc has not run, so nothing has
-    ; untracked it, and a collection during the drain would otherwise walk an
-    ; object whose refcount is already zero.  gc_untrack is idempotent, so the
-    ; untrack inside tp_dealloc still runs harmlessly later.
+    ; Too deep: mark definitively dead (MERGED, rc=0) without overwriting the
+    ; header so concurrent weakref obj_try_incref cannot resurrect it, untrack
+    ; from GC, and push onto the per-thread out-of-line trash_buf stack.
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
     mov rax, [rbx + PyObject.ob_type]
     test rax, rax
     jz .td_no_gc
@@ -118,10 +119,35 @@ DEF_FUNC_BARE obj_dealloc
     mov rdi, rbx
     call gc_untrack
 .td_no_gc:
-    mov rax, [gs:ThreadState.trash_later]
-    mov [rbx], rax
-    mov [gs:ThreadState.trash_later], rbx
+    mov rcx, [gs:ThreadState.trash_len]
+    cmp rcx, [gs:ThreadState.trash_cap]
+    jb .td_push_slot
+    mov rdx, [gs:ThreadState.trash_cap]
+    test rdx, rdx
+    jnz .td_grow_double
+    mov edx, 64
+    jmp .td_do_realloc
+.td_grow_double:
+    shl rdx, 1
+.td_do_realloc:
+    mov [gs:ThreadState.trash_cap], rdx
+    mov rdi, [gs:ThreadState.trash_buf]
+    lea rsi, [rdx * 8]
+    extern realloc
+    call realloc wrt ..plt
+    test rax, rax
+    jz .td_oom
+    mov [gs:ThreadState.trash_buf], rax
+    mov rcx, [gs:ThreadState.trash_len]
+.td_push_slot:
+    mov rax, [gs:ThreadState.trash_buf]
+    mov [rax + rcx * 8], rbx
+    inc qword [gs:ThreadState.trash_len]
     jmp .td_out
+.td_oom:
+    CSTRING rdi, "out of memory in trashcan"
+    extern fatal_error
+    call fatal_error
 
 .td_enter:
     inc qword [gs:ThreadState.trash_nesting]
@@ -206,24 +232,21 @@ DEF_FUNC_BARE obj_dealloc
 .td_leave:
     dec qword [gs:ThreadState.trash_nesting]
     jnz .td_out
-    cmp qword [gs:ThreadState.trash_later], 0
+    cmp qword [gs:ThreadState.trash_len], 0
     je .td_out
 
-    ; The outermost dealloc empties the chain, one object at a time.  The
-    ; nesting stays at 1 for the whole drain, so each object's own children go
-    ; on the chain rather than onto the machine stack once they are deep
-    ; enough -- which is what keeps this loop, and not the stack, bounded.
+    ; Outermost dealloc drains trash_buf LIFO with nesting held at 1 so deep
+    ; children re-defer rather than overflowing the machine stack.
 .td_drain:
     inc qword [gs:ThreadState.trash_nesting]
 .td_drain_loop:
-    mov rbx, [gs:ThreadState.trash_later]
-    test rbx, rbx
+    mov rcx, [gs:ThreadState.trash_len]
+    test rcx, rcx
     jz .td_drain_done
-    mov rax, [rbx]
-    mov [gs:ThreadState.trash_later], rax
-    mov dword [rbx + PyObject.ob_ref_local], 0
-    mov dword [rbx + PyObject.ob_ref_shared], 0
-    mov rdi, rbx
+    dec rcx
+    mov [gs:ThreadState.trash_len], rcx
+    mov rax, [gs:ThreadState.trash_buf]
+    mov rdi, [rax + rcx * 8]
     call obj_dealloc
     jmp .td_drain_loop
 .td_drain_done:

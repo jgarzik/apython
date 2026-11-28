@@ -28,6 +28,7 @@ rest.
 
 import _codecs
 import _iocore
+import _thread
 import abc
 
 from _iocore import (BlockingIOError, BytesIO, DEFAULT_BUFFER_SIZE, FileIO,
@@ -777,6 +778,7 @@ class BufferedWriter(_BufferedIOMixin):
             raise ValueError("invalid buffer size")
         self.buffer_size = buffer_size
         self._write_buf = bytearray()
+        self._write_lock = _thread.allocate_lock()
 
     def readable(self):
         return False
@@ -791,24 +793,31 @@ class BufferedWriter(_BufferedIOMixin):
             raise TypeError("can't write str to binary stream")
         if self.closed:
             raise ValueError("write to closed file")
-        self._write_buf.extend(b)
-        written = len(b)
-        if len(self._write_buf) > self.buffer_size:
-            self._flush_unlocked()
-        return written
+        with self._write_lock:
+            if self.closed:
+                raise ValueError("write to closed file")
+            self._write_buf.extend(b)
+            written = len(b)
+            if len(self._write_buf) > self.buffer_size:
+                self._flush_unlocked()
+            return written
 
     def truncate(self, pos=None):
         self._checkClosed()
         self._checkWritable()
-        self._flush_unlocked()
-        if pos is None:
-            pos = self.raw.tell()
-        return self.raw.truncate(pos)
+        with self._write_lock:
+            self._flush_unlocked()
+            if pos is None:
+                pos = self.raw.tell()
+            return self.raw.truncate(pos)
 
     def flush(self):
         if self.closed:
             raise ValueError("flush of closed file")
-        self._flush_unlocked()
+        with self._write_lock:
+            if self.closed:
+                raise ValueError("flush of closed file")
+            self._flush_unlocked()
 
     def _flush_unlocked(self):
         while self._write_buf:
@@ -827,16 +836,20 @@ class BufferedWriter(_BufferedIOMixin):
         if whence not in (0, 1, 2):
             raise ValueError("invalid whence value")
         self._checkClosed("seek of closed file")
-        self._flush_unlocked()
-        return _BufferedIOMixin.seek(self, pos, whence)
+        with self._write_lock:
+            self._flush_unlocked()
+            return _BufferedIOMixin.seek(self, pos, whence)
 
     def close(self):
         if self.raw is None or self.closed:
             return
-        try:
-            self._flush_unlocked()
-        finally:
-            self.raw.close()
+        with self._write_lock:
+            if self.raw is None or self.closed:
+                return
+            try:
+                self._flush_unlocked()
+            finally:
+                self.raw.close()
 
 
 class BufferedRandom(BufferedWriter, BufferedReader):

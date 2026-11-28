@@ -1480,21 +1480,26 @@ DEF_FUNC pyc_write_cache, PW_FRAME
     js .pw_free
     mov [rbp - PW_FD], rax
 
+PYCW_HDR_MAGIC equ 0
+PYCW_HDR_FLAGS equ 4
+PYCW_HDR_MTIME equ 8
+PYCW_HDR_SIZE  equ 12
+PYCW_HDR_LEN   equ 16
     ; The header (on the stack: 16 bytes, keeping rsp 16-aligned).
-    sub rsp, 16
-    mov dword [rsp], PYCW_MAGIC
-    mov dword [rsp + 4], 0
+    sub rsp, PYCW_HDR_LEN
+    mov dword [rsp + PYCW_HDR_MAGIC], PYCW_MAGIC
+    mov dword [rsp + PYCW_HDR_FLAGS], 0
     mov rax, [rbp - PW_STAT + PYCW_ST_MTIME]
-    mov dword [rsp + 8], eax
+    mov dword [rsp + PYCW_HDR_MTIME], eax
     mov rax, [rbp - PW_STAT + PYCW_ST_SIZE]
-    mov dword [rsp + 12], eax
+    mov dword [rsp + PYCW_HDR_SIZE], eax
 
     mov rdi, [rbp - PW_FD]
     mov rsi, rsp
-    mov edx, 16
+    mov edx, PYCW_HDR_LEN
     call sys_write
-    add rsp, 16
-    cmp rax, 16
+    add rsp, PYCW_HDR_LEN
+    cmp rax, PYCW_HDR_LEN
     jne .pw_close_fail
 
     mov rbx, [rbp - PW_BYTES]

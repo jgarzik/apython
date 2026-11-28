@@ -1273,7 +1273,10 @@ IC_CLS   equ 8
 IC_SUB   equ 16
 IC_INST  equ 24
 IC_DECL  equ 32             ; instance.__class__, when it is a class and differs
-IC_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+IC_CACHE equ 40             ; owned _abc_cache set
+IC_REF   equ 48             ; owned weakref to IC_SUB
+IC_RES   equ 56             ; set_contains result across decrefs
+IC_FRAME equ 64             ; + 0 pushes = 64, 16-aligned
 DEF_FUNC abc_instancecheck_func, IC_FRAME
     cmp rsi, 2
     jne .bad
@@ -1320,25 +1323,20 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     call abc_state_get
     test rax, rax
     jz .full
-    push rax                    ; owned _abc_cache
-    sub rsp, 8
+    mov [rbp - IC_CACHE], rax
     mov rdi, [rbp - IC_SUB]
     call abc_ref
-    mov rdi, [rsp + 8]          ; _abc_cache
-    push rax                    ; ref
-    sub rsp, 8
+    mov [rbp - IC_REF], rax
+    mov rdi, [rbp - IC_CACHE]
     mov rsi, rax
     call set_contains
     ERR_M1 .propagate_ref_cache
-    push rax
-    sub rsp, 8
-    mov rdi, [rsp + 24]         ; ref
+    mov [rbp - IC_RES], rax
+    mov rdi, [rbp - IC_REF]
     call obj_decref
-    mov rdi, [rsp + 40]         ; _abc_cache
+    mov rdi, [rbp - IC_CACHE]
     call obj_decref
-    add rsp, 8
-    pop rax
-    add rsp, 32
+    mov rax, [rbp - IC_RES]
     test eax, eax
     jnz .true
 
@@ -1375,11 +1373,9 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     leave
     ret
 .propagate_ref_cache:
-    add rsp, 8
-    pop rdi                     ; the weak reference being looked up
+    mov rdi, [rbp - IC_REF]
     call obj_decref
-    add rsp, 8
-    pop rdi                     ; owned _abc_cache
+    mov rdi, [rbp - IC_CACHE]
     call obj_decref
 .propagate:
     call .ic_release_declared
@@ -1408,7 +1404,9 @@ END_FUNC abc_instancecheck_func
 ;; ============================================================================
 RG_CLS   equ 8
 RG_SUB   equ 16
-RG_FRAME equ 16             ; + 0 pushes = 16
+RG_REG   equ 24             ; owned _abc_registry set
+RG_REF   equ 32             ; owned weakref to RG_SUB
+RG_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
 DEF_FUNC abc_register_func, RG_FRAME
     cmp rsi, 2
     jne .bad
@@ -1446,21 +1444,17 @@ DEF_FUNC abc_register_func, RG_FRAME
     call abc_state_get
     test rax, rax
     jz .done
-    push rax                    ; owned _abc_registry
-    sub rsp, 8
+    mov [rbp - RG_REG], rax
     mov rdi, [rbp - RG_SUB]
     call abc_ref
-    mov rdi, [rsp + 8]          ; _abc_registry
-    push rax                    ; ref
-    sub rsp, 8
+    mov [rbp - RG_REF], rax
+    mov rdi, [rbp - RG_REG]
     mov rsi, rax
     call set_add
     ERR_M1 .raised_ref
-    add rsp, 8
-    pop rdi                     ; ref
+    mov rdi, [rbp - RG_REF]
     call obj_decref
-    add rsp, 8
-    pop rdi                     ; _abc_registry
+    mov rdi, [rbp - RG_REG]
     call obj_decref
     inc qword [rel abc_invalidation_counter]
 
@@ -1472,11 +1466,9 @@ DEF_FUNC abc_register_func, RG_FRAME
     leave
     ret
 .raised_ref:
-    add rsp, 8
-    pop rdi                     ; the weak reference being added
+    mov rdi, [rbp - RG_REF]
     call obj_decref
-    add rsp, 8
-    pop rdi                     ; _abc_registry
+    mov rdi, [rbp - RG_REG]
     call obj_decref
     xor eax, eax
     leave
