@@ -1942,95 +1942,265 @@ section .text
 ;; builtin_input_fn(rdi = args, rsi = nargs) - input([prompt])
 ;;   -> rax = Value
 ;; 0 args: read line from stdin
-;; 1 arg: print prompt, then read line
+;; ============================================================================
+;; builtin_input_fn(rdi = args*, rsi = nargs) -> rax = str Value
+;; 0 args: flush sys.stdout and read a line from sys.stdin
+;; 1 arg:  write str(prompt) to sys.stdout, flush, and read a line from sys.stdin
 ;; Fails: 0
 ;; ============================================================================
 extern sys_write
 extern sys_read
+extern sys_module_obj
+extern obj_getattr_opt
+extern obj_call_n
+extern obj_str
+extern str_new_heap
+extern str_from_cstr_heap
+extern fileobj_flush_std
+extern exc_EOFError_type
+extern exc_RuntimeError_type
 
 global builtin_input_fn
-INP_BUF_SIZE equ 4096
-INP_FRAME equ INP_BUF_SIZE + 16  ; buffer + saved values
+INP_ARGS    equ 8
+INP_NARGS   equ 16
+INP_STDOUT  equ 24
+INP_STDIN   equ 32
+INP_PROMPT  equ 40
+INP_METH    equ 48
+INP_LINE    equ 56
+INP_FRAME   equ 64              ; + 0 pushes = 64, 16-aligned
 DEF_FUNC builtin_input_fn, INP_FRAME
-    test rsi, rsi
-    je .inp_no_prompt
-    cmp rsi, 1
-    jne .inp_error
+    mov [rbp - INP_ARGS], rdi
+    mov [rbp - INP_NARGS], rsi
+    mov qword [rbp - INP_STDOUT], 0
+    mov qword [rbp - INP_STDIN], 0
+    mov qword [rbp - INP_PROMPT], 0
+    mov qword [rbp - INP_METH], 0
+    mov qword [rbp - INP_LINE], 0
 
-    mov rax, [rdi]          ; args[0] = prompt
-    V_TEST_PTR rax, rcx
-    ja .inp_type_error
-    ; The prompt has to appear where a print() around it would.  Writing it
-    ; straight to fd 1 put it AHEAD of everything still in stdout's buffer,
-    ; so a pdb session's prompts all arrived before the output they were
-    ; prompting for.  CPython writes it through sys.stdout and flushes; this
-    ; flushes first and then writes, which comes to the same order.
+    cmp rsi, 1
+    ja .inp_error
+
+    ; Look up current sys.stdout and sys.stdin so redirected streams (e.g.
+    ; io.StringIO in unittest / code.InteractiveConsole) work like CPython.
+    mov rax, [rel sys_module_obj]
+    test rax, rax
+    jz .inp_lost_stdin
+
+    CSTRING rdi, "stdout"
+    call str_from_cstr_heap
     push rax
     sub rsp, 8
-    extern fileobj_flush_std
+    mov rdi, [rel sys_module_obj]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - INP_STDOUT], rax
+    add rsp, 8
+    pop rdi
+    call obj_decref
+
+    CSTRING rdi, "stdin"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rel sys_module_obj]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - INP_STDIN], rax
+    add rsp, 8
+    pop rdi
+    call obj_decref
+
+    mov rax, [rbp - INP_STDIN]
+    test rax, rax
+    jz .inp_lost_stdin
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .inp_lost_stdin
+
+    ; Write str(prompt) to sys.stdout if provided.
+    cmp qword [rbp - INP_NARGS], 0
+    je .inp_flush
+    mov rax, [rbp - INP_ARGS]
+    mov rdi, [rax]
+    call obj_str
+    ERR_NULL .inp_fail
+    mov [rbp - INP_PROMPT], rax
+
+    mov rax, [rbp - INP_STDOUT]
+    test rax, rax
+    jz .inp_drop_prompt
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .inp_drop_prompt
+
+    CSTRING rdi, "write"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - INP_STDOUT]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - INP_METH], rax
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - INP_METH]
+    test rdi, rdi
+    jz .inp_drop_prompt
+    lea rsi, [rbp - INP_PROMPT]
+    mov edx, 1
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    call obj_call_n
+    ERR_NULL .inp_fail
+    DECREF_V rax, rcx
+    mov rdi, [rbp - INP_METH]
+    mov qword [rbp - INP_METH], 0
+    DECREF_V rdi, rcx
+
+.inp_drop_prompt:
+    mov rdi, [rbp - INP_PROMPT]
+    mov qword [rbp - INP_PROMPT], 0
+    DECREF_V rdi, rcx
+
+.inp_flush:
     call fileobj_flush_std
+    mov rax, [rbp - INP_STDOUT]
+    test rax, rax
+    jz .inp_read
+    lea rcx, [rel none_singleton]
+    cmp rax, rcx
+    je .inp_read
+
+    CSTRING rdi, "flush"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - INP_STDOUT]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - INP_METH], rax
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - INP_METH]
+    test rdi, rdi
+    jz .inp_read
+    xor esi, esi
+    xor edx, edx
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    call obj_call_n
+    ERR_NULL .inp_fail
+    DECREF_V rax, rcx
+    mov rdi, [rbp - INP_METH]
+    mov qword [rbp - INP_METH], 0
+    DECREF_V rdi, rcx
+
+.inp_read:
+    CSTRING rdi, "readline"
+    call str_from_cstr_heap
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - INP_STDIN]
+    mov rsi, rax
+    call obj_getattr_opt
+    mov [rbp - INP_METH], rax
+    add rsp, 8
+    pop rdi
+    call obj_decref
+    mov rdi, [rbp - INP_METH]
+    test rdi, rdi
+    jz .inp_lost_stdin
+    xor esi, esi
+    xor edx, edx
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    call obj_call_n
+    ERR_NULL .inp_fail
+    mov [rbp - INP_LINE], rax
+    mov rdi, [rbp - INP_METH]
+    mov qword [rbp - INP_METH], 0
+    DECREF_V rdi, rcx
+
+    ; Validate returned line is str.
+    mov rax, [rbp - INP_LINE]
+    V_TEST_PTR rax, rcx
+    ja .inp_bad_line
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .inp_is_str
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .inp_bad_line
+.inp_is_str:
+    mov rsi, [rax + PyStrObject.ob_size]
+    test rsi, rsi
+    jz .inp_eof
+    lea rdi, [rax + PyStrObject.data]
+    cmp byte [rdi + rsi - 1], 10    ; strip trailing '\n'
+    jne .inp_make
+    dec rsi
+    test rsi, rsi
+    jz .inp_make
+    cmp byte [rdi + rsi - 1], 13    ; strip '\r' before '\n'
+    jne .inp_make
+    dec rsi
+.inp_make:
+    call str_new_heap
+    push rax
+    sub rsp, 8
+    call .inp_cleanup
     add rsp, 8
     pop rax
-    mov rsi, rax
-    add rsi, PyStrObject.data  ; buf ptr
-    mov rdx, [rax + PyStrObject.ob_size]  ; len
-    mov edi, 1              ; stdout
-    call sys_write
-
-.inp_no_prompt:
-    ; ONE LINE, not one bufferful.  A single read of 4095 bytes swallowed the
-    ; whole pipe: `input()` twice over "A\nB\n" answered "A\nB" and then "",
-    ; because the second call found EOF.  A byte at a time is a syscall per
-    ; character, which is the price of not owning a stdin buffer; input() is
-    ; not on any hot path.
-    xor r8d, r8d                ; bytes so far
-.inp_getc:
-    cmp r8, INP_BUF_SIZE - 1
-    jae .inp_have_line
-    push r8
-    sub rsp, 8
-    lea rsi, [rbp - INP_FRAME]
-    add rsi, r8
-    mov edx, 1
-    xor edi, edi                ; stdin
-    BLOCKING_CALL sys_read      ; the buffer is this frame's
-    add rsp, 8
-    pop r8
-    test rax, rax
-    jle .inp_eof_or_line        ; 0 = EOF, negative = error
-    lea rcx, [rbp - INP_FRAME]
-    cmp byte [rcx + r8], 10     ; '\n' ends the line and is not kept
-    je .inp_have_line
-    inc r8
-    jmp .inp_getc
-
-.inp_eof_or_line:
-    ; EOF with nothing read at all is CPython's EOFError; EOF after some
-    ; characters is a final line with no newline, which is not an error.
-    test r8, r8
-    jz .inp_eof
-
-.inp_have_line:
-    lea rdi, [rbp - INP_FRAME]
-    mov byte [rdi + r8], 0
-    call str_from_cstr
     leave
-    V_PACK rax, rdx             ; builtins return one Value
+    ret
+
+.inp_cleanup:
+    mov rdi, [rbp - INP_LINE]
+    test rdi, rdi
+    jz .cl_meth
+    mov qword [rbp - INP_LINE], 0
+    DECREF_V rdi, rcx
+.cl_meth:
+    mov rdi, [rbp - INP_METH]
+    test rdi, rdi
+    jz .cl_prompt
+    mov qword [rbp - INP_METH], 0
+    DECREF_V rdi, rcx
+.cl_prompt:
+    mov rdi, [rbp - INP_PROMPT]
+    test rdi, rdi
+    jz .cl_stdin
+    mov qword [rbp - INP_PROMPT], 0
+    DECREF_V rdi, rcx
+.cl_stdin:
+    mov rdi, [rbp - INP_STDIN]
+    test rdi, rdi
+    jz .cl_stdout
+    mov qword [rbp - INP_STDIN], 0
+    DECREF_V rdi, rcx
+.cl_stdout:
+    mov rdi, [rbp - INP_STDOUT]
+    test rdi, rdi
+    jz .cl_done
+    mov qword [rbp - INP_STDOUT], 0
+    DECREF_V rdi, rcx
+.cl_done:
     ret
 
 .inp_eof:
-    extern exc_EOFError_type
     SET_EXC exc_EOFError_type, "EOF when reading a line"
-    leave
-    ret
-
+    jmp .inp_fail
+.inp_bad_line:
+    SET_EXC exc_TypeError_type, "stdin.readline() did not return a str"
+    jmp .inp_fail
+.inp_lost_stdin:
+    SET_EXC exc_RuntimeError_type, "input(): lost sys.stdin"
+    jmp .inp_fail
 .inp_error:
     SET_EXC exc_TypeError_type, "input() takes at most 1 argument"
-    leave
-    ret
-
-.inp_type_error:
-    SET_EXC exc_TypeError_type, "input() prompt must be a string"
+.inp_fail:
+    call .inp_cleanup
+    xor eax, eax
     leave
     ret
 END_FUNC builtin_input_fn
