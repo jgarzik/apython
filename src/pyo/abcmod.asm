@@ -915,23 +915,22 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     call obj_decref
 
 .subclasses:
-    ; 6. a subclass of one of THIS class's subclasses.  A registration made
-    ; against a subclass of the ABC counts for the ABC too, and this is the
-    ; only step that can find it: without it, `B.register(X)` for a B deriving
-    ; from A left issubclass(X, A) answering False.  It was missing because
-    ; nothing kept a list of subclasses; type.__subclasses__ does now.
+    ; 6. a subclass of one of THIS class's subclasses.  Snapshot the SubList
+    ; under subclass_lock so concurrent class creation/dealloc cannot invalidate
+    ; the array while abc_call_issubclass runs arbitrary Python.
     mov rdi, [rbp - SC_CLS]
-    call sub_list_for_type
+    extern sub_list_snapshot
+    call sub_list_snapshot
     test rax, rax
     jz .cache_no
-    mov [rbp - SC_REG], rax     ; the SubList, reusing the registry slot
+    mov [rbp - SC_REG], rax     ; owned snapshot list
     mov qword [rbp - SC_IDX], 0
 .sub_loop:
     mov rax, [rbp - SC_REG]
     mov rcx, [rbp - SC_IDX]
-    cmp rcx, [rax + SubList.count]
-    jge .cache_no
-    mov rdx, [rax + SubList.items]
+    cmp rcx, [rax + PyListObject.ob_size]
+    jge .sub_done_no
+    mov rdx, [rax + PyListObject.ob_item]
     mov rsi, [rdx + rcx*8]
     inc qword [rbp - SC_IDX]
     cmp rsi, [rbp - SC_CLS]
@@ -939,10 +938,20 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_SUB]
     call abc_call_issubclass
     cmp eax, -1
-    je .error
+    je .sub_error
     test eax, eax
     jz .sub_loop
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
     jmp .cache_yes
+.sub_done_no:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
+    jmp .cache_no
+.sub_error:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
+    jmp .error
 
 .cache_yes:
     mov rdi, [rbp - SC_CACHE]

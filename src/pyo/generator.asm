@@ -233,13 +233,12 @@ DEF_FUNC gen_iternext
     test r12, r12
     jz .exhausted
 
-    ; Check if already running (recursive call)
-    cmp qword [rbx + PyGenObject.gi_running], 1
-    je .running_error
-
-    ; Mark as running, and as started: what gi_suspended asks is whether the
-    ; body has been entered, which instr_ptr cannot say.
-    mov qword [rbx + PyGenObject.gi_running], 1
+    ; Atomically claim gi_running (0 -> 1) so two threads cannot resume the
+    ; same generator simultaneously.
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [rbx + PyGenObject.gi_running], rcx
+    jne .running_error
     mov qword [rbx + PyGenObject.gi_started], 1
 
     ; Push None as the "sent" value onto the frame's value stack
@@ -849,13 +848,11 @@ DEF_FUNC gen_send
     test r12, r12
     jz .gs_exhausted
 
-    ; Check if already running
-    cmp qword [rbx + PyGenObject.gi_running], 1
-    je .gs_error
-
-    ; Mark as running, and as started: what gi_suspended asks is whether the
-    ; body has been entered, which instr_ptr cannot say.
-    mov qword [rbx + PyGenObject.gi_running], 1
+    ; Atomically claim gi_running (0 -> 1) before resuming
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [rbx + PyGenObject.gi_running], rcx
+    jne .gs_error
     mov qword [rbx + PyGenObject.gi_started], 1
 
     ; INCREF the sent value while its tag is still around, then pack it
@@ -1097,9 +1094,11 @@ DEF_FUNC gen_throw, GT_FRAME
     test r13, r13
     jz .gt_exhausted
 
-    ; Check if already running
-    cmp qword [rbx + PyGenObject.gi_running], 1
-    je .gt_error
+    ; Atomically claim gi_running (0 -> 1) before delegating or throwing
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [rbx + PyGenObject.gi_running], rcx
+    jne .gt_error
 
     ; The caller's pending exception is put aside rather than released: it
     ; belongs to the caller, and DECREFing it here freed an exception that was
@@ -1110,7 +1109,7 @@ DEF_FUNC gen_throw, GT_FRAME
 
     ; --- PEP 380: a `yield from` throws into the SUB-iterator first --------
     mov rdi, rbx
-    call gen_yf
+    call gen_yf_claimed
     mov [rbp - GT_YF], rax
     test rax, rax
     jz .gt_local
@@ -1417,25 +1416,33 @@ END_FUNC gen_throw
 ;; CPython reads exactly the same two facts.
 ;; ============================================================================
 DEF_FUNC_BARE gen_yf
-    mov rax, [rdi + PyGenObject.gi_frame]
-    test rax, rax
-    jz .gyf_none
     cmp qword [rdi + PyGenObject.gi_running], 0
     jne .gyf_none               ; executing: it is not suspended anywhere
-    mov rcx, [rax + PyFrame.instr_ptr]
-    test rcx, rcx
-    jz .gyf_none                ; finished
-    cmp byte [rcx], OP_RESUME
-    jne .gyf_none
-    cmp byte [rcx + 1], 2
-    jb .gyf_none
-    mov rcx, [rax + PyFrame.stack_ptr]
-    mov rax, [rcx - 8]
-    ret
+    jmp gen_yf_claimed
 .gyf_none:
     xor eax, eax
     ret
 END_FUNC gen_yf
+
+;; gen_yf_claimed(rdi = generator already claimed by caller) -> rax = sub-iter Value or 0
+DEF_FUNC_BARE gen_yf_claimed
+    mov rax, [rdi + PyGenObject.gi_frame]
+    test rax, rax
+    jz .gyfc_none
+    mov rcx, [rax + PyFrame.instr_ptr]
+    test rcx, rcx
+    jz .gyfc_none                ; finished
+    cmp byte [rcx], OP_RESUME
+    jne .gyfc_none
+    cmp byte [rcx + 1], 2
+    jb .gyfc_none
+    mov rcx, [rax + PyFrame.stack_ptr]
+    mov rax, [rcx - 8]
+    ret
+.gyfc_none:
+    xor eax, eax
+    ret
+END_FUNC gen_yf_claimed
 
 ;; ============================================================================
 ;; gen_close_iter(rdi = the sub-iterator, as a Value) -> void

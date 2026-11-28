@@ -81,6 +81,8 @@ extern opcode_table
 ; one table for every thread.
 
 section .data
+align 64
+systrace_lock:   dd 0
 align 8
 
 ; bit 0 = the -t opcode printer, bit 1 = sys.settrace.  Two independent
@@ -115,6 +117,15 @@ section .text
 ;; ============================================================================
 global eval_hooks_set
 DEF_FUNC eval_hooks_set
+    RT_LOCK_GATED systrace_lock
+    call eval_hooks_set_locked
+    RT_UNLOCK_GATED systrace_lock
+    leave
+    ret
+END_FUNC eval_hooks_set
+
+;; eval_hooks_set_locked(edi = bit, esi = 1/0) -> nothing (caller holds systrace_lock)
+DEF_FUNC_LOCAL eval_hooks_set_locked
     mov ecx, edi
     mov eax, 1
     shl rax, cl
@@ -134,7 +145,7 @@ DEF_FUNC eval_hooks_set
     mov [rel opcode_dispatch_table], rax
     leave
     ret
-END_FUNC eval_hooks_set
+END_FUNC eval_hooks_set_locked
 
 ;; ============================================================================
 ;; systrace_after_fork_child() -> nothing
@@ -144,6 +155,7 @@ END_FUNC eval_hooks_set
 ;; ============================================================================
 global systrace_after_fork_child
 DEF_FUNC systrace_after_fork_child
+    mov dword [rel systrace_lock], 0
     xor eax, eax
     cmp qword [gs:ThreadState.systrace_any], 0
     setne al
@@ -861,6 +873,7 @@ DEF_FUNC systrace_install, STI_FRAME
     push r12
     mov rbx, rdi
     mov r12, rsi
+    RT_LOCK_GATED systrace_lock
     mov rax, [rbx + ThreadState.sys_tracefunc]
     mov [rbp - STI_OLD], rax
     mov [rbx + ThreadState.sys_tracefunc], r12
@@ -876,7 +889,7 @@ DEF_FUNC systrace_install, STI_FRAME
     xor esi, esi
     cmp qword [rel systrace_threads], 0
     setne sil
-    call eval_hooks_set
+    call eval_hooks_set_locked
     xor eax, eax
     cmp qword [rbx + ThreadState.sys_tracefunc], 0
     jne .sti_any
@@ -886,6 +899,7 @@ DEF_FUNC systrace_install, STI_FRAME
     mov eax, 1
 .sti_store:
     mov [rbx + ThreadState.systrace_any], rax
+    RT_UNLOCK_GATED systrace_lock
     ; The old function last: releasing it can run Python.
     mov rdi, [rbp - STI_OLD]
     test rdi, rdi

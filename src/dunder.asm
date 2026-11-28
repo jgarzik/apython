@@ -99,11 +99,40 @@ DEF_FUNC dunder_name_obj
 
 .miss:
     mov rdi, rbx
-    call str_intern_cstr        ; kept for the life of the process
+    call str_intern_cstr        ; kept for the life of the process (owned ref)
+    ; Serialize cache fills under dunder_cache_lock; value is published BEFORE
+    ; key so lock-free readers on .probe/.hit always observe a valid value.
+    RT_LOCK_GATED dunder_cache_lock
+.miss_reprobe:
+    lea rcx, [rel dunder_cache_keys]
+    mov rdx, [rcx + r12*8]
+    test rdx, rdx
+    jz .miss_install
+    cmp rdx, rbx
+    je .miss_already
+    inc r12
+    and r12, DUNDER_CACHE_SLOTS - 1
+    jmp .miss_reprobe
+.miss_install:
+    lea rcx, [rel dunder_cache_vals]
+    mov [rcx + r12*8], rax      ; value BEFORE key (x86-64 TSO release)
     lea rcx, [rel dunder_cache_keys]
     mov [rcx + r12*8], rbx
+    RT_UNLOCK_GATED dunder_cache_lock
+    pop r12
+    pop rbx
+    leave
+    ret
+.miss_already:
     lea rcx, [rel dunder_cache_vals]
-    mov [rcx + r12*8], rax
+    mov rdx, [rcx + r12*8]      ; resident string
+    RT_UNLOCK_GATED dunder_cache_lock
+    push rdx
+    push rdx
+    mov rdi, rax
+    call obj_decref             ; drop our duplicate ref from str_intern_cstr
+    pop rax
+    pop rax
     pop r12
     pop rbx
     leave
@@ -111,7 +140,9 @@ DEF_FUNC dunder_name_obj
 END_FUNC dunder_name_obj
 
 section .bss
-align 8
+alignb 64
+dunder_cache_lock: resd 1
+alignb 8
 dunder_cache_keys: resq DUNDER_CACHE_SLOTS
 dunder_cache_vals: resq DUNDER_CACHE_SLOTS
 

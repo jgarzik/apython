@@ -145,6 +145,9 @@ SSL_PW_MAX  equ 1024    ; PEM_BUFSIZE: OpenSSL never asks for more
 
 section .data
 align 8
+align 64
+ssl_handle_lock: dd 0
+align 8
 ssl_handles:     dq 0       ; SslHandle[], grown by doubling
 ssl_handle_cap:  dq 0
 ssl_handle_n:    dq 0
@@ -192,14 +195,20 @@ DEF_FUNC_BARE ssl_handle_at
     xor eax, eax
     test rdi, rdi
     js .sh_no
+    RT_LOCK_GATED ssl_handle_lock
     cmp rdi, [rel ssl_handle_n]
-    jae .sh_no
+    jae .sh_unlock_no
     imul rax, rdi, SslHandle_size
     add rax, [rel ssl_handles]
     cmp qword [rax + SslHandle.ptr], 0
-    jne .sh_ok
+    jne .sh_unlock_ok
     xor eax, eax
-.sh_ok:
+.sh_unlock_ok:
+    RT_UNLOCK_GATED ssl_handle_lock
+    ret
+.sh_unlock_no:
+    xor eax, eax
+    RT_UNLOCK_GATED ssl_handle_lock
 .sh_no:
     ret
 END_FUNC ssl_handle_at
@@ -218,6 +227,7 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     push rbx
     mov [rbp - SA_PTR], rdi
     mov [rbp - SA_KIND], rsi
+    RT_LOCK_GATED ssl_handle_lock
     xor ebx, ebx
 .sa_scan:
     cmp rbx, [rel ssl_handle_n]
@@ -236,7 +246,7 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     mov rax, [rel ssl_handle_cap]
     test rax, rax
     jnz .sa_double
-    mov eax, 16
+    mov eax, 1024
     jmp .sa_grow
 .sa_double:
     add rax, rax
@@ -246,7 +256,7 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     imul rsi, rax, SslHandle_size
     call ap_realloc
     test rax, rax
-    jz .sa_fail
+    jz .sa_unlock_fail
     mov [rel ssl_handles], rax
     mov rcx, [rbp - SA_CAP]
     mov [rel ssl_handle_cap], rcx
@@ -261,10 +271,13 @@ DEF_FUNC_LOCAL ssl_handle_alloc, SA_FRAME
     mov rcx, [rbp - SA_KIND]
     mov [rax + SslHandle.kind], rcx
     mov qword [rax + SslHandle.extra], 0
+    RT_UNLOCK_GATED ssl_handle_lock
     mov rax, rbx
     pop rbx
     leave
     ret
+.sa_unlock_fail:
+    RT_UNLOCK_GATED ssl_handle_lock
 .sa_fail:
     mov rax, -1
     pop rbx

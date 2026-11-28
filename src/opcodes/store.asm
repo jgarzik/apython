@@ -434,8 +434,10 @@ DEF_FUNC_BARE op_store_deref
     mov rdx, [r12 + PyFrame.localsplus + rcx*8]  ; cell object
 
     ; Ownership transfers from stack to cell - no INCREF needed
+    OBJ_LOCK rdx
     mov rdi, [rdx + PyCellObject.ob_ref]        ; old Value
     mov [rdx + PyCellObject.ob_ref], rax
+    OBJ_UNLOCK rdx
     DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_store_deref
@@ -447,8 +449,10 @@ END_FUNC op_store_deref
 ;; ============================================================================
 DEF_FUNC_BARE op_delete_deref
     mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
+    OBJ_LOCK rax
     mov rdi, [rax + PyCellObject.ob_ref]
     mov qword [rax + PyCellObject.ob_ref], 0
+    OBJ_UNLOCK rax
     DECREF_V rdi, rsi
     DISPATCH
 END_FUNC op_delete_deref
@@ -861,6 +865,9 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     movsx rdx, ax
     cmp rdx, rax
     jne .sts_out
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .sts_out
     mov rcx, [rbp - STS_IP]
     mov edx, [rbp - STS_VER]
     mov dword [rcx], edx
@@ -896,6 +903,10 @@ DEF_FUNC_LOCAL sa_try_specialize, STS_FRAME
     je .sts_out
 
     ; Install: version, index, then the opcode byte last.
+    ; Multi-word inline caches are disabled in free-threaded mode.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .sts_out
     mov rcx, [rbp - STS_IP]
     mov eax, [rbp - STS_VER]
     mov dword [rcx], eax

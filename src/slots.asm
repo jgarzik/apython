@@ -1774,28 +1774,34 @@ DEF_FUNC type_install_slots_tree
     mov rax, [rbx + PyTypeObject.tp_flags]
     test rax, TYPE_FLAG_HEAPTYPE
     jz .tist_children
+    extern type_lock
+    RT_LOCK_GATED type_lock
     mov rdi, rbx
     call type_install_slots
+    RT_UNLOCK_GATED type_lock
 .tist_children:
     mov rdi, rbx
-    call sub_list_for_type
+    extern sub_list_snapshot
+    call sub_list_snapshot
     test rax, rax
     jz .tist_out
-    mov r12, [rax + SubList.items]
-    mov r13, [rax + SubList.count]
-    test r12, r12
-    jz .tist_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
     xor r14d, r14d
 .tist_loop:
     cmp r14, r13
-    jge .tist_out
-    mov rdi, [r12 + r14*8]
+    jge .tist_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
     test rdi, rdi
     jz .tist_next
     call type_install_slots_tree
 .tist_next:
     inc r14
     jmp .tist_loop
+.tist_drop:
+    mov rdi, r12
+    call obj_decref
 .tist_out:
     pop r14
     pop r13

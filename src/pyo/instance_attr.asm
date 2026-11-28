@@ -414,41 +414,75 @@ END_FUNC dict_has_data_descr
 DEF_FUNC_BARE type_bump_version
     test rdi, rdi
     jz .tbv_out
-    mov eax, [rel type_version_counter]
-    inc eax
-    jnz .tbv_store
-    mov eax, 1                      ; wrapped; zero is not a version
-.tbv_store:
-    mov [rel type_version_counter], eax
-    mov rdx, [rdi + PyTypeObject.tp_flags]
-    mov edx, edx                    ; keep the flags, drop the old version
-    shl rax, TYPE_VERSION_SHIFT
-    or rdx, rax
-    mov [rdi + PyTypeObject.tp_flags], rdx
+.tbv_ver_retry:
+    mov eax, 1
+    lock xadd [rel type_version_counter], eax
+    inc eax                         ; eax = new version value
+    jz .tbv_ver_retry               ; skip 0 (sentinel for unversioned)
+    mov ecx, eax                    ; keep new 32-bit version in ecx
+.tbv_cas:
+    mov rax, [rdi + PyTypeObject.tp_flags]
+    mov edx, eax                    ; keep low 32 flag bits
+    mov r8, rcx
+    shl r8, TYPE_VERSION_SHIFT
+    or rdx, r8
+    lock cmpxchg [rdi + PyTypeObject.tp_flags], rdx
+    jne .tbv_cas
 .tbv_out:
     ret
 END_FUNC type_bump_version
 
 ;; ============================================================================
-;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
+;; type_bump_version_tree(rdi = a type) -> nothing
 ;;
-;; Ask, once, the two questions instance_getattr's fast path is not allowed to
-;; ask per access:
-;;
-;;   - does anything in this MRO define a __getattribute__ that is not
-;;     object's?                      TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
-;;   - does anything in this MRO keep a DATA descriptor in its dict?
-;;                                    TYPE_FLAG_MRO_HAS_DATA_DESCR
-;;
-;; Both answers are inherited, so both are pushed down every subclass.  That
-;; is the whole reason the direct-subclass table has to be populated before
-;; any user code runs -- a class registered later would sit outside this walk
-;; and keep a stale bit forever.
-;;
-;; Called at class creation and from type_setattr.  Both are cold; this walks
-;; the MRO and allocates nothing.
+;; Bump tp_version on rdi and every subclass so type_cache entries referencing
+;; this class hierarchy are invalidated before tp_dict mutation.
 ;; ============================================================================
+global type_bump_version_tree
+DEF_FUNC type_bump_version_tree
+    push rbx
+    push r12
+    push r13
+    push r14
+    test rdi, rdi
+    jz .tbvt_out
+    mov rbx, rdi
+    call type_bump_version
+    mov rdi, rbx
+    extern sub_list_snapshot
+    call sub_list_snapshot
+    test rax, rax
+    jz .tbvt_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
+    xor r14d, r14d
+.tbvt_loop:
+    cmp r14, r13
+    jge .tbvt_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
+    test rdi, rdi
+    jz .tbvt_next
+    call type_bump_version_tree
+.tbvt_next:
+    inc r14
+    jmp .tbvt_loop
+.tbvt_drop:
+    mov rdi, r12
+    call obj_decref
+.tbvt_out:
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC type_bump_version_tree
 
+;; ============================================================================
+;; type_refresh_attr_flags(rdi = a heaptype) -> nothing
+;; Recompute MRO attribute flags and bump version across the subclass tree.
+;; ============================================================================
 DEF_FUNC type_refresh_attr_flags
     push rbx
     push r12
@@ -458,11 +492,8 @@ DEF_FUNC type_refresh_attr_flags
     jz .trg_out
     mov rbx, rdi
 
-    ; Whatever this recomputes, it recomputes because the type or one of its
-    ; bases changed -- so every cache keyed on the old version is now wrong.
-    ; Stamping here rather than at the call sites means the walk over
-    ; subclasses below invalidates them too, which is the property the caches
-    ; rely on.
+    extern type_lock
+    RT_LOCK_GATED type_lock
     call type_bump_version
 
     lea rsi, [rel ig_getattribute_name]
@@ -486,30 +517,17 @@ DEF_FUNC type_refresh_attr_flags
     mov rdi, rax
     call obj_decref
 .trg_set:
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     jmp .trg_data_descr
 .trg_clear:
     mov rax, TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     not rax
-    and [rbx + PyTypeObject.tp_flags], rax
+    lock and [rbx + PyTypeObject.tp_flags], rax
 
 .trg_data_descr:
-    ; --- and the data-descriptor bit ---
-    ; Reached whichever way the question above was answered.  It used to be
-    ; reached only on the `clear` path, so a class that overrode
-    ; __getattribute__ never had this bit computed at all -- and the two are
-    ; independent: __getattribute__ has nothing to do with __setattr__, and
-    ; op_store_attr consults this bit ALONE to decide whether a store needs to
-    ; look for a property.  A class with both answered `c.p = 5` by putting
-    ; `p` straight into the instance dict, so the setter never ran.
-    ; The MRO's dicts, scanned for anything a data descriptor could be.  Cold,
-    ; and the answer saves the hot path an MRO walk per attribute access.
-    ; TYPE_FLAG_HEAP_DATA_DESCR is the same answer counted over the
-    ; heaptypes alone, so the walk goes on past a static type that set the
-    ; wide bit, and stops at the first heaptype that sets both.
     mov rax, TYPE_FLAG_MRO_HAS_DATA_DESCR | TYPE_FLAG_HEAP_DATA_DESCR
     not rax
-    and [rbx + PyTypeObject.tp_flags], rax
+    lock and [rbx + PyTypeObject.tp_flags], rax
     mov r12, rbx                        ; the MRO walker
 .trg_mro:
     test r12, r12
@@ -520,50 +538,49 @@ DEF_FUNC type_refresh_attr_flags
     call dict_has_data_descr
     test eax, eax
     jz .trg_mro_next
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_MRO_HAS_DATA_DESCR
     test qword [r12 + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jz .trg_mro_next
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAP_DATA_DESCR
     jmp .trg_has_del
 .trg_mro_next:
     MRO_NEXT r12, rbx
     jmp .trg_mro
 
 .trg_has_del:
-    ; --- and the __del__ bit ---
-    ; The same question instance_dealloc used to ask by name on every instance
-    ; that died.  Asked once here instead, and pushed down the subclasses by
-    ; the walk below, so `Base.__del__ = f` reaches an already-built D.
     mov rax, TYPE_FLAG_HAS_DEL
     not rax
-    and [rbx + PyTypeObject.tp_flags], rax
+    lock and [rbx + PyTypeObject.tp_flags], rax
     mov rdi, rbx
     lea rsi, [rel trg_del_name]
     call dunder_exists
     test eax, eax
     jz .trg_children
-    or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
+    lock or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
 
 .trg_children:
+    RT_UNLOCK_GATED type_lock
     mov rdi, rbx
-    call sub_list_for_type
+    call sub_list_snapshot
     test rax, rax
     jz .trg_out
-    mov r12, [rax + SubList.items]
-    mov r13, [rax + SubList.count]
-    test r12, r12
-    jz .trg_out
+    mov r12, rax
+    mov r13, [r12 + PyListObject.ob_size]
     xor r14d, r14d
 .trg_loop:
     cmp r14, r13
-    jge .trg_out
-    mov rdi, [r12 + r14*8]
+    jge .trg_drop
+    mov rax, [r12 + PyListObject.ob_item]
+    mov rdi, [rax + r14*8]
     test rdi, rdi
     jz .trg_next
     call type_refresh_attr_flags
 .trg_next:
     inc r14
     jmp .trg_loop
+.trg_drop:
+    mov rdi, r12
+    call obj_decref
 
 .trg_out:
     pop r14
@@ -1425,17 +1442,41 @@ DEF_FUNC instance_setattr
     test rax, TYPE_FLAG_HAS_SLOTS
     jnz .sa_no_dict_error
 
-    ; Regular class without __slots__ — create dict on the fly
+    ; Regular class without __slots__ — create dict on the fly (locked publish)
     push r12
     push r13
     push r14
     call dict_new
-    STORE_INST_DICT rbx, rax, rcx, .sa_no_dict_slot
-    mov rdi, rax
+    mov r14, rax
+    OBJ_LOCK rbx
+    LOAD_INST_DICT rdi, rbx, .sa_unlock_no_dict
+    test rdi, rdi
+    jnz .sa_dict_race_lost
+    STORE_INST_DICT rbx, r14, rcx, .sa_unlock_no_dict
+    OBJ_UNLOCK rbx
+    mov rdi, r14
+    jmp .sa_dict_ready
+.sa_dict_race_lost:
+    OBJ_UNLOCK rbx
+    push rdi
+    push rdi
+    mov rdi, r14
+    call obj_decref
+    pop rdi
+    pop rax
+.sa_dict_ready:
     pop r14
     pop r13
     pop r12
     jmp .sa_dict_set
+.sa_unlock_no_dict:
+    OBJ_UNLOCK rbx
+    mov rdi, r14
+    call obj_decref
+    pop r14
+    pop r13
+    pop r12
+    jmp .sa_no_dict_slot
 
 .sa_have_dict:
 .sa_dict_set:
@@ -1492,16 +1533,24 @@ DEF_FUNC instance_setattr
     mov rdi, r13
     call obj_incref
 .sa_layout_dict_clear:
-    ; The old dict is released only after the new one is installed: it may be
-    ; the sole owner of the value being stored back into it.
-    LOAD_INST_DICT r14, rbx, .sa_no_dict_slot
-    STORE_INST_DICT rbx, r13, rcx, .sa_no_dict_slot
+    ; Swap instance dict atomically under OBJ_LOCK; release old dict unlocked.
+    OBJ_LOCK rbx
+    LOAD_INST_DICT r14, rbx, .sa_layout_unlock_no_slot
+    STORE_INST_DICT rbx, r13, rcx, .sa_layout_unlock_no_slot
+    OBJ_UNLOCK rbx
     test r14, r14
     jz .sa_layout_done
     mov rdi, r14
     call obj_decref
 .sa_layout_done:
     jmp .sa_ok
+.sa_layout_unlock_no_slot:
+    OBJ_UNLOCK rbx
+    test r13, r13
+    jz .sa_no_dict_slot
+    mov rdi, r13
+    call obj_decref
+    jmp .sa_no_dict_slot
 
 .sa_layout_dict_bad:
     ; "not a 'int'" -- the quotes are CPython's, and so is naming the type of

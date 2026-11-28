@@ -135,6 +135,12 @@ DEF_FUNC_BARE op_load_global
     push rdi
     push rdi
 
+    ; In free-threaded mode, use dict_get directly (returns owned ref under
+    ; OBJ_LOCK) instead of reading entries[idx] unlocked or installing ICs.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .lg_threaded
+
     ; Try globals first: dict_get_index(globals, name) -> slot or -1
     mov rdi, [r12 + PyFrame.globals]
     mov rsi, [rsp]             ; rsi = name
@@ -165,6 +171,29 @@ DEF_FUNC_BARE op_load_global
     mov rax, [rdi + DictEntry.value]
     add rsp, 16                ; discard the saved name and its pad
     jmp .lg_push_result
+
+.lg_threaded:
+    mov rdi, [r12 + PyFrame.globals]
+    mov rsi, [rsp]
+    call dict_get
+    ERR_DICT_GET .lg_threaded_exc
+    test rax, rax
+    jnz .lg_threaded_found
+    mov rdi, [r12 + PyFrame.builtins]
+    mov rsi, [rsp]
+    call dict_get
+    ERR_DICT_GET .lg_threaded_exc
+    test rax, rax
+    jz .not_found
+.lg_threaded_found:
+    add rsp, 16
+    VPUSH rax
+    add rbx, 8
+    DISPATCH
+.lg_threaded_exc:
+    add rsp, 16
+    PUBLISH_SP
+    jmp eval_exception_unwind
 
 .try_builtins:
     ; Try builtins: dict_get_index(builtins, name) -> slot or -1
@@ -896,6 +925,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     test r8d, r8d
     jnz .la_simple_push
 .la_ic_name_free:
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .la_simple_push
 
     mov rdi, [rbp - LA_OBJ]
     LOAD_INST_DICT rsi, rdi, .la_simple_push
@@ -912,14 +944,7 @@ DEF_FUNC op_load_attr, LA_FRAME
     cmp rax, 0xFFFF
     ja .la_simple_push             ; the index does not fit the cache
 
-    ; The handler validates the slot by comparing its KEY against co_names by
-    ; pointer, and dict_set keeps the FIRST writer's key object.  An attribute
-    ; created under a name that is not the interned constant --
-    ; setattr(o, "".join([...]), 1) -- can therefore never satisfy that guard,
-    ; and installing anyway made the site specialize and deopt on every single
-    ; execution: two instruction-stream writes and a dict_get_index per access,
-    ; measured at 41ms against 18ms for the same loop over a constant name.
-    ; Refusing once here is what stops it.
+    ; Ensure stored dict key matches co_names by pointer identity.
     mov rdi, [rbp - LA_OBJ]
     LOAD_INST_DICT rsi, rdi, .la_simple_push   ; rsi did not survive the call
     mov rcx, [rsi + PyDictObject.entries]
@@ -1003,54 +1028,33 @@ DEF_FUNC op_load_attr, LA_FRAME
     jnz .la_not_method             ; class attribute → [NULL, func]
     test dword [rax + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
     jnz .la_not_method             ; heaptype instance attr → [NULL, func]
-    ; A module's tp_getattr answers out of the module's own namespace, not out
-    ; of a type -- `m.f` is the global f, never a method bound to m.  It is not
-    ; a heaptype, so without this it fell into the built-in case below and was
-    ; called with the module as its first argument.
+    ; Module, function, descriptor wrappers, super, and bound methods answer
+    ; from their own namespace rather than binding self.
     lea rcx, [rel module_type]
     cmp rax, rcx
     je .la_not_method
-    ; A function's tp_getattr is the same shape: it reads out of the
-    ; function's own __dict__, so `f.g` is whatever was stored there and
-    ; calling it must not pass f.  functools.lru_cache hangs cache_info off
-    ; the wrapper exactly like that, and `slow.cache_info()` was called with
-    ; the wrapper as its first argument.
     lea rcx, [rel func_type]
     cmp rax, rcx
     je .la_not_method
-    ; The same for a classmethod or staticmethod wrapper: its __func__ is the
-    ; function it wraps, not a method of the wrapper.
     lea rcx, [rel classmethod_type]
     cmp rax, rcx
     je .la_not_method
     lea rcx, [rel staticmethod_type]
     cmp rax, rcx
     je .la_not_method
-    ; And a super, whose tp_getattr has already done the whole descriptor
-    ; protocol against __self__ -- `super().s` on a staticmethod comes back
-    ; as the plain function, and binding the SUPER OBJECT to it as self made
-    ; `super().s()` a TypeError about an argument nobody wrote.  This is the
-    ; shape CPython avoids wholesale: _PyObject_GetMethod reports "not a
-    ; method" for any type with a tp_getattro of its own.
     extern super_type
     lea rcx, [rel super_type]
     cmp rax, rcx
     je .la_not_method
-    ; And a BOUND METHOD, whose method_getattr answers `__func__` with the
-    ; plain function under it and delegates everything else to that function's
-    ; own __dict__.  Neither is a method OF the bound method, so binding it as
-    ; self passed three arguments where two were written:
-    ; `bm.__func__(a, 1)` was "A.im() takes 2 positional arguments but 3 were
-    ; given".  It matters most for what a decorator hangs off its wrapper --
-    ; `obj.method.cache_clear()` on an lru_cache'd method is this shape.
-    ; The value was never wrong; only the fused call site was, so a two-step
-    ; `m = bm.__func__` worked and hid it.
     lea rcx, [rel method_type]
     cmp rax, rcx
     je .la_not_method
     jmp .la_method_push            ; built-in tp_getattr → [func, self]
 
 .la_ic_check:
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .la_method_push
 
     ; Verify type has tp_dict with valid dk_version
     mov rdi, [rbp - LA_OBJ]       ; obj
@@ -1062,15 +1066,6 @@ DEF_FUNC op_load_attr, LA_FRAME
     jz .la_method_push             ; no tp_dict, skip
 
     ; Write CACHE: [+0]=type version(32b), [+4]=dk_version(16b), [+6]=descr(64b)
-    ;
-    ; The VERSION, not the type POINTER, is what says "the same class in the
-    ; same state".  Versions come from one global counter and are never
-    ; reused; an address is, and a class freed and another allocated in its
-    ; place passed the pointer compare -- with the dk_version guard only
-    ; sixteen bits wide behind it, and a cached DESCRIPTOR belonging to the
-    ; dead class's dict.  The site then called the wrong class's method, or a
-    ; freed one.  Every other cache in load_ic.asm already guards this way,
-    ; and typecache.asm's header says why.
     mov rax, [rcx + PyTypeObject.tp_flags]
     shr rax, TYPE_VERSION_SHIFT
     test eax, eax
@@ -1200,6 +1195,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     jmp .la_done
 
 .la_property_run:
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .la_prop_call
     ; === IC: try to specialize as LOAD_ATTR_PROPERTY (242) ===
     ;
     ; This is where a @property is actually run, and until now it was the only
@@ -1442,16 +1440,20 @@ END_FUNC op_load_closure
 ;; Raises NameError if cell is empty (ob_ref == NULL).
 ;; ============================================================================
 DEF_FUNC_BARE op_load_deref
-    mov rax, [r12 + PyFrame.localsplus + rcx*8]  ; rax = cell object (payload)
-    test rax, rax
+    mov rdi, [r12 + PyFrame.localsplus + rcx*8]  ; rdi = cell object (payload)
+    test rdi, rdi
     jz .deref_error
-    mov rax, [rax + PyCellObject.ob_ref]       ; rax = contained Value
-    test rax, rax                              ; 0 means an empty cell
-    jz .deref_error
+    OBJ_LOCK rdi
+    mov rax, [rdi + PyCellObject.ob_ref]         ; rax = contained Value
+    test rax, rax                                ; 0 means an empty cell
+    jz .deref_unlock_error
     INCREF_V rax, rdx
+    OBJ_UNLOCK rdi
     VPUSH rax
     DISPATCH
 
+.deref_unlock_error:
+    OBJ_UNLOCK rdi
 .deref_error:
     ; An empty cell is one of CPython's two different exceptions, and which
     ; one depends on whose cell it is: this function's own (a local that a

@@ -555,7 +555,11 @@ DEF_FUNC cx_closure, PC_FRAME
     test rax, rax
     jz .cl_fail
     mov [rbp - PC_V + 32], rax
-    mov rdi, rax
+    ; Enable concurrent runtime mode before handing a Python callback pointer
+    ; to native C code (which may invoke it from a foreign pthread).
+    extern rt_enable_threading
+    call rt_enable_threading
+    mov rdi, [rbp - PC_V + 32]
     mov rsi, [rbp - PC_V]
     lea rdx, [rel cx_tramp]
     mov rcx, [rbp - PC_V + 16]

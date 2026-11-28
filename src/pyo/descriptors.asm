@@ -1693,13 +1693,17 @@ DEF_FUNC member_descr_get, MDG_FRAME
     mov rdi, [rbp - MDG_SELF]
     mov rsi, [rbp - MDG_RECV]
     mov rcx, [rdi + PyMemberDescrObject.md_offset]
+    OBJ_LOCK rsi
     SLOT_ADDR rdx, rsi, rcx
     mov rax, [rdx]
     test rax, rax
-    jz .mdg_unset
+    jz .mdg_unlock_unset
     INCREF_V rax, rdx
+    OBJ_UNLOCK rsi
     leave
     ret
+.mdg_unlock_unset:
+    OBJ_UNLOCK rsi
 
 .mdg_unset:
     mov rcx, [rbp - MDG_SELF]
@@ -1747,6 +1751,7 @@ DEF_FUNC member_descr_set, MDS_FRAME
     mov rdi, [rbp - MDS_SELF]
     mov rsi, [rbp - MDS_RECV]
     mov rcx, [rdi + PyMemberDescrObject.md_offset]
+    OBJ_LOCK rsi
     SLOT_ADDR rdx, rsi, rcx
     mov rax, [rdx]              ; the old Value
     mov rcx, [rbp - MDS_VAL]
@@ -1756,7 +1761,7 @@ DEF_FUNC member_descr_set, MDS_FRAME
     jnz .mds_store
     mov rdi, [rbp - MDS_SELF]
     cmp qword [rdi + PyMemberDescrObject.md_nullable], 0
-    je .mds_unset               ; deleting an unset T_OBJECT_EX
+    je .mds_unlock_unset        ; deleting an unset T_OBJECT_EX
 
 .mds_store:
     ; The new value is counted BEFORE the old one is released: they may be the
@@ -1764,10 +1769,14 @@ DEF_FUNC member_descr_set, MDS_FRAME
     mov rdi, [rbp - MDS_VAL]
     INCREF_V rdi, rcx
     mov [rdx], rdi
+    OBJ_UNLOCK rsi
     XDECREF_V rax, rcx
     xor eax, eax
     leave
     ret
+
+.mds_unlock_unset:
+    OBJ_UNLOCK rsi
 
 .mds_unset:
     mov rcx, [rbp - MDS_SELF]

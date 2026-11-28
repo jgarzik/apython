@@ -103,12 +103,11 @@ DEF_FUNC ags_iternext
     test rdi, rdi
     jz .agsi_gen_exhausted
 
-    ; Check if already running
-    cmp qword [r12 + PyGenObject.gi_running], 1
-    je .agsi_error
-
-    ; Mark as running
-    mov qword [r12 + PyGenObject.gi_running], 1
+    ; Atomically claim gi_running (0 -> 1) before resuming across threads
+    xor eax, eax
+    mov ecx, 1
+    lock cmpxchg [r12 + PyGenObject.gi_running], rcx
+    jne .agsi_error
     mov qword [r12 + PyGenObject.gi_started], 1
 
     ; Push the sent value onto the generator's frame stack.  None unless

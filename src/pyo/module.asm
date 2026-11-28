@@ -201,7 +201,19 @@ DEF_FUNC_LOCAL mg_getattr_name
     call str_from_cstr_heap
     test rax, rax
     jz .mgn_done                ; 0, and the caller treats it as "no hook"
-    mov [rel mg_name_cached], rax
+    mov rdx, rax
+    xor eax, eax
+    lock cmpxchg [rel mg_name_cached], rdx
+    jz .mgn_installed
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rax
+    pop rdx
+    jmp .mgn_done
+.mgn_installed:
+    mov rax, rdx
 .mgn_done:
     leave
     ret
@@ -220,7 +232,19 @@ DEF_FUNC_LOCAL mg_dir_name
     call str_from_cstr_heap
     test rax, rax
     jz .mdn_done
-    mov [rel mg_dir_cached], rax
+    mov rdx, rax
+    xor eax, eax
+    lock cmpxchg [rel mg_dir_cached], rdx
+    jz .mdn_installed
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rax
+    pop rdx
+    jmp .mdn_done
+.mdn_installed:
+    mov rax, rdx
 .mdn_done:
     leave
     ret

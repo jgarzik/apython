@@ -278,22 +278,20 @@ DEF_FUNC fileobj_emit, FE_FRAME
     cmp qword [rdi + PyFileObject.file_buffered], 0
     je .fe_direct
 
+    OBJ_LOCK rdi
     ; Would it fit?  If not, drain first, and then take the straight path if
     ; it still would not.
     mov rax, [rdi + PyFileObject.file_len]
     add rax, rdx
     cmp rax, FILE_BUFSZ
     jbe .fe_append
-    call fileobj_drain
+    call fileobj_drain_locked
     test rax, rax
-    js .fe_out                  ; the waiting bytes could not go out, so this
-                                ; chunk must not be buffered on top of them --
-                                ; the order would be wrong and the exit-time
-                                ; flush would report the failure a second time
+    js .fe_unlock_out
     mov rdi, [rbp - FE_SELF]
     mov rdx, [rbp - FE_LEN]
     cmp rdx, FILE_BUFSZ
-    ja .fe_direct
+    ja .fe_unlock_direct
 
 .fe_append:
     mov rdi, [rbp - FE_SELF]
@@ -307,10 +305,15 @@ DEF_FUNC fileobj_emit, FE_FRAME
     mov rax, [rbp - FE_LEN]
     add [rdi + PyFileObject.file_len], rax
     xor eax, eax
+.fe_unlock_out:
+    mov rdi, [rbp - FE_SELF]
+    OBJ_UNLOCK rdi
 .fe_out:
     leave
     ret
 
+.fe_unlock_direct:
+    OBJ_UNLOCK rdi
 .fe_direct:
     mov rdi, [rbp - FE_SELF]
     mov rdi, [rdi + PyFileObject.file_fd]
@@ -322,6 +325,29 @@ DEF_FUNC fileobj_emit, FE_FRAME
 END_FUNC fileobj_emit
 
 ;; ============================================================================
+;; fileobj_drain_locked(rdi = self, caller holds OBJ_LOCK self) -> rax = 0, or -errno
+;; ============================================================================
+DEF_FUNC_LOCAL fileobj_drain_locked, 8
+    push rbx
+    mov rbx, rdi
+    mov rdx, [rbx + PyFileObject.file_len]
+    test rdx, rdx
+    jz .fdl_done
+    mov qword [rbx + PyFileObject.file_len], 0
+    mov rdi, [rbx + PyFileObject.file_fd]
+    lea rsi, [rbx + PyFileObject.file_buf]
+    call fileobj_write_all
+    pop rbx
+    leave
+    ret
+.fdl_done:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC fileobj_drain_locked
+
+;; ============================================================================
 ;; fileobj_drain(rdi = self) -> rax = 0, or -errno
 ;;
 ;; Write out whatever is waiting.  Safe on an unbuffered file, where there never
@@ -331,23 +357,9 @@ global fileobj_drain
 DEF_FUNC fileobj_drain, 8            ; 1 push, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
-    mov rdx, [rbx + PyFileObject.file_len]
-    test rdx, rdx
-    jz .fd_done
-    ; The buffer is dropped whether or not the write succeeds, which is
-    ; deliberate and is what CPython does: a flush that failed mid-run gives
-    ; exit 1 and one traceback, where a buffer that never got written at all
-    ; gives the "Exception ignored" report at exit.  Keeping the bytes would
-    ; report the same failure twice.
-    mov qword [rbx + PyFileObject.file_len], 0
-    mov rdi, [rbx + PyFileObject.file_fd]
-    lea rsi, [rbx + PyFileObject.file_buf]
-    call fileobj_write_all
-    pop rbx
-    leave
-    ret
-.fd_done:
-    xor eax, eax
+    OBJ_LOCK rbx
+    call fileobj_drain_locked
+    OBJ_UNLOCK rbx
     pop rbx
     leave
     ret

@@ -58,12 +58,92 @@ TC_OWNER     equ 40             ; the MRO entry whose dict answered
 ;; array no larger than it was.
 TC_ENTRY     equ 64
 TC_SHIFT     equ 6              ; log2(TC_ENTRY)
+TC_LOCK_CNT  equ 64             ; 64 cache-line-padded bucket locks
+TC_LOCK_MASK equ TC_LOCK_CNT - 1
+TC_LOCK_STRIDE equ 64
+
+; Acquire/release the bucket lock for slot index in %1 (not rax/rdi).
+; Preserves all registers; no-op while rt_threaded == 0.
+%macro TC_LOCK_SLOT 1
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    je %%skip
+    push rdi
+    push rax
+    mov rdi, %1
+    and rdi, TC_LOCK_MASK
+    shl rdi, 6
+    lea rax, [rel type_cache_locks]
+    add rdi, rax
+    extern rt_mutex_lock_p
+    call rt_mutex_lock_p
+    pop rax
+    pop rdi
+%%skip:
+%endmacro
+
+%macro TC_UNLOCK_SLOT 1
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    je %%skip
+    push rdi
+    push rax
+    mov rdi, %1
+    and rdi, TC_LOCK_MASK
+    shl rdi, 6
+    lea rax, [rel type_cache_locks]
+    add rdi, rax
+    extern rt_mutex_unlock_p
+    call rt_mutex_unlock_p
+    pop rax
+    pop rdi
+%%skip:
+%endmacro
 
 section .bss
 align 64
 type_cache: resb TC_SLOTS * TC_ENTRY
+align 64
+type_cache_locks: resb TC_LOCK_CNT * TC_LOCK_STRIDE
 
 section .text
+
+;; ============================================================================
+;; type_cache_quiesce() -> nothing
+;;
+;; Barrier for type_setattr in free-threaded mode: after bumping tp_version,
+;; acquire and release each of the 64 bucket locks so every concurrent reader
+;; that observed the old version has finished INCREFing its cached value
+;; before tp_dict mutation can DECREF/free the displaced entry.
+;; ============================================================================
+global type_cache_quiesce
+DEF_FUNC type_cache_quiesce
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    je .tcq_done
+    push rbx
+    push r12
+    lea rbx, [rel type_cache_locks]
+    xor r12d, r12d
+.tcq_loop:
+    cmp r12d, TC_LOCK_CNT
+    jae .tcq_out
+    mov rdi, rbx
+    extern rt_mutex_lock_p
+    call rt_mutex_lock_p
+    mov rdi, rbx
+    extern rt_mutex_unlock_p
+    call rt_mutex_unlock_p
+    add rbx, TC_LOCK_STRIDE
+    inc r12d
+    jmp .tcq_loop
+.tcq_out:
+    pop r12
+    pop rbx
+.tcq_done:
+    leave
+    ret
+END_FUNC type_cache_quiesce
 
 ;; ============================================================================
 ;; type_cache_clear() -> nothing
@@ -85,16 +165,20 @@ DEF_FUNC type_cache_clear
 .tcc_loop:
     cmp r12, TC_SLOTS
     jge .tcc_done
+    TC_LOCK_SLOT r12
     mov rax, r12
     shl rax, TC_SHIFT
     add rax, rbx
+    xor edi, edi
     cmp qword [rax + TC_VERSION], 0
-    je .tcc_next
+    je .tcc_unlock
     mov qword [rax + TC_VERSION], 0
     mov rdi, [rax + TC_NAME]
+    mov qword [rax + TC_NAME], 0
+.tcc_unlock:
+    TC_UNLOCK_SLOT r12
     test rdi, rdi
     jz .tcc_next
-    mov qword [rax + TC_NAME], 0
     call obj_decref
 .tcc_next:
     inc r12
@@ -108,11 +192,11 @@ END_FUNC type_cache_clear
 
 ;; ============================================================================
 ;; type_lookup_cached(rdi = a type, rsi = an interned name)
-;;   -> rax = the payload, edx = the tag (0 = not found), rcx = the owner
+;;   -> rax = the payload (owned), edx = the tag (0 = not found), rcx = the owner
 ;;
 ;; What the MRO walk it replaces returns, and in the same registers: the value
 ;; found in the first tp_dict along the MRO that has the name, and the type
-;; whose dict that was.  The reference is BORROWED, exactly as dict_get's is.
+;; whose dict that was.  The reference is OWNED.
 ;;
 ;; A negative answer is cached too.  "This class has no __iter__" is asked as
 ;; often as any positive lookup and costs a full walk to establish.
@@ -125,6 +209,7 @@ TLC_OLDNAME equ 40              ; the name this fill displaces, to release
 TLC_RESVAL  equ 48              ; the answer, across that release
 TLC_RESTAG  equ 56
 TLC_RESOWN  equ 64
+TLC_IDX     equ 72              ; slot index (0..TC_SLOTS-1) for bucket lock
 TLC_FRAME   equ 88              ; 88 + 3 pushes keeps rsp 16-aligned
 
 DEF_FUNC type_lookup_cached, TLC_FRAME
@@ -137,12 +222,11 @@ DEF_FUNC type_lookup_cached, TLC_FRAME
     mov [rbp - TLC_TYPE], rdi
     mov [rbp - TLC_NAME], rsi
 
-    ; A type with no version cannot be cached; walk and answer.
+    ; Quick unversioned check (static types have version 0).
     mov rax, [rdi + PyTypeObject.tp_flags]
     shr rax, TYPE_VERSION_SHIFT
     test eax, eax
     jz .tlc_walk_only
-    mov [rbp - TLC_VER], rax
 
     ; slot = (type >> 4) ^ (name >> 4), folded
     mov rcx, rdi
@@ -152,54 +236,74 @@ DEF_FUNC type_lookup_cached, TLC_FRAME
     imul rcx, rcx, 31
     xor rcx, rdx
     and rcx, TC_MASK
+    mov [rbp - TLC_IDX], rcx
+    mov r8, rcx                         ; r8 = slot index
     shl rcx, TC_SHIFT
     lea r13, [rel type_cache]
     add r13, rcx
     mov [rbp - TLC_SLOT], r13
 
-    ; A hit is all three of the version, the type and the name.
-    mov rcx, [rbp - TLC_VER]
-    cmp [r13 + TC_VERSION], rcx
-    jne .tlc_miss
+    ; Lock bucket, read live tp_version under lock, and test hit.
+    ; Holding the bucket lock across version read + INCREF pairs with
+    ; type_cache_quiesce() in type_setattr so TC_VALUE cannot be freed
+    ; while a reader with a matching version is INCREFing it.
+    TC_LOCK_SLOT r8
+    mov rax, [rbx + PyTypeObject.tp_flags]
+    shr rax, TYPE_VERSION_SHIFT
+    test eax, eax
+    jz .tlc_unlock_walk_only
+    mov [rbp - TLC_VER], rax
+
+    cmp [r13 + TC_VERSION], rax
+    jne .tlc_miss_unlock
     cmp [r13 + TC_TYPE], rbx
-    jne .tlc_miss
+    jne .tlc_miss_unlock
     cmp [r13 + TC_NAME], r12
-    jne .tlc_miss
+    jne .tlc_miss_unlock
     mov rax, [r13 + TC_VALUE]
     mov edx, [r13 + TC_TAG]
     INCREF_VAL rax, edx
     mov rcx, [r13 + TC_OWNER]
+    TC_UNLOCK_SLOT r8
     jmp .tlc_out
 
-.tlc_miss:
-    call tc_walk                        ; rax/edx = value, rcx = owner
-    mov r13, [rbp - TLC_SLOT]
+.tlc_unlock_walk_only:
+    TC_UNLOCK_SLOT r8
+    jmp .tlc_walk_only
+
+.tlc_miss_unlock:
+    TC_UNLOCK_SLOT r8
+    call tc_walk                        ; rax/edx = owned value, rcx = owner
     mov [rbp - TLC_RESVAL], rax
     mov [rbp - TLC_RESTAG], edx
     mov [rbp - TLC_RESOWN], rcx
+    mov r13, [rbp - TLC_SLOT]
+    mov r8, [rbp - TLC_IDX]
+    mov qword [rbp - TLC_OLDNAME], 0
+
+    ; Re-lock bucket and verify tp_version did not change during tc_walk.
+    TC_LOCK_SLOT r8
+    mov r9, [rbx + PyTypeObject.tp_flags]
+    shr r9, TYPE_VERSION_SHIFT
+    cmp r9, [rbp - TLC_VER]
+    jne .tlc_skip_fill
+
+    mov rax, [rbp - TLC_RESVAL]
+    mov edx, [rbp - TLC_RESTAG]
+    mov rcx, [rbp - TLC_RESOWN]
     mov [r13 + TC_VALUE], rax
     mov [r13 + TC_TAG], edx
     mov [r13 + TC_OWNER], rcx
     mov [r13 + TC_TYPE], rbx
 
-    ; The entry OWNS its name, and that is not tidiness.  The name is compared
-    ; by pointer, and a name that is not interned -- `getattr(o, "visit_" + k)`
-    ; builds one per call -- is freed as soon as the caller drops it, after
-    ; which the allocator can hand the same address to a DIFFERENT name.  The
-    ; entry would then match a lookup it has no answer for.  Holding a
-    ; reference makes the address unreusable for as long as the comparison can
-    ; see it.  (ast.NodeVisitor found this: visit_BinOp matched the entry left
-    ; by visit_Name and dispatched to it.)
-    mov r8, [r13 + TC_NAME]
-    mov [rbp - TLC_OLDNAME], r8
+    mov r10, [r13 + TC_NAME]
+    mov [rbp - TLC_OLDNAME], r10
     INCREF r12
     mov [r13 + TC_NAME], r12
+    mov [r13 + TC_VERSION], r9
 
-    ; The version goes in LAST, because it is the field the hit test reads
-    ; first and the one that makes the entry live.
-    mov r8, [rbp - TLC_VER]
-    mov [r13 + TC_VERSION], r8
-
+.tlc_skip_fill:
+    TC_UNLOCK_SLOT r8
     mov rdi, [rbp - TLC_OLDNAME]
     test rdi, rdi
     jz .tlc_filled

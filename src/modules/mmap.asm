@@ -77,6 +77,9 @@ struc MHandle
 endstruc
 
 section .bss
+alignb 64
+mc_handle_lock: resd 1
+alignb 8
 mc_handles:    resq 1
 mc_handle_n:   resq 1
 mc_handle_cap: resq 1
@@ -92,18 +95,24 @@ DEF_FUNC_BARE mc_handle_at
     xor eax, eax
     test rdi, rdi
     js .mha_no
+    RT_LOCK_GATED mc_handle_lock
     cmp rdi, [rel mc_handle_n]
-    jae .mha_no
+    jae .mha_unlock_no
     mov rax, [rel mc_handles]
     test rax, rax
-    jz .mha_no
+    jz .mha_unlock_no
     mov rax, [rax + rdi*8]
     test rax, rax
-    jz .mha_no
+    jz .mha_unlock_no
     cmp qword [rax + MHandle.magic], MC_MAGIC
-    je .mha_out
+    je .mha_unlock_out
     xor eax, eax
-.mha_out:
+.mha_unlock_out:
+    RT_UNLOCK_GATED mc_handle_lock
+    ret
+.mha_unlock_no:
+    xor eax, eax
+    RT_UNLOCK_GATED mc_handle_lock
 .mha_no:
     ret
 END_FUNC mc_handle_at
@@ -185,6 +194,7 @@ MS_FRAME equ 40                 ; + 1 push = 48, 16-aligned
 DEF_FUNC_LOCAL mc_slot, MS_FRAME
     push rbx
     mov rbx, rdi
+    RT_LOCK_GATED mc_handle_lock
     xor ecx, ecx
     mov rdx, [rel mc_handles]
     test rdx, rdx
@@ -223,6 +233,7 @@ DEF_FUNC_LOCAL mc_slot, MS_FRAME
 
 .ms_have:
     mov [rdx + rcx*8], rbx
+    RT_UNLOCK_GATED mc_handle_lock
     mov rdi, rcx
     call int_from_i64
     V_PACK rax, rdx
@@ -328,14 +339,23 @@ DEF_FUNC mc_unmap, MU_FRAME
     call mc_arg_int
     ERR_M1 .mu_fail
     mov [rbp - MU_IDX], rax
-    mov rdi, rax
-    call mc_handle_at
-    test rax, rax
-    jz .mu_done
+    RT_LOCK_GATED mc_handle_lock
+    mov rdx, rax
+    test rdx, rdx
+    js .mu_unlock_done
+    cmp rdx, [rel mc_handle_n]
+    jae .mu_unlock_done
     mov rcx, [rel mc_handles]
-    mov rdx, [rbp - MU_IDX]
+    test rcx, rcx
+    jz .mu_unlock_done
+    mov rax, [rcx + rdx*8]
+    test rax, rax
+    jz .mu_unlock_done
+    cmp qword [rax + MHandle.magic], MC_MAGIC
+    jne .mu_unlock_done
     mov qword [rcx + rdx*8], 0
     mov qword [rax + MHandle.magic], 0
+    RT_UNLOCK_GATED mc_handle_lock
     push rax
     sub rsp, 8
     mov rdi, [rax + MHandle.addr]
@@ -344,6 +364,9 @@ DEF_FUNC mc_unmap, MU_FRAME
     add rsp, 8
     pop rdi
     call ap_free
+    jmp .mu_done
+.mu_unlock_done:
+    RT_UNLOCK_GATED mc_handle_lock
 .mu_done:
     RET_NONE
     leave

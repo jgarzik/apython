@@ -68,6 +68,10 @@ extern set_exception
 TYA_COUNT equ 11
 
 section .bss
+alignb 64
+global type_lock
+type_lock: resd 1
+alignb 8
 ;; The interned name for each slot, built once by type_dict_add_attrs.  A
 ;; thunk has no argument but self, so this is how it knows which it is.
 tya_names: resq TYA_COUNT
@@ -515,31 +519,47 @@ DEF_FUNC type_setattr
     test rdi, rdi
     jnz .ts_have_dict
 
-    ; Allocate a new dict for this type
+    ; Allocate a new dict for this type (CAS publish for concurrent setattr)
     push rsi
     push rdx
     call dict_new
-    mov [rbx + PyTypeObject.tp_dict], rax
-    mov rdi, rax
+    mov rdx, rax
+    xor eax, eax
+    lock cmpxchg [rbx + PyTypeObject.tp_dict], rdx
+    jz .ts_dict_installed
+    ; Another thread won the race; drop our spare dict and use the winner's.
+    push rax
+    push rax
+    mov rdi, rdx
+    call obj_decref
+    pop rdx
+    pop rax
+.ts_dict_installed:
+    mov rdi, rdx
     pop rdx
     pop rsi
 
 .ts_have_dict:
-    ; A NULL value means DELETE, not "store a NULL".  dict_set was called
-    ; either way, so `del C.attr` left the key in the type's dict bound to a
-    ; NULL Value.  Lookup answered correctly -- `k in C.__dict__` was False and
-    ; `C.__dict__[k]` raised KeyError -- but the entry was still occupied, so
-    ; keys() and items() went on yielding it, and items() handed out the NULL
-    ; Value itself.
-    ;
-    ; That is how a NULL reached ordinary builtins: enum.py deletes five names
-    ; from Enum, doctest walks Enum.__dict__.items(), and inspect called
-    ; type() and isinstance() on the hole.  isinstance() then released an
-    ; uninitialised frame slot, and the decrement landed inside a live code
-    ; object's bytecode -- one byte of a RETURN_VALUE, which the eval loop
-    ; then refused as opcode 82.
-    ;
-    ; instance_setattr already had this fix; type_setattr was missed.
+    ; In free-threaded mode, bump tp_version down the subclass tree and
+    ; quiesce type_cache readers BEFORE mutating tp_dict so no reader can
+    ; INCREF a displaced entry after dict_set/dict_del_opt frees it.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    je .ts_pre_mut_done
+    push rdi
+    push rsi
+    push rdx
+    push rdx
+    mov rdi, rbx
+    extern type_bump_version_tree
+    call type_bump_version_tree
+    extern type_cache_quiesce
+    call type_cache_quiesce
+    pop rdx
+    pop rdx
+    pop rsi
+    pop rdi
+.ts_pre_mut_done:
     test rdx, rdx
     jz .ts_dict_del
     ; dict_set(dict, name Value, value Value)
@@ -633,9 +653,8 @@ DEF_FUNC type_setattr
     push rax
     call obj_incref
     pop rax
-    mov rcx, [rbx + PyTypeObject.tp_name]
-    lea rdx, [rax + PyStrObject.data]
-    mov [rbx + PyTypeObject.tp_name], rdx
+    lea rcx, [rax + PyStrObject.data]
+    xchg [rbx + PyTypeObject.tp_name], rcx
     test rcx, rcx
     jz .ts_rename_done
     sub rcx, PyStrObject.data
@@ -663,8 +682,8 @@ DEF_FUNC type_setattr
     push rax
     call obj_incref
     pop rax
-    mov rcx, [rbx + HT_QUALNAME]
-    mov [rbx + HT_QUALNAME], rax
+    mov rcx, rax
+    xchg [rbx + HT_QUALNAME], rcx
     test rcx, rcx
     jz .ts_rename_done
     mov rdi, rcx
