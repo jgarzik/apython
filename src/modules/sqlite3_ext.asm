@@ -122,6 +122,7 @@ END_FUNC sq_cb_alloc
 ;; _sqlite3core.set_callback_tracebacks(flag) -> None
 ;; ============================================================================
 DEF_FUNC sq_set_cb_tracebacks
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.set_callback_tracebacks() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -157,6 +158,7 @@ SCF_FN      equ 56
 SCF_CB      equ 64
 SCF_FRAME   equ 64
 DEF_FUNC sq_create_function, SCF_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.create_function() takes no keyword arguments", .fail
     cmp rsi, 5
     jne .nargs
@@ -261,6 +263,7 @@ SCAG_NARG   equ 40
 SCAG_CB     equ 48
 SCAG_FRAME  equ 48
 DEF_FUNC sq_create_aggregate, SCAG_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.create_aggregate() takes no keyword arguments", .fail
     cmp rsi, 4
     jne .nargs
@@ -360,6 +363,7 @@ SCW_NARG    equ 40
 SCW_CB      equ 48
 SCW_FRAME   equ 48
 DEF_FUNC sq_create_window, SCW_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.create_window_function() takes no keyword arguments", .fail
     cmp rsi, 4
     jne .nargs
@@ -467,6 +471,7 @@ SCC_NAME    equ 32
 SCC_CB      equ 40
 SCC_FRAME   equ 48
 DEF_FUNC sq_create_collation, SCC_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.create_collation() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -554,6 +559,7 @@ SSA_CB      equ 32
 SSA_RC      equ 40
 SSA_FRAME   equ 48
 DEF_FUNC sq_set_authorizer, SSA_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.set_authorizer() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -644,6 +650,7 @@ SSP_N       equ 32
 SSP_CB      equ 40
 SSP_FRAME   equ 48
 DEF_FUNC sq_set_progress, SSP_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.set_progress_handler() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -728,6 +735,7 @@ SSTC_NODE   equ 24
 SSTC_CB     equ 32
 SSTC_FRAME  equ 32
 DEF_FUNC sq_set_trace, SSTC_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.set_trace_callback() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -805,6 +813,7 @@ SLM_CAT     equ 16
 SLM_VAL     equ 24
 SLM_FRAME   equ 32
 DEF_FUNC sq_limit, SLM_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.limit() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -856,6 +865,7 @@ SDC_ACT     equ 32
 SDC_RC      equ 40
 SDC_FRAME   equ 48
 DEF_FUNC sq_db_config, SDC_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.db_config() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -921,6 +931,7 @@ SSER_DATA   equ 40
 SSER_NOCOPY equ 48
 SSER_FRAME  equ 48
 DEF_FUNC sq_serialize, SSER_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.serialize() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1012,6 +1023,7 @@ SDES_LEN    equ 40
 SDES_BUF    equ 48
 SDES_FRAME  equ 48
 DEF_FUNC sq_deserialize, SDES_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.deserialize() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1093,6 +1105,7 @@ SELE_ARGS   equ 8
 SELE_ON     equ 16
 SELE_FRAME  equ 16
 DEF_FUNC sq_enable_load_ext, SELE_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.enable_load_extension() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1145,6 +1158,7 @@ SLE_RC      equ 48
 SLE_MSG     equ 56
 SLE_FRAME   equ 64
 DEF_FUNC sq_load_ext, SLE_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.load_extension() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1242,6 +1256,7 @@ SBO_RC      equ 80
 SBO_BH      equ 88
 SBO_FRAME   equ 96
 DEF_FUNC sq_blob_open, SBO_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.blob_open() takes no keyword arguments", .fail
     cmp rsi, 6
     jne .nargs
@@ -1374,6 +1389,7 @@ SBC_BLOB    equ 16
 SBC_RC      equ 24
 SBC_FRAME   equ 32
 DEF_FUNC sq_blob_close, SBC_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.blob_close() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1419,6 +1435,7 @@ END_FUNC sq_blob_close
 ;; _sqlite3core.blob_bytes(blob_h) -> int
 ;; ============================================================================
 DEF_FUNC sq_blob_bytes
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.blob_bytes() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1459,6 +1476,7 @@ SBR_RC      equ 48
 SBR_OBJ     equ 56
 SBR_FRAME   equ 64
 DEF_FUNC sq_blob_read, SBR_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.blob_read() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1566,6 +1584,7 @@ SBW_OFF     equ 40
 SBW_COPY    equ 48
 SBW_FRAME   equ 48
 DEF_FUNC sq_blob_write, SBW_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.blob_write() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1654,6 +1673,7 @@ SBI2_SN     equ 40
 SBI2_BK     equ 48
 SBI2_FRAME  equ 48
 DEF_FUNC sq_backup_init, SBI2_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.backup_init() takes no keyword arguments", .fail
     cmp rsi, 4
     jne .nargs
@@ -1759,6 +1779,7 @@ SBS_PAGES   equ 16
 SBS_BK      equ 24
 SBS_FRAME   equ 32
 DEF_FUNC sq_backup_step, SBS_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.backup_step() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1808,6 +1829,7 @@ SBF2_BK     equ 16
 SBF2_RC     equ 24
 SBF2_FRAME  equ 32
 DEF_FUNC sq_backup_finish, SBF2_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.backup_finish() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1852,6 +1874,7 @@ END_FUNC sq_backup_finish
 %macro SQ_BKUP_INT_GETTER 2
 ;; %1(rdi = args*, rsi = nargs) -> rax = int Value
 DEF_FUNC %1
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core function takes no keyword arguments", %%fail
     cmp rsi, 1
     jne %%nargs
@@ -1890,6 +1913,7 @@ SQ_BKUP_INT_GETTER sq_backup_pagecount, sqlite3_backup_pagecount
 SSL_MS      equ 8
 SSL_FRAME   equ 16
 DEF_FUNC sq_sleep, SSL_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.sleep() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs

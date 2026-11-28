@@ -610,6 +610,7 @@ END_FUNC sq_arg_bytes_like
 ;; _sqlite3core.complete(sql_bytes) -> bool
 ;; ============================================================================
 DEF_FUNC sq_complete
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.complete() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -655,6 +656,7 @@ SO_RC       equ 40
 SO_H        equ 48
 SO_FRAME    equ 48              ; + 0 pushes = 48
 DEF_FUNC sq_open, SO_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.open() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -755,6 +757,7 @@ SC_DB       equ 40
 SC_RC       equ 48
 SC_FRAME    equ 48              ; + 0 pushes = 48
 DEF_FUNC sq_close, SC_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.close() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -882,6 +885,7 @@ SBT_ARGS    equ 8
 SBT_MS      equ 16
 SBT_FRAME   equ 16
 DEF_FUNC sq_busy_timeout, SBT_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.busy_timeout() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -921,6 +925,7 @@ END_FUNC sq_busy_timeout
 ;; _sqlite3core.interrupt(db_h) -> None
 ;; ============================================================================
 DEF_FUNC sq_interrupt
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.interrupt() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -953,6 +958,7 @@ END_FUNC sq_interrupt
 %macro SQ_DB_INT_GETTER 3
 ;; %1(rdi = args*, rsi = nargs) -> rax = int Value
 DEF_FUNC %1
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core function takes no keyword arguments", %%fail
     cmp rsi, 1
     jne %%nargs
@@ -995,6 +1001,7 @@ SQ_DB_INT_GETTER sq_extended_errcode,  sqlite3_extended_errcode,  0
 ;; _sqlite3core.errmsg(db_h) -> str
 ;; ============================================================================
 DEF_FUNC sq_errmsg
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.errmsg() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1034,6 +1041,7 @@ END_FUNC sq_errmsg
 ;; _sqlite3core.errstr(code) -> str
 ;; ============================================================================
 DEF_FUNC sq_errstr
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.errstr() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1081,6 +1089,7 @@ SP_RC       equ 64
 SP_SH       equ 72
 SP_FRAME    equ 80              ; + 0 pushes = 80
 DEF_FUNC sq_prepare, SP_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.prepare() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1209,6 +1218,7 @@ END_FUNC sq_prepare
 SST_STMT    equ 8
 SST_FRAME   equ 16
 DEF_FUNC sq_step, SST_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.step() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1265,6 +1275,7 @@ END_FUNC sq_step
 SR_STMT     equ 8
 SR_FRAME    equ 16
 DEF_FUNC sq_reset, SR_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.reset() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1307,6 +1318,7 @@ SF_STMT     equ 16
 SF_RC       equ 24
 SF_FRAME    equ 32
 DEF_FUNC sq_finalize, SF_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.finalize() takes no keyword arguments", .fail
     cmp rsi, 1
     jne .nargs
@@ -1352,6 +1364,7 @@ END_FUNC sq_finalize
 %macro SQ_STMT_INT_GETTER 2
 ;; %1(rdi = args*, rsi = nargs) -> rax = int Value
 DEF_FUNC %1
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core function takes no keyword arguments", %%fail
     cmp rsi, 1
     jne %%nargs
@@ -1393,6 +1406,7 @@ SSSI_FRAME  equ 16
 %macro SQ_STMT_STR_BY_IDX 2
 ;; %1(rdi = args*, rsi = nargs) -> rax = str or None
 DEF_FUNC %1, SSSI_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core function takes no keyword arguments", %%fail
     cmp rsi, 2
     jne %%nargs
@@ -1447,6 +1461,7 @@ SCT_ARGS    equ 8
 SCT_IDX     equ 16
 SCT_FRAME   equ 16
 DEF_FUNC sq_column_type, SCT_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.column_type() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1494,6 +1509,7 @@ SCB_STMT    equ 24
 SCB_PTR     equ 32
 SCB_FRAME   equ 32
 DEF_FUNC sq_column_blob, SCB_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.column_blob() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1527,18 +1543,8 @@ DEF_FUNC sq_column_blob, SCB_FRAME
     leave
     ret
 .check_null:
-    ; Distinguish SQL NULL from empty 0-byte blob/text.
-    mov rdi, [rbp - SCB_STMT]
-    mov esi, [rbp - SCB_IDX]
-    call sqlite3_column_type wrt ..plt
-    cmp eax, SQLITE_NULL
-    je .ret_none
-    lea rdi, [rel sq_empty_byte]
-    xor esi, esi
-    call bytes_from_data
-    leave
-    ret
-.ret_none:
+    ; CPython treats sqlite3_column_blob() == NULL (both SQL NULL and 0-byte
+    ; blobs) as None when running converters.
     lea rax, [rel none_singleton]
     INCREF rax
     leave
@@ -1572,11 +1578,14 @@ FR_VALS     equ 40
 FR_TYPES    equ 48
 FR_PTR      equ 56
 FR_LEN      equ 64
+FR_SAVED    equ 72
 FR_FRAME    equ 72              ; + 3 pushes (rbx, r12, r13) = 96, 16-aligned
 DEF_FUNC sq_fetch_row, FR_FRAME
     push rbx
     push r12
     push r13
+    mov [rbp - FR_SAVED], rsp
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.fetch_row() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1732,6 +1741,7 @@ DEF_FUNC sq_fetch_row, FR_FRAME
     mov [rcx], rdx
     mov rdx, [rbp - FR_TYPES]
     mov [rcx + 8], rdx
+    mov rsp, [rbp - FR_SAVED]
     pop r13
     pop r12
     pop rbx
@@ -1740,6 +1750,7 @@ DEF_FUNC sq_fetch_row, FR_FRAME
 
 .ret_vals:
     mov rax, [rbp - FR_VALS]
+    mov rsp, [rbp - FR_SAVED]
     pop r13
     pop r12
     pop rbx
@@ -1753,6 +1764,7 @@ DEF_FUNC sq_fetch_row, FR_FRAME
     call obj_decref
     mov rax, rbx
     V_PACK_I64 rax, rcx
+    mov rsp, [rbp - FR_SAVED]
     pop r13
     pop r12
     pop rbx
@@ -1765,6 +1777,7 @@ DEF_FUNC sq_fetch_row, FR_FRAME
     call set_exception
 .fail:
     xor eax, eax
+    mov rsp, [rbp - FR_SAVED]
     pop r13
     pop r12
     pop rbx
@@ -1780,6 +1793,7 @@ SBN_ARGS    equ 8
 SBN_IDX     equ 16
 SBN_FRAME   equ 16
 DEF_FUNC sq_bind_null, SBN_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.bind_null() takes no keyword arguments", .fail
     cmp rsi, 2
     jne .nargs
@@ -1823,6 +1837,7 @@ SBI_IDX     equ 16
 SBI_VAL     equ 24
 SBI_FRAME   equ 32
 DEF_FUNC sq_bind_int64, SBI_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.bind_int64() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1872,6 +1887,7 @@ SBD_IDX     equ 16
 SBD_VAL     equ 24
 SBD_FRAME   equ 32
 DEF_FUNC sq_bind_double, SBD_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.bind_double() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1928,6 +1944,7 @@ SBTX_PTR    equ 24
 SBTX_LEN    equ 32
 SBTX_FRAME  equ 32
 DEF_FUNC sq_bind_text, SBTX_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.bind_text() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
@@ -1989,6 +2006,7 @@ SBBL_PTR    equ 24
 SBBL_LEN    equ 32
 SBBL_FRAME  equ 32
 DEF_FUNC sq_bind_blob, SBBL_FRAME
+    and rsp, -16
     NO_KEYWORDS_RET "_sqlite3core.bind_blob() takes no keyword arguments", .fail
     cmp rsi, 3
     jne .nargs
