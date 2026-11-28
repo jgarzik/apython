@@ -14,20 +14,25 @@ records where the tree answers differently from CPython and why; nothing in it
 is a ruling, and the entries that cost tests are scheduled here like any other
 gap.
 
-Every number below was measured on 2026-11-27 at `a5ef4923`, against a
-CPython 3.12.9 built from `~/tmp/repo/cpython`.  They are a snapshot for
-ranking, not a ledger: re-measure at each phase gate.
+Every number below was measured on 2026-11-28 at `59ccad98` (with
+`array` full parity and `test_functools` fixes), against a CPython 3.12.9
+built from `~/tmp/repo/cpython`.  They are a snapshot for ranking, not a
+ledger: re-measure at each phase gate.
 
 ## Where we are
 
-The latest matched CPython 3.12.9 run reports **30,129 of 42,074** passing
-test IDs in mission scope (71.61%) and **30,178 of 43,097** against the
-full measured denominator (70.02%). apython completed the sweep without
-a process crash or timeout. The CPython control timed out in `test_runpy`
-and aborted in `test_tracemalloc`.
+The latest matched CPython 3.12.9 run (`make conformance`) reports
+**31,679 of 42,073** passing test IDs in mission scope (**75.30%**; files
+22,287/30,693, packages 9,392/11,380) and **31,728 of 43,096** against the
+full measured denominator (**73.62%**; files 22,336/31,015, packages
+9,392/12,081).  In that sweep, apython hit SIGSEGV in `test_bz2` and
+`test_code` and timed out in `test_builtin`, `test_io` and `test_pdb`; the
+CPython control timed out in `test_runpy` and crashed in `test_tracemalloc`.
 
-The package, source, curated CPython-source and stdlib gates pass. The
-aggregate macro benchmark measured 1.41x CPython and the core suite 1.52x.
+The unit, CPython, source, curated CPython-source and stdlib gates pass
+(`make check`, `make check-cpython`, `make check-source`,
+`make check-cpython-source`, `make check-stdlib`, `make EXC_STRICT=1`).
+The aggregate macro benchmark measured 1.41x CPython and the core suite 1.52x.
 
 ### How to re-measure
 
@@ -87,7 +92,6 @@ Each item is a single absent name or module with hundreds of tests behind it.
 
 | Item | Tests | Work |
 |---|---|---|
-| `array._array_reconstructor`, and `array.__reduce_ex__` to match | 814 | `test_array` dies at import on the one name.  Pickling an `array` fails today too |
 | `_multiprocessing` (`SemLock`), `_posixshmem`, fd passing over `recvmsg` | ~1,500 | Unlocks the three `test_multiprocessing_*` packages, `test_concurrent_futures` (255), `ProcessPoolExecutor`, `test_multiprocessing_main_handling`, `compileall -j` |
 | `_gdbm`, `_dbm` | ~230 | Shims over libgdbm.  `test_shelve` silently runs half its classes without them; `test_dbm`, `test_dbm_gnu`, `test_dbm_ndbm` |
 | C-accelerator stand-ins: `_functools` (96), `_uuid` (37), `_queue` (28), `_heapq` (25), `_bisect` (22), `_statistics` (20), `_elementtree` (19), `_stat` (6), `_opcode` (3), `_json`'s five names (12) | ~270 | Mostly re-exports under the C name.  `_json`, `_bisect` and `_stat` are imported as `None` by fresh-module tests today and take the test class with them |

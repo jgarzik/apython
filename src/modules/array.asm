@@ -1317,9 +1317,15 @@ DEF_FUNC array_repr, ARP_FRAME
     cmp qword [rdi + PyArrayObject.ob_size], 0
     jne .arp_with_items
 
-    ; array('X')
-    sub rsp, 32
+    ; <short_type_name>('X') -- strip leading "module." (like CPython _PyType_Name)
+    sub rsp, 128
     mov rdi, rsp
+    mov rcx, [rbp - ARP_ARR]
+    mov rcx, [rcx + PyObject.ob_type]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    call arp_short_name
+    call rbt_append_cstr
+    mov rdi, rax
     lea rsi, [rel arp_open]
     call rbt_append_cstr
     mov rcx, [rbp - ARP_ARR]
@@ -1331,7 +1337,7 @@ DEF_FUNC array_repr, ARP_FRAME
     call rbt_append_cstr
     mov rdi, rsp
     call str_from_cstr_heap
-    add rsp, 32
+    add rsp, 128
     mov edx, TAG_PTR
     leave
     ret
@@ -1354,13 +1360,19 @@ DEF_FUNC array_repr, ARP_FRAME
     jz .arp_drop
     mov [rbp - ARP_INNER], rax
 
-    ; "array('X', " + inner + ")"
+    ; "<short_type_name>('X', " + inner + ")"
     mov rcx, [rax + PyStrObject.ob_size]
-    lea rdi, [rcx + 32]
+    lea rdi, [rcx + 128]
     call ap_malloc
     test rax, rax
     jz .arp_drop
     mov [rbp - ARP_BUF], rax
+    mov rdi, rax
+    mov rcx, [rbp - ARP_ARR]
+    mov rcx, [rcx + PyObject.ob_type]
+    mov rsi, [rcx + PyTypeObject.tp_name]
+    call arp_short_name
+    call rbt_append_cstr
     mov rdi, rax
     lea rsi, [rel arp_open]
     call rbt_append_cstr
@@ -1417,8 +1429,25 @@ DEF_FUNC array_repr, ARP_FRAME
     ret
 END_FUNC array_repr
 
+;; arp_short_name(rsi = cstr) -> rsi = suffix after last '.' (like _PyType_Name)
+;; Preserves rdi; clobbers rax, rcx.
+DEF_FUNC_BARE arp_short_name
+    mov rcx, rsi
+.asn_scan:
+    mov al, [rcx]
+    test al, al
+    jz .asn_done
+    inc rcx
+    cmp al, '.'
+    jne .asn_scan
+    mov rsi, rcx
+    jmp .asn_scan
+.asn_done:
+    ret
+END_FUNC arp_short_name
+
 section .rodata
-arp_open:        db "array('", 0
+arp_open:        db "('", 0
 arp_tail_empty:  db "')", 0
 arp_tail_items:  db "', ", 0
 arp_close_paren: db ")", 0

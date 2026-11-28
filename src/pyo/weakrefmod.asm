@@ -1404,8 +1404,8 @@ DEF_FUNC proxy_getattr
     mov r12, rax                ; owned referent
     mov rdi, r12
     mov rsi, rbx
-    extern obj_getattr_opt
-    call obj_getattr_opt        ; err: 0 (absent or raised) is tp_getattr's answer
+    extern obj_getattr_raw
+    call obj_getattr_raw        ; err: 0 (absent or raised) is tp_getattr's answer
     push rax
     sub rsp, 8
     mov rdi, r12
