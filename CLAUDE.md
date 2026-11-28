@@ -31,6 +31,7 @@ make check-cpython-source  # the CPython corpus, compiled by OUR compiler
 ```bash
 ./apython --selftest-compile   # source-compiler invariants and tokenizer
 ./apython --selftest-alloc     # the pool allocator, without the interpreter
+./apython --selftest-sync      # 32-bit futex locks, BRC registry, and STW coordinator
 python3 src/compiler/lint.py   # static checks over the assembly
 ```
 
@@ -146,9 +147,11 @@ hooks and the asyncio loop -- is a field of `struc ThreadState` in
 `main_tstate` (`tstate_install`, src/eval.asm) before anything else runs.
 `lea` does NOT apply the segment base: a field whose address is wanted is
 `[gs:ThreadState.ts_self]` plus the field offset, and an array field is
-indexed in place (`[gs:ThreadState.tb_seen + rdx*8]`).  Shared state --
-allocator, freelists, the collector, caches, interned strings -- stays an
-ordinary `[rel ...]` global.
+indexed in place (`[gs:ThreadState.tb_seen + rdx*8]`).  Per-thread allocator
+caches (`ts_sc_free`, `ts_sc_bump`, `ts_int_freelist`, `ts_tuple_pool`,
+`ts_frame_pool`), the BRC merge queue (`ts_brc_*`), and the thread-local dict
+version clock (`ts_dict_ver`) also live in `ThreadState`.  Shared runtime state
+stays in `[rel ...]` globals protected by 32-bit futex locks (`src/sync.asm`).
 
 DISPATCH does NOT go through gs: it publishes the IP and value stack top into
 the running frame, `[r12 + PyFrame.disp_ip]` / `[r12 + PyFrame.disp_sp]`, and
@@ -158,52 +161,67 @@ still the frame uses `PUBLISH_SP` (macros.inc).  A gs-relative access has about
 twice the load latency and half the store rate of a plain one on the machine
 this was measured on, so gs is for cold paths and for loading `ts_self` once.
 
-## Threads and the GIL
+## Free-Threaded Runtime (No GIL)
 
-Threads are pthreads, and one of them at a time runs the interpreter under a
-global lock: `src/gil.asm`, a port of CPython's `ceval_gil.c` on a pthread
-mutex and two condition variables.  `src/modules/thread.asm` is `_threadcore`
--- thread start, the per-thread `ThreadState`, a lock that is a POSIX
-semaphore -- and `lib/_thread.py` is the surface over it.  `src/shutdown.asm`
-is what exit does first: `threading._shutdown()`, the `atexit` callbacks, then
-`gil_finalizing`, after which every thread but the main one is parked.
+Threads are pthreads executing Python bytecode in parallel across CPU cores with
+no global interpreter lock (`sys._is_gil_enabled() -> False`).  `src/sync.asm`
+provides the synchronization core, `src/gil.asm` manages thread-state
+attachment, `eval_breaker` dispatch, and fork safety, `src/modules/thread.asm`
+is `_threadcore`, `lib/_thread.py` is the Python surface, and `src/shutdown.asm`
+runs `threading._shutdown()`, `atexit` callbacks, and then parks daemon threads
+permanently at STW safepoints before single-threaded final teardown.
 
-Everything shared has no lock of its own and is safe only because its user
-holds the GIL.  The lock changes hands in exactly two places:
+### Synchronization & Single-Thread Parity
 
-- **An eval-breaker checkpoint**, `CHECK_EVAL_SIGNALS`: on `RESUME`, on a
-  backward jump, and on the return from a call.  `eval_breaker` is one word
-  with two bits, "a signal arrived" and "a thread wants the GIL", so the test
-  on the hot path is one load and one branch.  These points already ran
-  signal handlers, so the code around them already survives arbitrary Python.
-- **Around a blocking call**: `BLOCKING_CALL fn` for a raw syscall wrapper, or
-  `ALLOW_THREADS_BEGIN` / `ALLOW_THREADS_END` (`src/include/gil.inc`).
-  Between the two the thread **must not** touch an object, allocate, free,
-  change a refcount or raise.  Copy what the call needs into the frame first,
-  and read `errno` into the frame *before* `ALLOW_THREADS_END`.  A raw
-  `sys_*` wrapper returns `-errno` in rax, which is why those need nothing
-  more.  Until a second thread exists both forms cost a load and a branch.
+- **`rt_threaded` gate:** A global flag (`0` until the first worker thread or
+  foreign ctypes callback closure is created; reset to `0` in a forked child).
+  All leaf per-object locks (`OBJ_LOCK`, `OBJ_LOCK2`, `RT_LOCK_GATED`) and
+  `ALLOW_THREADS` / `BLOCKING_CALL` detach/reattach are single-branch no-ops
+  while `rt_threaded == 0`, preserving single-threaded performance.
+- **24-byte `PyObject` + Biased Reference Counting (BRC):**
+  `ob_ref_local` (+0, 4B owner-local non-atomic RC), `ob_ref_shared` (+4, 4B
+  atomic RC `<< 2` + `REF_MERGED_BIT`/`REF_QUEUED_BIT`), `ob_tid` (+8, 4B
+  owner `ts_tid`; `0` = immortal, `0xFFFFFFFF` = merged), `ob_mutex` (+12, 4B
+  direct Linux futex, spin=0), `ob_type` (+16, 8B).  Owner `INCREF`/`DECREF`
+  are plain non-atomic 32-bit inc/dec; remote decrements below zero enqueue onto
+  the owner's `ts_brc_buf` via the 64-bucket `brc_buckets` registry (or merge
+  directly if the owner has exited).  Static singletons, static builtin
+  methods/descriptors, and interned strings are immortal (`ob_tid == 0`).
+- **Strictly leaf object locks:** `OBJ_LOCK` / `OBJ_UNLOCK` (`src/include/sync.inc`)
+  guard mutable containers (`dict`, `set`, `list`, `bytearray`, `array`,
+  `memoryview`, cells, user instances/types).  Never hold an `OBJ_LOCK` across
+  Python callbacks (`__eq__`, `__hash__`, `__repr__`, `__del__`, weakref
+  callbacks), blocking syscalls, or a `DECREF` that may hit zero.  All
+  container/dunder/typecache/weakref lookup paths return **owned** references.
+- **Stop-The-World (STW) safepoints & 8-shard GC:** `src/gc.asm` shards
+  generation lists across 8 cache-line-padded shards (shard index in low 3 bits
+  of `PyGC_Head.gc_next`).  `gc_collect_gen` uses 2-phase STW
+  (`stw_stop_world` / `stw_start_world`): exact BRC drain + reachability +
+  snapshot + weakref detach inside STW; weakref callbacks, PEP 442 finalizers,
+  and `tp_clear` run unlocked outside STW.  While threaded, auto-GC in
+  `gc_track` defers via per-thread `ts_gc_pending` + `EB_GC_COLLECT` so STW is
+  never invoked while holding a leaf `OBJ_LOCK`.
+- **Eval-breaker checkpoints (`CHECK_EVAL_SIGNALS`):** Tests `eval_breaker`
+  (`EB_STOP_WORLD`, `EB_SIGNAL`, `EB_BRC_MERGE`, `EB_GC_COLLECT`) on `RESUME`,
+  backward jumps, and call returns; `sre.asm` and `list_sort.asm` also poll
+  `stw_requested`.  Signals run on the main thread without stalling workers.
+- **Blocking calls (`ALLOW_THREADS_BEGIN/END`, `BLOCKING_CALL`):** Mark the
+  thread `TS_STATE_DETACHED` around blocking syscalls (`sleep`, `sem_wait`,
+  `poll`, `io_uring_enter`, `socket`, `ssl`, `sqlite3`, `read`/`write`,
+  `ffi_call`) so STW pauses never wait on blocked threads.  Between BEGIN and
+  END the thread must not touch Python objects, allocate, free, change
+  refcounts, or raise.
+- **Foreign C threads & `os.fork`:** `ctypes` `cx_tramp` guards callbacks with
+  `rt_foreign_enter`/`rt_foreign_leave` using `pthread_getspecific(rt_tstate_key)`
+  so both detached Python threads and foreign C pthreads run safely.  `gil_fork`
+  calls `stw_stop_world()` around `fork()` so no runtime leaf futex is held in
+  the child, resumes in the parent, and resets single-threaded state in the child.
 
-Do NOT give the GIL up around the raw `sys_*` calls import and startup make:
-they hold static path buffers (`isp_buf`, `iap_buf`, `pycw_path`) across the
-call, and are safe only because nothing else can run meanwhile.
-
-A new thread's first act is `tstate_install`: a clone inherits its creator's
-gs base.  It always runs a *Python* function at the bottom of its stack
-(`_thread._bootstrap`), because a raise with no interpreter frame beneath it
-is `fatal_error`.  Threads other than the main one are created with every
-signal blocked, so handlers run on the main thread; `signal_run_pending`
-returns at once anywhere else.
-
-`os.fork` goes through glibc's `fork`, and the child resets the GIL and
-becomes the main thread (`gil_fork`).
-
-Anything that calls back into Python -- `__eq__`, `__hash__`, `__repr__`,
-`__index__`, `__del__`, an iterator -- is a place another thread can be let
-in, as well as a place the same thread can re-enter.  Re-read sizes and hold
-references across such a call; `tests/reentry_probe.sh` is the gate, and
-`tests/test_thread_stress.py` runs eight threads at a ten-microsecond switch
-interval.
+Gates: `--selftest-sync`, `tests/test_thread_stress.py`,
+`tests/test_thread_parallel.py`, `tests/test_thread_races.py`,
+`tests/test_thread_gc_stw.py`, `tests/test_thread_weakref_brc.py`,
+`tests/test_thread_ffi_callbacks.py`, `tests/run_thread_bench.sh`, and
+`tests/reentry_probe.sh`.
 
 ## Errors return
 
@@ -550,8 +568,12 @@ No hand-written file exceeds 100k bytes; only generated asm may.
 - `src/dunder.asm` — dunder lookup and the `dunder_call_*` helpers, the
   fallback path when a heaptype has no slot
 - `src/repr.asm` — the container reprs and the recursion stack they share
-- `src/gc.asm` — the generational collector.  Each type's `tp_traverse` and
-  `tp_clear` live with the type, in `src/pyo/*.asm`
+- `src/gc.asm` — the generational collector with 8-shard tracking and 2-phase
+  STW collection.  Each type's `tp_traverse` and `tp_clear` live with the type,
+  in `src/pyo/*.asm`
+- `src/sync.asm` / `src/synctest.asm` — 32-bit direct futex locks, biased
+  reference counting slow paths & 64-bucket thread registry, Stop-The-World
+  coordinator, foreign-thread callback attach/detach, and `--selftest-sync`
 - `src/sre.asm` / `src/sre_char.asm` / `src/modules/sre.asm` — the regex
   engine, its character layer (code-point fetch, the categories, character
   sets, the position assertions and case folding) and its module wrapper;
@@ -702,15 +724,17 @@ These cost real time; the shapes recur.
 
 ## Key Structs
 
-Defined in `src/include/*.inc`. All objects start with `PyObject` (ob_refcnt +0, ob_type +8).
+Defined in `src/include/*.inc`. All objects start with the 24-byte `PyObject`
+header (`ob_ref_local` +0, `ob_ref_shared` +4, `ob_tid` +8, `ob_mutex` +12,
+`ob_type` +16).  Field offsets in `src/include/object.inc` are canonical:
 
-- **PyTypeObject** (object.inc): tp_call +64, tp_getattr +72, tp_setattr +80, tp_as_number +128, tp_as_sequence +136, tp_as_mapping +144, tp_base +152, tp_mro +168, tp_bases +184, tp_dictoffset +208
-- **PyFrame** (object.inc): code +8, globals +16, locals +32, stack_ptr +48, stack_base +56, disp_ip +80, disp_sp +120 (both written by DISPATCH), localsplus +128 (variable-size Value[])
-- **PyIntObject** (object.inc): mpz +16 (only initialised on overflow), ival +32, compact +40 (1 = the ival is live)
+- **PyTypeObject** (object.inc): `tp_call`, `tp_getattr`, `tp_setattr`, `tp_as_number`, `tp_as_sequence`, `tp_as_mapping`, `tp_base`, `tp_mro`, `tp_bases`, `tp_dictoffset`
+- **PyFrame** (object.inc): `code`, `globals`, `locals`, `stack_ptr`, `stack_base`, `disp_ip`, `disp_sp` (both written by DISPATCH), `localsplus` (variable-size Value[])
+- **PyIntObject** (object.inc): `mpz` (only initialised on overflow), `ival`, `compact` (1 = the ival is live)
 - **DictEntry** (object.inc, 24 bytes): hash +0, key +8, value +16 — occupied ⇔ `key != 0`; empty ⇔ `key == 0 && hash == 0`; tombstone ⇔ `key == 0 && hash == -1`
-- **PyCodeObject** (object.inc): co_consts, co_names, co_firstlineno +112, co_linetable +120, co_code starts at +128
-- **PyStrObject** (object.inc): ob_size +16 is the length in **bytes**, ob_length +32 the length in **code points**, data +40 is NUL-terminated UTF-8.  They are equal for ASCII, which is the fast path every code-point-aware operation checks first.  A new string must set both: `str_set_length` counts, or compute it directly when the arithmetic is obvious.  `str_cp_offset` and `str_byte_to_cp` convert between the two index spaces
-- **PyWeakRefObject** (object.inc): wr_object +16 is a *borrowed* referent, zeroed when it dies.  The links live in a side table in `src/pyo/weakrefmod.asm`, consulted by `obj_dealloc` only when `weakref_live` is non-zero
+- **PyCodeObject** (object.inc): `co_consts`, `co_names`, `co_firstlineno`, `co_linetable`, `co_code`
+- **PyStrObject** (object.inc): `ob_size` is the length in **bytes**, `ob_length` the length in **code points**, `data` is NUL-terminated UTF-8.  They are equal for ASCII, which is the fast path every code-point-aware operation checks first.  A new string must set both: `str_set_length` counts, or compute it directly when the arithmetic is obvious.  `str_cp_offset` and `str_byte_to_cp` convert between the two index spaces
+- **PyWeakRefObject** (object.inc): `wr_object` is a *borrowed* referent, zeroed when it dies.  The links live in a side table in `src/pyo/weakrefmod.asm` behind a lock-free 2048-bucket presence filter, consulted by `obj_dealloc` only when `weakref_live` is non-zero
 
 ## Opcode Handler Pattern
 

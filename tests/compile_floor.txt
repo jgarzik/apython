@@ -849,9 +849,14 @@ test_sys_is_finalizing
 test_sys_version_platform
 test_termios
 test_thread_basic
+test_thread_ffi_callbacks
+test_thread_gc_stw
 test_threading_runs
 test_thread_lock
+test_thread_parallel
+test_thread_races
 test_thread_stress
+test_thread_weakref_brc
 test_throw_handled_context
 test_time_clock_info
 test_time_clocks
