@@ -27,6 +27,14 @@ import _thread
 
 _lock = _thread.RLock()
 
+try:
+    import posix as _posix
+    if hasattr(_posix, "register_at_fork"):
+        _posix.register_at_fork(after_in_child=_lock._at_fork_reinit)
+    del _posix
+except Exception:
+    pass
+
 
 def acquire_lock():
     _lock.acquire()

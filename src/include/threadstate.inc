@@ -130,6 +130,11 @@ struc ThreadState
     .uring_cq_head:       resq 1
     .uring_cq_tail:       resq 1
     .uring_cqes_base:     resq 1
+    ; ---- module per-thread state (ctypes, ssl) ----------------------------
+    .cx_errno:            resq 1  ; ctypes use_errno=True private errno
+    .ssl_last_errno:      resq 1  ; _sslcore last engine errno
+    .ssl_pw_len_plus1:    resq 1  ; _sslcore PEM password len+1 (0 = none)
+    .ssl_pw_buf:          resq 1  ; _sslcore lazily malloc'd 1024B pw buffer
     ; ---- byte flags, last -------------------------------------------------
     .throw_pending:       resb 1  ; gen_throw set current_exception
     .tb_suppress_frame:   resb 1  ; the next unwind adds no traceback entry

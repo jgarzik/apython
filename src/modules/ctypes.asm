@@ -72,12 +72,6 @@ extern ffi_prep_closure_loc
 
 CX_CLOSURE_SIZE equ 64          ; sizeof(ffi_closure) is 56 on x86-64
 
-section .bss
-; The ctypes-private errno, which a function made with use_errno=True swaps
-; with the real one around the call -- CPython keeps it per thread, and there
-; is one thread.
-cx_errno: resq 1
-
 section .text
 
 ;; ============================================================================
@@ -496,9 +490,9 @@ END_FUNC cx_prep_cif_var
 DEF_FUNC cx_swap_errno
     call __errno_location wrt ..plt
     mov ecx, [rax]
-    mov edx, [rel cx_errno]
+    mov edx, [gs:ThreadState.cx_errno]
     mov [rax], edx
-    mov [rel cx_errno], ecx
+    mov [gs:ThreadState.cx_errno], ecx
     leave
     ret
 END_FUNC cx_swap_errno
@@ -656,7 +650,7 @@ END_FUNC cx_tramp
 ;; _ctypescore.errno_get() -> int, the ctypes-private errno
 ;; ============================================================================
 DEF_FUNC cx_errno_get
-    movsxd rdi, dword [rel cx_errno]
+    movsxd rdi, dword [gs:ThreadState.cx_errno]
     call cx_ret_int
     leave
     ret
@@ -670,12 +664,12 @@ ES_FRAME equ 16             ; + 0 pushes = 16, 16-aligned
 DEF_FUNC cx_errno_set, ES_FRAME
     cmp rsi, 1
     jne cx_nargs
-    movsxd rax, dword [rel cx_errno]
+    movsxd rax, dword [gs:ThreadState.cx_errno]
     mov [rbp - ES_OLD], rax
     xor esi, esi
     call cx_arg_i64
     ERR_M1 cx_fail
-    mov [rel cx_errno], eax
+    mov [gs:ThreadState.cx_errno], eax
     mov rdi, [rbp - ES_OLD]
     call cx_ret_int
     leave

@@ -211,9 +211,14 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     dec qword [rel tc_running]
 
     ; Past this line the thread holds no GIL and touches no object.  The
-    ; ThreadState came from libc, so freeing it needs no lock of ours.
+    ; ThreadState and ssl_pw_buf came from libc, so freeing them needs no lock.
     mov r12, [gs:ThreadState.ts_self]
     call gil_drop
+    mov rdi, [r12 + ThreadState.ssl_pw_buf]
+    test rdi, rdi
+    jz .te_no_ssl_pw
+    call free
+.te_no_ssl_pw:
     mov rdi, r12
     call free
 

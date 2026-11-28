@@ -137,6 +137,25 @@ DEF_FUNC eval_hooks_set
 END_FUNC eval_hooks_set
 
 ;; ============================================================================
+;; systrace_after_fork_child() -> nothing
+;;
+;; Only the forking thread survives in the child; reset systrace_threads to
+;; match its own tracing state so vanished threads do not keep tracing enabled.
+;; ============================================================================
+global systrace_after_fork_child
+DEF_FUNC systrace_after_fork_child
+    xor eax, eax
+    cmp qword [gs:ThreadState.systrace_any], 0
+    setne al
+    mov [rel systrace_threads], rax
+    mov edi, 1
+    mov esi, eax
+    call eval_hooks_set
+    leave
+    ret
+END_FUNC systrace_after_fork_child
+
+;; ============================================================================
 ;; systrace_recount() -> nothing (systrace_any updated)
 ;; ============================================================================
 DEF_FUNC_BARE systrace_recount

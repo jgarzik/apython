@@ -166,14 +166,17 @@ PRH_FN    equ 32            ; the hook being called, for the report
 PRH_FRAME equ 32            ; + 1 push = 40... one more word to land right
 DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     push rbx
-    mov rbx, rdi
-    mov [rbp - PRH_LIST], rdi
     mov [rbp - PRH_REV], rsi
     test rdi, rdi
-    jz .prh_done
+    jz .prh_done_nocopy
     mov rax, [rdi + PyListObject.ob_size]
     test rax, rax
-    jz .prh_done
+    jz .prh_done_nocopy
+    extern list_copy
+    call list_copy
+    test rax, rax
+    jz .prh_done_nocopy
+    mov [rbp - PRH_LIST], rax
     mov qword [rbp - PRH_I], 0
 .prh_loop:
     mov rcx, [rbp - PRH_I]
@@ -195,6 +198,7 @@ DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
     jz .prh_next
+    INCREF rdi
     mov [rbp - PRH_FN], rdi
     xor esi, esi
     xor edx, edx
@@ -202,23 +206,31 @@ DEF_FUNC_LOCAL posix_run_fork_hooks, 40 ; + 1 push = 48, 16-aligned
     test rax, rax
     jz .prh_raised
     DECREF_V rax, rcx
+    mov rdi, [rbp - PRH_FN]
+    call obj_decref
     jmp .prh_next
 .prh_raised:
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
-    jz .prh_next
+    jz .prh_drop_fn
     mov rsi, [rbp - PRH_FN]
     extern traceback_print_unraisable
     call traceback_print_unraisable
     mov rdi, [gs:ThreadState.current_exception]
     test rdi, rdi
-    jz .prh_next
+    jz .prh_drop_fn
     mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+.prh_drop_fn:
+    mov rdi, [rbp - PRH_FN]
     call obj_decref
 .prh_next:
     inc qword [rbp - PRH_I]
     jmp .prh_loop
 .prh_done:
+    mov rdi, [rbp - PRH_LIST]
+    call obj_decref
+.prh_done_nocopy:
     pop rbx
     leave
     ret

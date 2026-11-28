@@ -1127,6 +1127,19 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     mov qword [rel gc_gen0_count], 0
 
     ; Update collection counters for triggering higher-gen collections
+    ; Clear collecting flag and record stats BEFORE cascading into gen1/gen2,
+    ; otherwise the recursive gc_collect_gen immediately bails out at
+    ; .already_collecting.
+    mov qword [rel gc_collecting], 0
+    mov qword [gs:ThreadState.gc_collect_rsp], 0
+    mov rax, [rbp - GCG_FOUND]
+
+    mov ecx, [rbp - GCG_GEN]
+    imul rcx, rcx, 24
+    lea rdx, [rel gc_stat_counters]
+    inc qword [rdx + rcx]
+    add [rdx + rcx + 8], rax
+
     mov eax, [rbp - GCG_GEN]
     test eax, eax
     jz .check_gen1
@@ -1159,21 +1172,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     call gc_collect_gen
 
 .collect_done:
-    ; Clear collecting flag
-    mov qword [rel gc_collecting], 0
-    mov qword [gs:ThreadState.gc_collect_rsp], 0
     mov rax, [rbp - GCG_FOUND]
-
-    ; What gc.get_stats() reports: how many collections have run in this
-    ; generation and how many objects they freed.  Nothing counted before,
-    ; and there was nothing to read them.  "uncollectable" stays zero: an
-    ; object this collector cannot free is one with a __del__ in a cycle,
-    ; which CPython has not treated as uncollectable since 3.4 either.
-    mov ecx, [rbp - GCG_GEN]
-    imul rcx, rcx, 24
-    lea rdx, [rel gc_stat_counters]
-    inc qword [rdx + rcx]
-    add [rdx + rcx + 8], rax
 
     pop r15
     pop r14

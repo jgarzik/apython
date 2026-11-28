@@ -943,6 +943,7 @@ DEF_FUNC op_call_function_ex
     pop r12
     pop rbx
     pop rbp
+    CHECK_EVAL_SIGNALS
     DISPATCH
 
 .cfex_propagate_exc:

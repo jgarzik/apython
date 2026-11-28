@@ -328,7 +328,8 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     ; the flag -- but one may have replaced a handler after the flag was set.
     V_TEST_PTR rax, rcx
     ja .srp_next
-    mov [rbp - SRP_FN], rax                 ; keep the handler
+    INCREF rax
+    mov [rbp - SRP_FN], rax                 ; keep strong ref to handler
     mov rdi, rbx
     call int_from_i64
     V_PACK rax, rdx
@@ -359,6 +360,8 @@ DEF_FUNC signal_run_pending, SRP_FRAME
     mov rax, [rbp - SRP_ARGS]
     DECREF_V rax, rcx
     mov rdi, [rbp - SRP_ARGS + 8]
+    call obj_decref
+    mov rdi, [rbp - SRP_FN]
     call obj_decref
     pop rax
     test rax, rax
@@ -426,6 +429,9 @@ DEF_FUNC signal_method_signal, 24           ; + 1 push = 32, 16-aligned
     push rbx
     cmp rsi, 2
     jne .ss_argerr
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .ss_thread
     mov rbx, rdi
     mov rdi, [rbx]
     call signal_arg
@@ -530,6 +536,9 @@ DEF_FUNC signal_method_signal, 24           ; + 1 push = 32, 16-aligned
     FAIL exc_TypeError_type, "signal handler must be signal.SIG_IGN, signal.SIG_DFL, or a callable object", .ss_fail
 .ss_argerr:
     FAIL exc_TypeError_type, "signal() takes exactly 2 arguments", .ss_fail
+.ss_thread:
+    FAIL exc_ValueError_type, \
+        "signal only works in main thread of the main interpreter", .ss_fail
 END_FUNC signal_method_signal
 
 ;; ============================================================================
@@ -657,6 +666,9 @@ SIR_FRAME  equ 176
 DEF_FUNC_LOCAL signal_method_siginterrupt, SIR_FRAME
     cmp rsi, 2
     jne .sir_args
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .sir_thread
     mov [rbp - SIR_FLAG], rdi          ; argument array until flag conversion
     mov rdi, [rdi]
     call posix_int32_arg
@@ -705,6 +717,9 @@ DEF_FUNC_LOCAL signal_method_siginterrupt, SIR_FRAME
     FAIL exc_TypeError_type, "siginterrupt expected 2 arguments", .sir_fail
 .sir_range:
     FAIL exc_ValueError_type, "signal number out of range", .sir_fail
+.sir_thread:
+    FAIL exc_ValueError_type, \
+        "signal only works in main thread of the main interpreter", .sir_fail
 .sir_fail:
     xor eax, eax
     leave
@@ -772,6 +787,9 @@ global signal_method_alarm
 DEF_FUNC signal_method_alarm, 16
     cmp rsi, 1
     jne .sal_argerr
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .sal_thread
     mov rax, [rdi]
     V_UNPACK rax, rdx
     mov rdi, rax
@@ -786,6 +804,13 @@ DEF_FUNC signal_method_alarm, 16
     ret
 .sal_argerr:
     SET_EXC exc_TypeError_type, "alarm() takes exactly 1 argument"
+    xor eax, eax
+    leave
+    ret
+.sal_thread:
+    SET_EXC exc_ValueError_type, \
+        "signal only works in main thread of the main interpreter"
+    xor eax, eax
     leave
     ret
 .idx_fail:                      ; not an index: the exception is pending
@@ -1132,6 +1157,9 @@ DEF_FUNC signal_method_setitimer, SSI_FRAME
     jl .ssi_argerr
     cmp rsi, 3
     jg .ssi_argerr
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .ssi_thread
     push rsi
     push rdi
 
@@ -1200,6 +1228,9 @@ DEF_FUNC signal_method_setitimer, SSI_FRAME
     xor edx, edx
     call set_type_error_counted
     jmp .ssi_fail
+.ssi_thread:
+    FAIL exc_ValueError_type, \
+        "signal only works in main thread of the main interpreter", .ssi_fail
 END_FUNC signal_method_setitimer
 
 ;; ============================================================================

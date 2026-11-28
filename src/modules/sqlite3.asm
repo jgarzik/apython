@@ -707,6 +707,7 @@ DEF_FUNC sq_open, SO_FRAME
     mov qword [rax + SqlDb.trace_cb], 0
     mov qword [rax + SqlDb.progress_cb], 0
     mov qword [rax + SqlDb.auth_cb], 0
+    mov qword [rax + SqlDb.closing], 0
     mov rsi, rax
     lea rdi, [rel sq_db_table]
     push rsi
@@ -789,6 +790,9 @@ DEF_FUNC sq_close, SC_FRAME
     call sq_tbl_get
     ERR_NULL .fail
     mov [rbp - SC_NODE], rax
+    cmp qword [rax + SqlDb.closing], 0
+    jne .already_closing
+    mov qword [rax + SqlDb.closing], 1
     mov rcx, [rax + SqlDb.db]
     mov [rbp - SC_DB], rcx
 
@@ -823,7 +827,14 @@ DEF_FUNC sq_close, SC_FRAME
     mov [rbp - SC_RC], rax
 
     cmp qword [rbp - SC_RC], SQLITE_OK
-    jne .ret_rc
+    je .finish_close
+    mov rax, [rbp - SC_NODE]
+    mov qword [rax + SqlDb.closing], 0
+    jmp .ret_rc
+.already_closing:
+    mov qword [rbp - SC_RC], SQLITE_BUSY
+    jmp .ret_rc
+.finish_close:
 
     ; Remove slot and free SqlDb plus any stored hook SqlCb structs.
     lea rdi, [rel sq_db_table]

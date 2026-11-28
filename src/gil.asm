@@ -454,6 +454,8 @@ DEF_FUNC gil_fork, GF_FRAME
     mov qword [rax + ThreadState.ts_next], 0
     mov qword [rax + ThreadState.ts_prev], 0
     call thread_running_reset
+    extern systrace_after_fork_child
+    call systrace_after_fork_child
     mov eax, SYS_gettid_nr
     syscall
     mov [gs:ThreadState.ts_native_id], rax
