@@ -929,6 +929,7 @@ END_FUNC array_length
 ;; array_sq_item(rdi = the array, rsi = index) -> rax = a Value, or 0 raising
 ;; Negative indices count from the end, as every sequence here does.
 ;; ============================================================================
+global array_sq_item
 DEF_FUNC array_sq_item, 8
     push rbx
     mov rbx, rdi
@@ -1473,15 +1474,31 @@ DEF_FUNC array_subscript, 8   ; + 1 push = 16, 16-aligned
     ret
 END_FUNC array_subscript
 
+extern array_concat
+extern array_inplace_concat
+extern array_repeat
+extern array_inplace_repeat
+extern array_contains
+extern array_subscript_full
+extern array_ass_subscript_full
+extern array_m_add
+extern array_m_iadd
+extern array_m_mul
+extern array_m_imul
+extern array_m_contains
+extern array_m_delitem
+extern array_m_iter
+
 ;; ============================================================================
-;; array_ass_subscript(rdi = the array, rsi = key Value, rdx = value Value)
+;; array_ass_subscript_int(rdi = the array, rsi = key Value, rdx = value Value)
 ;;   -> eax = 0 on success, or -1 raising.  A NULL value is `del a[i]`.
 ;; ============================================================================
 AAS_ARR   equ 8
 AAS_VAL   equ 16
 AAS_IDX   equ 24
 AAS_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
-DEF_FUNC array_ass_subscript, AAS_FRAME
+global array_ass_subscript_int
+DEF_FUNC array_ass_subscript_int, AAS_FRAME
     mov [rbp - AAS_ARR], rdi
     mov [rbp - AAS_VAL], rdx
     mov rdi, rsi
@@ -1557,26 +1574,26 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     mov eax, -1
     leave
     ret
-END_FUNC array_ass_subscript
+END_FUNC array_ass_subscript_int
 
 section .data
 align 8
 array_seq_methods:
     dq array_length             ; +0:  sq_length
-    dq 0                        ; +8:  sq_concat
-    dq 0                        ; +16: sq_repeat
+    dq array_concat             ; +8:  sq_concat
+    dq array_repeat             ; +16: sq_repeat
     ; sq_item is what reversed() looks for, and mp_subscript does not cover it.
     dq array_sq_item            ; +24: sq_item
     dq 0                        ; +32: sq_ass_item (mp_ass_subscript covers it)
-    dq 0                        ; +40: sq_contains
-    dq 0                        ; +48: sq_inplace_concat
-    dq 0                        ; +56: sq_inplace_repeat
+    dq array_contains           ; +40: sq_contains
+    dq array_inplace_concat     ; +48: sq_inplace_concat
+    dq array_inplace_repeat     ; +56: sq_inplace_repeat
 
 align 8
 array_mapping_methods:
     dq array_length             ; mp_length        +0
-    dq array_subscript          ; mp_subscript     +8
-    dq array_ass_subscript      ; mp_ass_subscript +16
+    dq array_subscript_full     ; mp_subscript     +8
+    dq array_ass_subscript_full ; mp_ass_subscript +16
 
 align 8
 global array_type
@@ -2913,7 +2930,15 @@ DEF_FUNC array_module_create, AMC_FRAME
     AM_ADD_METHOD array_m_buffer_info, "buffer_info"
     AM_ADD_METHOD array_m_getitem,     "__getitem__"
     AM_ADD_METHOD array_m_setitem,     "__setitem__"
+    AM_ADD_METHOD array_m_delitem,     "__delitem__"
     AM_ADD_METHOD array_m_len,         "__len__"
+    AM_ADD_METHOD array_m_iter,        "__iter__"
+    AM_ADD_METHOD array_m_contains,    "__contains__"
+    AM_ADD_METHOD array_m_add,         "__add__"
+    AM_ADD_METHOD array_m_iadd,        "__iadd__"
+    AM_ADD_METHOD array_m_mul,         "__mul__"
+    AM_ADD_METHOD array_m_mul,         "__rmul__"
+    AM_ADD_METHOD array_m_imul,        "__imul__"
     AM_ADD_METHOD array_m_init,        "__init__"
     mov rdi, rbx
     lea rsi, [rel array_m_new]
@@ -3017,6 +3042,7 @@ END_FUNC array_module_create
 ;; array has an iterator type of its own; this one answers the same items in
 ;; the same order, and it is the one already written.
 ;; ============================================================================
+global array_tp_iter
 DEF_FUNC array_tp_iter
     extern seq_iter_new
     call seq_iter_new
@@ -3036,7 +3062,7 @@ DEF_FUNC array_m_getitem
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
     leave
-    jmp array_subscript
+    jmp array_subscript_full
 .amg_arity:
     SET_EXC exc_TypeError_type, "__getitem__() takes exactly one argument"
     leave
@@ -3052,7 +3078,7 @@ DEF_FUNC array_m_setitem
     mov rdx, [rdi + 16]
     mov rsi, [rdi + 8]
     mov rdi, [rdi]
-    call array_ass_subscript
+    call array_ass_subscript_full
     test eax, eax
     js .ams_fail
     LOAD_NONE rax
