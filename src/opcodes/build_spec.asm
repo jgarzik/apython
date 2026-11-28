@@ -156,40 +156,37 @@ DEF_FUNC_BARE op_for_iter_list
     ; takes, and itertools.dropwhile is written exactly that way.
     test rax, rax
     jz .fil_exhausted
+    mov r11, rax
+    OBJ_LOCK r11
     mov rcx, [rdi + PyListIterObject.it_index]     ; current index
 
     ; Check bounds
-    cmp rcx, [rax + PyListObject.ob_size]
-    jge .fil_exhausted
+    cmp rcx, [r11 + PyListObject.ob_size]
+    jge .fil_unlock_exhausted
 
-    ; Get item and INCREF (payload + tag arrays)
-    ; A list slot already holds a Value.  This used to V_UNPACK it into a
-    ; (payload, tag) pair and V_PACK it straight back around the refcount
-    ; bump, which made the SPECIALIZATION slower at handling the value than
-    ; the generic list_iter_next it exists to beat -- that one has always
-    ; been two instructions here.
-    mov rdx, [rax + PyListObject.ob_item]
+    ; Get item and pin under OBJ_LOCK
+    mov rdx, [r11 + PyListObject.ob_item]
     mov rax, [rdx + rcx * 8]      ; the item Value
     INCREF_V rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
+    OBJ_UNLOCK r11
 
     add rsp, 8                     ; discard saved jump offset
     VPUSH rax
     add rbx, 2                     ; skip CACHE
     DISPATCH
 
+.fil_unlock_exhausted:
+    OBJ_UNLOCK r11
 .fil_exhausted:
-    ; Clear it_seq BEFORE releasing the list, for the reason list_iter_next
-    ; carries in full: a __del__ that re-enters this iterator must find it
-    ; exhausted rather than pointing at storage being freed.
     push rdi                       ; save iterator ptr
-    mov rdi, [rdi + PyListIterObject.it_seq]
-    mov rcx, [rsp]
-    mov qword [rcx + PyListIterObject.it_seq], 0
-    test rdi, rdi
+    xor eax, eax
+    xchg [rdi + PyListIterObject.it_seq], rax
+    test rax, rax
     jz .fil_already_exhausted
+    mov rdi, rax
     call obj_decref
 .fil_already_exhausted:
     pop rdi
@@ -236,7 +233,7 @@ END_FUNC op_for_iter_list
 ;; site that is about to raise anyway.
 ;; ============================================================================
 
-%macro BSUB_INT_BODY 2          ; %1 = handler name, %2 = type symbol
+%macro BSUB_INT_BODY 3          ; %1 = handler name, %2 = type symbol, %3 = lock (1=list, 0=tuple)
 DEF_FUNC_BARE %1
     mov rax, [r13 - 8]              ; the key Value
     V_IS_INT rax, rdx
@@ -249,24 +246,24 @@ DEF_FUNC_BARE %1
     jne %%deopt
 
     V_TO_I64 rax                    ; rax = the index, as a plain int64
+%if %3
+    OBJ_LOCK rdi
+%endif
     mov rdx, [rdi + PyListObject.ob_size]
     test rax, rax
     jns %%nonneg
     add rax, rdx                    ; a negative index counts from the end
 %%nonneg:
     cmp rax, rdx
-    jae %%deopt                     ; unsigned, so it catches a still-negative
-                                    ; index as well as one past the end
+    jae %%unlock_deopt
 
     mov rdx, [rdi + PyListObject.ob_item]
     mov rax, [rdx + rax*8]          ; the item, already a Value
     INCREF_V rax, rdx
+%if %3
+    OBJ_UNLOCK rdi
+%endif
 
-    ; The container's own reference goes away with its stack slot.  The item
-    ; is INCREFd above the drop, so it survives even when the container was
-    ; the last thing holding it -- `f()[0]` is exactly that shape.  It has to
-    ; sit in a callee-saved register meanwhile: DECREF_V calls obj_dealloc
-    ; when the count reaches zero, and that clobbers every caller-saved one.
     mov r15, rax
     DECREF_V rdi, rdx
     VREPLACE2 r15
@@ -274,6 +271,10 @@ DEF_FUNC_BARE %1
     add rbx, 2                      ; skip 1 CACHE entry
     DISPATCH
 
+%%unlock_deopt:
+%if %3
+    OBJ_UNLOCK rdi
+%endif
 %%deopt:
     mov byte [rbx - 2], OP_BINARY_SUBSCR
     sub rbx, 2
@@ -281,26 +282,12 @@ DEF_FUNC_BARE %1
 END_FUNC %1
 %endmacro
 
-;; ============================================================================
-;; op_binary_subscr_list_int (235) -> nothing; replaces the pair with the item
-;; ============================================================================
-BSUB_INT_BODY op_binary_subscr_list_int, list_type
+BSUB_INT_BODY op_binary_subscr_list_int, list_type, 1
+
+BSUB_INT_BODY op_binary_subscr_tuple_int, tuple_type, 0
 
 ;; ============================================================================
-;; op_binary_subscr_tuple_int (236) -> nothing; replaces the pair with the item
-;; ============================================================================
-BSUB_INT_BODY op_binary_subscr_tuple_int, tuple_type
-
-;; ============================================================================
-;; op_store_subscr_list_int (237) -> nothing; stores and pops all three
-;;
-;; Stack on entry, top last:  value, container, key.
-;;
-;; The new value is not INCREFd: the stack was holding a reference to it and
-;; the list takes that one over.  The old occupant is released afterwards, and
-;; the store happens BEFORE the release, because a __del__ reached from it can
-;; run arbitrary code -- including code that reallocates ob_item, which would
-;; leave the address computed here pointing into a freed block.
+;; op_store_subscr_list_int (237) -> nothing; stores TOS2 into list[index]
 ;; ============================================================================
 DEF_FUNC_BARE op_store_subscr_list_int
     mov rax, [r13 - 8]              ; the key Value
@@ -314,24 +301,24 @@ DEF_FUNC_BARE op_store_subscr_list_int
     jne .ssl_deopt
 
     V_TO_I64 rax
+    OBJ_LOCK rdi
     mov rdx, [rdi + PyListObject.ob_size]
     test rax, rax
     jns .ssl_nonneg
     add rax, rdx
 .ssl_nonneg:
     cmp rax, rdx
-    jae .ssl_deopt
+    jae .ssl_unlock_deopt
 
     mov rdx, [rdi + PyListObject.ob_item]
     lea rcx, [rdx + rax*8]          ; the slot
     mov rsi, [r13 - 24]             ; the new value, owned by the stack
     mov rax, [rcx]                  ; the old occupant, owned by the list
     mov [rcx], rsi                  ; the list takes the stack's reference
+    OBJ_UNLOCK rdi
 
     sub r13, 24                     ; all three operands are consumed
 
-    ; Both drops can call obj_dealloc, so the container is parked in a
-    ; callee-saved register across the first of them.
     mov r15, rdi
     DECREF_V rax, rdx               ; the value that was there
     DECREF_V r15, rdx               ; the container's stack reference
@@ -339,6 +326,8 @@ DEF_FUNC_BARE op_store_subscr_list_int
     add rbx, 2                      ; skip 1 CACHE entry
     DISPATCH
 
+.ssl_unlock_deopt:
+    OBJ_UNLOCK rdi
 .ssl_deopt:
     mov byte [rbx - 2], OP_STORE_SUBSCR
     sub rbx, 2
@@ -367,7 +356,7 @@ END_FUNC op_store_subscr_list_int
 ;; where it stood before the instruction and releases the slot itself.
 ;; ============================================================================
 
-%macro UNPACK_SEQ_BODY 3        ; %1 = handler, %2 = type symbol, %3 = size field
+%macro UNPACK_SEQ_BODY 4        ; %1 = handler, %2 = type symbol, %3 = size field, %4 = lock
 DEF_FUNC_BARE %1
     mov rdi, [r13 - 8]              ; the sequence Value, not yet popped
     V_TEST_PTR rdi, rdx
@@ -375,8 +364,11 @@ DEF_FUNC_BARE %1
     lea rdx, [rel %2]
     cmp [rdi + PyObject.ob_type], rdx
     jne %%deopt
+%if %4
+    OBJ_LOCK rdi
+%endif
     cmp rcx, [rdi + %3]             ; ecx is the expected count
-    jne %%deopt
+    jne %%unlock_deopt
 
     ; Past the last guard, so rcx is free.
     mov rsi, [rdi + PyListObject.ob_item]
@@ -385,8 +377,6 @@ DEF_FUNC_BARE %1
     lea r13, [r13 + rcx*8 - 8]      ; the sequence slot goes, count slots come
     dec ecx                         ; source index, count-1 down to 0
 
-    ; items[count-1] lands deepest and items[0] on top, so that the first
-    ; assignment target pops the first element.
 %%fill:
     test ecx, ecx
     js %%done
@@ -399,12 +389,17 @@ DEF_FUNC_BARE %1
     jmp %%fill
 
 %%done:
-    ; Every item is INCREFd above, so the sequence can go even when it was the
-    ; last thing holding them.
+%if %4
+    OBJ_UNLOCK rdi
+%endif
     DECREF_V rdi, rdx
     add rbx, 2                      ; skip 1 CACHE entry
     DISPATCH
 
+%%unlock_deopt:
+%if %4
+    OBJ_UNLOCK rdi
+%endif
 %%deopt:
     mov byte [rbx - 2], OP_UNPACK_SEQUENCE
     jmp op_unpack_sequence
@@ -414,9 +409,9 @@ END_FUNC %1
 ;; ============================================================================
 ;; op_unpack_sequence_tuple (238) -> nothing; replaces the tuple with its items
 ;; ============================================================================
-UNPACK_SEQ_BODY op_unpack_sequence_tuple, tuple_type, PyTupleObject.ob_size
+UNPACK_SEQ_BODY op_unpack_sequence_tuple, tuple_type, PyTupleObject.ob_size, 0
 
 ;; ============================================================================
 ;; op_unpack_sequence_list (239) -> nothing; replaces the list with its items
 ;; ============================================================================
-UNPACK_SEQ_BODY op_unpack_sequence_list, list_type, PyListObject.ob_size
+UNPACK_SEQ_BODY op_unpack_sequence_list, list_type, PyListObject.ob_size, 1

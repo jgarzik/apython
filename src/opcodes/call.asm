@@ -575,7 +575,14 @@ DEF_FUNC op_call_function_ex
     extern list_type
     lea rdx, [rel list_type]
     cmp rcx, rdx
+    jne .cfex_not_list
+    ; In free-threaded mode, materialise list *args to an immutable tuple so
+    ; concurrent list mutation cannot invalidate ob_item during tp_call.
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
     je .cfex_args_ok
+    jmp .cfex_materialise
+.cfex_not_list:
     ; A type with neither tp_iter nor sq_item is refused HERE rather than by
     ; the materialisation below, because CPython's check_args_iterable runs
     ; before the conversion and so has the callable to name: `f(*5)` is

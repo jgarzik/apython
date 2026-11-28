@@ -91,72 +91,71 @@ DEF_FUNC list_method_pop, 8            ; 3 pushes, so rsp is 16-aligned
 
     mov rax, rdi            ; rax = args ptr
     mov rbx, [rax]          ; self (list)
-    ; Check if list is being sorted (ob_item == NULL)
-    cmp qword [rbx + PyListObject.ob_item], 0
-    je .pop_sorting
     mov r12, rsi            ; nargs
 
-    ; Get index
+    ; Get index (compute __index__ UNLOCKED before taking OBJ_LOCK)
     cmp r12, 2
     jge .pop_idx
-    ; Default: pop last element
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .pop_unlock_sorting
     mov r13, [rbx + PyListObject.ob_size]
     dec r13                 ; index = size - 1
-    jmp .pop_do
+    jmp .pop_do_locked
 
 .pop_idx:
     mov rdi, [rax + 8]    ; args[1]
-    V_UNPACK rdi, rdx       ; args[1]
-    call obj_as_index       ; an index, so __index__ counts and a str does not
+    V_UNPACK rdi, rdx
+    call obj_as_index
     ERR_M1 .pop_fail
     mov r13, rax
 
-    ; Handle negative index
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .pop_unlock_sorting
     test r13, r13
-    jns .pop_do
+    jns .pop_do_locked
     add r13, [rbx + PyListObject.ob_size]
 
-.pop_do:
-    ; Bounds check
+.pop_do_locked:
+    ; Bounds check under OBJ_LOCK
     test r13, r13
-    jl .pop_error
+    jl .pop_unlock_error
     cmp r13, [rbx + PyListObject.ob_size]
-    jge .pop_error
+    jge .pop_unlock_error
 
-    ; Get the item (it already has refs from being in the list)
+    ; Take item (ownership transfers to caller)
     mov rax, [rbx + PyListObject.ob_item]
-    mov r12, [rax + r13 * 8]        ; payload to return
-    V_UNPACK r12, rdx
-    push rdx                        ; save tag on stack
-    ; Don't DECREF since we're transferring ownership to caller
+    mov r12, [rax + r13 * 8]
 
-    ; Shift payloads down: memmove(&payloads[idx], &payloads[idx+1], (size-1-idx)*8)
-    mov rax, [rbx + PyListObject.ob_item]
-    lea rdi, [rax + r13 * 8]        ; dst = &payloads[idx]
-    lea rsi, [rdi + 8]              ; src = &payloads[idx+1]
+    ; Shift payloads down
+    lea rdi, [rax + r13 * 8]
+    lea rsi, [rdi + 8]
     mov rdx, [rbx + PyListObject.ob_size]
     sub rdx, r13
-    dec rdx                         ; count = size - idx - 1
-    shl rdx, 3                      ; bytes = count * 8
-    jz .pop_shrink                  ; nothing to shift if popping last
+    dec rdx
+    shl rdx, 3
+    jz .pop_shrink
     call ap_memmove
 
 .pop_shrink:
     dec qword [rbx + PyListObject.ob_size]
+    OBJ_UNLOCK rbx
 
-    ; Return item (ownership transferred, no extra INCREF needed)
     mov rax, r12
-    pop rdx                  ; item tag
     pop r13
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.pop_unlock_error:
+    OBJ_UNLOCK rbx
 .pop_error:
     SET_EXC exc_IndexError_type, "pop index out of range"
     jmp .pop_fail
+.pop_unlock_sorting:
+    OBJ_UNLOCK rbx
 .pop_sorting:
     call set_list_sorting_error
 .pop_fail:
@@ -197,6 +196,9 @@ DEF_FUNC list_method_insert
     mov r13, [rax + 16]     ; item = args[2] payload (16B stride)
     V_UNPACK r13, r14       ; args[2]
 
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .ins_unlock_sorting
     ; Clamp index to [0, size]
     test r12, r12
     jns .ins_pos
@@ -210,43 +212,37 @@ DEF_FUNC list_method_insert
     mov r12, [rbx + PyListObject.ob_size]
 .ins_ok:
 
-    ; First append a dummy to grow the list if needed
-    ; (reuse list_append logic for growth, then shift)
-    ; Actually, let's just handle growth manually:
-    ; Check if size == allocated
     mov rax, [rbx + PyListObject.ob_size]
     cmp rax, [rbx + PyListObject.allocated]
     jl .ins_no_grow
-    ; Double capacity
     mov rdi, [rbx + PyListObject.allocated]
     shl rdi, 1
     mov [rbx + PyListObject.allocated], rdi
     mov rdi, [rbx + PyListObject.ob_item]
     mov rsi, [rbx + PyListObject.allocated]
-    shl rsi, 3              ; new_cap * 8
+    shl rsi, 3
     call ap_realloc
     mov [rbx + PyListObject.ob_item], rax
 .ins_no_grow:
 
-    ; Shift items up: memmove(&items[idx+1], &items[idx], (size-idx)*8)
     mov rax, [rbx + PyListObject.ob_item]
     mov rcx, r12
-    shl rcx, 3              ; idx * 8
-    lea rsi, [rax + rcx]    ; src = &items[idx]
-    lea rdi, [rsi + 8]      ; dst = &items[idx+1]
+    shl rcx, 3
+    lea rsi, [rax + rcx]
+    lea rdi, [rsi + 8]
     mov rdx, [rbx + PyListObject.ob_size]
-    sub rdx, r12            ; count = size - idx
-    shl rdx, 3              ; bytes = count * 8
-    jz .ins_place           ; nothing to shift if inserting at end
+    sub rdx, r12
+    shl rdx, 3
+    jz .ins_place
     call ap_memmove
 
 .ins_place:
-    ; Place item at index
     mov rax, [rbx + PyListObject.ob_item]
     INCREF_VAL r13, r14
     V_PACK r13, r14
     mov [rax + r12 * 8], r13
     inc qword [rbx + PyListObject.ob_size]
+    OBJ_UNLOCK rbx
 
     RET_NONE
     pop r14
@@ -256,6 +252,8 @@ DEF_FUNC list_method_insert
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.ins_unlock_sorting:
+    OBJ_UNLOCK rbx
 .ins_sorting:
     call set_list_sorting_error
     jmp .ins_fail
@@ -276,23 +274,26 @@ END_FUNC list_method_insert
 ;; args[0]=self, reverse in place
 ;; Fails: 0
 ;; ============================================================================
-DEF_FUNC list_method_reverse
-    ; No push: the body uses rax, rcx, rdi, rsi, r8 and r10.  rbx was saved
-    ; and never read.
-    mov rax, [rdi]          ; self
-    ; Check if list is being sorted (ob_item == NULL)
-    cmp qword [rax + PyListObject.ob_item], 0
+DEF_FUNC list_method_reverse, 8         ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, [rdi]          ; self
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
     je .rev_sorting
-    mov rsi, [rax + PyListObject.ob_size]
-    mov rdi, [rax + PyListObject.ob_item]
+    mov rsi, [rbx + PyListObject.ob_size]
+    mov rdi, [rbx + PyListObject.ob_item]
     call list_reverse_values
+    OBJ_UNLOCK rbx
 .rev_done:
     RET_NONE
+    pop rbx
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
 .rev_sorting:
+    OBJ_UNLOCK rbx
     call set_list_sorting_error
+    pop rbx
     leave
     ret
 END_FUNC list_method_reverse
@@ -494,20 +495,23 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov rbx, [rbp - LS_LIST]       ; reload list (clobbered by kw parsing)
 
 .ls_no_kw:
-    cmp r12, 2
-    jb .ls_trivial
-
-    ; --- Take the array away from the list ------------------------------
-    ; ob_item == NULL is what every other list method tests to decide that a
-    ; sort is in progress, so from here to the restore below any re-entrant
-    ; append, pop, insert, clear, extend, remove or reverse raises.
+    ; Atomically detach ob_item under OBJ_LOCK (catches concurrent sort too)
+    OBJ_LOCK rbx
     mov rax, [rbx + PyListObject.ob_item]
+    test rax, rax
+    jz .ls_unlock_sorting
+    mov r12, [rbx + PyListObject.ob_size]
+    mov [rbp - LS_N], r12
+    cmp r12, 2
+    jb .ls_trivial_locked
+
     mov [rbp - LS_ITEMS], rax
     mov [rbp - LS_KEYS], rax       ; with no key=, the items ARE the keys
     mov rax, [rbx + PyListObject.allocated]
     mov [rbp - LS_ALLOC], rax
     mov qword [rbx + PyListObject.ob_item], 0
     mov qword [rbx + PyListObject.ob_size], 0
+    OBJ_UNLOCK rbx
 
     cmp qword [rbp - LS_KEY], 0
     jz .ls_keys_ready
@@ -604,6 +608,7 @@ DEF_FUNC list_method_sort, LS_FRAME
 .ls_restore:
     ; --- did anything reach the list while it was empty? -----------------
     mov rbx, [rbp - LS_LIST]
+    OBJ_LOCK rbx
     mov r14, [rbx + PyListObject.ob_item]   ; what the mutation left, if any
     mov r15, [rbx + PyListObject.ob_size]
     mov rax, [rbp - LS_ITEMS]
@@ -612,6 +617,7 @@ DEF_FUNC list_method_sort, LS_FRAME
     mov [rbx + PyListObject.allocated], rax
     mov rax, [rbp - LS_N]
     mov [rbx + PyListObject.ob_size], rax
+    OBJ_UNLOCK rbx
     test r14, r14
     jnz .ls_mutated
 
@@ -647,28 +653,35 @@ DEF_FUNC list_method_sort, LS_FRAME
     SET_EXC exc_ValueError_type, "list modified during sort"
     jmp .ls_error_have
 
-.ls_trivial:
-    ; n < 2 and nothing to sort -- but the KEY still runs, once per element.
-    ; CPython computes them before it looks at the length, so `sorted([1],
-    ; key=0)` is a TypeError there and was [1] here, and a key that raises
-    ; was not called at all.
+.ls_unlock_sorting:
+    OBJ_UNLOCK rbx
+    call set_list_sorting_error
+    jmp .ls_error_have
+
+.ls_trivial_locked:
     cmp qword [rbp - LS_KEY], 0
-    jz .ls_trivial_done
+    jz .ls_trivial_unlock_done
     cmp r12, 1
-    jne .ls_trivial_done
-    mov rax, [rbx + PyListObject.ob_item]
-    test rax, rax
-    jz .ls_trivial_done
+    jne .ls_trivial_unlock_done
     mov rdi, [rax]                 ; items[0], a Value
+    INCREF_V rdi, rcx
+    OBJ_UNLOCK rbx
     sub rsp, 16
     mov [rsp], rdi
     mov rdi, [rbp - LS_KEY]
     mov rsi, rsp
     mov edx, 1
-    call obj_call_n
+    call obj_call_n                ; err: checked below after dropping pinned item
+    mov r12, rax
+    mov rdi, [rsp]
     add rsp, 16
-    ERR_NULL .ls_error_return
-    XDECREF_V rax, rcx             ; only whether it could be computed
+    DECREF_V rdi, rcx
+    test r12, r12
+    jz .ls_error_return
+    XDECREF_V r12, rcx             ; only whether it could be computed
+    jmp .ls_trivial_done
+.ls_trivial_unlock_done:
+    OBJ_UNLOCK rbx
 .ls_trivial_done:
     RET_NONE
     pop r15
@@ -800,30 +813,40 @@ DEF_FUNC list_method_index, LI_FRAME
     mov rax, [rbp - LI_IDX]
     cmp rax, [rbp - LI_SIZE]
     jge .index_not_found
-    ; Re-read the size: an element's __eq__ can shorten the list.
     mov rbx, [rbp - LI_LIST]
+    OBJ_LOCK rbx
     cmp rax, [rbx + PyListObject.ob_size]
-    jge .index_not_found
+    jge .index_unlock_not_found
 
-    mov rbx, [rbx + PyListObject.ob_item]
-    mov rdi, [rbx + rax * 8]    ; the element Value
+    mov rcx, [rbx + PyListObject.ob_item]
+    mov rdi, [rcx + rax * 8]    ; the element Value
 
-    ; Was a hand-rolled type switch feeding tp_richcompare, with a NULL
-    ; result meaning "no match" -- so NotImplemented never tried the
-    ; reflected operand and a raising __eq__ was reported as absence.
     mov rsi, [rbp - LI_VPAY]
-    VALUE_EQ_FAST rdi, rsi, rdx, .index_found, .index_next
+    VALUE_EQ_FAST rdi, rsi, rdx, .index_unlock_found, .index_unlock_next
+    INCREF_V rdi, rdx
+    OBJ_UNLOCK rbx
+    mov r12, rdi                ; save pinned element across obj_richcompare_bool
     mov edx, PY_EQ
-    call obj_richcompare_bool
+    call obj_richcompare_bool   ; err: checked below after dropping pin
+    push rax
+    push rax
+    DECREF_V r12, rcx
+    pop rax
+    pop rax
     cmp eax, -1
     je .index_error
     test eax, eax
     jnz .index_found
+    jmp .index_next
 
+.index_unlock_next:
+    OBJ_UNLOCK rbx
 .index_next:
     inc qword [rbp - LI_IDX]
     jmp .index_loop
 
+.index_unlock_found:
+    OBJ_UNLOCK rbx
 .index_found:
     mov rdi, [rbp - LI_IDX]
     call int_from_i64
@@ -840,6 +863,8 @@ DEF_FUNC list_method_index, LI_FRAME
     leave
     ret
 
+.index_unlock_not_found:
+    OBJ_UNLOCK rbx
 .index_not_found:
     ; CPython names the value it could not find, through its repr.
     mov rsi, [rbp - LI_VPAY]
@@ -871,29 +896,45 @@ DEF_FUNC list_method_count, LC_FRAME
 
 .count_loop:
     mov rcx, [rbp - LC_IDX]
-    ; The size is re-read every pass: an element's __eq__ can shorten the
-    ; list under us.
+    OBJ_LOCK rbx
     mov r13, [rbx + PyListObject.ob_size]
     cmp rcx, r13
-    jge .count_done
+    jge .count_unlock_done
 
     mov rax, [rbx + PyListObject.ob_item]
     mov rdi, [rax + rcx * 8]    ; the element Value
     mov rsi, r12
-    VALUE_EQ_FAST rdi, rsi, rdx, .count_hit, .count_next
+    VALUE_EQ_FAST rdi, rsi, rdx, .count_unlock_hit, .count_unlock_next
+    INCREF_V rdi, rdx
+    OBJ_UNLOCK rbx
+    mov r13, rdi                ; save pinned element
     mov edx, PY_EQ
-    call obj_richcompare_bool
+    call obj_richcompare_bool   ; err: checked below after dropping pin
+    push rax
+    push rax
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     cmp eax, -1
     je .count_error
     test eax, eax
     jz .count_next
 .count_hit:
     inc r14
+    jmp .count_next
 
+.count_unlock_hit:
+    OBJ_UNLOCK rbx
+    inc r14
+    jmp .count_next
+.count_unlock_next:
+    OBJ_UNLOCK rbx
 .count_next:
     inc qword [rbp - LC_IDX]
     jmp .count_loop
 
+.count_unlock_done:
+    OBJ_UNLOCK rbx
 .count_done:
     mov rdi, r14
     call int_from_i64
@@ -1344,9 +1385,12 @@ DEF_FUNC list_method_extend, LE_FRAME
     ; l.extend(l) is why that helper handles a source that is the
     ; destination's own array.
 .extend_list:
-    mov rdx, [r12 + PyListObject.ob_size]
-    mov rsi, [r12 + PyListObject.ob_item]
-    jmp .extend_from_array
+    mov rdi, [rbp - LE_SELF]
+    mov rsi, r12
+    extern list_extend_from_list
+    call list_extend_from_list
+    ERR_M1 .extend_iter_raised
+    jmp .extend_done
 
 .extend_tuple:
     mov rdx, [r12 + PyTupleObject.ob_size]
@@ -1484,29 +1528,78 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     xor r14d, r14d          ; index = 0
 
 .lremove_loop:
-    ; Re-read the size each pass: an element's __eq__ can shorten the list.
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .lremove_unlock_sorting
     mov r13, [rbx + PyListObject.ob_size]
     cmp r14, r13
-    jge .lremove_not_found
+    jge .lremove_unlock_not_found
 
     mov rax, [rbx + PyListObject.ob_item]
     mov rdi, [rax + r14 * 8]    ; the element Value
 
-    ; Was a hand-rolled type switch feeding tp_richcompare, treating a NULL
-    ; result as "no match" -- so NotImplemented never reached the reflected
-    ; operand and a raising __eq__ became a ValueError about absence.
     mov rsi, r12
-    VALUE_EQ_FAST rdi, rsi, rdx, .lremove_found, .lremove_next
+    VALUE_EQ_FAST rdi, rsi, rdx, .lremove_found_locked, .lremove_unlock_next
+    INCREF_V rdi, rdx
+    OBJ_UNLOCK rbx
+    mov r15, rdi                ; save pinned element
     mov edx, PY_EQ
-    call obj_richcompare_bool
+    call obj_richcompare_bool   ; err: checked below after dropping pin
+    push rax
+    push rax
+    DECREF_V r15, rcx
+    pop rax
+    pop rax
     cmp eax, -1
     je .lremove_error
     test eax, eax
-    jnz .lremove_found
+    jnz .lremove_reacquire_found
+    jmp .lremove_next
 
+.lremove_unlock_next:
+    OBJ_UNLOCK rbx
 .lremove_next:
     inc r14
     jmp .lremove_loop
+
+.lremove_reacquire_found:
+    OBJ_LOCK rbx
+    cmp qword [rbx + PyListObject.ob_item], 0
+    je .lremove_unlock_sorting
+    cmp r14, [rbx + PyListObject.ob_size]
+    jge .lremove_unlock_not_found
+
+.lremove_found_locked:
+    ; r14 = index of found item; OBJ_LOCK rbx HELD
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r12, [rax + r14 * 8]        ; removed Value, released after OBJ_UNLOCK
+
+    lea rdi, [rax + r14 * 8]
+    lea rsi, [rdi + 8]
+    mov rdx, [rbx + PyListObject.ob_size]
+    sub rdx, r14
+    dec rdx
+    shl rdx, 3
+    jz .lremove_shrink
+    call ap_memmove
+
+.lremove_shrink:
+    dec qword [rbx + PyListObject.ob_size]
+    OBJ_UNLOCK rbx
+
+    ; DECREF the removed item outside lock
+    mov rdi, r12
+    DECREF_V rdi, rsi
+
+    RET_NONE
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx             ; builtins return one Value
+    ret
 
 .lremove_error:
     xor eax, eax
@@ -1518,44 +1611,13 @@ DEF_FUNC list_method_remove, 8            ; 5 pushes, so rsp is 16-aligned
     leave
     ret
 
-.lremove_found:
-    ; r14 = index of found item
-    ; Get the item for DECREF
-    mov rax, [rbx + PyListObject.ob_item]
-    mov r12, [rax + r14 * 8]        ; the item Value
-
-    ; Shift payloads left: memmove(&payloads[idx], &payloads[idx+1], (size-1-idx)*8)
-    mov rax, [rbx + PyListObject.ob_item]
-    lea rdi, [rax + r14 * 8]
-    lea rsi, [rdi + 8]
-    mov rdx, [rbx + PyListObject.ob_size]
-    sub rdx, r14
-    dec rdx                 ; count = size - idx - 1
-    shl rdx, 3              ; bytes = count * 8
-    jz .lremove_shrink      ; nothing to shift if removing last
-    call ap_memmove
-
-.lremove_shrink:
-    dec qword [rbx + PyListObject.ob_size]
-
-    ; DECREF the removed item
-    mov rdi, r12
-    DECREF_V rdi, rsi
-
-    ; Return None
-    RET_NONE
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    V_PACK rax, rdx             ; builtins return one Value
-    ret
-
+.lremove_unlock_not_found:
+    OBJ_UNLOCK rbx
 .lremove_not_found:
     SET_EXC exc_ValueError_type, "list.remove(x): x not in list"
     jmp .lremove_error
+.lremove_unlock_sorting:
+    OBJ_UNLOCK rbx
 .lremove_sorting:
     call set_list_sorting_error
     jmp .lremove_error
@@ -1579,7 +1641,9 @@ DEF_FUNC list_method_reversed, 8            ; 1 push, so rsp is 16-aligned
 
     mov [rax + PyListIterObject.it_seq], rbx       ; it_seq = self
     INCREF rbx
+    OBJ_LOCK rbx
     mov rcx, [rbx + PyListObject.ob_size]
+    OBJ_UNLOCK rbx
     dec rcx                   ; it_index = ob_size - 1
     mov [rax + PyListIterObject.it_index], rcx
 

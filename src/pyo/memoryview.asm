@@ -170,6 +170,8 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .mv_view_released_free
     mov rcx, [rdi + PyMemoryViewObject.mv_source]
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
@@ -194,9 +196,15 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov [rax + PyMemoryViewObject.mv_readonly], rcx
     mov rcx, [rdi + PyMemoryViewObject.mv_stride]
     mov [rax + PyMemoryViewObject.mv_stride], rcx
+    OBJ_UNLOCK rdi
     mov edx, TAG_PTR
     leave
     ret
+.mv_view_released_free:
+    OBJ_UNLOCK rdi
+    mov rdi, rax
+    call ap_free
+    jmp .mv_released
 
 .mv_nargs_error:
     mov rsi, rdx
@@ -275,6 +283,14 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov rcx, [rcx + PyTypeObject.tp_as_buffer]
     mov esi, BUF_ACQUIRE
     call rcx
+    ; Re-read (buf, len) now that the export count pins the exporter's buffer.
+    mov rdi, [rbp - MV_ARG]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_buffer]
+    mov esi, BUF_GET
+    call rcx
+    mov [rbp - MV_BUF], rax
+    mov [rbp - MV_LEN], rdx
     pop rax
     pop rax
 
@@ -463,7 +479,9 @@ DEF_FUNC_BARE writable_buffer_acquire
     lea rcx, [rel memoryview_type]
     cmp [rdi + PyObject.ob_type], rcx
     jne bytearray_export_acquired
+    OBJ_LOCK rdi
     inc qword [rdi + PyMemoryViewObject.mv_exports]
+    OBJ_UNLOCK rdi
     ret
 END_FUNC writable_buffer_acquire
 
@@ -472,7 +490,9 @@ DEF_FUNC_BARE writable_buffer_release
     lea rcx, [rel memoryview_type]
     cmp [rdi + PyObject.ob_type], rcx
     jne bytearray_export_released
+    OBJ_LOCK rdi
     dec qword [rdi + PyMemoryViewObject.mv_exports]
+    OBJ_UNLOCK rdi
     ret
 END_FUNC writable_buffer_release
 
@@ -765,31 +785,32 @@ global memoryview_as_bytes
 ;; Fails: 0
 ;; for a released view.
 DEF_FUNC memoryview_as_bytes
-    ; A released view answers no questions -- that is what release() is for --
-    ; and `bytes(m)` reached this straight from bytes_type_call, which read a
-    ; buffer that is no longer there.  Asked before the pushes, so the raise
-    ; leaves nothing on this frame.
-    MV_LIVE_OR rdi, .mab_released
     push rbx
     push r12
     mov rbx, rdi
+    OBJ_LOCK rbx
+    MV_LIVE_OR rbx, .mab_unlock_released
     mov rdi, [rbx + PyMemoryViewObject.mv_len]
     extern bytes_new
     call bytes_new
     test rax, rax
-    jz .mab_done
+    jz .mab_unlock_done
     mov r12, rax
     mov rdi, rbx
     lea rsi, [r12 + PyBytesObject.data]
     call memoryview_copy_out
     mov rax, r12
-.mab_done:
+.mab_unlock_done:
+    OBJ_UNLOCK rbx
     pop r12
     pop rbx
     leave
     ret
-.mab_released:                  ; reached before the pushes
+.mab_unlock_released:
+    OBJ_UNLOCK rbx
     call memoryview_set_released
+    pop r12
+    pop rbx
     leave
     ret
 END_FUNC memoryview_as_bytes
@@ -1044,20 +1065,26 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     ; A released view has no .obj to report, and CPython refuses rather than
     ; answering None -- the source is exactly what release() let go of.
     mov rdi, [rbp - MVG_SELF]
-    MV_LIVE_OR rdi, .mvg_released
-    mov rdi, [rbp - MVG_SELF]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .mvg_unlock_released
     mov rax, [rdi + PyMemoryViewObject.mv_source]
     test rax, rax
-    jz .mvg_none
+    jz .mvg_unlock_none
     INCREF rax
+    OBJ_UNLOCK rdi
     mov edx, TAG_PTR
     leave
     ret
+.mvg_unlock_none:
+    OBJ_UNLOCK rdi
 .mvg_none:
     LOAD_NONE rax
     mov edx, TAG_PTR
     leave
     ret
+.mvg_unlock_released:
+    OBJ_UNLOCK rdi
+    jmp .mvg_released
 
 .mvg_shape:
     ; One dimension, so a 1-tuple of the item count.
@@ -1153,21 +1180,8 @@ DEF_FUNC memoryview_method_tobytes, MVM_FRAME
     test rsi, rsi
     jz .mvt_argerr
     mov rdi, [rdi]
-    mov [rbp - MVM_SELF], rdi
-    MV_LIVE_OR rdi, .mvt_released
-    ; A strided view has no contiguous run to hand over, so the bytes are
-    ; built empty and filled item by item.
-    mov rdi, [rbp - MVM_SELF]
-    mov rdi, [rdi + PyMemoryViewObject.mv_len]
-    extern bytes_new
-    call bytes_new
-    test rax, rax
-    jz .mvt_fail
-    push rax
-    mov rdi, [rbp - MVM_SELF]
-    lea rsi, [rax + PyBytesObject.data]
-    call memoryview_copy_out
-    pop rax
+    call memoryview_as_bytes
+    ERR_NULL .mvt_fail
     mov edx, TAG_PTR
     leave
     ret
@@ -1178,9 +1192,6 @@ DEF_FUNC memoryview_method_tobytes, MVM_FRAME
     ret
 .mvt_argerr:
     FAIL exc_TypeError_type, "tobytes() takes no arguments", .mvt_fail
-.mvt_released:
-    call memoryview_set_released
-    jmp .mvt_fail
 END_FUNC memoryview_method_tobytes
 
 ;; ============================================================================
@@ -1232,15 +1243,19 @@ DEF_FUNC memoryview_method_release, MVR_FRAME
     test rsi, rsi
     jz .mvrl_argerr
     mov rdi, [rdi]
+    ; Atomically check state/exports and detach mv_source under OBJ_LOCK;
+    ; release exporter counts and DECREF source after unlocking.
+    OBJ_LOCK rdi
     ; Releasing twice is not an error, as CPython has it.
     cmp qword [rdi + PyMemoryViewObject.mv_buf], MV_RELEASED
-    je .mvrl_done
+    je .mvrl_unlock_done
     mov rcx, [rdi + PyMemoryViewObject.mv_exports]
     test rcx, rcx
-    jnz .mvrl_exported
+    jnz .mvrl_unlock_exported
     mov qword [rdi + PyMemoryViewObject.mv_buf], MV_RELEASED
     mov rax, [rdi + PyMemoryViewObject.mv_source]
     mov qword [rdi + PyMemoryViewObject.mv_source], 0
+    OBJ_UNLOCK rdi
     test rax, rax
     jz .mvrl_done
     push rax                    ; io_buffer_released returns in rax, so the
@@ -1269,6 +1284,12 @@ DEF_FUNC memoryview_method_release, MVR_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.mvrl_unlock_done:
+    OBJ_UNLOCK rdi
+    jmp .mvrl_done
+.mvrl_unlock_exported:
+    OBJ_UNLOCK rdi
+    jmp .mvrl_exported
 .mvrl_argerr:
     SET_EXC exc_TypeError_type, "release() takes no arguments"
     jmp .mvrl_fail
@@ -1404,17 +1425,13 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov rdi, [rbp - MVC_SELF]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .mvc_released_free
     mov rcx, [rdi + PyMemoryViewObject.mv_source]
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
     jz .mvc_no_src
     INCREF rcx
-    ; cast() is the fourth place a view takes a share of another's source, and
-    ; release and dealloc decrement for every view that has one -- so without
-    ; the matching acquire this view's release drove a BytesIO's export count
-    ; below what is outstanding, and the next write reallocated the storage
-    ; underneath it.  lib/_io.py's readinto does `b = b.cast("B")`, so it is
-    ; on the ordinary path, not a corner.
     push rax
     push rdi
     mov rdi, rcx
@@ -1428,6 +1445,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov [rax + PyMemoryViewObject.mv_len], rcx
     mov rcx, [rdi + PyMemoryViewObject.mv_readonly]
     mov [rax + PyMemoryViewObject.mv_readonly], rcx
+    OBJ_UNLOCK rdi
     mov rcx, [rbp - MVC_SIZE]
     mov [rax + PyMemoryViewObject.mv_itemsize], rcx
     mov rcx, [rbp - MVC_FMT]
@@ -1437,6 +1455,11 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov edx, TAG_PTR
     leave
     ret
+.mvc_released_free:
+    OBJ_UNLOCK rdi
+    mov rdi, rax
+    call ap_free
+    jmp .mvc_released
 
 .mvc_not_contiguous:
     FAIL exc_TypeError_type, "memoryview: casts are restricted to C-contiguous views", .mvc_fail
@@ -1485,8 +1508,12 @@ DEF_FUNC memoryview_method_tolist, 40
     cmp rbx, [rbp - MVL_N]
     jge .mvtl_done
     mov rdi, [rbp - MVL_SELF]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .mvtl_unlock_released
     mov rsi, rbx
     call memoryview_item_value
+    mov rdi, [rbp - MVL_SELF]
+    OBJ_UNLOCK rdi
     mov rsi, rax
     mov rdi, [rbp - MVL_OUT]
     push rsi
@@ -1497,6 +1524,11 @@ DEF_FUNC memoryview_method_tolist, 40
     DECREF_V rsi, rcx           ; V_PACK may have boxed it
     inc rbx
     jmp .mvtl_loop
+.mvtl_unlock_released:
+    OBJ_UNLOCK rdi
+    mov rdi, [rbp - MVL_OUT]
+    call obj_decref
+    jmp .mvtl_released
 .mvtl_done:
     mov rax, [rbp - MVL_OUT]
     mov edx, TAG_PTR
@@ -1630,9 +1662,11 @@ DEF_FUNC memoryview_method_hex_self, MVH_FRAME
 END_FUNC memoryview_method_hex_self
 
 DEF_FUNC_BARE memoryview_iter_next
+    OBJ_LOCK rdi
     mov rax, [rdi + PyBytesIterObject.it_seq]
+    OBJ_LOCK rax
     cmp qword [rax + PyMemoryViewObject.mv_buf], MV_RELEASED
-    je .mvin_done
+    je .mvin_unlock_done
     mov rcx, [rdi + PyBytesIterObject.it_index]
     mov rdx, [rax + PyMemoryViewObject.mv_len]
     push rdi
@@ -1641,16 +1675,23 @@ DEF_FUNC_BARE memoryview_iter_next
     mov rax, rdx
     xor edx, edx
     div r8                      ; the item count
-    pop rdi                     ; the view
+    mov rdi, [rsp]              ; the view (keep saved on stack for unlock)
     cmp rcx, rax
     jge .mvin_pop_done
     mov rsi, rcx
     call memoryview_item_value
+    pop r8                      ; the view
+    OBJ_UNLOCK r8
     pop rdi                     ; the iterator
     inc qword [rdi + PyBytesIterObject.it_index]
+    OBJ_UNLOCK rdi
     ret
 .mvin_pop_done:
+    pop rax
     pop rdi
+.mvin_unlock_done:
+    OBJ_UNLOCK rax
+    OBJ_UNLOCK rdi
 .mvin_done:
     xor eax, eax
     ret
@@ -1738,9 +1779,11 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
 
-    ; Every field the source carries has to come across.  A missed itemsize
-    ; left the new view with 0, and memoryview_len divides by it.
+    ; Lock source view across live check, field copy, and source export acquire
+    ; so release() cannot free or detach the source concurrently.
     mov rdi, [rbp - MS_OBJ]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ms_slice_released_free
     mov rcx, [rdi + PyMemoryViewObject.mv_itemsize]
     mov [rax + PyMemoryViewObject.mv_itemsize], rcx
     mov rdx, [rdi + PyMemoryViewObject.mv_format]
@@ -1748,9 +1791,6 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov rdx, [rdi + PyMemoryViewObject.mv_readonly]
     mov [rax + PyMemoryViewObject.mv_readonly], rdx
 
-    ; mv_buf points at the slice's FIRST item, which for a negative step is
-    ; the highest address in it -- the source's own stride is what turns an
-    ; index into an offset, and a slice of a slice multiplies the two.
     push rcx
     mov rdx, [rbp - MS_START]
     MV_ITEM_ADDR rcx, rdi, rdx, r8
@@ -1763,24 +1803,28 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     imul rdx, [rdi + PyMemoryViewObject.mv_stride]
     mov [rax + PyMemoryViewObject.mv_stride], rdx
 
-    ; The slice shares the ORIGINAL owner, not the view it came from: a
-    ; chain of slices would otherwise keep every intermediate alive.
     mov rcx, [rdi + PyMemoryViewObject.mv_source]
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
     jz .ms_no_source
     INCREF rcx
     push rax
-    push rax                    ; and a pad: the call below stays aligned
+    push rdi                    ; keep source view for unlock + 16-align
     mov rdi, rcx
     call mv_source_acquired
-    pop rax
+    pop rdi
     pop rax
 .ms_no_source:
+    OBJ_UNLOCK rdi
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
     ret
+.ms_slice_released_free:
+    OBJ_UNLOCK rdi
+    mov rdi, rax
+    call ap_free
+    jmp .ms_released
 
 .ms_fail:
     xor eax, eax
@@ -1791,6 +1835,8 @@ DEF_FUNC memoryview_subscript, MS_FRAME
 .ms_int_index:
     ; rsi = the index, as an i64
     mov rdi, [rbp - MS_OBJ]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ms_int_unlock_released
     push rsi
     call memoryview_nitems             ; rax = item count
     pop rsi
@@ -1800,14 +1846,23 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     add rsi, rcx
 .ms_check_bounds:
     test rsi, rsi
-    jl .ms_index_error
+    jl .ms_int_unlock_index
     cmp rsi, rcx
-    jge .ms_index_error
+    jge .ms_int_unlock_index
     mov rdi, [rbp - MS_OBJ]
     call memoryview_item_value
+    mov rdi, [rbp - MS_OBJ]
+    OBJ_UNLOCK rdi
     mov edx, TAG_PTR
     leave
     ret
+.ms_int_unlock_released:
+    OBJ_UNLOCK rdi
+    jmp .ms_released
+.ms_int_unlock_index:
+    mov rdi, [rbp - MS_OBJ]
+    OBJ_UNLOCK rdi
+    jmp .ms_index_error
 
 .ms_int_index_heap:
     mov rax, [rsi + PyObject.ob_type]   ; int_to_i64 reads PyIntObject.compact
@@ -1977,6 +2032,8 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
 .ma_range_ok:
 
     mov rdi, [rbp - MA_OBJ]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ma_unlock_released
     mov rcx, [rbp - MA_START]
     MV_ITEM_ADDR rsi, rdi, rcx, r8
     mov rcx, [rdi + PyMemoryViewObject.mv_itemsize]
@@ -1988,19 +2045,25 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     cmp rcx, 4
     je .ma_store4
     mov [rsi], rax
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 .ma_store1:
     mov [rsi], al
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 .ma_store2:
     mov [rsi], ax
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 .ma_store4:
     mov [rsi], eax
+.ma_unlock_ok:
+    mov rdi, [rbp - MA_OBJ]
+    OBJ_UNLOCK rdi
 .ma_ok:
     xor eax, eax
     leave
     ret
+.ma_unlock_released:
+    OBJ_UNLOCK rdi
+    jmp .ma_released
 
 .ma_put_float:
     mov rdi, [rbp - MA_VAL]
@@ -2010,7 +2073,8 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     test eax, eax
     jz .ma_value_type
     mov rdi, [rbp - MA_OBJ]
-    MV_LIVE_OR rdi, .ma_released       ; a __float__ ran
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ma_unlock_released ; a __float__ ran
     mov rcx, [rbp - MA_START]
     MV_ITEM_ADDR rsi, rdi, rcx, r8
     mov rcx, [rbp - MA_FMT]
@@ -2018,10 +2082,10 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     je .ma_put_f64
     cvtsd2ss xmm0, xmm0
     movss [rsi], xmm0
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 .ma_put_f64:
     movsd [rsi], xmm0
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 
 .ma_put_bool:
     mov rdi, [rbp - MA_VAL]
@@ -2029,13 +2093,14 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     call obj_is_true
     ERR_M1 .ma_fail
     mov rdi, [rbp - MA_OBJ]
-    MV_LIVE_OR rdi, .ma_released       ; a __bool__ ran
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ma_unlock_released ; a __bool__ ran
     mov rcx, [rbp - MA_START]
     push rax
     MV_ITEM_ADDR rsi, rdi, rcx, r8
     pop rax
     mov [rsi], al
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 
 .ma_put_char:
     ; 'c' takes a one-byte bytes, as CPython's does.
@@ -2053,10 +2118,12 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     jne .ma_value_range
     movzx r10d, byte [rax + PyBytesObject.data]
     mov rdi, [rbp - MA_OBJ]
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ma_unlock_released
     mov rcx, [rbp - MA_START]
     MV_ITEM_ADDR rsi, rdi, rcx, r8
     mov [rsi], r10b
-    jmp .ma_ok
+    jmp .ma_unlock_ok
 
 .ma_maybe_slice:
     test rsi, rsi
@@ -2101,16 +2168,26 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
 .ma_have_count:
     mov [rbp - MA_COUNT], rdx
 
-    mov rdi, [rbp - MA_VAL]
+    ; Lock destination view and (if pointer) source bytes-like object in
+    ; ascending address order across live check, pointer/len read, and copy.
+    mov r11, [rbp - MA_VAL]
+    V_TEST_PTR r11, rcx
+    ja .ma_value_type
+    test r11, r11
+    jz .ma_value_type
+    mov rdi, [rbp - MA_OBJ]
+    OBJ_LOCK2 rdi, r11
+    MV_LIVE_OR rdi, .ma_slice_unlock_released
+    mov rdi, r11
     call bytes_like_ptr_len            ; rax = data, r10 = length, ecx = ok
     test ecx, ecx
-    jz .ma_value_type
+    jz .ma_slice_unlock_type
     mov [rbp - MA_SRC], rax
     mov rdi, [rbp - MA_OBJ]
     mov rdx, [rbp - MA_COUNT]
     imul rdx, [rdi + PyMemoryViewObject.mv_itemsize]
     cmp r10, rdx
-    jne .ma_size_error
+    jne .ma_slice_unlock_size
 
     ; One item at a time: the destination items are mv_stride apart, and for
     ; a slice with a step of its own they are that many further again.  The
@@ -2119,7 +2196,7 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
 .ma_write_loop:
     mov rcx, [rbp - MA_I]
     cmp rcx, [rbp - MA_COUNT]
-    jge .ma_ok
+    jge .ma_slice_unlock_ok
     mov rdi, [rbp - MA_OBJ]
     mov rax, [rbp - MA_STEP]
     imul rax, rcx
@@ -2133,6 +2210,26 @@ DEF_FUNC memoryview_ass_subscript, MA_FRAME
     call ap_memcpy
     inc qword [rbp - MA_I]
     jmp .ma_write_loop
+.ma_slice_unlock_ok:
+    mov rdi, [rbp - MA_OBJ]
+    mov r11, [rbp - MA_VAL]
+    OBJ_UNLOCK2 rdi, r11
+    jmp .ma_ok
+.ma_slice_unlock_released:
+    mov rdi, [rbp - MA_OBJ]
+    mov r11, [rbp - MA_VAL]
+    OBJ_UNLOCK2 rdi, r11
+    jmp .ma_released
+.ma_slice_unlock_type:
+    mov rdi, [rbp - MA_OBJ]
+    mov r11, [rbp - MA_VAL]
+    OBJ_UNLOCK2 rdi, r11
+    jmp .ma_value_type
+.ma_slice_unlock_size:
+    mov rdi, [rbp - MA_OBJ]
+    mov r11, [rbp - MA_VAL]
+    OBJ_UNLOCK2 rdi, r11
+    jmp .ma_size_error
 
 .ma_del_error:
     FAIL exc_TypeError_type, "cannot delete memory", .ma_fail
@@ -2167,10 +2264,14 @@ END_FUNC memoryview_ass_subscript
 ;; memoryview_len(rdi = self) -> rax = the length in items
 ;; Fails: -1
 DEF_FUNC memoryview_len
-    MV_LIVE_OR rdi, .ml_released
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .ml_unlock_released
     call memoryview_nitems
+    OBJ_UNLOCK rdi
     leave
     ret
+.ml_unlock_released:
+    OBJ_UNLOCK rdi
 .ml_released:
     call memoryview_set_released
     mov rax, -1
@@ -2268,24 +2369,32 @@ DEF_FUNC_LOCAL memoryview_sq_item, MSQ_FRAME
     ; out of alignment, and everything under it inherits that.
     mov [rbp - MSQ_SELF], rdi
     mov [rbp - MSQ_IDX], rsi
-    MV_LIVE_OR rdi, .msqi_released
+    OBJ_LOCK rdi
+    MV_LIVE_OR rdi, .msqi_unlock_released
     mov rdi, [rbp - MSQ_SELF]
     call memoryview_nitems
     mov rsi, [rbp - MSQ_IDX]
     test rsi, rsi
-    jl .msqi_range
+    jl .msqi_unlock_range
     cmp rsi, rax
-    jge .msqi_range
+    jge .msqi_unlock_range
     mov rdi, [rbp - MSQ_SELF]
     call memoryview_item_value
+    mov rdi, [rbp - MSQ_SELF]
+    OBJ_UNLOCK rdi
     mov edx, TAG_PTR
     leave
     ret
+.msqi_unlock_range:
+    mov rdi, [rbp - MSQ_SELF]
+    OBJ_UNLOCK rdi
 .msqi_range:
     SET_EXC exc_IndexError_type, "index out of bounds"
     xor eax, eax
     leave
     ret
+.msqi_unlock_released:
+    OBJ_UNLOCK rdi
 .msqi_released:
     call memoryview_set_released
     leave

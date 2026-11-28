@@ -2051,12 +2051,11 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     ret
 
 .revi_exhausted:
-    ; Drop the sequence at exhaustion, as CPython's listreviter does and as
-    ; every forward iterator here now does.  Clear before releasing --
-    ; list_iter_next carries the reason in full.  reversed_dealloc still
-    ; releases it_seq afterwards, which is fine: obj_decref is NULL-safe.
-    mov rdi, [rbx + IT_FIELD1]
-    mov qword [rbx + IT_FIELD1], 0
+    xor eax, eax
+    xchg [rbx + IT_FIELD1], rax
+    test rax, rax
+    jz .revi_done
+    mov rdi, rax
     call obj_decref
 .revi_done:
     RET_NULL

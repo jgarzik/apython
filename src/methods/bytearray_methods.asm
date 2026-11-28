@@ -92,13 +92,17 @@ DEF_FUNC bytearray_shared_call, 72
     test rsi, rsi
     jz .bsc_bad
     mov rdi, [rdi]              ; self
+    OBJ_LOCK rdi
     mov r8, [rdi + PyByteArrayObject.ob_size]
+    push rdi
     push r8
     call bytearray_data
     pop r8
     mov rdi, rax
     mov rsi, r8
     call bytes_from_data
+    pop rdi
+    OBJ_UNLOCK rdi
     test rax, rax
     jz .bsc_oom
     mov [rbp - BSC_TMP], rax
@@ -723,14 +727,16 @@ DEF_FUNC bytearray_method_reduce, BRD_FRAME
     mov rbx, [rdi]                      ; args[0] = self, always a pointer
     mov [rbp - BRD_SELF], rbx
 
+    OBJ_LOCK rbx
     mov rdi, [rbx + PyByteArrayObject.ob_size]
     test rdi, rdi
-    jz .brd_empty
+    jz .brd_unlock_empty
 
     mov rdi, [rbx + PyByteArrayObject.ob_bytes]
     mov rsi, [rbx + PyByteArrayObject.ob_size]
     extern bytes_latin1_to_str
     call bytes_latin1_to_str
+    OBJ_UNLOCK rbx
     test rax, rax
     jz .brd_failed
     mov [rbp - BRD_STR], rax
@@ -754,6 +760,8 @@ DEF_FUNC bytearray_method_reduce, BRD_FRAME
     mov [rcx + 8], rax
     jmp .brd_wrap
 
+.brd_unlock_empty:
+    OBJ_UNLOCK rbx
 .brd_empty:
     xor edi, edi
     call tuple_new

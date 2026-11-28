@@ -262,8 +262,14 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     ; Iterate elements
     xor r12d, r12d             ; index = 0
 .lr_loop:
+    OBJ_LOCK rbx
     cmp r12, [rbx + PyListObject.ob_size]   ; live: a __repr__ can shrink it
-    jge .lr_done
+    jge .lr_unlock_done
+
+    mov rax, [rbx + PyListObject.ob_item]
+    mov r13, [rax + r12 * 8]
+    INCREF_V r13, rax
+    OBJ_UNLOCK rbx
 
     ; If not first element, append ", "
     test r12, r12
@@ -273,12 +279,14 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     BUF_BYTE ' '
 .lr_no_comma:
 
-    ; Get element (payload + tag arrays)
-    mov rax, [rbx + PyListObject.ob_item]
-    mov rdi, [rax + r12 * 8]      ; payload
-
-    ; Call obj_repr(payload, tag)
-    call repr_held
+    ; Call obj_repr on pinned item, then release pin
+    mov rdi, r13
+    call obj_repr
+    push rax
+    push rax
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     test rax, rax
     jz .lr_elem_failed
 
@@ -305,6 +313,8 @@ DEF_FUNC list_repr, RB_FRAME3               ; buf ptr, used, capacity
     inc r12
     jmp .lr_loop
 
+.lr_unlock_done:
+    OBJ_UNLOCK rbx
 .lr_done:
     ; Append ']' and NUL
     BUF_ENSURE 2

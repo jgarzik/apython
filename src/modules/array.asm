@@ -457,11 +457,10 @@ DEF_FUNC array_store_item, ASI_FRAME
 
 .asi_store:
     mov rdi, [rbp - ASI_ARR]
-    mov rax, [rdi + PyArrayObject.ob_data]
-    mov rcx, [rdi + PyArrayObject.ob_isize]
     mov rsi, [rbp - ASI_IDX]
-    imul rsi, rcx
-    add rax, rsi
+    call asi_acquire_slot
+    test rax, rax
+    jz .asi_fail
     cmp rcx, 1
     je .asi_w1
     cmp rcx, 2
@@ -469,15 +468,22 @@ DEF_FUNC array_store_item, ASI_FRAME
     cmp rcx, 4
     je .asi_w4
     mov [rax], rbx
-    jmp .asi_ok
+    jmp .asi_unlock_ok
 .asi_w1:
     mov [rax], bl
-    jmp .asi_ok
+    jmp .asi_unlock_ok
 .asi_w2:
     mov [rax], bx
-    jmp .asi_ok
+    jmp .asi_unlock_ok
 .asi_w4:
     mov [rax], ebx
+.asi_unlock_ok:
+    mov rdi, [rbp - ASI_ARR]
+    cmp qword [rbp - ASI_IDX], -1
+    jne .asi_unlock_only
+    inc qword [rdi + PyArrayObject.ob_size]
+.asi_unlock_only:
+    OBJ_UNLOCK rdi
 .asi_ok:
     mov eax, 1
     pop rbx
@@ -490,23 +496,25 @@ DEF_FUNC array_store_item, ASI_FRAME
     call float_to_f64           ; refuses what is not a number
     cmp qword [gs:ThreadState.current_exception], 0
     jne .asi_fail
+    sub rsp, 16
+    movsd [rsp], xmm0
     mov rdi, [rbp - ASI_ARR]
-    mov rax, [rdi + PyArrayObject.ob_data]
-    mov rcx, [rdi + PyArrayObject.ob_isize]
     mov rsi, [rbp - ASI_IDX]
-    imul rsi, rcx
-    add rax, rsi
+    call asi_acquire_slot
+    movsd xmm0, [rsp]
+    add rsp, 16
+    test rax, rax
+    jz .asi_fail
     cmp rcx, 4
     je .asi_f4
     movsd [rax], xmm0
-    jmp .asi_ok
+    jmp .asi_unlock_ok
 .asi_f4:
     cvtsd2ss xmm1, xmm0
     movss dword [rax], xmm1
-    jmp .asi_ok
+    jmp .asi_unlock_ok
 
 .asi_unicode:
-    ; 'u' takes a one-character str and stores its code point.
     mov rdi, rdx
     V_TEST_PTR rdi, rax
     ja .asi_need_char
@@ -520,11 +528,12 @@ DEF_FUNC array_store_item, ASI_FRAME
     call str_cp_at
     mov rbx, rax
     mov rdi, [rbp - ASI_ARR]
-    mov rax, [rdi + PyArrayObject.ob_data]
     mov rsi, [rbp - ASI_IDX]
-    lea rax, [rax + rsi*4]
+    call asi_acquire_slot
+    test rax, rax
+    jz .asi_fail
     mov [rax], ebx
-    jmp .asi_ok
+    jmp .asi_unlock_ok
 
 .asi_fail:
     xor eax, eax
@@ -612,6 +621,57 @@ DEF_FUNC array_store_item, ASI_FRAME
     leave
     ret
 END_FUNC array_store_item
+
+;; asi_acquire_slot(rdi = array, rsi = index or -1 to append)
+;;   -> rax = &slot (with OBJ_LOCK rdi HELD), rcx = ob_isize; or rax = 0 (UNLOCKED, exc set)
+DEF_FUNC_LOCAL asi_acquire_slot, 16
+    push rbx
+    push r12
+    mov rbx, rdi
+    mov r12, rsi
+    OBJ_LOCK rbx
+    cmp r12, -1
+    je .aas_append
+    test r12, r12
+    jl .aas_oor
+    cmp r12, [rbx + PyArrayObject.ob_size]
+    jge .aas_oor
+    jmp .aas_addr
+.aas_append:
+    mov rdi, rbx
+    call array_no_exports
+    ERR_NULL .aas_fail
+    mov rdi, rbx
+    mov rsi, [rbx + PyArrayObject.ob_size]
+    mov r12, rsi
+    inc rsi
+    call array_reserve
+    ERR_NULL .aas_fail
+.aas_addr:
+    mov rax, [rbx + PyArrayObject.ob_data]
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    imul r12, rcx
+    add rax, r12
+    pop r12
+    pop rbx
+    leave
+    ret
+.aas_oor:
+    OBJ_UNLOCK rbx
+    SET_EXC exc_IndexError_type, "array assignment index out of range"
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+.aas_fail:
+    OBJ_UNLOCK rbx
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC asi_acquire_slot
 
 section .rodata
 asi_m_schar_lo:  db "signed char is less than minimum", 0
@@ -815,60 +875,51 @@ END_FUNC array_length
 ;; array_sq_item(rdi = the array, rsi = index) -> rax = a Value, or 0 raising
 ;; Negative indices count from the end, as every sequence here does.
 ;; ============================================================================
-DEF_FUNC array_sq_item
+DEF_FUNC array_sq_item, 8
+    push rbx
+    mov rbx, rdi
+    OBJ_LOCK rbx
     test rsi, rsi
     jns .asq_have
-    add rsi, [rdi + PyArrayObject.ob_size]
+    add rsi, [rbx + PyArrayObject.ob_size]
 .asq_have:
     test rsi, rsi
-    jl .asq_range
-    cmp rsi, [rdi + PyArrayObject.ob_size]
-    jge .asq_range
+    jl .asq_unlock_range
+    cmp rsi, [rbx + PyArrayObject.ob_size]
+    jge .asq_unlock_range
+    mov rdi, rbx
     call array_item_value
+    OBJ_UNLOCK rbx
+    pop rbx
     leave
     ret
+.asq_unlock_range:
+    OBJ_UNLOCK rbx
 .asq_range:
-    ; SET_EXC and a NULL, not RAISE.  RAISE tail-jumps into the unwinder, and
-    ; the sequence iterator's whole protocol is to CATCH the IndexError this
-    ; raises and read it as exhaustion -- unwinding takes the exception
-    ; straight past it and out of the `for`.  The same rule a builtin
-    ; __next__ follows for StopIteration.
     SET_EXC exc_IndexError_type, "array index out of range"
     xor eax, eax
     xor edx, edx
+    pop rbx
     leave
     V_PACK rax, rdx
     ret
 END_FUNC array_sq_item
 
-;; ============================================================================
 ;; array_append_value(rdi = the array, rsi = a Value) -> eax = 1
-;; Fails: 0
-;; ============================================================================
 AAV_ARR   equ 8
 AAV_VAL   equ 16
-AAV_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+AAV_FRAME equ 16
 DEF_FUNC array_append_value, AAV_FRAME
     mov [rbp - AAV_ARR], rdi
     mov [rbp - AAV_VAL], rsi
-    ; Any change to the LENGTH is refused while a view is out, not only one
-    ; that moves the buffer: CPython's array_resize makes this test first, and
-    ; an append that happens to fit the spare capacity is a resize all the same.
     call array_no_exports
     ERR_NULL .aav_fail
     mov rdi, [rbp - AAV_ARR]
-    mov rsi, [rdi + PyArrayObject.ob_size]
-    inc rsi
-    call array_reserve
-    ERR_NULL .aav_fail
-    mov rdi, [rbp - AAV_ARR]
-    mov rsi, [rdi + PyArrayObject.ob_size]
+    mov rsi, -1                     ; append atomically under OBJ_LOCK
     mov rdx, [rbp - AAV_VAL]
     call array_store_item
     test eax, eax
     jz .aav_fail
-    mov rdi, [rbp - AAV_ARR]
-    inc qword [rdi + PyArrayObject.ob_size]
     mov eax, 1
     leave
     ret
@@ -911,10 +962,14 @@ DEF_FUNC array_extend_iterable, 40
     cmp rcx, [rdi + PyArrayObject.ob_code]
     jne .aei_generic
 
+    OBJ_LOCK2 rdi, rbx
+    call array_no_exports
+    ERR_NULL .aei_unlock2_fail
+    mov rdi, [rbp - AEI_ARR]
     mov rsi, [rdi + PyArrayObject.ob_size]
     add rsi, [rbx + PyArrayObject.ob_size]
     call array_reserve
-    ERR_NULL .aei_fail
+    ERR_NULL .aei_unlock2_fail
     mov rdi, [rbp - AEI_ARR]
     mov rax, [rdi + PyArrayObject.ob_size]
     imul rax, [rdi + PyArrayObject.ob_isize]
@@ -930,10 +985,15 @@ DEF_FUNC array_extend_iterable, 40
     mov rdi, [rbp - AEI_ARR]
     mov rax, [rbx + PyArrayObject.ob_size]
     add [rdi + PyArrayObject.ob_size], rax
+    OBJ_UNLOCK2 rdi, rbx
     mov eax, 1
     pop rbx
     leave
     ret
+.aei_unlock2_fail:
+    mov rdi, [rbp - AEI_ARR]
+    OBJ_UNLOCK2 rdi, rbx
+    jmp .aei_fail
 
 .aei_generic:
     ; The real tag, not TAG_PTR: array('i', 5) hands an int IMMEDIATE here,
@@ -1091,10 +1151,13 @@ DEF_FUNC array_tolist, ATL_FRAME
     mov qword [rbp - ATL_I], 0
 .atl_loop:
     mov rdi, [rbp - ATL_ARR]
+    OBJ_LOCK rdi
     mov rsi, [rbp - ATL_I]
     cmp rsi, [rdi + PyArrayObject.ob_size]
-    jge .atl_done
+    jge .atl_unlock_done
     call array_item_value
+    mov rcx, [rbp - ATL_ARR]
+    OBJ_UNLOCK rcx
     test rax, rax
     jz .atl_drop
     push rax
@@ -1102,9 +1165,11 @@ DEF_FUNC array_tolist, ATL_FRAME
     mov rsi, rax
     call list_append          ; err: a list built here is not being sorted
     pop rdi
-    DECREF_V rdi, rcx           ; a Value; list_append took its own reference
+    DECREF_V rdi, rcx
     inc qword [rbp - ATL_I]
     jmp .atl_loop
+.atl_unlock_done:
+    OBJ_UNLOCK rdi
 .atl_done:
     mov rax, [rbp - ATL_LIST]
     leave
@@ -1308,15 +1373,15 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
     ret
 
 .aas_delete:
-    ; Shift the tail down one item.  The buffer does not shrink: capacity is
-    ; not what ob_size means.  It is still a resize, and a view over the array
-    ; would be left describing bytes that have moved.
     mov rdi, [rbp - AAS_ARR]
+    OBJ_LOCK rdi
     call array_no_exports
-    ERR_NULL .aas_fail
+    ERR_NULL .aas_unlock_fail
     mov rdi, [rbp - AAS_ARR]
-    mov rcx, [rdi + PyArrayObject.ob_isize]
     mov rax, [rbp - AAS_IDX]
+    cmp rax, [rdi + PyArrayObject.ob_size]
+    jge .aas_unlock_range
+    mov rcx, [rdi + PyArrayObject.ob_isize]
     imul rax, rcx
     mov rsi, [rdi + PyArrayObject.ob_data]
     lea rdi, [rsi + rax]        ; dest = &item[i]
@@ -1333,14 +1398,21 @@ DEF_FUNC array_ass_subscript, AAS_FRAME
 .aas_shrink:
     mov rdi, [rbp - AAS_ARR]
     dec qword [rdi + PyArrayObject.ob_size]
+    OBJ_UNLOCK rdi
     xor eax, eax
     leave
     ret
 
+.aas_unlock_fail:
+    mov rdi, [rbp - AAS_ARR]
+    OBJ_UNLOCK rdi
 .aas_fail:
     mov eax, -1
     leave
     ret
+.aas_unlock_range:
+    mov rdi, [rbp - AAS_ARR]
+    OBJ_UNLOCK rdi
 .aas_range:
     SET_EXC exc_IndexError_type, "array assignment index out of range"
     mov eax, -1
@@ -1422,17 +1494,18 @@ DEF_FUNC_BARE array_getbuffer
     mov ecx, 1
     ret
 .agb_count:
+    OBJ_LOCK rdi
     cmp esi, BUF_ACQUIRE
     jne .agb_release
     inc qword [rdi + PyArrayObject.ob_exports]
+    OBJ_UNLOCK rdi
     ret
 .agb_release:
-    ; Clamped: a release that is somehow not paired must not make the count
-    ; negative and silently permit every resize after it.
     cmp qword [rdi + PyArrayObject.ob_exports], 0
     jle .agb_done
     dec qword [rdi + PyArrayObject.ob_exports]
 .agb_done:
+    OBJ_UNLOCK rdi
     ret
 END_FUNC array_getbuffer
 
@@ -1598,21 +1671,25 @@ DEF_FUNC_BARE array_m_fromlist
 END_FUNC array_m_fromlist
 
 ;; array_m_tobytes(args, nargs) -> the raw buffer as bytes
-DEF_FUNC array_m_tobytes
-    mov rdi, [rdi]
-    mov rsi, [rdi + PyArrayObject.ob_size]
-    imul rsi, [rdi + PyArrayObject.ob_isize]
-    mov rdi, [rdi + PyArrayObject.ob_data]
+DEF_FUNC array_m_tobytes, 8
+    push rbx
+    mov rbx, [rdi]
+    OBJ_LOCK rbx
+    mov rsi, [rbx + PyArrayObject.ob_size]
+    imul rsi, [rbx + PyArrayObject.ob_isize]
+    mov rdi, [rbx + PyArrayObject.ob_data]
     test rdi, rdi
     jnz .amb_have
     lea rdi, [rel array_empty_byte]
 .amb_have:
     call bytes_from_data
+    OBJ_UNLOCK rbx
     mov edx, TAG_PTR
     test rax, rax
     jnz .amb_ok
     xor edx, edx
 .amb_ok:
+    pop rbx
     leave
     V_PACK rax, rdx
     ret
@@ -1678,23 +1755,34 @@ DEF_FUNC array_m_frombytes, 40
     test rsi, rsi
     jz .afb_done
     push rsi
+    mov rdi, [rbp - AFB_ARR]
+    OBJ_LOCK rdi
+    call array_no_exports
+    ERR_NULL .afb_unlock_pop_fail
+    mov rdi, [rbp - AFB_ARR]
+    mov rsi, [rsp]
     add rsi, [rdi + PyArrayObject.ob_size]
     call array_reserve
-    pop rsi
-    ERR_NULL .afb_fail
+    ERR_NULL .afb_unlock_pop_fail
 
     mov rdi, [rbp - AFB_ARR]
     mov rax, [rdi + PyArrayObject.ob_size]
     imul rax, [rdi + PyArrayObject.ob_isize]
     add rax, [rdi + PyArrayObject.ob_data]
-    push rsi
     mov rdi, rax
-    mov rsi, [rbp - AFB_SRC]    ; wherever the source keeps its bytes
+    mov rsi, [rbp - AFB_SRC]
     mov rdx, [rbp - AFB_LEN]
     call ap_memcpy
     pop rsi
     mov rdi, [rbp - AFB_ARR]
     add [rdi + PyArrayObject.ob_size], rsi
+    OBJ_UNLOCK rdi
+    jmp .afb_done
+.afb_unlock_pop_fail:
+    pop rsi
+    mov rdi, [rbp - AFB_ARR]
+    OBJ_UNLOCK rdi
+    jmp .afb_fail
 
 .afb_done:
     LOAD_NONE rax
@@ -1840,18 +1928,16 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     test rax, rax
     jz .aff_appended
 
-    ; The same growth frombytes does, and the same refusal when a live view
-    ; would be left pointing at the old buffer.
     mov rdi, [rbp - AFF_ARR]
+    OBJ_LOCK rdi
     call array_no_exports
-    ERR_NULL .aff_fail_buf
+    ERR_NULL .aff_unlock_fail_buf
     mov rdi, [rbp - AFF_ARR]
     mov rsi, [rdi + PyArrayObject.ob_size]
     add rsi, [rbp - AFF_ITEMS]
     call array_reserve
-    ERR_NULL .aff_fail_buf
+    ERR_NULL .aff_unlock_fail_buf
 
-    ; The destination is read AFTER the reserve: the buffer has just moved.
     mov rdi, [rbp - AFF_ARR]
     mov rax, [rdi + PyArrayObject.ob_size]
     imul rax, [rdi + PyArrayObject.ob_isize]
@@ -1864,6 +1950,12 @@ DEF_FUNC array_m_fromfile, AFF_FRAME
     mov rdi, [rbp - AFF_ARR]
     mov rax, [rbp - AFF_ITEMS]
     add [rdi + PyArrayObject.ob_size], rax
+    OBJ_UNLOCK rdi
+    jmp .aff_appended
+.aff_unlock_fail_buf:
+    mov rdi, [rbp - AFF_ARR]
+    OBJ_UNLOCK rdi
+    jmp .aff_fail_buf
 
 .aff_appended:
     mov rdi, [rbp - AFF_BUF]
@@ -1983,6 +2075,7 @@ DEF_FUNC array_m_tofile, ATF_FRAME
     mov [rbp - ATF_FN], rax
 
     mov rdi, [rbp - ATF_ARR]
+    OBJ_LOCK rdi
     mov rsi, [rdi + PyArrayObject.ob_size]
     imul rsi, [rdi + PyArrayObject.ob_isize]
     mov rdi, [rdi + PyArrayObject.ob_data]
@@ -1991,6 +2084,8 @@ DEF_FUNC array_m_tofile, ATF_FRAME
     lea rdi, [rel array_empty_byte]
 .atf_have_data:
     call bytes_from_data
+    mov rcx, [rbp - ATF_ARR]
+    OBJ_UNLOCK rcx
     test rax, rax
     jz .atf_fail_fn
     mov [rbp - ATF_ARG], rax
@@ -2053,26 +2148,30 @@ END_FUNC array_m_tofile
 ;; size, so it is unreachable until one does.
 ;; ============================================================================
 extern exc_RuntimeError_type
-DEF_FUNC array_m_byteswap
+DEF_FUNC array_m_byteswap, 8
+    push rbx
     cmp rsi, 1
     jne .abs_arity
-    mov rdi, [rdi]
-    mov rcx, [rdi + PyArrayObject.ob_isize]
-    mov rsi, [rdi + PyArrayObject.ob_size]
-    mov rdi, [rdi + PyArrayObject.ob_data]
+    mov rbx, [rdi]
+    OBJ_LOCK rbx
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    mov rsi, [rbx + PyArrayObject.ob_size]
+    mov rdi, [rbx + PyArrayObject.ob_data]
     test rsi, rsi
-    jle .abs_done
+    jle .abs_unlock_done
     cmp rcx, 1
-    je .abs_done
+    je .abs_unlock_done
     cmp rcx, 2
     je .abs_two
     cmp rcx, 4
     je .abs_four
     cmp rcx, 8
     je .abs_eight
+    OBJ_UNLOCK rbx
     SET_EXC exc_RuntimeError_type, \
             "don't know how to byteswap this array type"
     xor eax, eax
+    pop rbx
     leave
     ret
 
@@ -2083,7 +2182,7 @@ DEF_FUNC array_m_byteswap
     add rdi, 2
     dec rsi
     jnz .abs_two
-    jmp .abs_done
+    jmp .abs_unlock_done
 .abs_four:
     mov eax, [rdi]
     bswap eax
@@ -2091,7 +2190,7 @@ DEF_FUNC array_m_byteswap
     add rdi, 4
     dec rsi
     jnz .abs_four
-    jmp .abs_done
+    jmp .abs_unlock_done
 .abs_eight:
     mov rax, [rdi]
     bswap rax
@@ -2100,8 +2199,11 @@ DEF_FUNC array_m_byteswap
     dec rsi
     jnz .abs_eight
 
+.abs_unlock_done:
+    OBJ_UNLOCK rbx
 .abs_done:
     LOAD_NONE rax
+    pop rbx
     leave
     ret
 .abs_arity:
@@ -2112,6 +2214,7 @@ DEF_FUNC array_m_byteswap
     CSTRING rdi, "array.byteswap() takes no arguments ("
     CSTRING rdx, " given)"
     call set_type_error_counted
+    pop rbx
     leave
     ret
 END_FUNC array_m_byteswap
@@ -2127,16 +2230,19 @@ DEF_FUNC array_m_buffer_info, 24
     test rax, rax
     jz .abi_null
     mov [rbp - ABI_TUP], rax
-    ; V_PACK each: a tuple slot holds a VALUE, and int_from_i64 answers a
-    ; (payload, tag) pair.  Storing the payload put a raw integer where the
-    ; collector expects a pointer, and tuple_traverse followed it.
+    OBJ_LOCK rbx
     mov rdi, [rbx + PyArrayObject.ob_data]
+    mov rsi, [rbx + PyArrayObject.ob_size]
+    OBJ_UNLOCK rbx
+    push rsi
+    push rsi
     call int_from_i64
     V_PACK rax, rdx
     mov rcx, [rbp - ABI_TUP]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rcx], rax
-    mov rdi, [rbx + PyArrayObject.ob_size]
+    pop rdi
+    pop rdi
     call int_from_i64
     V_PACK rax, rdx
     mov rcx, [rbp - ABI_TUP]

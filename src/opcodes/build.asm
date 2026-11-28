@@ -1169,8 +1169,11 @@ DEF_FUNC op_list_extend, 72   ; + 0 pushes; a handler is entered ALIGNED, so thi
     jmp .extend_from_array
 
 .extend_list:
-    mov rdx, [rsi + PyListObject.ob_size]
-    mov rsi, [rsi + PyListObject.ob_item]
+    mov rdi, [rbp - LE_LIST]
+    extern list_extend_from_list
+    call list_extend_from_list
+    ERR_M1_JUMP
+    jmp .extend_done
 
 .extend_from_array:
     mov rdi, [rbp - LE_LIST]

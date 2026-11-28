@@ -99,32 +99,33 @@ END_FUNC list_iter_new
 ;; Return next item or NULL if exhausted
 ;; ============================================================================
 DEF_FUNC_BARE list_iter_next
-    mov rax, [rdi + PyListIterObject.it_seq]      ; list
-    test rax, rax
+    mov r11, [rdi + PyListIterObject.it_seq]      ; list
+    test r11, r11
     jz .exhausted                                  ; already exhausted
+    OBJ_LOCK r11
     mov rcx, [rdi + PyListIterObject.it_index]     ; index
 
     ; Check bounds
-    cmp rcx, [rax + PyListObject.ob_size]
-    jge .exhausted_mark
+    cmp rcx, [r11 + PyListObject.ob_size]
+    jge .unlock_exhausted_mark
 
-    ; Get item
-    mov rdx, [rax + PyListObject.ob_item]
+    ; Get item and pin under OBJ_LOCK
+    mov rdx, [r11 + PyListObject.ob_item]
     mov rax, [rdx + rcx * 8]     ; item Value
     INCREF_V rax, rdx
 
     ; Advance index
     inc qword [rdi + PyListIterObject.it_index]
+    OBJ_UNLOCK r11
     ret
 
+.unlock_exhausted_mark:
+    OBJ_UNLOCK r11
 .exhausted_mark:
-    ; Drop the reference BEFORE releasing it.  Releasing first runs the
-    ; list's __del__ inside obj_decref, and a __del__ that calls next() on
-    ; this same iterator then read it_seq while the list was being freed --
-    ; CPython issue 26494, and a segfault here.  Clearing first makes that
-    ; re-entrant next() see an exhausted iterator, which is what it is.
-    mov rax, [rdi + PyListIterObject.it_seq]
-    mov qword [rdi + PyListIterObject.it_seq], 0
+    xor eax, eax
+    xchg [rdi + PyListIterObject.it_seq], rax
+    test rax, rax
+    jz .exhausted
     push rdi
     mov rdi, rax
     call obj_decref
@@ -226,12 +227,10 @@ DEF_FUNC_BARE tuple_iter_next
     ret
 
 .exhausted_mark:
-    ; Drop the tuple at exhaustion, the way list_iter_next does and the way
-    ; CPython's tupleiter_next does -- it is what lets a __del__ on the last
-    ; reference run while the iterator can still answer "exhausted".  Clear
-    ; before releasing, for the reason list_iter_next carries in full.
-    mov rax, [rdi + PyTupleIterObject.it_seq]
-    mov qword [rdi + PyTupleIterObject.it_seq], 0
+    xor eax, eax
+    xchg [rdi + PyTupleIterObject.it_seq], rax
+    test rax, rax
+    jz .exhausted
     push rdi
     mov rdi, rax
     call obj_decref

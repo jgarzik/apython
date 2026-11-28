@@ -2683,17 +2683,17 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     mov [rbp - BJ_LIST], rax
     mov rcx, rax
 .bj_seq_ready:
-
+    OBJ_LOCK rcx
     ; Get count
     mov r12, [rcx + PyListObject.ob_size]   ; count
     test r12, r12
-    jz .bj_empty
+    jz .bj_unlock_empty
 
     ; Compute total length: sum of all item sizes + (count-1)*sep_len
     mov rdi, [rbp - BJ_SEP]
     call bytes_like_ptr_len
     test ecx, ecx
-    jz .bj_item_error
+    jz .bj_unlock_item_error
     mov r14, r10                            ; sep_len
 
     xor r13d, r13d              ; total = 0
@@ -2781,6 +2781,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     jmp .bj_copy_loop
 
 .bj_make_bytes:
+    mov rcx, [rbp - BJ_LIST]
+    OBJ_UNLOCK rcx
     mov rdi, [rbp - BJ_BUF]
     mov rsi, [rbp - BJ_TOTAL]
     call bytes_from_data
@@ -2801,6 +2803,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bj_unlock_empty:
+    OBJ_UNLOCK rcx
 .bj_empty:
     ; Return empty bytes
     BJ_RELEASE_TMP
@@ -2816,21 +2820,21 @@ DEF_FUNC bytes_method_join, BJ_FRAME
     V_PACK rax, rdx             ; builtins return one Value
     ret
 
+.bj_unlock_item_error:
+    mov rcx, [rbp - BJ_LIST]
+    OBJ_UNLOCK rcx
+    jmp .bj_item_error
+
 .bj_error:
     SET_EXC exc_TypeError_type, "join() argument must be a list of bytes"
     jmp .bj_fail
 
 .bj_bad_item:
-    ; CPython names the position and the type, which is the whole difference
-    ; between "one of these is wrong" and "the second one is a str".
-    mov [rbp - BJ_TOTAL], rcx   ; the index, free until the lengths are summed
+    mov [rbp - BJ_TOTAL], rcx
     mov rax, [rbp - BJ_LIST]
     mov rax, [rax + PyListObject.ob_item]
     mov rcx, [rbp - BJ_TOTAL]
     mov rax, [rax + rcx*8]
-    ; The NAME, not the object: BJ_RELEASE_TMP frees the converted list, and
-    ; for `b"".join("ab")` that list holds the only reference to the item --
-    ; reading its type afterwards reads freed memory.  A type outlives it.
     V_TEST_PTR rax, rdx
     ja .bj_name_int
     test rax, rax
@@ -2841,6 +2845,8 @@ DEF_FUNC bytes_method_join, BJ_FRAME
 .bj_name_int:
     lea rax, [rel bj_name_int]
 .bj_name_have:
+    mov rcx, [rbp - BJ_LIST]
+    OBJ_UNLOCK rcx
     mov [rbp - BJ_WPOS], rax
     BJ_RELEASE_TMP
     lea rdi, [rel bj_msg_item]
