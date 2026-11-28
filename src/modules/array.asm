@@ -70,7 +70,12 @@ extern rbt_append_cstr
 extern str_cp_at
 extern hash_not_implemented
 extern obj_dealloc
-extern set_exception
+extern gc_alloc
+extern gc_track
+extern str_new_heap
+extern add_new_staticmethod
+extern new_check_class
+extern exc_MemoryError_type
 
 ;; ============================================================================
 ;; The typecode table.  Each row is (letter, itemsize, kind), where kind says
@@ -122,6 +127,7 @@ section .text
 ;; ============================================================================
 ;; array_find_code(rdi = the typecode letter) -> rax = its ArrayCode*, or 0
 ;; ============================================================================
+global array_find_code
 DEF_FUNC_BARE array_find_code
     lea rax, [rel array_codes]
     mov rcx, ARRAY_NCODES
@@ -140,37 +146,84 @@ DEF_FUNC_BARE array_find_code
 END_FUNC array_find_code
 
 ;; ============================================================================
-;; array_new_empty(rdi = ArrayCode*) -> rax = a new empty array, or 0
+;; array_new_empty_type(rdi = ArrayCode*, rsi = PyTypeObject*) -> rax or 0
+;; Allocates an empty array of the requested type (array_type or a subclass),
+;; respecting tp_basicsize and TYPE_FLAG_HAVE_GC, zeroing any subclass tail.
 ;; ============================================================================
-ANE_FRAME equ 16            ; + 1 push = 24 ... see below
-DEF_FUNC array_new_empty, 8
+ANET_CODE  equ 8
+ANET_TYPE  equ 16
+ANET_SIZE  equ 24
+ANET_FRAME equ 40            ; + 1 push (rbx) = 48, 16-aligned
+global array_new_empty_type
+DEF_FUNC array_new_empty_type, ANET_FRAME
     push rbx
-    mov rbx, rdi
-    ; ap_malloc, not gc_alloc: the buffer holds raw scalars, so the type
-    ; carries no TYPE_FLAG_HAVE_GC and there is nothing for the collector to
-    ; track.  gc_alloc and gc_dealloc are a pair, and using one without the
-    ; other handed free() a pointer that was never its to free.
+    mov [rbp - ANET_CODE], rdi
+    mov [rbp - ANET_TYPE], rsi
+
+    mov rdi, [rsi + PyTypeObject.tp_basicsize]
+    cmp rdi, PyArrayObject_size
+    jge .anet_size_ok
     mov edi, PyArrayObject_size
+.anet_size_ok:
+    mov [rbp - ANET_SIZE], rdi
+    test qword [rsi + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .anet_plain_alloc
+    call gc_alloc
+    jmp .anet_alloc_done
+.anet_plain_alloc:
     call ap_malloc
     test rax, rax
-    jz .ane_out
+    jz .anet_out
     INIT_OBJ_RC rax
-    lea rcx, [rel array_type]
-    mov [rax + PyObject.ob_type], rcx
-    mov qword [rax + PyArrayObject.ob_size], 0
-    mov qword [rax + PyArrayObject.ob_cap], 0
-    mov qword [rax + PyArrayObject.ob_data], 0
-    mov rcx, [rbx + ArrayCode.letter]
-    mov [rax + PyArrayObject.ob_code], rcx
-    mov rcx, [rbx + ArrayCode.itemsize]
-    mov [rax + PyArrayObject.ob_isize], rcx
-    mov rcx, [rbx + ArrayCode.kind]
-    mov [rax + PyArrayObject.ob_kind], rcx
-    mov qword [rax + PyArrayObject.ob_exports], 0
-.ane_out:
+    mov rsi, [rbp - ANET_TYPE]
+    mov [rax + PyObject.ob_type], rsi
+.anet_alloc_done:
+    test rax, rax
+    jz .anet_out
+    mov rbx, rax
+    mov qword [rbx + PyArrayObject.ob_size], 0
+    mov qword [rbx + PyArrayObject.ob_cap], 0
+    mov qword [rbx + PyArrayObject.ob_data], 0
+    mov rdx, [rbp - ANET_CODE]
+    mov rcx, [rdx + ArrayCode.letter]
+    mov [rbx + PyArrayObject.ob_code], rcx
+    mov rcx, [rdx + ArrayCode.itemsize]
+    mov [rbx + PyArrayObject.ob_isize], rcx
+    mov rcx, [rdx + ArrayCode.kind]
+    mov [rbx + PyArrayObject.ob_kind], rcx
+    mov qword [rbx + PyArrayObject.ob_exports], 0
+
+    ; Zero any subclass tail (__dict__ slot and __slots__ values)
+    mov rcx, [rbp - ANET_SIZE]
+    sub rcx, PyArrayObject_size
+    jle .anet_no_tail
+    lea rdi, [rbx + PyArrayObject_size]
+    shr rcx, 3
+    xor eax, eax
+    rep stosq
+.anet_no_tail:
+    ; Own a ref to the type (no-op for immortal array_type; required for heaptype)
+    mov rsi, [rbp - ANET_TYPE]
+    INCREF rsi
+    test qword [rsi + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
+    jz .anet_done
+    mov rdi, rbx
+    call gc_track
+.anet_done:
+    mov rax, rbx
+.anet_out:
     pop rbx
     leave
     ret
+END_FUNC array_new_empty_type
+
+;; ============================================================================
+;; array_new_empty(rdi = ArrayCode*) -> rax = a new empty array, or 0
+;; ============================================================================
+global array_new_empty
+DEF_FUNC_BARE array_new_empty
+    lea rsi, [rel array_type]
+    jmp array_new_empty_type
 END_FUNC array_new_empty
 
 ;; ============================================================================
@@ -183,6 +236,7 @@ END_FUNC array_new_empty
 AR_ARR   equ 8
 AR_WANT  equ 16
 AR_FRAME equ 32             ; + 0 pushes = 32, 16-aligned
+global array_reserve
 DEF_FUNC array_reserve, AR_FRAME
     mov [rbp - AR_ARR], rdi
     mov [rbp - AR_WANT], rsi
@@ -227,7 +281,6 @@ DEF_FUNC array_reserve, AR_FRAME
     leave
     ret
 .arr_nomem:
-    extern exc_MemoryError_type
     SET_EXC exc_MemoryError_type, "out of memory"
     leave
     ret
@@ -242,6 +295,7 @@ END_FUNC array_reserve
 ;; ============================================================================
 AIV_ARG   equ 8          ; the one-element argument array chr() takes
 AIV_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
+global array_item_value
 DEF_FUNC array_item_value, AIV_FRAME
     mov rax, [rdi + PyArrayObject.ob_data]
     mov rcx, [rdi + PyArrayObject.ob_isize]
@@ -385,6 +439,7 @@ ASI_NEG   equ 40        ; 1 when the refusal is "less than minimum"
 ASI_MSG_ROW equ 40      ; five qwords per row of asi_msgs
 ASI_WIDE  equ 48        ; 1 when it did not even fit the C conversion type
 ASI_FRAME equ 56            ; + 1 push = 64, 16-aligned
+global array_store_item
 DEF_FUNC array_store_item, ASI_FRAME
     push rbx
     mov [rbp - ASI_ARR], rdi
@@ -790,9 +845,8 @@ DEF_FUNC array_richcompare, ARC_FRAME
     V_TEST_PTR rsi, rax
     ja .arc_not_impl
     mov rax, [rsi + PyObject.ob_type]
-    lea rcx, [rel array_type]
-    cmp rax, rcx
-    jne .arc_not_impl
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
+    jz .arc_not_impl
 
     mov [rbp - ARC_RIGHT], rsi
     mov [rbp - ARC_OP], rdx
@@ -909,6 +963,7 @@ END_FUNC array_sq_item
 AAV_ARR   equ 8
 AAV_VAL   equ 16
 AAV_FRAME equ 16
+global array_append_value
 DEF_FUNC array_append_value, AAV_FRAME
     mov [rbp - AAV_ARR], rdi
     mov [rbp - AAV_VAL], rsi
@@ -940,6 +995,7 @@ END_FUNC array_append_value
 AEI_ARR   equ 8
 AEI_ITER  equ 16
 AEI_FRAME equ 32            ; + 1 push = 40 ... padded below
+global array_extend_iterable
 DEF_FUNC array_extend_iterable, 40
     push rbx
     mov [rbp - AEI_ARR], rdi
@@ -955,9 +1011,8 @@ DEF_FUNC array_extend_iterable, 40
     V_TEST_PTR rbx, rax
     ja .aei_generic
     mov rax, [rbx + PyObject.ob_type]
-    lea rcx, [rel array_type]
-    cmp rax, rcx
-    jne .aei_generic
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
+    jz .aei_generic
     mov rcx, [rbx + PyArrayObject.ob_code]
     cmp rcx, [rdi + PyArrayObject.ob_code]
     jne .aei_generic
@@ -1059,10 +1114,28 @@ ATN_CODE  equ 8
 ATN_ARR   equ 16
 ATN_ARGS  equ 24
 ATN_NARGS equ 32
+ATN_TYPE  equ 40
 ATN_FRAME equ 48            ; + 0 pushes = 48, 16-aligned
+global array_type_new
 DEF_FUNC array_type_new, ATN_FRAME
+    mov [rbp - ATN_TYPE], rdi
     mov [rbp - ATN_ARGS], rsi
     mov [rbp - ATN_NARGS], rdx
+
+    ; Handle keyword arguments: array.array() refuses them, while a subclass
+    ; (e.g. ArraySubclassWithKwargs('b', newarg=1)) passes kwargs through to
+    ; __init__, so tp_new strips them from nargs.
+    mov rax, [gs:ThreadState.kw_names_pending]
+    test rax, rax
+    jz .atn_no_kw
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    lea rcx, [rel array_type]
+    cmp rdi, rcx
+    je .atn_kw_err
+    mov rcx, [rax + PyTupleObject.ob_size]
+    sub rdx, rcx
+    mov [rbp - ATN_NARGS], rdx
+.atn_no_kw:
     cmp rdx, 1
     jb .atn_arity
     cmp rdx, 2
@@ -1079,7 +1152,10 @@ DEF_FUNC array_type_new, ATN_FRAME
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .atn_not_a_char
+    je .atn_str_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .atn_not_a_char
+.atn_str_ok:
     cmp qword [rdi + PyStrObject.ob_length], 1
     jne .atn_not_a_char
     movzx edi, byte [rdi + PyStrObject.data]
@@ -1089,16 +1165,62 @@ DEF_FUNC array_type_new, ATN_FRAME
     mov [rbp - ATN_CODE], rax
 
     mov rdi, rax
-    call array_new_empty
+    mov rsi, [rbp - ATN_TYPE]
+    call array_new_empty_type
     test rax, rax
     jz .atn_null
     mov [rbp - ATN_ARR], rax
 
     cmp qword [rbp - ATN_NARGS], 2
     jb .atn_done
-    mov rdi, rax
     mov rsi, [rbp - ATN_ARGS]
     mov rsi, [rsi + 8]          ; args[1], one Value per slot
+
+    ; Dispatch initializer like CPython's array_new:
+    ;   - bytes / bytearray -> frombytes (raw scalar bytes)
+    ;   - str -> fromunicode for 'u', TypeError otherwise
+    ;   - unicode array -> TypeError for non-'u'
+    ;   - anything else -> extend iterable
+    V_TEST_PTR rsi, rcx
+    ja .atn_init_iter
+    mov rcx, [rsi + PyObject.ob_type]
+    lea rdx, [rel bytes_type]
+    cmp rcx, rdx
+    je .atn_init_bytes
+    test qword [rcx + PyTypeObject.tp_flags], \
+         TYPE_FLAG_BYTES_SUBCLASS | TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .atn_init_bytes
+    lea rdx, [rel str_type]
+    cmp rcx, rdx
+    je .atn_init_str
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jnz .atn_init_str
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
+    jz .atn_init_iter
+    ; Another array: refuse unicode array -> non-unicode array
+    cmp qword [rsi + PyArrayObject.ob_code], 'u'
+    jne .atn_init_iter
+    mov rdi, [rbp - ATN_ARR]
+    cmp qword [rdi + PyArrayObject.ob_code], 'u'
+    jne .atn_bad_uarray
+    jmp .atn_init_iter
+
+.atn_init_bytes:
+    mov rdi, [rbp - ATN_ARR]
+    call array_frombytes_raw
+    ERR_NULL .atn_drop
+    jmp .atn_done
+
+.atn_init_str:
+    mov rdi, [rbp - ATN_ARR]
+    cmp qword [rdi + PyArrayObject.ob_code], 'u'
+    jne .atn_bad_str
+    call array_fromunicode_str
+    ERR_NULL .atn_drop
+    jmp .atn_done
+
+.atn_init_iter:
+    mov rdi, [rbp - ATN_ARR]
     call array_extend_iterable
     ERR_NULL .atn_drop
 
@@ -1108,6 +1230,13 @@ DEF_FUNC array_type_new, ATN_FRAME
     leave
     V_PACK rax, rdx             ; builtins return one Value
     ret
+.atn_bad_str:
+    SET_EXC exc_TypeError_type, \
+            "cannot use a str to initialize an array with non-'u' typecode"
+    jmp .atn_drop
+.atn_bad_uarray:
+    SET_EXC exc_TypeError_type, \
+            "cannot use a unicode array to initialize an array with non-'u' typecode"
 .atn_drop:
     mov rdi, [rbp - ATN_ARR]
     call obj_decref
@@ -1115,6 +1244,8 @@ DEF_FUNC array_type_new, ATN_FRAME
     RET_NULL                    ; tp_new: rax = 0 and edx = 0
     leave
     ret
+.atn_kw_err:
+    FAIL exc_TypeError_type, "array.array() takes no keyword arguments", .atn_null
 .atn_bad_code:
     FAIL exc_ValueError_type, \
           "bad typecode (must be b, B, u, h, H, i, I, l, L, q, Q, f or d)", \
@@ -1141,6 +1272,7 @@ ATL_ARR   equ 8
 ATL_LIST  equ 16
 ATL_I     equ 24
 ATL_FRAME equ 32            ; + 0 pushes = 32, 16-aligned
+global array_tolist
 DEF_FUNC array_tolist, ATL_FRAME
     mov [rbp - ATL_ARR], rdi
     xor edi, edi
@@ -1229,8 +1361,15 @@ DEF_FUNC array_repr, ARP_FRAME
     ret
 
 .arp_with_items:
+    cmp qword [rdi + PyArrayObject.ob_code], 'u'
+    jne .arp_not_unicode
+    call array_tounicode_str
+    ERR_NULL .arp_null
+    jmp .arp_have_obj
+.arp_not_unicode:
     call array_tolist
     ERR_NULL .arp_null
+.arp_have_obj:
     mov [rbp - ARP_LIST], rax
     mov rdi, rax
     extern obj_repr
@@ -1531,6 +1670,7 @@ section .text
 ;;
 ;; CPython's array_resize makes this test first, with this wording.
 ;; ============================================================================
+global array_no_exports
 DEF_FUNC array_no_exports
     cmp qword [rdi + PyArrayObject.ob_exports], 0
     jne .anx_exporting
@@ -1582,10 +1722,8 @@ array_type:
     dq 0                        ; tp_base
     dq 0                        ; tp_dict
     dq 0                        ; tp_mro
-    ; No BASETYPE: the buffer moves, so a subclass could take neither a
-    ; __dict__ nor __slots__ at a fixed offset, which is the rule bytearray
-    ; and memoryview follow.
-    dq TYPE_FLAG_FINAL          ; tp_flags
+    ; Subclassable like bytearray (fixed header + out-of-line scalar buffer).
+    dq TYPE_FLAG_BASETYPE | TYPE_FLAG_ARRAY_SUBCLASS ; tp_flags
     dq 0                        ; tp_bases
     dq 0                        ; tp_traverse
     dq 0                        ; tp_clear
@@ -1671,8 +1809,11 @@ DEF_FUNC_BARE array_m_fromlist
 END_FUNC array_m_fromlist
 
 ;; array_m_tobytes(args, nargs) -> the raw buffer as bytes
+global array_m_tobytes
 DEF_FUNC array_m_tobytes, 8
     push rbx
+    cmp rsi, 1
+    jne .amb_arity
     mov rbx, [rdi]
     OBJ_LOCK rbx
     mov rsi, [rbx + PyArrayObject.ob_size]
@@ -1693,53 +1834,55 @@ DEF_FUNC array_m_tobytes, 8
     leave
     V_PACK rax, rdx
     ret
+.amb_arity:
+    FAIL exc_TypeError_type, "tobytes() takes no arguments", .amb_fail
+.amb_fail:
+    xor eax, eax
+    xor edx, edx
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
 END_FUNC array_m_tobytes
 
-;; array_m_frombytes(args, nargs) -> None
-;;   The bytes must be a whole number of items, which is what CPython checks.
+;; ============================================================================
+;; array_frombytes_raw(rdi = arr, rsi = bytes-like Value) -> eax = 1 or 0
+;; Fails: 0
+;; ============================================================================
 AFB_ARR   equ 8
-AFB_FRAME equ 16            ; + 1 push = 24 ... padded below
-AFB_SRC equ 24              ; the incoming data pointer, whatever held it
-AFB_LEN equ 32              ; and its length in bytes
-DEF_FUNC array_m_frombytes, 40
+AFB_SRC   equ 16            ; the incoming data pointer, whatever held it
+AFB_LEN   equ 24            ; and its length in bytes
+AFB_CNT   equ 32            ; item count coming in
+AFB_FRAME equ 40            ; + 1 push (rbx) = 48, 16-aligned
+global array_frombytes_raw
+DEF_FUNC array_frombytes_raw, AFB_FRAME
     push rbx
-    cmp rsi, 2
-    jne .afb_arity
-    mov rbx, [rdi + 8]          ; the bytes
-    mov rdi, [rdi]
     mov [rbp - AFB_ARR], rdi
+    mov rbx, rsi
 
     ; As in array_append_value: the length is about to change.
     call array_no_exports
     ERR_NULL .afb_fail
 
-    ; Anything bytes-LIKE, which is what CPython takes: a bytes, a bytearray or
-    ; a memoryview.  An exact-bytes test refused the other two.
-    ;
-    ; NOT a generic buffer exporter, and not another array: CPython asks for
-    ; PyBUF_SIMPLE, which an exporter carrying its own format refuses, so
-    ; `a.frombytes(other_array)` is a TypeError there.  This slot does not model
-    ; the request flags, so the three are named instead.
+    ; Anything bytes-LIKE, which is what CPython takes: bytes, bytearray, or
+    ; memoryview (including bytes/bytearray subclasses).
     V_TEST_PTR rbx, rax
     ja .afb_need_bytes
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel bytes_type]
     cmp rax, rcx
     je .afb_kind_ok
-    extern bytearray_type
-    lea rcx, [rel bytearray_type]
-    cmp rax, rcx
-    je .afb_kind_ok
+    test qword [rax + PyTypeObject.tp_flags], \
+         TYPE_FLAG_BYTES_SUBCLASS | TYPE_FLAG_BYTEARRAY_SUBCLASS
+    jnz .afb_kind_ok
     extern memoryview_type
     lea rcx, [rel memoryview_type]
     cmp rax, rcx
     jne .afb_need_bytes
 .afb_kind_ok:
-    push rbx
     mov rdi, rbx
     extern bytes_like_ptr_len
     call bytes_like_ptr_len
-    pop rbx
     test ecx, ecx
     jz .afb_need_bytes
     mov [rbp - AFB_SRC], rax    ; where the incoming bytes are
@@ -1751,19 +1894,18 @@ DEF_FUNC array_m_frombytes, 40
     div rcx
     test rdx, rdx
     jnz .afb_not_multiple
-    mov rsi, rax                ; the item count coming in
-    test rsi, rsi
+    mov [rbp - AFB_CNT], rax    ; the item count coming in
+    test rax, rax
     jz .afb_done
-    push rsi
     mov rdi, [rbp - AFB_ARR]
     OBJ_LOCK rdi
     call array_no_exports
-    ERR_NULL .afb_unlock_pop_fail
+    ERR_NULL .afb_unlock_fail
     mov rdi, [rbp - AFB_ARR]
-    mov rsi, [rsp]
+    mov rsi, [rbp - AFB_CNT]
     add rsi, [rdi + PyArrayObject.ob_size]
     call array_reserve
-    ERR_NULL .afb_unlock_pop_fail
+    ERR_NULL .afb_unlock_fail
 
     mov rdi, [rbp - AFB_ARR]
     mov rax, [rdi + PyArrayObject.ob_size]
@@ -1773,40 +1915,427 @@ DEF_FUNC array_m_frombytes, 40
     mov rsi, [rbp - AFB_SRC]
     mov rdx, [rbp - AFB_LEN]
     call ap_memcpy
-    pop rsi
+    mov rsi, [rbp - AFB_CNT]
     mov rdi, [rbp - AFB_ARR]
     add [rdi + PyArrayObject.ob_size], rsi
     OBJ_UNLOCK rdi
     jmp .afb_done
-.afb_unlock_pop_fail:
-    pop rsi
+.afb_unlock_fail:
     mov rdi, [rbp - AFB_ARR]
     OBJ_UNLOCK rdi
     jmp .afb_fail
 
 .afb_done:
-    LOAD_NONE rax
-    INCREF rax
-    mov edx, TAG_PTR
+    mov eax, 1
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
 .afb_fail:
     xor eax, eax
-    xor edx, edx
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
-.afb_arity:
-    FAIL exc_TypeError_type, "frombytes() takes exactly one argument", .afb_fail
 .afb_need_bytes:
     FAIL exc_TypeError_type, "a bytes-like object is required", .afb_fail
 .afb_not_multiple:
     FAIL exc_ValueError_type, \
           "bytes length not a multiple of item size", .afb_fail
+END_FUNC array_frombytes_raw
+
+;; array_m_frombytes(args, nargs) -> None
+global array_m_frombytes
+DEF_FUNC array_m_frombytes
+    cmp rsi, 2
+    jne .amfb_arity
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call array_frombytes_raw
+    ERR_NULL .amfb_fail
+    LOAD_NONE rax
+    INCREF rax
+    leave
+    ret
+.amfb_arity:
+    SET_EXC exc_TypeError_type, "frombytes() takes exactly one argument"
+.amfb_fail:
+    xor eax, eax
+    leave
+    ret
 END_FUNC array_m_frombytes
+
+;; ============================================================================
+;; array_fromunicode_str(rdi = arr, rsi = str Value) -> eax = 1 or 0
+;; Fails: 0
+;; Decodes UTF-8 codepoints from str into a 'u' array's uint32 buffer.
+;; ============================================================================
+AFU_ARR   equ 8
+AFU_STR   equ 16
+AFU_NADD  equ 24
+AFU_FRAME equ 40            ; + 1 push (rbx) = 48, 16-aligned
+global array_fromunicode_str
+DEF_FUNC array_fromunicode_str, AFU_FRAME
+    push rbx
+    mov [rbp - AFU_ARR], rdi
+    mov [rbp - AFU_STR], rsi
+
+    cmp qword [rdi + PyArrayObject.ob_code], 'u'
+    jne .afu_not_u
+    V_TEST_PTR rsi, rax
+    ja .afu_not_str
+    mov rax, [rsi + PyObject.ob_type]
+    lea rcx, [rel str_type]
+    cmp rax, rcx
+    je .afu_str_ok
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
+    jz .afu_not_str
+.afu_str_ok:
+    call array_no_exports
+    ERR_NULL .afu_fail
+    mov rsi, [rbp - AFU_STR]
+    mov rax, [rsi + PyStrObject.ob_length]
+    mov [rbp - AFU_NADD], rax
+    test rax, rax
+    jz .afu_ok
+
+    mov rdi, [rbp - AFU_ARR]
+    OBJ_LOCK rdi
+    call array_no_exports
+    ERR_NULL .afu_unlock_fail
+    mov rdi, [rbp - AFU_ARR]
+    mov rsi, [rdi + PyArrayObject.ob_size]
+    add rsi, [rbp - AFU_NADD]
+    call array_reserve
+    ERR_NULL .afu_unlock_fail
+
+    mov rbx, [rbp - AFU_ARR]
+    mov rax, [rbx + PyArrayObject.ob_size]
+    shl rax, 2
+    add rax, [rbx + PyArrayObject.ob_data]  ; dst = &data[ob_size]
+    mov rdi, rax
+    mov rdx, [rbp - AFU_STR]
+    lea rsi, [rdx + PyStrObject.data]
+    mov rcx, [rbp - AFU_NADD]
+.afu_loop:
+    test rcx, rcx
+    jz .afu_done_copy
+    movzx eax, byte [rsi]
+    cmp eax, 0x80
+    jb .afu_1b
+    cmp eax, 0xE0
+    jb .afu_2b
+    cmp eax, 0xF0
+    jb .afu_3b
+    ; 4-byte UTF-8
+    and eax, 0x07
+    shl eax, 18
+    movzx r8d, byte [rsi + 1]
+    and r8d, 0x3F
+    shl r8d, 12
+    or eax, r8d
+    movzx r8d, byte [rsi + 2]
+    and r8d, 0x3F
+    shl r8d, 6
+    or eax, r8d
+    movzx r8d, byte [rsi + 3]
+    and r8d, 0x3F
+    or eax, r8d
+    add rsi, 4
+    jmp .afu_store
+.afu_3b:
+    and eax, 0x0F
+    shl eax, 12
+    movzx r8d, byte [rsi + 1]
+    and r8d, 0x3F
+    shl r8d, 6
+    or eax, r8d
+    movzx r8d, byte [rsi + 2]
+    and r8d, 0x3F
+    or eax, r8d
+    add rsi, 3
+    jmp .afu_store
+.afu_2b:
+    and eax, 0x1F
+    shl eax, 6
+    movzx r8d, byte [rsi + 1]
+    and r8d, 0x3F
+    or eax, r8d
+    add rsi, 2
+    jmp .afu_store
+.afu_1b:
+    inc rsi
+.afu_store:
+    mov [rdi], eax
+    add rdi, 4
+    dec rcx
+    jmp .afu_loop
+
+.afu_done_copy:
+    mov rax, [rbp - AFU_NADD]
+    add [rbx + PyArrayObject.ob_size], rax
+    OBJ_UNLOCK rbx
+.afu_ok:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.afu_unlock_fail:
+    mov rdi, [rbp - AFU_ARR]
+    OBJ_UNLOCK rdi
+.afu_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.afu_not_u:
+    FAIL exc_ValueError_type, \
+         "fromunicode() may only be called on unicode type arrays", .afu_fail
+.afu_not_str:
+    FAIL exc_TypeError_type, "fromunicode() argument must be str", .afu_fail
+END_FUNC array_fromunicode_str
+
+;; array_m_fromunicode(args, nargs) -> None
+DEF_FUNC array_m_fromunicode
+    cmp rsi, 2
+    jne .amfu_arity
+    mov rsi, [rdi + 8]
+    mov rdi, [rdi]
+    call array_fromunicode_str
+    ERR_NULL .amfu_fail
+    LOAD_NONE rax
+    INCREF rax
+    leave
+    ret
+.amfu_arity:
+    SET_EXC exc_TypeError_type, "fromunicode() takes exactly one argument"
+.amfu_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_m_fromunicode
+
+;; ============================================================================
+;; array_tounicode_str(rdi = arr) -> rax = PyStrObject*, or 0
+;; Fails: 0
+;; Encodes a 'u' array's uint32 codepoints into a UTF-8 PyStrObject.
+;; ============================================================================
+ATU_ARR   equ 8
+ATU_BUF   equ 16
+ATU_BYTES equ 24
+ATU_FRAME equ 40            ; + 1 push (rbx) = 48, 16-aligned
+global array_tounicode_str
+DEF_FUNC array_tounicode_str, ATU_FRAME
+    push rbx
+    mov [rbp - ATU_ARR], rdi
+    cmp qword [rdi + PyArrayObject.ob_code], 'u'
+    jne .atu_not_u
+
+    mov rbx, rdi
+    OBJ_LOCK rbx
+    mov rcx, [rbx + PyArrayObject.ob_size]
+    test rcx, rcx
+    jz .atu_unlock_empty
+
+    ; Pass 1: validate codepoints <= 0x10FFFF and compute UTF-8 byte length
+    mov rsi, [rbx + PyArrayObject.ob_data]
+    xor r8d, r8d                ; total UTF-8 bytes
+    xor edx, edx                ; index
+.atu_len_loop:
+    cmp rdx, rcx
+    jge .atu_alloc
+    mov eax, [rsi + rdx * 4]
+    cmp eax, 0x10FFFF
+    ja .atu_unlock_bad_cp
+    cmp eax, 0x80
+    jb .atu_l1
+    cmp eax, 0x800
+    jb .atu_l2
+    cmp eax, 0x10000
+    jb .atu_l3
+    add r8, 4
+    jmp .atu_lnext
+.atu_l1:
+    inc r8
+    jmp .atu_lnext
+.atu_l2:
+    add r8, 2
+    jmp .atu_lnext
+.atu_l3:
+    add r8, 3
+.atu_lnext:
+    inc rdx
+    jmp .atu_len_loop
+
+.atu_alloc:
+    mov [rbp - ATU_BYTES], r8
+    mov rdi, r8
+    call ap_malloc
+    test rax, rax
+    jz .atu_unlock_nomem
+    mov [rbp - ATU_BUF], rax
+
+    ; Pass 2: encode UTF-8 into scratch buffer while still holding OBJ_LOCK
+    mov rdi, rax
+    mov rsi, [rbx + PyArrayObject.ob_data]
+    mov rcx, [rbx + PyArrayObject.ob_size]
+    xor edx, edx
+.atu_enc_loop:
+    cmp rdx, rcx
+    jge .atu_encoded
+    mov eax, [rsi + rdx * 4]
+    cmp eax, 0x80
+    jb .atu_e1
+    cmp eax, 0x800
+    jb .atu_e2
+    cmp eax, 0x10000
+    jb .atu_e3
+    ; 4 bytes
+    mov r9d, eax
+    shr r9d, 18
+    or r9d, 0xF0
+    mov [rdi], r9b
+    mov r9d, eax
+    shr r9d, 12
+    and r9d, 0x3F
+    or r9d, 0x80
+    mov [rdi + 1], r9b
+    mov r9d, eax
+    shr r9d, 6
+    and r9d, 0x3F
+    or r9d, 0x80
+    mov [rdi + 2], r9b
+    and eax, 0x3F
+    or eax, 0x80
+    mov [rdi + 3], al
+    add rdi, 4
+    jmp .atu_enext
+.atu_e1:
+    mov [rdi], al
+    inc rdi
+    jmp .atu_enext
+.atu_e2:
+    mov r9d, eax
+    shr r9d, 6
+    or r9d, 0xC0
+    mov [rdi], r9b
+    and eax, 0x3F
+    or eax, 0x80
+    mov [rdi + 1], al
+    add rdi, 2
+    jmp .atu_enext
+.atu_e3:
+    mov r9d, eax
+    shr r9d, 12
+    or r9d, 0xE0
+    mov [rdi], r9b
+    mov r9d, eax
+    shr r9d, 6
+    and r9d, 0x3F
+    or r9d, 0x80
+    mov [rdi + 1], r9b
+    and eax, 0x3F
+    or eax, 0x80
+    mov [rdi + 2], al
+    add rdi, 3
+.atu_enext:
+    inc rdx
+    jmp .atu_enc_loop
+
+.atu_encoded:
+    OBJ_UNLOCK rbx
+    mov rdi, [rbp - ATU_BUF]
+    mov rsi, [rbp - ATU_BYTES]
+    call str_new_heap
+    mov rbx, rax
+    mov rdi, [rbp - ATU_BUF]
+    call ap_free
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+
+.atu_unlock_empty:
+    OBJ_UNLOCK rbx
+    lea rdi, [rel array_empty_byte]
+    xor esi, esi
+    call str_new_heap
+    pop rbx
+    leave
+    ret
+.atu_unlock_bad_cp:
+    OBJ_UNLOCK rbx
+    FAIL exc_ValueError_type, \
+         "character is not in range [U+0000; U+10ffff]", .atu_fail
+.atu_unlock_nomem:
+    OBJ_UNLOCK rbx
+    FAIL exc_MemoryError_type, "out of memory", .atu_fail
+.atu_not_u:
+    FAIL exc_ValueError_type, \
+         "tounicode() may only be called on unicode type arrays", .atu_fail
+.atu_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_tounicode_str
+
+;; array_m_tounicode(args, nargs) -> str
+DEF_FUNC array_m_tounicode
+    cmp rsi, 1
+    jne .amtu_arity
+    mov rdi, [rdi]
+    call array_tounicode_str    ; err: 0 is this method's own
+    leave
+    ret
+.amtu_arity:
+    SET_EXC exc_TypeError_type, "tounicode() takes no arguments"
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_m_tounicode
+
+;; array_m_new(args, nargs) -> array.array.__new__(cls, typecode[, init])
+AMN_ARGS  equ 8
+AMN_NARGS equ 16
+AMN_FRAME equ 16            ; 0 pushes, 16-aligned
+DEF_FUNC array_m_new, AMN_FRAME
+    mov [rbp - AMN_ARGS], rdi
+    mov [rbp - AMN_NARGS], rsi
+    mov rdx, rsi
+    mov rsi, rdi
+    lea rdi, [rel array_type]
+    call new_check_class
+    ERR_NULL .amn_fail
+    mov rdi, rax                ; cls
+    mov rsi, [rbp - AMN_ARGS]
+    add rsi, 8
+    mov rdx, [rbp - AMN_NARGS]
+    dec rdx
+    call array_type_new
+    leave
+    ret
+.amn_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_m_new
+
+;; array_m_init(args, nargs) -> None
+;; Matches object.__init__ on array.array (allows subclass __init__ calling
+;; array.array.__init__(self) or default init forwarding).
+DEF_FUNC array_m_init
+    mov qword [gs:ThreadState.kw_names_pending], 0
+    cmp rsi, 1
+    jb .ami_arity
+    LOAD_NONE rax
+    INCREF rax
+    leave
+    ret
+.ami_arity:
+    SET_EXC exc_TypeError_type, "descriptor '__init__' of 'array.array' object needs an argument"
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_m_init
 
 ;; ============================================================================
 ;; The two names fromfile and tofile look up, built once by
@@ -2376,6 +2905,8 @@ DEF_FUNC array_module_create, AMC_FRAME
     AM_ADD_METHOD array_m_fromlist,    "fromlist"
     AM_ADD_METHOD array_m_tobytes,     "tobytes"
     AM_ADD_METHOD array_m_frombytes,   "frombytes"
+    AM_ADD_METHOD array_m_fromunicode, "fromunicode"
+    AM_ADD_METHOD array_m_tounicode,   "tounicode"
     AM_ADD_METHOD array_m_tofile,      "tofile"
     AM_ADD_METHOD array_m_fromfile,    "fromfile"
     AM_ADD_METHOD array_m_byteswap,    "byteswap"
@@ -2383,6 +2914,10 @@ DEF_FUNC array_module_create, AMC_FRAME
     AM_ADD_METHOD array_m_getitem,     "__getitem__"
     AM_ADD_METHOD array_m_setitem,     "__setitem__"
     AM_ADD_METHOD array_m_len,         "__len__"
+    AM_ADD_METHOD array_m_init,        "__init__"
+    mov rdi, rbx
+    lea rsi, [rel array_m_new]
+    call add_new_staticmethod
     lea rax, [rel array_type]
     mov [rax + PyTypeObject.tp_dict], rbx
     mov rdi, rax
@@ -2425,6 +2960,17 @@ DEF_FUNC array_module_create, AMC_FRAME
     lea rax, [rel array_type]
     lea rcx, [rel array_type_new]
     mov [rax + PyTypeObject.tp_new], rcx
+
+    ; ArrayType is the legacy alias for array.array
+    CSTRING rdi, "ArrayType"
+    call str_from_cstr_heap
+    mov [rbp - AMC_KEY], rax
+    mov rdi, r12
+    mov rsi, rax
+    lea rdx, [rel array_type]
+    call dict_set_str
+    mov rdi, [rbp - AMC_KEY]
+    call obj_decref
 
     CSTRING rdi, "typecodes"
     call str_from_cstr_heap
@@ -2472,7 +3018,6 @@ END_FUNC array_module_create
 ;; the same order, and it is the one already written.
 ;; ============================================================================
 DEF_FUNC array_tp_iter
-    call obj_incref             ; seq_iter_new takes ownership
     extern seq_iter_new
     call seq_iter_new
     leave

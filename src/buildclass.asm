@@ -1505,7 +1505,7 @@ TFP_RSP   equ 40 + 88
              TYPE_FLAG_DICT_SUBCLASS | TYPE_FLAG_SET_SUBCLASS | \
              TYPE_FLAG_FLOAT_SUBCLASS | TYPE_FLAG_COMPLEX_SUBCLASS | \
              TYPE_FLAG_BYTEARRAY_SUBCLASS | TYPE_FLAG_BYTES_SUBCLASS | \
-             TYPE_FLAG_OSERROR_SUBCLASS
+             TYPE_FLAG_OSERROR_SUBCLASS | TYPE_FLAG_ARRAY_SUBCLASS
     or [r12 + PyTypeObject.tp_flags], r10
 
     ; A class deriving from `type` is a metatype: its instances are classes,
@@ -1660,6 +1660,10 @@ TFP_RSP   equ 40 + 88
     cmp rax, rcx
     je .bc_container_sub
     lea rcx, [rel bytearray_type]
+    cmp rax, rcx
+    je .bc_container_sub
+    extern array_type
+    lea rcx, [rel array_type]
     cmp rax, rcx
     je .bc_container_sub
     lea rcx, [rel memoryview_type]

@@ -1037,6 +1037,8 @@ weakref_allowed_types:
     dq code_type
     dq file_type
     dq io_bytesio_type
+extern array_type
+    dq array_type
     dq task_type
     dq 0
 
@@ -1402,30 +1404,8 @@ DEF_FUNC proxy_getattr
     mov r12, rax                ; owned referent
     mov rdi, r12
     mov rsi, rbx
-    mov rax, [rdi + PyObject.ob_type]
-    mov rax, [rax + PyTypeObject.tp_getattr]
-    test rax, rax
-    jz .via_dict
-    call rax
-    push rax
-    push rdx
-    mov rdi, r12
-    call obj_decref
-    pop rdx
-    pop rax
-    pop r12
-    pop rbx
-    leave
-    ret
-.via_dict:
-    mov rax, [r12 + PyObject.ob_type]
-    mov rdi, [rax + PyTypeObject.tp_dict]
-    test rdi, rdi
-    jz .none_rel
-    mov rsi, rbx
-    call dict_get_mro
-    test rax, rax
-    jz .none_rel
+    extern obj_getattr_opt
+    call obj_getattr_opt        ; err: 0 (absent or raised) is tp_getattr's answer
     push rax
     sub rsp, 8
     mov rdi, r12
@@ -1436,18 +1416,54 @@ DEF_FUNC proxy_getattr
     pop rbx
     leave
     ret
-.none_rel:
-    mov rdi, r12
-    call obj_decref
 .none:
     xor eax, eax
-    xor edx, edx
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
 END_FUNC proxy_getattr
+
+;; proxy_length(rdi = proxy) -> rax = len(referent), or -1 raising
+PL_ARG   equ 8
+PL_RES   equ 16
+PL_FRAME equ 24                 ; + 1 push (rbx) = 32, 16-aligned
+DEF_FUNC proxy_length, PL_FRAME
+    push rbx
+    call proxy_referent
+    ERR_NULL .pl_fail
+    mov rbx, rax
+    mov [rbp - PL_ARG], rax
+    lea rdi, [rbp - PL_ARG]
+    mov esi, 1
+    extern builtin_len
+    call builtin_len            ; err: 0 tested below after dropping referent
+    mov [rbp - PL_RES], rax
+    mov rdi, rbx
+    call obj_decref
+    mov rdi, [rbp - PL_RES]
+    test rdi, rdi
+    jz .pl_fail
+    V_UNPACK rdi, rdx
+    extern obj_as_index
+    call obj_as_index
+    ERR_M1 .pl_drop_res
+    mov rbx, rax
+    mov rdi, [rbp - PL_RES]
+    DECREF_V rdi, rcx
+    mov rax, rbx
+    pop rbx
+    leave
+    ret
+.pl_drop_res:
+    mov rdi, [rbp - PL_RES]
+    DECREF_V rdi, rcx
+.pl_fail:
+    mov rax, -1
+    pop rbx
+    leave
+    ret
+END_FUNC proxy_length
 
 DEF_FUNC proxy_setattr, 8               ; + 3 pushes = 32, 16-aligned
     push rbx
@@ -1909,6 +1925,17 @@ weakref_type:
     dq 0                        ; tp_as_buffer
 
 align 8
+proxy_seq_methods:
+    dq proxy_length             ; sq_length
+    dq 0                        ; sq_concat
+    dq 0                        ; sq_repeat
+    dq 0                        ; sq_item
+    dq 0                        ; sq_ass_item
+    dq 0                        ; sq_contains
+    dq 0                        ; sq_inplace_concat
+    dq 0                        ; sq_inplace_repeat
+
+align 8
 global proxy_type
 proxy_type:
     dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
@@ -1929,7 +1956,7 @@ proxy_type:
     dq 0
     dq 0
     dq 0
-    dq 0
+    dq proxy_seq_methods        ; tp_as_sequence
     dq 0
     dq 0
     dq 0
@@ -1963,7 +1990,7 @@ callableproxy_type:
     dq 0
     dq 0
     dq 0
-    dq 0
+    dq proxy_seq_methods        ; tp_as_sequence
     dq 0
     dq 0
     dq 0

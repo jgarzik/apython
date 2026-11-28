@@ -1675,6 +1675,9 @@ TYPE_FLAG_OWNS_NUMBER   equ 0x4000000
 TYPE_FLAG_OWNS_SEQUENCE equ 0x8000000
 TYPE_FLAG_OWNS_MAPPING  equ 0x10000000
 TYPE_FLAG_OSERROR_SUBCLASS equ 0x20000000
+; array.array keeps its scalar buffer out of line, so subclass instances own
+; ob_data that instance_dealloc must free and array ops must recognise.
+TYPE_FLAG_ARRAY_SUBCLASS   equ 0x40000000
 
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free. It is a stamp from one global
