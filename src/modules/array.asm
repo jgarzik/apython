@@ -1488,6 +1488,14 @@ extern array_m_imul
 extern array_m_contains
 extern array_m_delitem
 extern array_m_iter
+extern array_m_insert
+extern array_m_pop
+extern array_m_remove
+extern array_m_index
+extern array_m_count
+extern array_m_reverse
+extern array_m_copy
+extern array_m_deepcopy
 
 ;; ============================================================================
 ;; array_ass_subscript_int(rdi = the array, rsi = key Value, rdx = value Value)
@@ -1782,9 +1790,19 @@ END_FUNC array_m_append
 DEF_FUNC array_m_extend
     cmp rsi, 2
     jne .ame_arity
-    mov rdx, [rdi + 8]
+    mov rsi, [rdi + 8]
     mov rdi, [rdi]
-    mov rsi, rdx
+    ; Extending with another array of a DIFFERENT typecode is a TypeError
+    ; (unlike the constructor array(tc1, array(tc2, ...)), which iterates).
+    V_TEST_PTR rsi, rax
+    ja .ame_go
+    mov rax, [rsi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
+    jz .ame_go
+    mov rcx, [rdi + PyArrayObject.ob_code]
+    cmp rcx, [rsi + PyArrayObject.ob_code]
+    jne .ame_bad_kind
+.ame_go:
     call array_extend_iterable
     ERR_NULL .ame_fail
     LOAD_NONE rax
@@ -1793,6 +1811,8 @@ DEF_FUNC array_m_extend
     leave
     V_PACK rax, rdx
     ret
+.ame_bad_kind:
+    FAIL exc_TypeError_type, "can only extend with array of same kind", .ame_fail
 .ame_fail:
     xor eax, eax
     xor edx, edx
@@ -1805,6 +1825,8 @@ END_FUNC array_m_extend
 
 ;; array_m_tolist(args, nargs) -> a list of the items
 DEF_FUNC array_m_tolist
+    cmp rsi, 1
+    jne .amt_arity
     mov rdi, [rdi]
     call array_tolist           ; err: its 0 is this method's own
     mov edx, TAG_PTR
@@ -1815,14 +1837,62 @@ DEF_FUNC array_m_tolist
     leave
     V_PACK rax, rdx
     ret
+.amt_arity:
+    SET_EXC exc_TypeError_type, "tolist() takes no arguments"
+    xor eax, eax
+    leave
+    ret
 END_FUNC array_m_tolist
 
 ;; array_m_fromlist(args, nargs) -> None, or 0 raising
-;;
-;; extend() by another name, which is what CPython's is once the list check
-;; has passed.
-DEF_FUNC_BARE array_m_fromlist
-    jmp array_m_extend
+;; Requires a list (or list subclass) and rolls back partial appends on error.
+AMFL_ARR  equ 8
+AMFL_OLD  equ 16
+AMFL_FRAME equ 16               ; 0 pushes, 16-aligned
+extern list_type
+DEF_FUNC array_m_fromlist, AMFL_FRAME
+    cmp rsi, 2
+    jne .amfl_arity
+    mov rax, [rdi]
+    mov [rbp - AMFL_ARR], rax
+    mov rsi, [rdi + 8]
+    V_TEST_PTR rsi, rcx
+    ja .amfl_not_list
+    mov rcx, [rsi + PyObject.ob_type]
+    lea rdx, [rel list_type]
+    cmp rcx, rdx
+    je .amfl_ok_list
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_LIST_SUBCLASS
+    jz .amfl_not_list
+.amfl_ok_list:
+    mov rdx, [rax + PyArrayObject.ob_size]
+    mov [rbp - AMFL_OLD], rdx
+    mov rdi, rax
+    call array_extend_iterable
+    ERR_NULL .amfl_rollback
+    LOAD_NONE rax
+    INCREF rax
+    leave
+    ret
+.amfl_rollback:
+    mov rdi, [rbp - AMFL_ARR]
+    OBJ_LOCK rdi
+    mov rdx, [rbp - AMFL_OLD]
+    mov [rdi + PyArrayObject.ob_size], rdx
+    OBJ_UNLOCK rdi
+    xor eax, eax
+    leave
+    ret
+.amfl_not_list:
+    SET_EXC exc_TypeError_type, "arg must be list"
+    xor eax, eax
+    leave
+    ret
+.amfl_arity:
+    SET_EXC exc_TypeError_type, "fromlist() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
 END_FUNC array_m_fromlist
 
 ;; array_m_tobytes(args, nargs) -> the raw buffer as bytes
@@ -2770,6 +2840,8 @@ ABI_TUP   equ 8
 ABI_FRAME equ 16            ; + 1 push = 24 ... padded below
 DEF_FUNC array_m_buffer_info, 24
     push rbx
+    cmp rsi, 1
+    jne .abi_arity
     mov rbx, [rdi]
     mov edi, 2
     call tuple_new
@@ -2800,6 +2872,8 @@ DEF_FUNC array_m_buffer_info, 24
     leave
     V_PACK rax, rdx
     ret
+.abi_arity:
+    SET_EXC exc_TypeError_type, "buffer_info() takes no arguments"
 .abi_null:
     xor eax, eax
     xor edx, edx
@@ -2928,6 +3002,14 @@ DEF_FUNC array_module_create, AMC_FRAME
     AM_ADD_METHOD array_m_fromfile,    "fromfile"
     AM_ADD_METHOD array_m_byteswap,    "byteswap"
     AM_ADD_METHOD array_m_buffer_info, "buffer_info"
+    AM_ADD_METHOD array_m_insert,      "insert"
+    AM_ADD_METHOD array_m_pop,         "pop"
+    AM_ADD_METHOD array_m_remove,      "remove"
+    AM_ADD_METHOD array_m_index,       "index"
+    AM_ADD_METHOD array_m_count,       "count"
+    AM_ADD_METHOD array_m_reverse,     "reverse"
+    AM_ADD_METHOD array_m_copy,        "__copy__"
+    AM_ADD_METHOD array_m_deepcopy,    "__deepcopy__"
     AM_ADD_METHOD array_m_getitem,     "__getitem__"
     AM_ADD_METHOD array_m_setitem,     "__setitem__"
     AM_ADD_METHOD array_m_delitem,     "__delitem__"
@@ -3101,10 +3183,17 @@ END_FUNC array_m_setitem
 ;; array_m_len(args, nargs) -> the item count, as a Value
 ;; ============================================================================
 DEF_FUNC array_m_len
+    cmp rsi, 1
+    jne .aml_arity
     mov rdi, [rdi]
     mov rdi, [rdi + PyArrayObject.ob_size]
     call int_from_i64
     leave
     V_PACK rax, rdx
+    ret
+.aml_arity:
+    SET_EXC exc_TypeError_type, "__len__() takes no arguments"
+    xor eax, eax
+    leave
     ret
 END_FUNC array_m_len

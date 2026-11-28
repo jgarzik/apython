@@ -16,6 +16,7 @@ extern array_reserve
 extern array_item_value
 extern array_no_exports
 extern array_extend_iterable
+extern array_append_value
 extern array_sq_item
 extern array_ass_subscript_int
 extern array_tp_iter
@@ -27,6 +28,8 @@ extern ap_memmove
 extern obj_decref
 extern obj_incref
 extern obj_as_index
+extern obj_as_slice_index
+extern int_from_i64
 extern obj_richcompare_bool
 extern binop_is_count
 extern seq_repeat_count
@@ -1200,3 +1203,612 @@ DEF_FUNC array_m_iter
     leave
     ret
 END_FUNC array_m_iter
+
+;; ============================================================================
+;; array_m_insert(rdi = args, rsi = nargs) -> rax = None or 0
+;; a.insert(i, x): inserts x before index i (clamped like list.insert).
+;; Appends via array_append_value first (enforcing export lock & type/range
+;; validation before shifting), then rotates the appended item into slot i.
+;; ============================================================================
+AMIN_SELF equ 8
+AMIN_IDX  equ 16
+AMIN_TMP  equ 24
+AMIN_FRAME equ 40               ; + 1 push (rbx) = 48, 16-aligned
+global array_m_insert
+DEF_FUNC array_m_insert, AMIN_FRAME
+    push rbx
+    cmp rsi, 3
+    jne .amins_arity
+    mov rbx, [rdi]
+    mov [rbp - AMIN_SELF], rbx
+    mov rdx, [rdi + 16]         ; x
+    push rdx
+    sub rsp, 8
+    mov rdi, [rdi + 8]          ; i
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    add rsp, 8
+    pop rdx
+    ERR_M1 .amins_fail
+    mov [rbp - AMIN_IDX], rax
+
+    mov rdi, rbx
+    mov rsi, rdx
+    call array_append_value
+    ERR_NULL .amins_fail
+
+    OBJ_LOCK rbx
+    mov r8, [rbx + PyArrayObject.ob_size]
+    dec r8                      ; old_size = new_size - 1
+    mov rax, [rbp - AMIN_IDX]
+    test rax, rax
+    jns .amins_pos
+    add rax, r8
+    test rax, rax
+    jns .amins_pos
+    xor eax, eax
+.amins_pos:
+    cmp rax, r8
+    jge .amins_unlock_ok        ; already appended at end
+
+    ; Save the newly appended scalar (at old_size), shift [idx..old_size-1]
+    ; up by one slot, then write the saved scalar into slot idx.
+    mov [rbp - AMIN_IDX], rax   ; save clamped idx BEFORE ao_copy_scalar clobbers rax
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    mov r9, [rbx + PyArrayObject.ob_data]
+    mov rsi, r8
+    imul rsi, rcx
+    add rsi, r9
+    lea rdi, [rbp - AMIN_TMP]
+    call ao_copy_scalar
+
+    mov rax, [rbp - AMIN_IDX]   ; reload clamped idx
+    mov rdx, r8
+    sub rdx, rax                ; count of items to shift
+    imul rdx, rcx               ; bytes to shift
+    mov rsi, rax
+    imul rsi, rcx
+    add rsi, r9                 ; src = &data[idx]
+    lea rdi, [rsi + rcx]        ; dst = &data[idx + 1]
+    call ap_memmove
+
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    mov rax, [rbp - AMIN_IDX]
+    imul rax, rcx
+    mov rdi, [rbx + PyArrayObject.ob_data]
+    add rdi, rax
+    lea rsi, [rbp - AMIN_TMP]
+    call ao_copy_scalar
+
+.amins_unlock_ok:
+    OBJ_UNLOCK rbx
+    LOAD_NONE rax
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.amins_arity:
+    SET_EXC exc_TypeError_type, "insert() takes exactly two arguments"
+.amins_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_insert
+
+;; ============================================================================
+;; array_m_pop(rdi = args, rsi = nargs) -> rax = popped Value or 0
+;; a.pop([i=-1]): removes and returns element at i.
+;; ============================================================================
+AMP_SELF  equ 8
+AMP_IDX   equ 16
+AMP_VAL   equ 24
+AMP_FRAME equ 40                ; + 1 push (rbx) = 48, 16-aligned
+global array_m_pop
+DEF_FUNC array_m_pop, AMP_FRAME
+    push rbx
+    cmp rsi, 1
+    jb .ampop_arity
+    cmp rsi, 2
+    ja .ampop_arity
+    mov rbx, [rdi]
+    mov [rbp - AMP_SELF], rbx
+    mov qword [rbp - AMP_IDX], -1
+    cmp rsi, 2
+    jne .ampop_lock
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    ERR_M1 .ampop_fail
+    mov [rbp - AMP_IDX], rax
+
+.ampop_lock:
+    OBJ_LOCK rbx
+    mov r8, [rbx + PyArrayObject.ob_size]
+    test r8, r8
+    jz .ampop_unlock_empty
+    mov rax, [rbp - AMP_IDX]
+    test rax, rax
+    jns .ampop_pos
+    add rax, r8
+.ampop_pos:
+    test rax, rax
+    js .ampop_unlock_range
+    cmp rax, r8
+    jge .ampop_unlock_range
+    mov [rbp - AMP_IDX], rax
+
+    mov rdi, rbx
+    call array_no_exports
+    ERR_NULL .ampop_unlock_fail
+
+    mov rdi, rbx
+    mov rsi, [rbp - AMP_IDX]
+    call array_item_value
+    test rax, rax
+    jz .ampop_unlock_fail
+    mov [rbp - AMP_VAL], rax
+
+    mov r8, [rbx + PyArrayObject.ob_size]
+    mov rax, [rbp - AMP_IDX]
+    mov rdx, r8
+    sub rdx, rax
+    dec rdx                     ; tail item count
+    jle .ampop_shrink
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    imul rdx, rcx
+    imul rax, rcx
+    mov rdi, [rbx + PyArrayObject.ob_data]
+    add rdi, rax                ; dst = &data[idx]
+    lea rsi, [rdi + rcx]        ; src = &data[idx + 1]
+    call ap_memmove
+.ampop_shrink:
+    dec qword [rbx + PyArrayObject.ob_size]
+    OBJ_UNLOCK rbx
+    mov rax, [rbp - AMP_VAL]
+    pop rbx
+    leave
+    ret
+.ampop_unlock_empty:
+    OBJ_UNLOCK rbx
+    SET_EXC exc_IndexError_type, "pop from empty array"
+    jmp .ampop_fail
+.ampop_unlock_range:
+    OBJ_UNLOCK rbx
+    SET_EXC exc_IndexError_type, "pop index out of range"
+    jmp .ampop_fail
+.ampop_unlock_fail:
+    OBJ_UNLOCK rbx
+    jmp .ampop_fail
+.ampop_arity:
+    SET_EXC exc_TypeError_type, "pop() takes at most 1 argument"
+.ampop_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_pop
+
+;; ============================================================================
+;; array_m_remove(rdi = args, rsi = nargs) -> rax = None or 0
+;; a.remove(x): removes the first occurrence of x, or raises ValueError.
+;; ============================================================================
+AMR_SELF  equ 8
+AMR_ITEM  equ 16
+AMR_IDX   equ 24
+AMR_ELEM  equ 32
+AMR_FRAME equ 40                ; + 1 push (rbx) = 48, 16-aligned
+global array_m_remove
+DEF_FUNC array_m_remove, AMR_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .amrem_arity
+    mov rbx, [rdi]
+    mov [rbp - AMR_SELF], rbx
+    mov rax, [rdi + 8]
+    mov [rbp - AMR_ITEM], rax
+    mov qword [rbp - AMR_IDX], 0
+
+.amrem_loop:
+    OBJ_LOCK rbx
+    mov rsi, [rbp - AMR_IDX]
+    cmp rsi, [rbx + PyArrayObject.ob_size]
+    jge .amrem_unlock_notfound
+    mov rdi, rbx
+    call array_item_value
+    OBJ_UNLOCK rbx
+    test rax, rax
+    jz .amrem_fail
+    mov [rbp - AMR_ELEM], rax
+    mov rdi, rax
+    mov rsi, [rbp - AMR_ITEM]
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - AMR_ELEM]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    test eax, eax
+    js .amrem_fail
+    jnz .amrem_found
+    inc qword [rbp - AMR_IDX]
+    jmp .amrem_loop
+
+.amrem_found:
+    OBJ_LOCK rbx
+    mov rax, [rbp - AMR_IDX]
+    cmp rax, [rbx + PyArrayObject.ob_size]
+    jge .amrem_unlock_notfound
+    mov rdi, rbx
+    call array_no_exports
+    ERR_NULL .amrem_unlock_fail
+    mov r8, [rbx + PyArrayObject.ob_size]
+    mov rax, [rbp - AMR_IDX]
+    mov rdx, r8
+    sub rdx, rax
+    dec rdx
+    jle .amrem_shrink
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    imul rdx, rcx
+    imul rax, rcx
+    mov rdi, [rbx + PyArrayObject.ob_data]
+    add rdi, rax
+    lea rsi, [rdi + rcx]
+    call ap_memmove
+.amrem_shrink:
+    dec qword [rbx + PyArrayObject.ob_size]
+    OBJ_UNLOCK rbx
+    LOAD_NONE rax
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.amrem_unlock_notfound:
+    OBJ_UNLOCK rbx
+    SET_EXC exc_ValueError_type, "array.remove(x): x not in array"
+    jmp .amrem_fail
+.amrem_unlock_fail:
+    OBJ_UNLOCK rbx
+    jmp .amrem_fail
+.amrem_arity:
+    SET_EXC exc_TypeError_type, "remove() takes exactly one argument"
+.amrem_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_remove
+
+;; ============================================================================
+;; array_m_index(rdi = args, rsi = nargs) -> rax = index int Value or 0
+;; a.index(x[, start[, stop]]): first index of x in [start, stop).
+;; ============================================================================
+AMX_SELF  equ 8
+AMX_ITEM  equ 16
+AMX_IDX   equ 24
+AMX_STOP  equ 32
+AMX_ELEM  equ 40
+AMX_ARGS  equ 48
+AMX_NARGS equ 56
+AMX_FRAME equ 72                ; + 1 push (rbx) = 80, 16-aligned
+global array_m_index
+DEF_FUNC array_m_index, AMX_FRAME
+    push rbx
+    cmp rsi, 2
+    jb .amidx_arity
+    cmp rsi, 4
+    ja .amidx_arity
+    mov [rbp - AMX_ARGS], rdi
+    mov [rbp - AMX_NARGS], rsi
+    mov rbx, [rdi]
+    mov [rbp - AMX_SELF], rbx
+    mov rax, [rdi + 8]
+    mov [rbp - AMX_ITEM], rax
+    mov qword [rbp - AMX_IDX], 0
+    mov rax, [rbx + PyArrayObject.ob_size]
+    mov [rbp - AMX_STOP], rax
+
+    cmp qword [rbp - AMX_NARGS], 3
+    jb .amidx_loop
+    mov rax, [rbp - AMX_ARGS]
+    mov rdi, [rax + 16]
+    V_UNPACK rdi, rdx
+    call obj_as_slice_index
+    ERR_M1 .amidx_fail
+    test rax, rax
+    jns .amidx_start_ok
+    add rax, [rbx + PyArrayObject.ob_size]
+    test rax, rax
+    jns .amidx_start_ok
+    xor eax, eax
+.amidx_start_ok:
+    mov [rbp - AMX_IDX], rax
+
+    cmp qword [rbp - AMX_NARGS], 4
+    jb .amidx_loop
+    mov rax, [rbp - AMX_ARGS]
+    mov rdi, [rax + 24]
+    V_UNPACK rdi, rdx
+    call obj_as_slice_index
+    ERR_M1 .amidx_fail
+    test rax, rax
+    jns .amidx_stop_ok
+    add rax, [rbx + PyArrayObject.ob_size]
+    test rax, rax
+    jns .amidx_stop_ok
+    xor eax, eax
+.amidx_stop_ok:
+    mov [rbp - AMX_STOP], rax
+
+.amidx_loop:
+    mov rsi, [rbp - AMX_IDX]
+    cmp rsi, [rbp - AMX_STOP]
+    jge .amidx_notfound
+    OBJ_LOCK rbx
+    cmp rsi, [rbx + PyArrayObject.ob_size]
+    jge .amidx_unlock_notfound
+    mov rdi, rbx
+    call array_item_value
+    OBJ_UNLOCK rbx
+    test rax, rax
+    jz .amidx_fail
+    mov [rbp - AMX_ELEM], rax
+    mov rdi, rax
+    mov rsi, [rbp - AMX_ITEM]
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - AMX_ELEM]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    test eax, eax
+    js .amidx_fail
+    jnz .amidx_found
+    inc qword [rbp - AMX_IDX]
+    jmp .amidx_loop
+
+.amidx_found:
+    mov rdi, [rbp - AMX_IDX]
+    call int_from_i64
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+.amidx_unlock_notfound:
+    OBJ_UNLOCK rbx
+.amidx_notfound:
+    SET_EXC exc_ValueError_type, "array.index(x): x not in array"
+    jmp .amidx_fail
+.amidx_arity:
+    SET_EXC exc_TypeError_type, "index() takes 1 to 3 arguments"
+.amidx_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_index
+
+;; ============================================================================
+;; array_m_count(rdi = args, rsi = nargs) -> rax = count int Value or 0
+;; a.count(x): number of occurrences of x in the array.
+;; ============================================================================
+AMCN_SELF  equ 8
+AMCN_ITEM  equ 16
+AMCN_IDX   equ 24
+AMCN_CNT   equ 32
+AMCN_ELEM  equ 40
+AMCN_FRAME equ 56               ; + 1 push (rbx) = 64, 16-aligned
+global array_m_count
+DEF_FUNC array_m_count, AMCN_FRAME
+    push rbx
+    cmp rsi, 2
+    jne .amcnt_arity
+    mov rbx, [rdi]
+    mov [rbp - AMCN_SELF], rbx
+    mov rax, [rdi + 8]
+    mov [rbp - AMCN_ITEM], rax
+    mov qword [rbp - AMCN_IDX], 0
+    mov qword [rbp - AMCN_CNT], 0
+
+.amcnt_loop:
+    OBJ_LOCK rbx
+    mov rsi, [rbp - AMCN_IDX]
+    cmp rsi, [rbx + PyArrayObject.ob_size]
+    jge .amcnt_unlock_done
+    mov rdi, rbx
+    call array_item_value
+    OBJ_UNLOCK rbx
+    test rax, rax
+    jz .amcnt_fail
+    mov [rbp - AMCN_ELEM], rax
+    mov rdi, rax
+    mov rsi, [rbp - AMCN_ITEM]
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - AMCN_ELEM]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    test eax, eax
+    js .amcnt_fail
+    jz .amcnt_next
+    inc qword [rbp - AMCN_CNT]
+.amcnt_next:
+    inc qword [rbp - AMCN_IDX]
+    jmp .amcnt_loop
+
+.amcnt_unlock_done:
+    OBJ_UNLOCK rbx
+    mov rdi, [rbp - AMCN_CNT]
+    call int_from_i64
+    V_PACK rax, rdx
+    pop rbx
+    leave
+    ret
+.amcnt_arity:
+    SET_EXC exc_TypeError_type, "count() takes exactly one argument"
+.amcnt_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_count
+
+;; ============================================================================
+;; array_m_reverse(rdi = args, rsi = nargs) -> rax = None or 0
+;; a.reverse(): reverses the order of items in the array in place.
+;; ============================================================================
+global array_m_reverse
+DEF_FUNC array_m_reverse, 8     ; + 1 push (rbx) = 16, 16-aligned
+    push rbx
+    cmp rsi, 1
+    jne .amrev_arity
+    mov rbx, [rdi]
+    OBJ_LOCK rbx
+    mov rax, [rbx + PyArrayObject.ob_size]
+    cmp rax, 1
+    jle .amrev_unlock_ok
+    mov rcx, [rbx + PyArrayObject.ob_isize]
+    mov rdi, [rbx + PyArrayObject.ob_data]  ; lo
+    dec rax
+    imul rax, rcx
+    lea rsi, [rdi + rax]                    ; hi
+    cmp rcx, 4
+    je .amrev_4
+    cmp rcx, 8
+    je .amrev_8
+    cmp rcx, 2
+    je .amrev_2
+.amrev_1:
+    cmp rdi, rsi
+    jae .amrev_unlock_ok
+    mov al, [rdi]
+    mov dl, [rsi]
+    mov [rdi], dl
+    mov [rsi], al
+    inc rdi
+    dec rsi
+    jmp .amrev_1
+.amrev_2:
+    cmp rdi, rsi
+    jae .amrev_unlock_ok
+    mov ax, [rdi]
+    mov dx, [rsi]
+    mov [rdi], dx
+    mov [rsi], ax
+    add rdi, 2
+    sub rsi, 2
+    jmp .amrev_2
+.amrev_4:
+    cmp rdi, rsi
+    jae .amrev_unlock_ok
+    mov eax, [rdi]
+    mov edx, [rsi]
+    mov [rdi], edx
+    mov [rsi], eax
+    add rdi, 4
+    sub rsi, 4
+    jmp .amrev_4
+.amrev_8:
+    cmp rdi, rsi
+    jae .amrev_unlock_ok
+    mov rax, [rdi]
+    mov rdx, [rsi]
+    mov [rdi], rdx
+    mov [rsi], rax
+    add rdi, 8
+    sub rsi, 8
+    jmp .amrev_8
+.amrev_unlock_ok:
+    OBJ_UNLOCK rbx
+    LOAD_NONE rax
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.amrev_arity:
+    SET_EXC exc_TypeError_type, "reverse() takes no arguments"
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_reverse
+
+;; ============================================================================
+;; array_m_copy(rdi = args, rsi = nargs) -> rax = shallow copy array or 0
+;; Also invoked by array_m_deepcopy.
+;; ============================================================================
+AMCP_SELF  equ 8
+AMCP_OUT   equ 16
+AMCP_FRAME equ 24               ; + 1 push (rbx) = 32, 16-aligned
+global array_m_copy
+DEF_FUNC array_m_copy, AMCP_FRAME
+    push rbx
+    cmp rsi, 1
+    jne .amcpy_arity
+    mov rbx, [rdi]
+    mov [rbp - AMCP_SELF], rbx
+    mov rdi, [rbx + PyArrayObject.ob_code]
+    call array_find_code
+    mov rdi, rax
+    call array_new_empty
+    test rax, rax
+    jz .amcpy_fail
+    mov [rbp - AMCP_OUT], rax
+
+    OBJ_LOCK rbx
+    mov rsi, [rbx + PyArrayObject.ob_size]
+    test rsi, rsi
+    jz .amcpy_unlock_done
+    mov rdi, rax
+    call array_reserve
+    ERR_NULL .amcpy_unlock_drop
+    mov r8, [rbp - AMCP_OUT]
+    mov rdx, [rbx + PyArrayObject.ob_size]
+    mov [r8 + PyArrayObject.ob_size], rdx
+    imul rdx, [rbx + PyArrayObject.ob_isize]
+    mov rdi, [r8 + PyArrayObject.ob_data]
+    mov rsi, [rbx + PyArrayObject.ob_data]
+    call ap_memcpy
+.amcpy_unlock_done:
+    OBJ_UNLOCK rbx
+    mov rax, [rbp - AMCP_OUT]
+    pop rbx
+    leave
+    ret
+.amcpy_unlock_drop:
+    OBJ_UNLOCK rbx
+    mov rdi, [rbp - AMCP_OUT]
+    call obj_decref
+    jmp .amcpy_fail
+.amcpy_arity:
+    SET_EXC exc_TypeError_type, "__copy__() takes no arguments"
+.amcpy_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC array_m_copy
+
+;; ============================================================================
+;; array_m_deepcopy(rdi = args, rsi = nargs) -> rax = shallow copy array or 0
+;; ============================================================================
+global array_m_deepcopy
+DEF_FUNC array_m_deepcopy
+    cmp rsi, 2
+    jne .amdcpy_arity
+    mov esi, 1
+    leave
+    jmp array_m_copy
+.amdcpy_arity:
+    SET_EXC exc_TypeError_type, "__deepcopy__() takes exactly one argument"
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_m_deepcopy
