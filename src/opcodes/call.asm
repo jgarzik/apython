@@ -620,6 +620,11 @@ DEF_FUNC op_call_function_ex
     jz .cfex_args_raised
     mov rdi, [rbp - CFX_ARGS]       ; the original iterable, still owned
     mov [rbp - CFX_ARGS], rax
+    ; Keep the popped value-stack slot in sync with CFX_ARGS: DISPATCH recorded
+    ; disp_sp above args, so a non-local RAISE in the callee unwinds that slot.
+    ; Without updating [r13], the unwinder double-DECREFs the original iterable
+    ; and leaks the materialised tuple.
+    mov [r13], rax
     call obj_decref
 .cfex_args_ok:
 
