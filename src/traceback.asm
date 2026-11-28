@@ -2100,6 +2100,8 @@ DEF_FUNC_LOCAL tb_print_notes, TPN_FRAME
     jz .tpn_out
     call obj_decref
 .tpn_out:
+    mov rdi, [rbp - TPN_NOTES]
+    XDECREF_V rdi, rcx
     mov rax, [rbp - TPN_EXC]
     mov [gs:ThreadState.current_exception], rax
     leave

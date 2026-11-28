@@ -30,6 +30,7 @@ extern int_is_integer
 extern int_shrink
 extern int_type
 extern bool_type
+extern obj_decref
 
 section .text
 
@@ -383,12 +384,16 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     jz .pow_not_all_ints
     test edx, TAG_RC_BIT
     jz .pow_not_all_ints
-    mov r12, rax                ; the function
+    mov r12, rax                ; the function (owned)
 
     mov rax, [r12 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .pow_not_all_ints
+    jnz .pow_do_dunder_call
+    mov rdi, r12
+    call obj_decref
+    jmp .pow_not_all_ints
+.pow_do_dunder_call:
 
     sub rsp, 32                 ; 3 Values, padded to keep rsp 16-aligned
     mov rdi, [rbp - POW_BASE]
@@ -408,6 +413,12 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov edx, 3
     call rax
     add rsp, 32
+    push rax
+    sub rsp, 8
+    mov rdi, r12
+    call obj_decref
+    add rsp, 8
+    pop rax
     V_UNPACK rax, rdx
     test edx, edx
     jz .pow_propagate

@@ -584,7 +584,7 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .gq_module_from_name
+    jne .gq_mod_drop_fallback
     lea rsi, [rax + PyStrObject.data]
     mov rdi, rsi
     CSTRING rsi, "builtins"
@@ -592,11 +592,17 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     call ap_strcmp
     pop rsi
     test eax, eax
-    jz .gq_qualname                 ; "builtins" is left off
+    jz .gq_mod_drop_qual            ; "builtins" is left off
     call .gq_copy_cstr
     mov byte [rbx + r13], '.'
     inc r13
+.gq_mod_drop_qual:
+    mov rdi, r15
+    call obj_decref
     jmp .gq_qualname
+.gq_mod_drop_fallback:
+    mov rdi, r15
+    call obj_decref
 
 .gq_module_from_name:
     ; A static type records no __module__; its tp_name carries the dotted
@@ -651,10 +657,15 @@ DEF_FUNC generic_alias_repr, GAR_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .gq_from_tp_name
+    jne .gq_qual_drop_fallback
     lea rsi, [rax + PyStrObject.data]
     call .gq_copy_cstr
+    mov rdi, r15
+    call obj_decref
     jmp .gq_done
+.gq_qual_drop_fallback:
+    mov rdi, r15
+    call obj_decref
 
 .gq_from_tp_name:
     ; The last dotted component: "types.GenericAlias" prints "GenericAlias",
@@ -1828,13 +1839,15 @@ DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     jz .gen_no_module
     V_TEST_PTR rax, rcx
     ja .gen_no_module
+    push rax                        ; save owned __module__ ref (+8; sub 8 below)
+    sub rsp, 8
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .gen_no_module
+    jne .gen_mod_drop_no
     mov rcx, [rax + PyStrObject.ob_size]
     test rcx, rcx
-    jz .gen_no_module
+    jz .gen_mod_drop_no
     lea rdi, [rax + PyStrObject.data]
     cmp rcx, 8
     jne .gen_copy_module
@@ -1845,7 +1858,7 @@ DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     pop rcx
     pop rax
     test eax, eax
-    jz .gen_no_module           ; builtins is left off, as CPython leaves it
+    jz .gen_mod_drop_no         ; builtins is left off, as CPython leaves it
     lea rdi, [rax + PyStrObject.data]
 .gen_copy_module:
     xor edx, edx
@@ -1861,9 +1874,13 @@ DEF_FUNC ga_emit_name, 8            ; 3 pushes, so rsp is 16-aligned
     jmp .gen_mod_loop
 .gen_mod_done:
     cmp r13, 240
-    jae .gen_no_module
+    jae .gen_mod_drop_no
     mov byte [rbx + r13], '.'
     inc r13
+.gen_mod_drop_no:
+    add rsp, 8
+    pop rdi
+    call obj_decref
 
 .gen_no_module:
     mov rsi, [r12 + PyTypeObject.tp_name]

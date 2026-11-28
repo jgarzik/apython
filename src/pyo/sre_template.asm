@@ -192,15 +192,22 @@ DEF_FUNC_LOCAL tp_set_error, TPE_FRAME
     cmp edx, TAG_PTR
     jne .tpe_plain
 
+    push rbx                    ; save owned `re` module
+    sub rsp, 8
     CSTRING rdi, "error"
     call str_from_cstr_heap
     push rax
+    sub rsp, 8
     mov rdi, rbx
     mov rsi, rax
     call obj_getattr_opt
     mov rbx, rax
+    add rsp, 8
     pop rdi
-    call obj_decref
+    call obj_decref             ; drop "error" str
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; drop owned `re` module
     test rbx, rbx
     jz .tpe_plain
     V_TEST_PTR rbx, rax
@@ -675,9 +682,18 @@ DEF_FUNC sre_template_parse, TP_FRAME
     pop rax
     test rax, rax
     jz .tp_name_miss
+    push rax
+    sub rsp, 8
     V_UNPACK rax, rdx
     mov rdi, rax
-    call obj_as_index           ; the index may be a heap int
+    call obj_as_index           ; err: tested below, after releasing dict_get ref
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     ERR_M1 .tp_raised
     call .tp_addgroup
     inc qword [rbp - TP_POS]

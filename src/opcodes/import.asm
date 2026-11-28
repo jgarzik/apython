@@ -277,7 +277,6 @@ DEF_FUNC op_import_from, IF2_FRAME
     jmp .if_try_submodule
 
 .if_found_in_dict:
-    INCREF_VAL rax, edx
     VPUSH_VAL rax, rdx
     leave
     DISPATCH
@@ -441,7 +440,7 @@ DEF_FUNC_LOCAL import_from_error, IFE_FRAME
     lea rsi, [rbp - IFE_BUF]
     mov rdx, [rbp - IFE_NAME]
     mov rcx, [rbp - IFE_PATH]
-    xor r8d, r8d                    ; both borrowed from the module dict
+    mov r8d, 1                      ; both owned from ife_str_field / dict_get
     call exc_raise_import
     ud2
 END_FUNC import_from_error
@@ -480,11 +479,14 @@ DEF_FUNC_LOCAL ife_str_field, ISF_FRAME
     mov rax, [rbx + PyObject.ob_type]
     lea rcx, [rel str_type]
     cmp rax, rcx
-    jne .isf_none
+    jne .isf_drop_none
     mov rax, rbx
     pop rbx
     leave
     ret
+.isf_drop_none:
+    mov rdi, rbx
+    call obj_decref
 .isf_none:
     xor eax, eax
     pop rbx
@@ -552,6 +554,12 @@ DEF_FUNC_LOCAL ife_initializing, IFI_FRAME
     mov rsi, rax
     extern obj_getattr_opt
     call obj_getattr_opt
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - IFI_SPEC]
+    call obj_decref             ; drop owned __spec__ from dict_get
+    add rsp, 8
+    pop rax
     mov [rbp - IFI_SPEC], rax
     mov rdi, [rbp - IFI_KEY]
     call obj_decref

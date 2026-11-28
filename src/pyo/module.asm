@@ -277,11 +277,7 @@ DEF_FUNC_LOCAL module_dunder_dir, MDD_FRAME
     ; The module's own __dir__, called with no arguments.  obj_call_n refuses a
     ; non-callable with a TypeError, which is what CPython answers too.
     ;
-    ; dict_get handed back a BORROWED reference and the call runs arbitrary
-    ; Python, so own it for the duration: a hook whose body is
-    ; `del globals()["__dir__"]` otherwise drops the last reference to the
-    ; function that is executing, and this frame goes on using freed memory.
-    INCREF_V rax, rcx
+    ; dict_get already returned an owned reference; hold it across the call.
     mov [rbp - MDD_HOOK], rax
     mov rdi, rax
     xor esi, esi
@@ -366,10 +362,9 @@ DEF_FUNC module_getattr, MG_FRAME
     ERR_DICT_GET .mg_really_not_found
     V_UNPACK rax, rdx           ; dict_get returns a Value
 
-    ; INCREF if found (dict_get returns borrowed ref)
+    ; dict_get already returned an owned Value
     test edx, edx
     jz .not_found
-    INCREF_VAL rax, rdx         ; tag-aware: skip for SmallInt
     pop r12
     pop rbx
     leave
@@ -412,31 +407,31 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rdi, [rbx + PyObject.ob_type]
     mov rsi, r12
     extern type_lookup_cached
-    call type_lookup_cached     ; rax = payload, edx = tag; borrowed
+    call type_lookup_cached     ; rax = payload (owned), edx = tag
     test edx, edx
-    jnz .mg_really_not_found
+    jz .mg_check_generic
+    DECREF_VAL rax, rdx
+    mov rdi, [rbp - MG_HOOK]
+    DECREF_V rdi, rcx
+    jmp .mg_really_not_found
+.mg_check_generic:
     mov rdi, rbx
     mov rsi, r12
     extern obj_generic_attr
     call obj_generic_attr       ; __class__, which no dict holds; owned, or 0
     test rax, rax
-    jnz .mg_generic
+    jz .mg_call_hook
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - MG_HOOK]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    jmp .mg_generic
+.mg_call_hook:
     mov rax, [rbp - MG_HOOK]
 
-    ; The hook, called with the attribute name.  obj_call_n returns rather
-    ; than unwinding, and refuses a non-callable with a TypeError of its own --
-    ; which is CPython's answer for `m.__getattr__ = 5` too, so it is left to
-    ; do that.
-    ;
-    ; dict_get handed back a BORROWED reference, and the call runs arbitrary
-    ; Python -- which may unbind the hook.  A body of
-    ; `del globals()["__getattr__"]` then drops the last reference to the
-    ; function that is currently executing, and every instruction after the
-    ; call reads freed memory.  So own it for the duration.  CPython's own
-    ; Lib/test/test_module/bad_getattr3.py is exactly this, and its comment is
-    ; "these lookups should not crash".
-    INCREF_V rax, rcx
-    mov [rbp - MG_HOOK], rax
+    ; MG_HOOK is already owned from dict_get; hold it across the call.
     mov [rbp - MG_NAME], r12    ; the one-Value argument array
     mov rdi, rax
     lea rsi, [rbp - MG_NAME]
@@ -603,7 +598,11 @@ DEF_FUNC module_repr, MR_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .mr_no_file
+    je .mr_save_file
+    mov rdi, rax
+    call obj_decref
+    jmp .mr_no_file
+.mr_save_file:
     mov [rbp - MR_FILE], rax
 .mr_no_file:
 
@@ -678,6 +677,12 @@ DEF_FUNC module_repr, MR_FRAME
     mov rdi, rbx
     mov rsi, [rbp - MR_FILE]
     call module_repr_from
+    push rax
+    push rdx
+    mov rdi, [rbp - MR_FILE]
+    call obj_decref
+    pop rdx
+    pop rax
     pop rbx
     leave
     ret
@@ -1100,7 +1105,6 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     V_UNPACK rax, rdx
     test edx, edx
     jz .nsg_none
-    INCREF_VAL rax, rdx
     pop rbx
     leave
     V_PACK rax, rdx

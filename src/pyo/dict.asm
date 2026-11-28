@@ -611,6 +611,7 @@ DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
     mov rcx, [rbx + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     mov rax, [rcx + rax + DictEntry.value]
+    INCREF_V rax, rdx
     pop rbx
     leave
     ret
@@ -652,6 +653,7 @@ DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
     mov rcx, [rbx + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     mov rax, [rcx + rax + DictEntry.value]
+    INCREF_V rax, rdx
     pop rbx
     leave
     ret
@@ -1410,11 +1412,10 @@ DEF_FUNC dict_subscript, DSUB_FRAME
 
     mov [rbp - DSUB_DICT], rdi ; the mapping, for __missing__ below
     mov rbx, rsi               ; save the key Value for the error message
-    call dict_get          ; both take a key Value
+    call dict_get          ; both take a key Value (returns owned Value)
     ERR_PENDING .ds_missing_raised
     test rax, rax              ; a Value, and 0 is the only miss
     jz .key_error
-    INCREF_V rax, rdx          ; dict_get's answer is borrowed
     pop rbx
     leave
     ret
@@ -1785,11 +1786,12 @@ dict_iter_self:
 ;; ============================================================================
 DEF_FUNC_BARE dict_contains
     sub rsp, 8                  ; a bare function: the call wants rsp aligned
-    call dict_get
+    call dict_lookup            ; rax = entries index, -1 (miss), or -2 (raised)
     add rsp, 8
-    ERR_PENDING .dc_raised
-    test rax, rax               ; a Value, and 0 is the only miss
-    setnz al
+    cmp rax, -2
+    je .dc_raised
+    cmp rax, -1
+    setne al
     movzx eax, al
     ret
 .dc_raised:
@@ -2129,7 +2131,6 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     mov [rbp - DRC_RVAL], rax
     test rax, rax
     jz .drc_not_equal_rel           ; key not in right
-    INCREF_V rax, rcx
 
     ; Compare them the way Python does.  This used to be a hand-rolled
     ; payload-and-tag comparison that answered "not equal" whenever the two

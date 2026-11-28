@@ -135,20 +135,24 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     ; __set_name__ is not the hook.
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel tsn_name]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
-    jz .next
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
+    jz .next_drop
 
     mov rdi, rbx                        ; self = the value
     mov rsi, [rbp - TSN_CLS]            ; owner
     mov rdx, [rbp - TSN_NAME]           ; name
     lea rcx, [rel tsn_name]
     mov r8d, TAG_PTR
-    call dunder_call_3          ; err: 0, absent or raised, goes to .raised
+    call dunder_call_3          ; err: 0, absent or raised, goes to .raised_drop
     test rax, rax               ; dunder_call_3 answers with a Value; 0 is the miss
-    jz .raised
+    jz .raised_drop
     mov rdi, rax
     DECREF_V rdi, rsi
+.next_drop:
+    mov rdi, rbx
+    call obj_decref
 .next:
     inc qword [rbp - TSN_I]
     jmp .loop
@@ -163,6 +167,9 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     pop rbx
     leave
     ret
+.raised_drop:
+    mov rdi, rbx
+    call obj_decref
 .raised:
     mov rdi, [rbp - TSN_KEYS]
     call obj_decref
@@ -313,6 +320,7 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .tah_unhashable_slot
+    DECREF_V rax, rcx
     jmp .tah_done
 
 .tah_no_hash:
@@ -322,7 +330,10 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     call tah_dict_get
     ERR_PENDING .tah_fail
     test rax, rax
-    jnz .tah_unhashable
+    jz .tah_check_inherited
+    DECREF_V rax, rcx
+    jmp .tah_unhashable
+.tah_check_inherited:
 
     ; ...and so does an INHERITED __hash__ of None, which is how a subclass
     ; of an unhashable class stays unhashable without a rule of its own.
@@ -332,13 +343,13 @@ DEF_FUNC type_apply_hash_rule, TAH_FRAME
     CSTRING rsi, "__hash__"
     extern dunder_lookup
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax
     jz .tah_done
     lea rcx, [rel none_singleton]
     cmp rax, rcx
-    jne .tah_done
-    jmp .tah_unhashable_slot
+    je .tah_unhashable_slot
+    DECREF_V rax, rcx
+    jmp .tah_done
 
 .tah_unhashable_slot:
     ; The slot only: the name already says None, here or up the MRO.
@@ -451,18 +462,24 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
     extern func_type
     lea rdx, [rel func_type]
     cmp rcx, rdx
-    jne .twi_release
+    jne .twi_drop_release
 
-    push rax                    ; [rsp] is the one-element argument array
+    push rax                    ; [rsp + 8] is the one-element argument array (owned func)
     sub rsp, 8
     extern classmethod_type
     extern classmethod_construct
     lea rdi, [rel classmethod_type]
     lea rsi, [rsp + 8]
     mov edx, 1
-    call classmethod_construct  ; err: rax is tested once the stack is back
+    call classmethod_construct  ; err: rax is tested once the old func is released
     add rsp, 8
-    pop rcx
+    pop rdi                     ; owned func from dict_get
+    push rax
+    sub rsp, 8
+    extern obj_decref
+    call obj_decref
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .twi_release
 
@@ -477,11 +494,15 @@ DEF_FUNC type_wrap_implicit_classmethods, TWI_FRAME
     pop rdi
     push rax                    ; the verdict, across the release
     sub rsp, 8
-    extern obj_decref
     call obj_decref             ; dict_set took its own reference
     add rsp, 8
     pop rax
     ERR_M1 .twi_one_fail
+    jmp .twi_release
+
+.twi_drop_release:
+    mov rdi, rax
+    call obj_decref
 
 .twi_release:
     mov rdi, [rbp - TWI_KEY]
@@ -596,6 +617,7 @@ DEF_FUNC type_slots_conflict, TSC_FRAME
     ERR_DICT_GET .tsc_fail_name
     test rax, rax
     jz .tsc_release
+    DECREF_V rax, rcx           ; presence-only check
 
     ; Bound -- unless it is one of the four that are not the body's doing.
     mov rdi, [rbp - TSC_NAME]

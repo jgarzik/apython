@@ -2247,10 +2247,7 @@ DEF_FUNC_LOCAL warn_with_category, DW_FRAME
     mov rax, [rbp - DW_MSG]
     test rax, rax
     jz .dw_no_module
-    mov rdi, rax
-    call obj_incref                 ; the cache holds it for the process
-    mov rax, [rbp - DW_MSG]
-    mov [rel dw_warn_impl], rax
+    mov [rel dw_warn_impl], rax     ; cache owns ref from dict_get
 
     mov rax, [rbp - DW_KW]
     mov [gs:ThreadState.kw_names_pending], rax

@@ -1362,7 +1362,9 @@ DEF_FUNC pyc_write_cache, PW_FRAME
 .pw_flag_found:
     lea rcx, [rel bool_false]
     cmp rax, rcx
-    jne .pw_out
+    je .pw_have_flag            ; bool_false is immortal
+    DECREF_V rax, rcx
+    jmp .pw_out
 .pw_have_flag:
 
     mov rdi, [rbp - PW_SRC]

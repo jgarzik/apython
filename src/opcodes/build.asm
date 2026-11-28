@@ -269,18 +269,27 @@ DEF_FUNC_BARE op_binary_subscr
     mov rdi, [rsp+8]              ; obj (the type itself)
     CSTRING rsi, "__class_getitem__"
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .subscr_error
+    V_TEST_PTR rax, rcx
+    ja .subscr_error
 
-    ; rax = __class_getitem__ attr (borrowed ref)
-    ; Check if it's a classmethod wrapper — unwrap if so
+    ; Check if it's a classmethod wrapper — unwrap keeping an owned ref.
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel classmethod_type]
     cmp rcx, rdx
     jne .cgi_not_classmethod
 
-    ; Unwrap classmethod: get cm_callable, call with (cls, key)
-    mov rax, [rax + PyClassMethodObject.cm_callable]
+    mov r8, [rax + PyClassMethodObject.cm_callable]
+    INCREF_V r8, rcx
+    push r8
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop rax
+    V_TEST_PTR rax, rcx
+    ja .subscr_error
 
 .cgi_not_classmethod:
     ; Call func(cls, key): tp_call(func, &[cls, key], 2)
@@ -288,21 +297,33 @@ DEF_FUNC_BARE op_binary_subscr
     mov rcx, [rdi + PyObject.ob_type]
     mov rcx, [rcx + PyTypeObject.tp_call]
     test rcx, rcx
-    jz .subscr_error
-
-    ; Build the args array: [cls, key]
+    jnz .cgi_do_call
+    call obj_decref
+    jmp .subscr_error
+.cgi_do_call:
+    ; Save owned callable + build args array [cls, key]
+    push rdi
+    sub rsp, 8
     sub rsp, 16
-    mov rax, [rsp + 16 + BSUB_OBJ]  ; obj (type/cls) — always a pointer
+    mov rax, [rsp + 32 + BSUB_OBJ]  ; obj (type/cls) — always a pointer
     mov [rsp], rax                   ; args[0] = cls
-    mov rax, [rsp + 16 + BSUB_KEY]  ; key
-    mov r8, [rsp + 16 + BSUB_KTAG]  ; key tag
+    mov rax, [rsp + 32 + BSUB_KEY]  ; key
+    mov r8, [rsp + 32 + BSUB_KTAG]  ; key tag
     V_PACK rax, r8
     mov [rsp + 8], rax               ; args[1] = key
     mov rsi, rsp                     ; args ptr
     mov edx, 2                       ; nargs = 2
     call rcx
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 16                      ; pop args
+    mov r8, rax
+    add rsp, 8
+    pop rdi                          ; owned callable
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    V_UNPACK rax, rdx           ; tp_call returns a Value
     jmp .subscr_done
 
 .subscr_error:
@@ -483,37 +504,52 @@ DEF_FUNC_BARE op_store_subscr
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel dunder_setitem]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
+    V_UNPACK rax, rdx           ; owned Value
     test edx, edx
     jz .store_type_error
+    cmp edx, TAG_PTR
+    jne .store_type_error
 
     ; Call __setitem__(self, key, value) via tp_call
-    mov rcx, rax              ; func
+    mov rcx, rax              ; owned func
     mov rax, [rcx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .store_type_error
-
+    jnz .ssub_do_call
+    mov rdi, rcx
+    call obj_decref
+    jmp .store_type_error
+.ssub_do_call:
+    push rcx
+    sub rsp, 8
     ; Build the args array: [self, key, value]
     sub rsp, 32               ; three Values, rsp stays aligned
-    mov r8, [rsp + 32 + SSUB_OBJ]   ; self (a heap instance, so already a Value)
+    mov r8, [rsp + 48 + SSUB_OBJ]   ; self (a heap instance, so already a Value)
     mov [rsp], r8
-    mov r8, [rsp + 32 + SSUB_KEY]   ; key payload
-    mov r9, [rsp + 32 + SSUB_KTAG]
+    mov r8, [rsp + 48 + SSUB_KEY]   ; key payload
+    mov r9, [rsp + 48 + SSUB_KTAG]
     V_PACK r8, r9
     mov [rsp + 8], r8
-    mov r8, [rsp + 32 + SSUB_VAL]   ; value payload
-    mov r9, [rsp + 32 + SSUB_VTAG]
+    mov r8, [rsp + 48 + SSUB_VAL]   ; value payload
+    mov r9, [rsp + 48 + SSUB_VTAG]
     V_PACK r8, r9
     mov [rsp + 16], r8
     mov rdi, rcx              ; callable
     mov rsi, rsp              ; args ptr
     mov edx, 3                ; nargs
     call rax
-    ERR_NULL_JUMP
-    V_UNPACK rax, rdx           ; tp_call returns a Value
     add rsp, 32               ; pop the args array
-    ; rax = result (discard — __setitem__ returns None)
+    mov r8, rax
+    add rsp, 8
+    pop rdi                   ; owned __setitem__ func
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    ERR_NULL_JUMP
+    DECREF_V rax, rcx         ; discard __setitem__ return value
+    xor eax, eax
     jmp .store_done
 
 .store_type_error:
@@ -1461,10 +1497,11 @@ DEF_FUNC_BARE op_contains_op
     lea rsi, [rel dunder_contains]
     extern dunder_lookup
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .contains_iter_fallback  ; genuinely not defined
     IS_NONE rax, rcx
     je .contains_type_error
+    DECREF_V rax, rcx
 
 .contains_iter_fallback:
     ; Fallback: iterate container via tp_iter, compare each element
@@ -2411,8 +2448,11 @@ DEF_FUNC op_dict_merge
     mov rdi, [rbp - DM_DICT]          ; target dict
     call dict_get
     ERR_DICT_GET_JUMP
-    test rax, rax               ; dict_get answers with a Value; 0 is the miss
-    jnz .dm_dup_error          ; key already exists in target
+    test rax, rax               ; dict_get answers with an owned Value; 0 is the miss
+    jz .dm_no_dup
+    DECREF_V rax, rcx
+    jmp .dm_dup_error           ; key already exists in target
+.dm_no_dup:
 
     ; dict_set(target, key, value, value_tag, key_tag)
     pop rbx

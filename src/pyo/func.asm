@@ -459,11 +459,10 @@ DEF_FUNC func_call
     test r10, r10
     jz .kw_default_miss     ; not in kwdefaults, skip (would be error)
 
-    ; Assign and INCREF
+    ; Assign (already owned from dict_get)
     movsxd r9, esi
     mov r11, r9
     shl r9, 3                  ; localsplus 8 bytes/slot
-    INCREF_VAL r8, r10
     V_PACK r8, r10
     mov [r12 + PyFrame.localsplus + r9], r8
 
@@ -1382,8 +1381,7 @@ DEF_FUNC func_getattr
     test edx, edx
     jz .not_found
 
-    ; Found in dict - INCREF and return (rdx = tag from dict_get)
-    INCREF_VAL rax, rdx
+    ; Found in dict - already owned from dict_get
     pop r12
     pop rbx
     leave
@@ -1397,7 +1395,7 @@ DEF_FUNC func_getattr
     ; __qualname__ that way.
     call .fg_from_dict
     test rax, rax
-    jnz .return_ptr_attr
+    jnz .return_owned_val
     mov rax, [rbx + PyFuncObject.func_name]
     INCREF rax
     mov edx, TAG_PTR
@@ -1416,7 +1414,7 @@ DEF_FUNC func_getattr
     jnz .return_ptr_attr
     call .fg_from_dict
     test rax, rax
-    jnz .return_ptr_attr
+    jnz .return_owned_val
     ; Get co_qualname from the code object
     mov rax, [rbx + PyFuncObject.func_code]
     mov rax, [rax + PyCodeObject.co_qualname]
@@ -1527,6 +1525,7 @@ DEF_FUNC func_getattr
 .return_ptr_attr:
     INCREF rax
     mov edx, TAG_PTR
+.return_owned_val:
     pop r12
     pop rbx
     leave
@@ -1578,7 +1577,6 @@ DEF_FUNC func_getattr
     V_UNPACK rax, rdx
     test edx, edx
     jz .doc_from_code
-    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
@@ -1641,7 +1639,7 @@ DEF_FUNC func_getattr
     pop rax
     test edx, edx
     jz .fg_module_miss
-    jmp .return_ptr_attr
+    jmp .return_owned_val
 
 .return_code:
     mov rax, [rbx + PyFuncObject.func_code]

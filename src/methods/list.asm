@@ -1221,6 +1221,7 @@ DEF_FUNC list_dunder_init, LDI_FRAME
     lea rdx, [rbp - LDI_OWNER]
     extern dunder_lookup_owner
     call dunder_lookup_owner
+    DECREF_V rax, rcx
     mov rax, [rbp - LDI_OWNER]              ; the type whose dict answered
     mov rbx, [rbp - LDI_ARGS]
     mov r12, [rbp - LDI_NARGS]

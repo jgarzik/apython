@@ -2778,14 +2778,14 @@ DEF_FUNC_BARE obj_is_true
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel dunder_bool]
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .check_dunder_len       ; not found (TAG_NULL) → try __len__
 
     ; Check if __bool__ is None → TypeError
-    ; Handle both inline (0, TAG_NONE) and pointer (none_singleton, TAG_PTR) forms
     lea rcx, [rel none_singleton]
     cmp rax, rcx
     je .dunder_bool_none_error
+    DECREF_V rax, rcx
 
     ; Call __bool__ via dunder_call_1
     extern dunder_call_1
@@ -2987,13 +2987,14 @@ DEF_FUNC type_repr, TR_FRAME
     jz .tr_name
     cmp edx, TAG_PTR
     jne .tr_name
+    mov [rbp - TR_LEN], rax         ; owned __module__ ref
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .tr_name
+    jne .tr_mod_drop_name
     mov rdx, [rax + PyStrObject.ob_size]
     test rdx, rdx
-    jz .tr_name
+    jz .tr_mod_drop_name
     cmp rdx, 8
     jne .tr_copy_module
     lea rdi, [rax + PyStrObject.data]
@@ -3010,7 +3011,7 @@ DEF_FUNC type_repr, TR_FRAME
     ; <class 'builtins.C'>.  exec(src, {}) is the ordinary way to get one:
     ; the class body's LOAD_NAME __name__ falls through to builtins.
     test ecx, ecx
-    jz .tr_name                 ; module is "builtins": leave it off
+    jz .tr_mod_drop_name        ; module is "builtins": leave it off
 .tr_copy_module:
     lea rsi, [rax + PyStrObject.data]
     xor ecx, ecx
@@ -3027,12 +3028,16 @@ DEF_FUNC type_repr, TR_FRAME
 .tr_mod_done:
     mov byte [rbx + r12], '.'
     inc r12
+.tr_mod_drop_name:
+    mov rdi, [rbp - TR_LEN]
+    call obj_decref
 
 .tr_name:
     ; CPython's repr uses __qualname__, not __name__: a nested class prints
     ; "<class 'M.Inner'>", and a class RENAMED through __name__ keeps the
     ; qualname it was built with.  Only a heaptype records one; a static type
     ; falls through to tp_name, which is the same string.
+    mov qword [rbp - TR_LEN], 0
     mov rax, [rbp - TR_TYPE]
     mov rdi, [rax + PyTypeObject.tp_dict]
     test rdi, rdi
@@ -3042,20 +3047,26 @@ DEF_FUNC type_repr, TR_FRAME
     call str_from_cstr
     mov rsi, rax
     mov rdi, [rbp - TR_LEN]
+    mov qword [rbp - TR_LEN], 0
     call dict_get_mro
     V_UNPACK rax, rdx
     test edx, edx
     jz .tr_name_from_tp
     cmp edx, TAG_PTR
     jne .tr_name_from_tp
+    mov [rbp - TR_LEN], rax         ; owned __qualname__ ref
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .tr_name_from_tp
+    jne .tr_qual_drop_tp
     cmp qword [rax + PyStrObject.ob_size], 0
-    je .tr_name_from_tp
+    je .tr_qual_drop_tp
     lea rsi, [rax + PyStrObject.data]
     jmp .tr_name_loop
+.tr_qual_drop_tp:
+    mov rdi, [rbp - TR_LEN]
+    mov qword [rbp - TR_LEN], 0
+    call obj_decref
 .tr_name_from_tp:
     mov rax, [rbp - TR_TYPE]
     mov rsi, [rax + PyTypeObject.tp_name]
@@ -3071,6 +3082,11 @@ DEF_FUNC type_repr, TR_FRAME
     jmp .tr_name_loop
 
 .tr_close:
+    mov rdi, [rbp - TR_LEN]
+    test rdi, rdi
+    jz .tr_close_str
+    call obj_decref
+.tr_close_str:
     mov byte [rbx + r12], 0x27
     mov byte [rbx + r12 + 1], '>'
     mov byte [rbx + r12 + 2], 0

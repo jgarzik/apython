@@ -2928,7 +2928,7 @@ DEF_FUNC_LOCAL fm_lookup
 .fml_dict:
     extern dict_get
     call dict_get           ; err: returned as is; the caller tells a miss from a failure by what is pending
-    xor r8d, r8d
+    mov r8d, 1              ; owned, matching mp_subscript
     leave
     ret
 .fml_generic:

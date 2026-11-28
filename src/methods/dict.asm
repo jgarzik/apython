@@ -84,8 +84,7 @@ DEF_FUNC dict_method_get
     ret
 
 .dg_found:
-    add rsp, 8              ; discard saved args
-    INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    add rsp, 8              ; discard saved args (dict_get already returned owned Value)
     pop r12
     pop rbx
     leave
@@ -178,8 +177,7 @@ DEF_FUNC dict_method_pop, 8            ; 5 pushes, so rsp is 16-aligned
     test rax, rax           ; a Value, and 0 is the only miss
     jz .dpop2_not_found
 
-    INCREF_V rax, rdx       ; dict_get's answer is borrowed
-    mov r15, rax            ; held across dict_del, which can run a __del__
+    mov r15, rax            ; already owned from dict_get; held across dict_del
 
     mov rdi, rbx
     mov rsi, r13
@@ -771,8 +769,7 @@ DEF_FUNC dict_method_setdefault, 8            ; 5 pushes, so rsp is 16-aligned
     ret
 
 .sd_found:
-    add rsp, 8              ; discard saved args ptr
-    INCREF_V rax, rdx       ; dict_get's answer is borrowed
+    add rsp, 8              ; discard saved args ptr (dict_get already returned owned Value)
     pop r15
     pop r14
     pop r13

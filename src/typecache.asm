@@ -167,6 +167,7 @@ DEF_FUNC type_lookup_cached, TLC_FRAME
     jne .tlc_miss
     mov rax, [r13 + TC_VALUE]
     mov edx, [r13 + TC_TAG]
+    INCREF_VAL rax, edx
     mov rcx, [r13 + TC_OWNER]
     jmp .tlc_out
 

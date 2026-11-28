@@ -2330,9 +2330,7 @@ DEF_FUNC builtin_open_fn
     call obj_decref
     test r13, r13
     jz .bo_missing
-    mov rdi, r13
-    call obj_incref             ; the cache holds it for the process's life
-    mov [rel builtin_open_impl], r13
+    mov [rel builtin_open_impl], r13    ; cache owns ref from dict_get
 
     pop rax
     mov [gs:ThreadState.kw_names_pending], rax
@@ -2881,12 +2879,12 @@ DEF_FUNC builtin_aiter_fn, AIT_FRAME
     ; __aiter__, not __iter__: a list has a tp_iter and is not an async
     ; iterable at all, so `aiter([])` answered its ordinary list_iterator.
     push rdi
-    extern dunder_lookup
+    extern dunder_exists
     mov rdi, [rdi + PyObject.ob_type]
     CSTRING rsi, "__aiter__"
-    call dunder_lookup
+    call dunder_exists
     pop rdi
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test eax, eax
     jz .aiter_type_error
     ; Call tp_iter
     mov rax, [rdi + PyObject.ob_type]
@@ -3276,8 +3274,7 @@ DEF_FUNC builtin_import_fn, BIM_FRAME
     test rax, rax
     jz .imp_leaf_missing
     V_UNPACK rax, rdx
-    INCREF rax                  ; dict_get hands back a borrowed reference
-    mov rdi, rax
+    mov rdi, rax                ; already owned from dict_get
     pop rax                     ; the package
     push rdi
     call obj_decref

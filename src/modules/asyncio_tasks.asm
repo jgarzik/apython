@@ -162,7 +162,6 @@ DEF_FUNC_LOCAL async_current_task, ACT_FRAME
     ERR_DICT_GET .failed
     test rax, rax
     jz .empty
-    INCREF_V rax, rcx
     leave
     ret
 .empty:
@@ -228,13 +227,15 @@ DEF_FUNC_LOCAL async_task_switch, ATS_FRAME
     cmp rax, [rbp - ATS_TASK]
     jne .wrong_task
     call .delete
-    ERR_M1 .failed
+    ERR_M1 .leave_failed
+    mov rdi, [rbp - ATS_OLD]
+    XDECREF_V rdi, rcx
 .none:
     LOAD_NONE rax
     leave
     ret
 .swap:
-    INCREF_V rax, rcx
+    ; ATS_OLD is already owned from dict_get (or 0)
     lea rcx, [rel none_singleton]
     cmp [rbp - ATS_TASK], rcx
     jne .swap_store
@@ -249,13 +250,18 @@ DEF_FUNC_LOCAL async_task_switch, ATS_FRAME
     jz .none
     leave
     ret
+.leave_failed:
 .swap_failed:
     mov rdi, [rbp - ATS_OLD]
     XDECREF_V rdi, rcx
     jmp .failed
 .already_running:
+    mov rdi, [rbp - ATS_OLD]
+    XDECREF_V rdi, rcx
     FAIL exc_RuntimeError_type, "Cannot enter into task while another task is being executed.", .failed
 .wrong_task:
+    mov rdi, [rbp - ATS_OLD]
+    XDECREF_V rdi, rcx
     FAIL exc_RuntimeError_type, "Leaving task does not match the current task.", .failed
 .arity:
     FAIL exc_TypeError_type, "task bookkeeping requires a loop and a task", .failed

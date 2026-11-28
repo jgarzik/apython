@@ -398,13 +398,21 @@ DEF_FUNC dict_items_view_contains, 8    ; + 1 push = 16, 16-aligned
     test rax, rax
     jz .divc_no
 
-    ; The borrow is safe across the comparison: obj_richcompare_bool takes a
-    ; reference to both operands before it can run any Python.
+    ; dict_get returned an owned Value; release it after the comparison.
+    push rax
+    sub rsp, 8
     mov rdi, rax
     mov rax, [rbx + PyTupleObject.ob_item]
     mov rsi, [rax + 8]                  ; the value the pair carries
     mov edx, PY_EQ
     call obj_richcompare_bool
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     cmp eax, -1
     je .divc_error
     pop rbx

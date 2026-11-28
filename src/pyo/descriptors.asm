@@ -1095,9 +1095,14 @@ DEF_FUNC mappingproxy_getattr, MPG_FRAME
     jz .mpg_none
     ; bind it to the wrapped dict, so proxy.keys() reads the dict
     extern method_new
+    push rax                    ; save owned func from dict_get_mro
     mov rsi, rdi
     mov rdi, rax
     call method_new
+    pop rdi
+    push rax
+    call obj_decref
+    pop rax
     mov edx, TAG_PTR
     leave
     ret

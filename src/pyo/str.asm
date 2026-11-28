@@ -717,8 +717,6 @@ DEF_FUNC codec_via_python, CVP_FRAME
     call obj_decref
     test rbx, rbx
     jz .cvp_missing
-    mov rdi, rbx
-    call obj_incref
     mov [rel codec_encode_impl], rbx
     pop rbx
 
@@ -734,8 +732,6 @@ DEF_FUNC codec_via_python, CVP_FRAME
     call obj_decref
     test rbx, rbx
     jz .cvp_missing
-    mov rdi, rbx
-    call obj_incref
     mov [rel codec_decode_impl], rbx
     pop rbx
 
@@ -751,8 +747,6 @@ DEF_FUNC codec_via_python, CVP_FRAME
     call obj_decref
     test rbx, rbx
     jz .cvp_missing
-    mov rdi, rbx
-    call obj_incref
     mov [rel codec_surrogate_impl], rbx
     pop rbx
 

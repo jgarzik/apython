@@ -651,8 +651,9 @@ DEF_FUNC math_%1, MRD_FRAME
     jz %%coerce
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel %3]
-    call dunder_lookup
-    test rax, rax
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz %%coerce
     mov rdi, [rbp - MRD_VAL]
     lea rsi, [rel %3]
@@ -745,8 +746,8 @@ DEF_FUNC math_trunc, MTR_FRAME
     jz .mtr_type
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel mm_d_trunc]
-    call dunder_lookup
-    test rax, rax
+    call dunder_exists
+    test eax, eax
     jz .mtr_type
     mov rdi, [rbp - MTR_VAL]
     lea rsi, [rel mm_d_trunc]

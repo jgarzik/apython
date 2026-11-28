@@ -369,6 +369,8 @@ DEF_FUNC memoryview_from_dunder_buffer, MDB_FRAME
     call dunder_lookup
     test rax, rax
     jz .mdb_none
+    push rax
+    sub rsp, 8
     mov rcx, [rbp - MDB_OBJ]
     mov [rbp - MDB_ARGS], rcx
     mov rcx, V_INT(0x11C)       ; PyBUF_FULL_RO, what CPython's memoryview asks
@@ -377,7 +379,15 @@ DEF_FUNC memoryview_from_dunder_buffer, MDB_FRAME
     lea rsi, [rbp - MDB_ARGS]
     mov edx, 2
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: checked via ERR_NULL .mdb_raised below
+    mov r8, rax
+    add rsp, 8
+    pop rdi
+    push r8
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     ERR_NULL .mdb_raised
     V_TEST_PTR rax, rcx
     ja .mdb_wrong

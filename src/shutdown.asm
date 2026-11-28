@@ -72,8 +72,7 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     mov rdi, [rbp - SC_MOD]
     mov rdi, [rdi + PyModuleObject.mod_dict]
     mov rsi, rax
-    call dict_get           ; err: borrowed; a failure is reported at .sc_raised, once the name is released
-    INCREF_V rax, rcx
+    call dict_get           ; err: owned; a failure is reported at .sc_raised, once the name is released
     mov [rbp - SC_FN], rax
     mov rdi, [rbp - SC_NAME]
     call obj_decref
@@ -103,6 +102,8 @@ DEF_FUNC_LOCAL shutdown_call, SC_FRAME
     mov qword [gs:ThreadState.current_exception], 0
     call obj_decref
 .sc_out:
+    mov rdi, [rbp - SC_MOD]
+    XDECREF_V rdi, rcx
     leave
     ret
 END_FUNC shutdown_call

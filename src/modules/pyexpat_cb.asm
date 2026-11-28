@@ -554,8 +554,7 @@ DEF_FUNC px_intern, 40
     ; as a pointer to 0xFFF8...  `ParserCreate(intern={"a": 5})` then parsing
     ; `<a/>` segfaulted.  Every release of an interned result below is
     ; DECREF_V for the same reason.
-    mov rbx, rax
-    INCREF_V rbx, rcx
+    mov rbx, rax                ; already owned from dict_get
     mov rdi, [rbp - PI_STR]
     call obj_decref             ; always a fresh str, so always a pointer
     mov rax, rbx

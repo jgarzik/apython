@@ -327,11 +327,7 @@ DEF_FUNC_BARE op_load_name
 .found:
     add rsp, 16                ; discard saved name and the pad
 .found_no_pop:
-    ; Each of the three probes above used to V_UNPACK dict_get's answer just
-    ; to `test edx, edx` for a miss.  dict_get already returns a bare Value
-    ; and 0 on a miss, and 0 is the only NULL encoding -- integer 0 encodes as
-    ; V_INT_BIAS -- so the raw test is exact.
-    INCREF_V rax, rdx
+    ; dict_get already returns an owned Value.
     VPUSH rax
     DISPATCH
 END_FUNC op_load_name
@@ -487,7 +483,6 @@ DEF_FUNC op_load_attr, LA_FRAME
 .la_tag_found:
     mov [rbp - LA_ATTR], rax
     mov [rbp - LA_ATTR_TAG], rdx
-    INCREF_VAL rax, rdx
     mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 
@@ -635,11 +630,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     test edx, edx
     jz .la_attr_error
 .la_dict_found:
-
-    ; INCREF the result (dict_get returns borrowed ref — may be SmallInt)
+    ; type_lookup_cached already returns an owned reference.
     mov [rbp - LA_ATTR], rax
-    mov [rbp - LA_ATTR_TAG], rdx   ; save tag from dict_get
-    INCREF_VAL rax, rdx
+    mov [rbp - LA_ATTR_TAG], rdx   ; save tag from type_lookup_cached
     mov qword [rbp - LA_FROM_TYPE], 1
     jmp .la_got_attr
 
@@ -706,9 +699,9 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; Check if attr's type has __get__
     mov rdi, rcx               ; attr's type
     lea rsi, [rel dunder_get]
-    call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .la_check_flag          ; no __get__, treat normally
 
     ; Has __get__!  Which two arguments it gets depends on where the lookup
@@ -882,15 +875,25 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; __set__ at all -- so what it lets through can never become one.
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    call type_lookup_cached        ; rax = payload, edx = tag
+    call type_lookup_cached        ; rax = payload (owned), edx = tag
     test edx, edx
     jz .la_ic_name_free            ; the MRO does not define it at all
     cmp edx, TAG_PTR
     jne .la_ic_name_free           ; and an immediate is never a descriptor
+    push rax
+    sub rsp, 8
     mov rdi, rax
     extern attr_may_be_data_descr
     call attr_may_be_data_descr
-    test eax, eax
+    mov r8d, eax
+    add rsp, 8
+    pop rdi
+    push r8
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop r8
+    test r8d, r8d
     jnz .la_simple_push
 .la_ic_name_free:
 
@@ -1232,18 +1235,31 @@ DEF_FUNC op_load_attr, LA_FRAME
     ; this is the one place to check that the two agree.
     mov rdi, rax
     mov rsi, [rbp - LA_NAME]
-    call type_lookup_cached        ; rax = payload, edx = tag
+    call type_lookup_cached        ; rax = payload (owned), edx = tag
     cmp edx, TAG_PTR
     jne .la_prop_call
-    cmp rax, [rbp - LA_ATTR]
-    jne .la_prop_call              ; a different answer: do not cache this one
+    mov r8, rax
+    cmp r8, [rbp - LA_ATTR]
+    jne .la_prop_drop_call         ; a different answer: do not cache this one
     ; Exactly property, not a subclass of it: a subclass may define __get__.
     lea rcx, [rel property_type]
-    cmp [rax + PyObject.ob_type], rcx
-    jne .la_prop_call
-    mov rax, [rax + PyPropertyObject.prop_get]
+    cmp [r8 + PyObject.ob_type], rcx
+    jne .la_prop_drop_call
+    mov rax, [r8 + PyPropertyObject.prop_get]
+    push rax
+    sub rsp, 8
+    mov rdi, r8
+    call obj_decref
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .la_prop_call               ; no getter: the generic path raises
+    jmp .la_prop_have_get
+.la_prop_drop_call:
+    mov rdi, r8
+    call obj_decref
+    jmp .la_prop_call
+.la_prop_have_get:
     ; The getter has to be a shape the handler can run inline.  Checking it
     ; here as well as at every hit is what keeps a lambda with a default, a
     ; builtin or a generator from installing and deopting for ever.
@@ -1950,9 +1966,8 @@ DEF_FUNC op_load_super_attr, LSA_FRAME
     jmp eval_exception_unwind
 
 .lsa_found:
-    ; rax = attribute value, rdx = tag (from dict_get)
-    mov [rbp - LSA_ATTR_TAG], rdx  ; save tag before INCREF/DECREF
-    INCREF_VAL rax, rdx
+    ; rax = attribute value, rdx = tag (owned from dict_get_mro)
+    mov [rbp - LSA_ATTR_TAG], rdx
     push rax                       ; save attr
 
     ; DECREF class
@@ -2426,7 +2441,6 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
 .ga_from_type:
     mov [rbp - GA_ATTR], rax
     mov [rbp - GA_ATTRTAG], rdx
-    INCREF_VAL rax, rdx
     mov qword [rbp - GA_FROMTYPE], 1
     jmp .ga_have_attr
 
@@ -2474,8 +2488,8 @@ DEF_FUNC obj_getattr_raw, GA_FRAME
     jz .ga_plain
     mov rdi, rcx
     lea rsi, [rel dunder_get]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .ga_plain
     mov rdi, [rbp - GA_ATTR]
     ; Found in a CLASS's own MRO, it is read through the class: __get__(None,

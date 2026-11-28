@@ -156,16 +156,21 @@ DEF_FUNC instance_getattr, IGA_FRAME
     jz .iga_default
     cmp edx, TAG_PTR
     jne .iga_default
-    ; object's own is a builtin wrapping object_method_getattribute.  Anything
-    ; else is a definition, and definitions run.
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel builtin_func_type]
     cmp rcx, r8
-    jne .iga_call
+    jne .iga_drop_call
     extern object_method_getattribute
     lea r8, [rel object_method_getattribute]
     cmp [rax + PyBuiltinObject.func_ptr], r8
-    je .iga_default
+    jne .iga_drop_call
+    mov rdi, rax
+    call obj_decref
+    jmp .iga_default
+.iga_drop_call:
+    mov rdi, rax
+    call obj_decref
+    jmp .iga_call
 .iga_call:
     mov rdi, [rbp - IGA_SELF]
     mov rsi, [rbp - IGA_NAME]
@@ -240,14 +245,14 @@ DEF_FUNC attr_is_data_descr, 8   ; 1 push below, so rsp stays 16-aligned
     jz .aidd_no
     mov rdi, rbx
     CSTRING rsi, "__set__"
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jnz .aidd_yes
     mov rdi, rbx
     CSTRING rsi, "__delete__"
-    call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    call dunder_exists
+    test eax, eax
     jnz .aidd_yes
 
 .aidd_no:
@@ -458,15 +463,19 @@ DEF_FUNC type_refresh_attr_flags
     jz .trg_clear               ; nothing in the MRO at all
     cmp edx, TAG_PTR
     jne .trg_clear
-    ; object's own is a builtin wrapping object_method_getattribute; anything
-    ; else is a definition.  The same test instance_getattr makes.
     mov rcx, [rax + PyObject.ob_type]
     lea r8, [rel builtin_func_type]
     cmp rcx, r8
-    jne .trg_set
+    jne .trg_drop_set
     lea r8, [rel object_method_getattribute]
     cmp [rax + PyBuiltinObject.func_ptr], r8
-    je .trg_clear
+    jne .trg_drop_set
+    mov rdi, rax
+    call obj_decref
+    jmp .trg_clear
+.trg_drop_set:
+    mov rdi, rax
+    call obj_decref
 .trg_set:
     or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_GETATTRIBUTE_OVERRIDDEN
     jmp .trg_data_descr
@@ -521,8 +530,8 @@ DEF_FUNC type_refresh_attr_flags
     and [rbx + PyTypeObject.tp_flags], rax
     mov rdi, rbx
     lea rsi, [rel trg_del_name]
-    call dunder_lookup
-    test rax, rax                       ; a NULL Value is the only "absent"
+    call dunder_exists
+    test eax, eax
     jz .trg_children
     or qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HAS_DEL
 
@@ -681,9 +690,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jz .found_inst_nowhere
     mov qword [rcx], 1
 .found_inst_nowhere:
-    mov r13, rax                ; save payload
+    mov r13, rax                ; save payload (already owned from dict_get)
     mov r12, rdx                ; save tag (name no longer needed)
-    INCREF_VAL rax, edx         ; tag-aware INCREF (skips SmallInt/NULL)
     mov rax, r13
     mov rdx, r12                ; restore tag from dict_get
     IG_RELEASE_HELD
@@ -695,6 +703,12 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ret
 
 .found_type:
+    ; type_lookup_cached returns an owned reference; park TAG_PTR in IG_HELD
+    ; so every exit releases it automatically via IG_RELEASE_HELD.
+    cmp rdx, TAG_PTR
+    jne .ft_check_descr
+    mov [rbp - IG_HELD], rax
+.ft_check_descr:
     ; On the descriptor-first order the instance dict has not been consulted
     ; yet, and it outranks everything here except a data descriptor.
     cmp qword [rbp - IG_DESCR1], 0
@@ -715,20 +729,9 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     jnz .found_type_dispatch            ; data descriptor: it wins
 .ft_beaten_by_inst:
     ; Not one.  If the instance has the name, that is the answer.
-    ;
-    ; The lookup below runs the instance dict's KEYS' __eq__, and that is
-    ; arbitrary Python: `del C.attr` inside one drops the type's last
-    ; reference to the descriptor this is still holding, and everything after
-    ; reads freed memory.  CPython INCREFs what _PyType_Lookup found and keeps
-    ; it to the end of the function for exactly this -- test_descr's
-    ; vicious_descriptor_nonsense, from 2003 -- and so does IG_HELD.
+    ; IG_HELD already holds our owned ref across the instance dict lookup.
     push rax
     push rdx
-    cmp rdx, TAG_PTR
-    jne .ft_not_held
-    mov [rbp - IG_HELD], rax
-    INCREF rax
-.ft_not_held:
     LOAD_INST_DICT rdi, rbx, .ft_no_inst
     test rdi, rdi
     jz .ft_no_inst
@@ -927,8 +930,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; find the member descriptor in tp_dict and hand THAT back.
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
-    call dunder_lookup
-    test rax, rax               ; a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jnz .ig_ask_getattr
 
     ; CPython names the type and the attribute here as it does everywhere
@@ -978,8 +981,8 @@ DEF_FUNC instance_getattr_default, IG_FRAME
     ; consulted, so a class defining it got a bare AttributeError.
     mov rdi, [rbx + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .really_not_found
     ; A __getattr__ explicitly set to None is not absent.  CPython calls it and
     ; the call fails as "'NoneType' object is not callable"; treating it as
@@ -1172,8 +1175,8 @@ DEF_FUNC attr_getattr_hook, AGH_FRAME
     mov rdi, [rbp - AGH_OBJ]
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel ig_getattr_name]
-    call dunder_lookup
-    test rax, rax               ; a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .agh_no
 
     ; rbx still holds the exception, and the global still holds its reference.
@@ -1254,32 +1257,35 @@ DEF_FUNC instance_setattr
     ; reference is borrowed the same way.
     mov rdi, rax
     mov rsi, r12                ; name
-    call type_lookup_cached     ; rax = payload, edx = tag
+    call type_lookup_cached     ; rax = payload (owned), edx = tag
     mov r9, rax
     test edx, edx
     jz .sa_no_slot
 
 .sa_found_type:
-    ; Check if it's a member descriptor (r9 = the value found)
+    ; Check if it's a member descriptor (r9 = owned value if TAG_PTR)
     cmp edx, TAG_PTR
     jne .sa_no_slot
+    mov r14, r9                 ; keep owned descriptor in callee-saved r14
     extern member_descr_type
     lea rcx, [rel member_descr_type]
-    cmp [r9 + PyObject.ob_type], rcx
+    cmp [r14 + PyObject.ob_type], rcx
     je .sa_member
 
-    ; A property is a data descriptor too, and this is the only road a DELETE
-    ; takes: op_store_attr has a property fast path of its own, op_delete_attr
-    ; has none and comes straight here.  So `del obj.prop` never reached the
-    ; deleter -- it fell through to the instance dict and did nothing.
     lea rcx, [rel property_type]
-    cmp [r9 + PyObject.ob_type], rcx
+    cmp [r14 + PyObject.ob_type], rcx
     jne .sa_check_getset
-    mov rdi, r9
+    mov rdi, r14
     mov rsi, rbx
     mov rdx, r13                ; the value Value; 0 means delete
     extern property_descr_set
     call property_descr_set     ; err: its status is this slot's own
+    push rax
+    sub rsp, 8
+    mov rdi, r14
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop r14
     pop r13
     pop r12
@@ -1288,25 +1294,23 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_check_getset:
-    ; A getset descriptor is a data descriptor: it takes precedence over the
-    ; instance dict, so `I(5).real = 9` is the AttributeError CPython raises
-    ; rather than a shadowing instance attribute.
     extern getset_descr_type
     lea rcx, [rel getset_descr_type]
-    cmp [r9 + PyObject.ob_type], rcx
+    cmp [r14 + PyObject.ob_type], rcx
     jne .sa_check_heap_descr
-    ; The __dict__ and __weakref__ getsets a class body grows are the
-    ; instance LAYOUT, handled below -- reached here only when some other
-    ; data descriptor (any property) set the MRO flag.  Their getset has no
-    ; setter, so `o.__dict__ = d` on an instance of a class with a property
-    ; was "not writable"; rich's Console is that class, and pip uses rich.
-    test qword [r9 + PyGetSetDescrObject.gs_flags], GS_LAYOUT
-    jnz .sa_no_slot
-    mov rdi, r9
+    test qword [r14 + PyGetSetDescrObject.gs_flags], GS_LAYOUT
+    jnz .sa_drop_no_slot
+    mov rdi, r14
     mov rsi, rbx
     mov rdx, r13
     extern getset_descr_set
     call getset_descr_set       ; err: its status is this slot's own
+    push rax
+    sub rsp, 8
+    mov rdi, r14
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop r14
     pop r13
     pop r12
@@ -1315,16 +1319,9 @@ DEF_FUNC instance_setattr
     ret
 
 .sa_check_heap_descr:
-    ; A data descriptor written in Python -- a class with __set__, or with
-    ; __delete__ for a delete.  op_store_attr calls __set__ before it ever
-    ; gets here, but setattr(), object.__setattr__ and `del obj.x` come
-    ; straight to this store, and they stored into the instance dict past
-    ; it: setattr(struct, "x", 1) on a ctypes Structure, whose fields are
-    ; exactly such descriptors, left the field untouched.
-    mov rcx, [r9 + PyObject.ob_type]
+    mov rcx, [r14 + PyObject.ob_type]
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .sa_no_slot
-    mov r14, r9                 ; the descriptor, borrowed from the MRO
+    jz .sa_drop_no_slot
     mov rdi, rcx
     extern dunder_set
     lea rsi, [rel dunder_set]
@@ -1332,13 +1329,14 @@ DEF_FUNC instance_setattr
     jnz .sa_heap_lookup
     lea rsi, [rel ia_dunder_delete]
 .sa_heap_lookup:
-    call dunder_lookup          ; rax = the function, borrowed, or 0
+    call dunder_lookup          ; rax = the function (owned), or 0
     test rax, rax
-    jz .sa_no_slot
-    sub rsp, 32                 ; [descriptor, instance, value] + pad
+    jz .sa_drop_no_slot
+    sub rsp, 32                 ; [descriptor, instance, value, owned_fn]
     mov [rsp], r14
     mov [rsp + 8], rbx
     mov [rsp + 16], r13
+    mov [rsp + 24], rax
     mov rdi, rax
     mov rsi, rsp
     mov edx, 3
@@ -1347,18 +1345,33 @@ DEF_FUNC instance_setattr
     mov edx, 2                  ; __delete__(descriptor, instance)
 .sa_heap_call:
     extern obj_call_n
-    call obj_call_n
+    call obj_call_n             ; err: checked via ERR_NULL .sa_fail after releasing r14 + fn
+    mov r8, [rsp + 24]          ; owned fn
     add rsp, 32
+    push rax
+    push r8
+    mov rdi, r8
+    DECREF_V rdi, rcx
+    mov rdi, r14
+    call obj_decref
+    pop r8
+    pop rax
     ERR_NULL .sa_fail
     DECREF_V rax, rcx
     jmp .sa_ok
 
 .sa_member:
-    mov rdi, r9
+    mov rdi, r14
     mov rsi, rbx
     mov rdx, r13
     extern member_descr_set
     call member_descr_set       ; err: forward the result
+    push rax
+    sub rsp, 8
+    mov rdi, r14
+    call obj_decref
+    add rsp, 8
+    pop rax
     pop r14
     pop r13
     pop r12
@@ -1366,6 +1379,9 @@ DEF_FUNC instance_setattr
     leave
     ret
 
+.sa_drop_no_slot:
+    mov rdi, r14
+    call obj_decref
 .sa_no_slot:
     ; __dict__ and __weakref__ are the two names that reach here and must NOT
     ; become instance-dict keys.  Their getsets carry GS_LAYOUT, which stays

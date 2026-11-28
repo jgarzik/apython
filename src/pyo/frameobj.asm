@@ -951,7 +951,6 @@ DEF_FUNC sys_getframemodulename_func, SGM_FRAME
     pop rax
     test rax, rax
     jz .sgm_miss
-    INCREF_V rax, rdx
     pop rbx
     leave
     ret

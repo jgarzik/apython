@@ -143,6 +143,8 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     mov rsi, [rbp - BFC_KEY]
     extern dict_del_opt
     call dict_del_opt         ; err: the key is a str built in this function
+    mov rdi, [rbp - BFC_FOUND]
+    DECREF_V rdi, rcx
 .bfc_drop_key:
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
@@ -152,14 +154,14 @@ DEF_FUNC_LOCAL bc_fill_cell, BFC_FRAME
     ret
 
 .bfc_not_a_cell:
-    ; What was found stays where it is -- the namespace still holds it -- so
-    ; it can be named after the key is given back.
     mov rdi, [rbp - BFC_KEY]
     call obj_decref
     mov rdi, [rbp - BFC_MSG]
     mov rsi, [rbp - BFC_FOUND]
     extern set_type_error_with_name
     call set_type_error_with_name
+    mov rdi, [rbp - BFC_FOUND]
+    DECREF_V rdi, rcx
     mov rax, -1
     leave
     ret
@@ -294,14 +296,18 @@ DEF_FUNC_LOCAL bc_take_qualname, BTQ_FRAME
     extern str_type
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .btq_release_key
+    jne .btq_release_val
 
-    INCREF rax                  ; ht_qualname owns it
+    ; ht_qualname takes ownership of dict_get's ref directly
     mov [r12 + HT_QUALNAME], rax
     mov rdi, [r12 + PyTypeObject.tp_dict]
     mov rsi, [rbp - BTQ_KEY]
     extern dict_del_opt
     call dict_del_opt         ; err: the key is a str built in this function
+    jmp .btq_release_key
+.btq_release_val:
+    mov rdi, rax
+    call obj_decref
 
 .btq_release_key:
     mov rdi, [rbp - BTQ_KEY]
@@ -363,11 +369,19 @@ DEF_FUNC_LOCAL bc_check_qualname, BCQ_FRAME
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    je .bcq_done
+    jne .bcq_not_str
+    mov rdi, rax
+    call obj_decref
+    jmp .bcq_done
 .bcq_not_str:
+    push rax
+    sub rsp, 8
     mov rsi, rax
     lea rdi, [rel bc_qualname_not_str]
     call set_type_error_with_name
+    add rsp, 8
+    pop rdi
+    DECREF_V rdi, rcx
     mov rax, -1
     leave
     ret
@@ -747,15 +761,20 @@ TFP_RSP   equ 40 + 88
     je .tfp_slots_size
     lea rdx, [rel list_type]
     cmp rcx, rdx
-    jne .tfp_slots_ok
+    jne .tfp_slots_drop_ok
 .tfp_slots_size:
     cmp qword [r12 + PyTupleObject.ob_size], 0
-    je .tfp_slots_ok
+    je .tfp_slots_drop_ok
+    mov rdi, r12
+    call obj_decref
     lea rdi, [rel bc_slots_unsupported]
     mov rsi, r13
     extern set_type_error_with_typename
     call set_type_error_with_typename
     jmp .tfp_fail_ns
+.tfp_slots_drop_ok:
+    mov rdi, r12
+    call obj_decref
 .tfp_slots_ok:
     ; __qualname__ is checked HERE, before the type object exists, as
     ; CPython's type_new checks it: there is only the namespace to give back.
@@ -967,7 +986,7 @@ TFP_RSP   equ 40 + 88
     extern func_type
     lea rcx, [rel func_type]
     cmp rax, rcx
-    jne .tfp_new_done
+    jne .tfp_new_drop_done
     sub rsp, 16
     mov [rsp], rbx
     extern staticmethod_type
@@ -975,9 +994,15 @@ TFP_RSP   equ 40 + 88
     lea rdi, [rel staticmethod_type]
     mov rsi, rsp
     mov edx, 1
-    call staticmethod_construct ; err: rax is tested once the stack is back
+    call staticmethod_construct ; err: rax is tested once the old func is released
     V_UNPACK rax, rdx
     add rsp, 16
+    push rax
+    sub rsp, 8
+    mov rdi, rbx
+    call obj_decref             ; drop owned func from dict_get
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .tfp_new_done
     mov rbx, rax
@@ -988,6 +1013,10 @@ TFP_RSP   equ 40 + 88
     ERR_M1 .tfp_fail_type_key_rbx
     mov rdi, rbx
     call obj_decref             ; the dict holds it now
+    jmp .tfp_new_done
+.tfp_new_drop_done:
+    mov rdi, rbx
+    call obj_decref
 .tfp_new_done:
     pop rdi
     call obj_decref             ; the key
@@ -1002,8 +1031,11 @@ TFP_RSP   equ 40 + 88
     mov rsi, rax
     call dict_get
     ERR_DICT_GET .tfp_fail_type_key
-    test rax, rax               ; dict_get answers with a Value; 0 is the miss
-    jnz .bc_have_module
+    test rax, rax               ; dict_get answers with an owned Value; 0 is the miss
+    jz .bc_fill_module
+    DECREF_V rax, rcx
+    jmp .bc_have_module
+.bc_fill_module:
     mov rcx, [gs:ThreadState.eval_saved_r12]
     test rcx, rcx
     jz .bc_have_module
@@ -1018,19 +1050,23 @@ TFP_RSP   equ 40 + 88
     mov rsi, rax
     call dict_get               ; the caller's globals: anyone's dict
     ERR_DICT_GET .tfp_fail_type_key2
-    V_UNPACK rax, rdx
     pop rdi
     push rax
-    push rdx
+    sub rsp, 8
     call obj_decref                 ; the "__name__" key
-    pop rdx
-    pop rax
-    test edx, edx
+    add rsp, 8
+    pop rbx                         ; owned Value from globals["__name__"]
+    test rbx, rbx
     jz .bc_have_module
     mov rdi, r15
     mov rsi, [rsp]                  ; the "__module__" key
-    mov rdx, rax
-    call dict_set
+    mov rdx, rbx
+    call dict_set                   ; err: tested below after releasing rbx
+    push rax
+    sub rsp, 8
+    DECREF_V rbx, rcx
+    add rsp, 8
+    pop rax
     ERR_M1 .tfp_fail_type_key
     or qword [rbp - TFP_FILLED], TFP_FILLED_MODULE
 .bc_have_module:
@@ -1056,8 +1092,11 @@ TFP_RSP   equ 40 + 88
     mov rsi, rax
     call dict_get
     ERR_DICT_GET .tfp_fail_type_key
-    test rax, rax               ; a Value; 0 is the miss
-    jnz .bc_have_doc
+    test rax, rax               ; owned Value; 0 is the miss
+    jz .bc_fill_doc
+    DECREF_V rax, rcx
+    jmp .bc_have_doc
+.bc_fill_doc:
     mov rdi, r15
     mov rsi, [rsp]
     lea rdx, [rel none_singleton]
@@ -1078,7 +1117,7 @@ TFP_RSP   equ 40 + 88
     mov rsi, rax
     call dict_get
     ERR_DICT_GET .tfp_fail_type_key
-    V_UNPACK rax, rdx           ; dict_get returns a Value
+    V_UNPACK rax, rdx           ; dict_get returns an owned Value
     pop rdi                         ; __slots__ str
     push rdx                        ; save dict_get tag
     push rax                        ; save dict_get value
@@ -1096,30 +1135,37 @@ TFP_RSP   equ 40 + 88
     mov rcx, [rax + PyObject.ob_type]
     lea rdx, [rel tuple_type]
     cmp rcx, rdx
-    je .bc_slots_tuple
+    je .bc_slots_own_seq
     lea rdx, [rel list_type]
     cmp rcx, rdx
-    je .bc_slots_tuple
+    je .bc_slots_own_seq
     ; `__slots__ = 'name'` declares exactly one, and is the form a class with
     ; a single slot is usually written with.  Wrap it, so the loop below sees
     ; one shape; the wrapper is released at .bc_no_slots, which every exit
     ; from the slot code passes through.
     lea rdx, [rel str_type]
     cmp rcx, rdx
-    jne .bc_no_slots
+    jne .bc_slots_drop_none
     push rax
     mov edi, 1
     call tuple_new
-    pop rcx
+    pop rcx                         ; owned str from dict_get
     test rax, rax
-    jz .bc_no_slots
+    jz .bc_slots_drop_rcx
     mov [rbp - TFP_SLOT1], rax
     mov rdx, [rax + PyTupleObject.ob_item]
-    mov [rdx], rcx
-    push rax
+    mov [rdx], rcx                  ; transfer owned ref into tuple
+    jmp .bc_slots_tuple
+.bc_slots_drop_rcx:
     mov rdi, rcx
-    call obj_incref
-    pop rax
+    call obj_decref
+    jmp .bc_no_slots
+.bc_slots_drop_none:
+    mov rdi, rax
+    call obj_decref
+    jmp .bc_no_slots
+.bc_slots_own_seq:
+    mov [rbp - TFP_SLOT1], rax      ; owned tuple/list, released at .bc_no_slots or fail
 
     ; rax = slots list — get size and item pointers (same layout as tuple for ob_size/ob_item)
 .bc_slots_tuple:
@@ -1370,15 +1416,20 @@ TFP_RSP   equ 40 + 88
     mov rsi, rax            ; "__init__" str
     call dict_get_mro       ; a slot being filled in from the type's own
                             ; namespace, which is what _PyType_Lookup is for
-    V_UNPACK rax, rdx           ; dict_get returns a Value
-    mov rbx, rax            ; rbx = __init__ func or NULL
+    mov rbx, rax            ; rbx = owned __init__ Value or NULL
 
     ; DECREF the "__init__" string
     pop rdi
     call obj_decref
 
-    ; Store tp_init (func ptr or 0)
-    mov [r12 + PyTypeObject.tp_init], rbx
+    ; Store tp_init (unpacked func ptr or 0; non-owning, kept alive by class_dict)
+    mov rax, rbx
+    V_UNPACK rax, rdx
+    mov [r12 + PyTypeObject.tp_init], rax
+    test rbx, rbx
+    jz .bc_init_done
+    DECREF_V rbx, rcx
+.bc_init_done:
 
     ; Set tp_base: use explicit base class, or default to object_type
     mov rax, [rbp - TFP_BASE]
@@ -1859,36 +1910,47 @@ TFP_RSP   equ 40 + 88
     mov rdi, r12               ; the class being built
     CSTRING rsi, "__init_subclass__"
     call dunder_lookup_after
-    test rax, rax               ; a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .bc_no_init_subclass
 
-    ; object's own is a classmethod wrapper; unwrap it, since the class it
-    ; would bind is already going in as args[0].
-    mov rcx, [rax + PyObject.ob_type]
+    ; object's own is a classmethod wrapper; unwrap it, keeping an owned ref.
+    mov r8, rax
+    V_TEST_PTR r8, rcx
+    ja .bc_is_have_callable
+    mov rcx, [r8 + PyObject.ob_type]
     lea rdx, [rel classmethod_type]
     cmp rcx, rdx
     jne .bc_is_have_callable
-    mov rax, [rax + PyClassMethodObject.cm_callable]
+    mov rax, [r8 + PyClassMethodObject.cm_callable]
+    INCREF_V rax, rcx
+    push rax
+    sub rsp, 8
+    mov rdi, r8
+    call obj_decref
+    add rsp, 8
+    pop rax
     test rax, rax
     jz .bc_no_init_subclass
 .bc_is_have_callable:
-
-    ; Call __init_subclass__(new_class, **class_keywords).  The keywords are
-    ; the whole point of the hook -- `class C(B, tag="t")` -- and they arrive
-    ; through the pending pair, because the class statement knows them and
-    ; this function does not.
+    push rax
+    sub rsp, 8                 ; [rsp+8] = owned callable across bc_call_kw
     SPUSH_PTR r12              ; args[0] = new class
     mov rdi, rax               ; callable
     mov rsi, rsp               ; args
     mov edx, 1                 ; nargs
     mov rcx, [gs:ThreadState.class_kwnames_pending]
     mov r8, [gs:ThreadState.class_kwvalues_pending]
-    call bc_call_kw
-    ; It ran and raised, or was never reached for want of room for the
-    ; keywords: either way the exception is pending and there is no class.
-    ; The error exit puts rsp back, so the argument need not be popped first.
-    ERR_NULL .tfp_fail_type
+    call bc_call_kw            ; err: checked below after releasing callable
     add rsp, 16                ; pop fat args
+    mov r8, rax
+    add rsp, 8
+    pop rdi                    ; owned callable
+    push r8
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    ERR_NULL .tfp_fail_type
     mov rdi, rax
     call obj_decref
 
@@ -2217,8 +2279,11 @@ DEF_FUNC_LOCAL bc_add_layout_getset, BAL_FRAME
     mov rsi, rax
     call dict_get
     ERR_DICT_GET .bal_fail_name
-    test rax, rax               ; a Value; 0 is the miss
-    jnz .bal_drop_name          ; the class already has the name
+    test rax, rax               ; owned Value; 0 is the miss
+    jz .bal_create
+    DECREF_V rax, rcx           ; the class already has the name
+    jmp .bal_drop_name
+.bal_create:
 
     mov rdi, [rbp - BAL_GET]
     xor esi, esi                ; read-only

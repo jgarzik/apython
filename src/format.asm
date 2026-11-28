@@ -2673,8 +2673,9 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     jz .fpc_int_bad
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel fpc_name_index]
-    call dunder_lookup
-    test rax, rax
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .fpc_int_bad
     mov rdi, [rbp - FPC_VAL]
     V_UNPACK rdi, rdx
@@ -2709,8 +2710,8 @@ DEF_FUNC fmt_percent_coerce, FPC_FRAME
     jz .fpc_float_bad
     mov rdi, [rdi + PyObject.ob_type]
     lea rsi, [rel fpc_name_float]
-    call dunder_lookup
-    test rax, rax
+    call dunder_exists
+    test eax, eax
     jz .fpc_float_bad
     mov rdi, [rbp - FPC_VAL]
     lea rsi, [rel fpc_name_float]

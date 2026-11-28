@@ -1297,6 +1297,16 @@ DEF_FUNC main_sys_options, MSO_FRAME
     inc qword [rbp - MSO_I]
     jmp .mso_x_loop
 .mso_out:
+    mov rdi, [rbp - MSO_XDICT]
+    test rdi, rdi
+    jz .mso_out_list
+    call obj_decref
+.mso_out_list:
+    mov rdi, [rbp - MSO_LIST]
+    test rdi, rdi
+    jz .mso_ret
+    call obj_decref
+.mso_ret:
     leave
     ret
 

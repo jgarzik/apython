@@ -41,7 +41,7 @@ CL_TOTAL     equ 40
 CL_SAVED_RSP equ 48
 CL_TPCALL    equ 56
 CL_CFUNC     equ 64            ; the C function, while sys.setprofile is on
-CL_CALL_TAG  equ 72            ; spare: the callable is classified in place
+CL_OWN_FN    equ 72            ; owned __call__ dunder ref to release on cleanup, or 0
 CL_SAVED_R13 equ 80
 CL_FRAME     equ 104         ; + 0 pushes = 96
 
@@ -214,25 +214,22 @@ DEF_FUNC op_call, CL_FRAME
     mov rdi, rcx              ; type
     lea rsi, [rel dunder_call]
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
+    V_UNPACK rax, rdx           ; owned Value
     test edx, edx
     jz .not_callable
+    cmp edx, TAG_PTR
+    jne .not_callable
     ; Found __call__ — use its tp_call to dispatch
-    mov rcx, rax              ; __call__ func
+    mov rcx, rax              ; owned __call__ func
     mov rax, [rcx + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_call]
     test rax, rax
-    jz .not_callable
-    ; Rewrite callable: we need to call __call__(self, *args)
-    ; The self is the original callable, prepend it to args
-    ; Actually, we can just call dunder_func's tp_call with [callable, args...]
-    ; But that requires restructuring the args. For simplicity, call it as
-    ; tp_call(dunder_func, args_including_self, nargs+1)
-    ; where args_including_self starts at the callable's slot on the value stack
-    ; The callable is at [r13 - (nargs+1)*8], and args start at [r13 - nargs*8]
-    ; We already have self in the callable's slot... actually this is tricky.
-    ; Save dunder_func in the frame, and keep the original
-    ; callable as first arg by shifting the args pointer back by 1
+    jnz .dunder_have_tp_call
+    mov rdi, rcx
+    call obj_decref
+    jmp .not_callable
+.dunder_have_tp_call:
+    mov [rbp - CL_OWN_FN], rcx           ; released in .cleanup
     mov [rbp - CL_CALLABLE], rcx         ; replace callable with __call__ func
     ; args_ptr should now include the original callable as self
     ; The original callable is already on the value stack at the right position
@@ -257,6 +254,7 @@ DEF_FUNC op_call, CL_FRAME
     jmp .call_with_args
 
 .have_tp_call:
+    mov qword [rbp - CL_OWN_FN], 0
     ; Set up args: tp_call(callable, args_ptr, nargs)
     mov [rbp - CL_TPCALL], rax               ; save tp_call function ptr
     mov rcx, [rbp - CL_NARGS]               ; original nargs
@@ -326,6 +324,12 @@ DEF_FUNC op_call, CL_FRAME
     jmp .cleanup
 
 .cleanup:
+    ; Release owned __call__ dunder reference if the dunder path ran.
+    mov rdi, [rbp - CL_OWN_FN]
+    test rdi, rdi
+    jz .cl_no_own_fn
+    call obj_decref
+.cl_no_own_fn:
     ; Restore value stack pointers (defensive against callee clobber)
     mov r13, [rbp - CL_SAVED_R13]
 
@@ -1191,12 +1195,16 @@ DEF_FUNC op_before_with
     lea rsi, [rel dunder_enter]
     extern dunder_lookup
     call dunder_lookup
-    mov rsi, rbx
     V_TEST_PTR rax, rcx
-    ja .bw_no_either
+    ja .bw_no_either_set_rsi
+    mov rdi, rax
+    call obj_decref
+    mov rsi, rbx
     CSTRING rdi, `'\x01' object does not support the context manager protocol (missed __exit__ method)`
     extern raise_type_error_with_name
     jmp raise_type_error_with_name
+.bw_no_either_set_rsi:
+    mov rsi, rbx
 .bw_no_either:
     CSTRING rdi, `'\x01' object does not support the context manager protocol`
     jmp raise_type_error_with_name

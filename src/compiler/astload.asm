@@ -553,8 +553,7 @@ DEF_FUNC_LOCAL al_prep_fn, ALP_FRAME
     jz .alp_fail
     V_TEST_PTR rax, rcx
     ja .alp_fail
-    INCREF rax                  ; the cache's own, for the process's life
-    mov [rel al_prep_cache], rax
+    mov [rel al_prep_cache], rax    ; cache owns ref from dict_get
 .alp_out:
     leave
     ret

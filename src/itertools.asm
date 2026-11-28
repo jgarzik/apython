@@ -286,10 +286,9 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rcx                   ; type
     extern dunder_next
     lea rsi, [rel dunder_next]
-    extern dunder_lookup
-    call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
-    test edx, edx
+    extern dunder_exists
+    call dunder_exists
+    test eax, eax
     jz .iter_bad                   ; no __next__ found
     ; Has __next__, good
 
@@ -332,8 +331,8 @@ DEF_FUNC get_iterator_opt, 8            ; 1 pushes, so rsp is 16-aligned
     mov rdi, rcx                   ; type
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .no_iter                    ; no __getitem__
     ; Has __getitem__ — create seq_iter
     mov rdi, rbx                   ; obj
@@ -1841,14 +1840,13 @@ DEF_FUNC builtin_reversed, 8            ; 3 pushes, so rsp is 16-aligned
     lea rsi, [rel .dunder_reversed_name]
     extern dunder_lookup
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .rev_no_dunder      ; not found at all
 
     ; Found __reversed__.  Setting it to None blocks reversal.
     IS_NONE rax, rcx
     je .rev_type_error
-    test rax, rax
-    jz .rev_type_error
+    DECREF_V rax, rcx
 
 .rev_call_dunder:
     ; Call __reversed__ via dunder_call_1
@@ -1921,8 +1919,8 @@ section .text
     mov rdi, rax            ; type
     extern dunder_len
     lea rsi, [rel dunder_len]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     pop rcx                 ; restore type
     jz .rev_type_error      ; no __len__
 
@@ -1930,8 +1928,8 @@ section .text
     mov rdi, rcx            ; type
     extern dunder_getitem
     lea rsi, [rel dunder_getitem]
-    call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    call dunder_exists
+    test eax, eax
     jz .rev_type_error      ; no __getitem__
 
     ; Call __len__ to get length

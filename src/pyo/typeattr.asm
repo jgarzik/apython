@@ -1134,8 +1134,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     ret
 
 .tga_found:
-    ; dict_get's answer is a borrowed Value.
-    INCREF_V rax, rdx
+    ; dict_get_mro already returns an owned Value.
     pop r12
     pop rbx
     leave
@@ -1201,12 +1200,9 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     call dict_get_mro
     test rax, rax
     jz .tga_module_builtin
-    V_UNPACK rax, rdx
-    INCREF_VAL rax, rdx
     pop r12
     pop rbx
     leave
-    V_PACK rax, rdx
     ret
 
 .tga_module_builtin:
@@ -1404,7 +1400,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
 .tga_meta_data:
     mov rdi, rax
     mov rsi, rbx
-    call type_meta_data_descr   ; a borrowed descriptor, or 0
+    call type_meta_data_descr   ; OWNED descriptor, or 0
     test rax, rax
     jz .tga_ladder
     mov rcx, [rbp - TGA_FROMMETA]
@@ -1412,9 +1408,41 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     jz .tga_meta_data_found
     mov qword [rcx], 1          ; the caller runs its __get__
 .tga_meta_data_found:
-    mov [rbp - TGA_META], rax   ; just a place to keep it; nothing walks on
+    mov [rbp - TGA_META], rax   ; owned ref
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    xor esi, esi
+    extern builtin_should_bind
+    call builtin_should_bind    ; err: no receiver given, nothing to refuse
+    mov ecx, eax
+    add rsp, 8
+    pop rax
+    test ecx, ecx
+    jz .tga_meta_data_plain
+    mov rdi, rax
+    mov rsi, [rbp - TGA_ORIGIN]
+    push rax
+    sub rsp, 8
+    call method_new
+    mov rbx, rax
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; drop owned descriptor (method_new INCREF'd it)
+    mov rax, rbx
     mov edx, TAG_PTR
-    ; fall into the metatype answer: bound or handed over, as any other
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
+.tga_meta_data_plain:
+    mov edx, TAG_PTR
+    pop r12
+    pop rbx
+    leave
+    V_PACK rax, rdx
+    ret
 .tga_meta_found:
     cmp edx, TAG_PTR
     jne .tga_meta_plain
@@ -1442,9 +1470,16 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     test ecx, ecx
     jz .tga_meta_plain
 .tga_meta_bind:
+    push rax
+    sub rsp, 8
     mov rdi, rax
     mov rsi, [rbp - TGA_ORIGIN]
     call method_new
+    mov rbx, rax
+    add rsp, 8
+    pop rdi
+    call obj_decref             ; drop owned ref from dict_get_mro
+    mov rax, rbx
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1452,9 +1487,7 @@ DEF_FUNC type_getattr_meta, TGA_FRAME
     V_PACK rax, rdx
     ret
 .tga_meta_plain:
-    mov r12, rdx
-    INCREF_VAL rax, rdx
-    mov rdx, r12
+    ; Already owned from dict_get_mro
     pop r12
     pop rbx
     leave
@@ -1542,6 +1575,8 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
 .tsm_result:
     DECREF_V rax, rcx           ; the answer is None, or 0 for no such dunder
 .tsm_yes:
+    mov rdi, [rbp - TSM_DESC]
+    call obj_decref
     mov eax, 1
     leave
     ret
@@ -1550,51 +1585,45 @@ DEF_FUNC_LOCAL ts_meta_descr_set, TSM_FRAME
     leave
     ret
 .tsm_raised:
+    mov rdi, [rbp - TSM_DESC]
+    call obj_decref
     mov rax, -1
     leave
     ret
 END_FUNC ts_meta_descr_set
 
 ;; ============================================================================
-;; type_meta_data_descr(rdi = a metatype, rsi = a name) -> rax = a BORROWED
+;; type_meta_data_descr(rdi = a metatype, rsi = a name) -> rax = an OWNED
 ;;   data descriptor the metatype's MRO defines under that name, or 0
-;;
-;; Step one of CPython's type_getattro and of its generic setattr on a type.
-;; Only an entry a HEAPTYPE in the metatype's MRO owns counts: `type`'s own
-;; getsets (__name__, __module__, __dict__ ...) are answered by
-;; type_getattr_meta's ladder and by type_setattr's renames, and reporting
-;; them here would hand out the getset instead.  Of what a heaptype holds,
-;; a property and an instance of a class with __set__ or __delete__ qualify --
-;; the GS_LAYOUT getsets a class body grows are not the class's to offer.
-;;
-;; Answered through the type cache, so a class whose metaclass defines nothing
-;; under the name pays one hashed compare per lookup.
 ;; ============================================================================
 TMD_DESCR equ 8
 TMD_FRAME equ 16
 DEF_FUNC type_meta_data_descr, TMD_FRAME
     extern type_lookup_cached
-    call type_lookup_cached     ; rax = payload, edx = tag, rcx = the owner
+    call type_lookup_cached     ; rax = payload (owned), edx = tag, rcx = the owner
     cmp edx, TAG_PTR
     jne .tmd_no
+    mov [rbp - TMD_DESCR], rax
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .tmd_no
+    jz .tmd_drop_no
     mov rdx, [rax + PyObject.ob_type]
     lea r8, [rel property_type]
     cmp rdx, r8
     je .tmd_yes
     test qword [rdx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
-    jz .tmd_no
-    mov [rbp - TMD_DESCR], rax
+    jz .tmd_drop_no
     mov rdi, rax
     extern attr_is_data_descr
     call attr_is_data_descr
     test eax, eax
-    jz .tmd_no
+    jz .tmd_drop_no
     mov rax, [rbp - TMD_DESCR]
 .tmd_yes:
     leave
     ret
+.tmd_drop_no:
+    mov rdi, [rbp - TMD_DESCR]
+    call obj_decref
 .tmd_no:
     xor eax, eax
     leave

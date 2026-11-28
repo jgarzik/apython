@@ -469,7 +469,7 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
 .ca_names_loop:
     mov rcx, [rbp - CA_IDX]
     cmp rcx, [r12 + PyDictObject.capacity]
-    jge .ca_base_loop
+    jge .ca_base_drop
     mov rdx, [r12 + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rax, [rdx + rcx + 8]    ; the key (the hash sits at +0)
@@ -497,14 +497,22 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     DECREF_VAL rdi, rdx
     pop rcx
     cmp rcx, -1                 ; never an answer
-    je .ca_fail
+    je .ca_fail_drop
     test ecx, ecx
     jz .ca_names_loop
     mov rdi, [rbp - CA_SET]
     mov rsi, [rbp - CA_KEY]
     call set_add
-    ERR_M1 .ca_fail
+    ERR_M1 .ca_fail_drop
     jmp .ca_names_loop
+.ca_base_drop:
+    mov rdi, r12
+    call obj_decref
+    jmp .ca_base_loop
+.ca_fail_drop:
+    mov rdi, r12
+    call obj_decref
+    jmp .ca_fail
 
 .ca_store:
     mov rax, [rbp - CA_SET]
@@ -633,6 +641,8 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     push r12
     mov [rbp - SC_CLS], rdi
     mov [rbp - SC_SUB], rsi
+    mov qword [rbp - SC_CACHE], 0
+    mov qword [rbp - SC_NEG], 0
 
     ; 1. the positive cache
     CSTRING rsi, "_abc_cache"
@@ -662,13 +672,20 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache_version"
     call abc_state_get
+    mov rcx, rax
     V_TO_I64 rax
+    push rax
+    sub rsp, 8
+    DECREF_V rcx, rdx
+    add rsp, 8
+    pop rax
     cmp rax, [rel abc_invalidation_counter]
     jge .neg_current
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache"
     call abc_fresh_set
     ERR_NULL .error
+    INCREF rax                  ; own a ref uniformly with abc_state_get
     mov [rbp - SC_NEG], rax
     mov rdi, [rbp - SC_CLS]
     CSTRING rsi, "_abc_negative_cache_version"
@@ -810,7 +827,7 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rax, [rbp - SC_REG]
     mov rcx, [rbp - SC_IDX]
     cmp rcx, [rax + PyDictObject.capacity]
-    jge .subclasses
+    jge .reg_done_drop
     mov rdx, [rax + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rdi, [rdx + rcx + 8]    ; the entry's key Value (hash sits at +0)
@@ -826,10 +843,19 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_SUB]
     call abc_call_issubclass
     cmp eax, -1
-    je .error
+    je .reg_error_drop
     test eax, eax
     jz .reg_loop
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
     jmp .cache_yes
+.reg_error_drop:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
+    jmp .error
+.reg_done_drop:
+    mov rdi, [rbp - SC_REG]
+    call obj_decref
 
 .subclasses:
     ; 6. a subclass of one of THIS class's subclasses.  A registration made
@@ -876,6 +902,16 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     pop rdi
     call obj_decref
 .yes:
+    mov rdi, [rbp - SC_CACHE]
+    test rdi, rdi
+    jz .yes_neg
+    call obj_decref
+.yes_neg:
+    mov rdi, [rbp - SC_NEG]
+    test rdi, rdi
+    jz .yes_ret
+    call obj_decref
+.yes_ret:
     mov eax, 1
     pop r12
     pop rbx
@@ -897,6 +933,16 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     pop rdi
     call obj_decref
 .no:
+    mov rdi, [rbp - SC_CACHE]
+    test rdi, rdi
+    jz .no_neg
+    call obj_decref
+.no_neg:
+    mov rdi, [rbp - SC_NEG]
+    test rdi, rdi
+    jz .no_ret
+    call obj_decref
+.no_ret:
     xor eax, eax
     pop r12
     pop rbx
@@ -919,6 +965,16 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     pop rdi
     call obj_decref
 .error:
+    mov rdi, [rbp - SC_CACHE]
+    test rdi, rdi
+    jz .err_neg
+    call obj_decref
+.err_neg:
+    mov rdi, [rbp - SC_NEG]
+    test rdi, rdi
+    jz .err_ret
+    call obj_decref
+.err_ret:
     mov eax, -1
     pop r12
     pop rbx
@@ -1195,21 +1251,25 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     call abc_state_get
     test rax, rax
     jz .full
-    mov rdi, rax
-    mov rsi, [rbp - IC_SUB]
-    push rdi
-    mov rdi, rsi
+    push rax                    ; owned _abc_cache
+    sub rsp, 8
+    mov rdi, [rbp - IC_SUB]
     call abc_ref
-    pop rdi
-    push rax
+    mov rdi, [rsp + 8]          ; _abc_cache
+    push rax                    ; ref
+    sub rsp, 8
     mov rsi, rax
     call set_contains
-    ERR_M1 .propagate_ref
+    ERR_M1 .propagate_ref_cache
     push rax
-    mov rdi, [rsp + 8]
+    sub rsp, 8
+    mov rdi, [rsp + 24]         ; ref
     call obj_decref
-    pop rax
+    mov rdi, [rsp + 40]         ; _abc_cache
+    call obj_decref
     add rsp, 8
+    pop rax
+    add rsp, 32
     test eax, eax
     jnz .true
 
@@ -1245,8 +1305,12 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
     INCREF rax
     leave
     ret
-.propagate_ref:
+.propagate_ref_cache:
+    add rsp, 8
     pop rdi                     ; the weak reference being looked up
+    call obj_decref
+    add rsp, 8
+    pop rdi                     ; owned _abc_cache
     call obj_decref
 .propagate:
     call .ic_release_declared
@@ -1313,16 +1377,21 @@ DEF_FUNC abc_register_func, RG_FRAME
     call abc_state_get
     test rax, rax
     jz .done
-    mov rdi, rax
-    push rdi
+    push rax                    ; owned _abc_registry
+    sub rsp, 8
     mov rdi, [rbp - RG_SUB]
     call abc_ref
-    pop rdi
-    push rax
+    mov rdi, [rsp + 8]          ; _abc_registry
+    push rax                    ; ref
+    sub rsp, 8
     mov rsi, rax
     call set_add
     ERR_M1 .raised_ref
-    pop rdi
+    add rsp, 8
+    pop rdi                     ; ref
+    call obj_decref
+    add rsp, 8
+    pop rdi                     ; _abc_registry
     call obj_decref
     inc qword [rel abc_invalidation_counter]
 
@@ -1334,7 +1403,11 @@ DEF_FUNC abc_register_func, RG_FRAME
     leave
     ret
 .raised_ref:
+    add rsp, 8
     pop rdi                     ; the weak reference being added
+    call obj_decref
+    add rsp, 8
+    pop rdi                     ; _abc_registry
     call obj_decref
     xor eax, eax
     leave
@@ -1384,8 +1457,8 @@ DEF_FUNC abc_get_dump_func, GD_FRAME
     test rax, rax
     jnz %%have
     lea rax, [rel none_singleton]
+    INCREF rax
     %%have:
-    INCREF_V rax, rcx
     mov rcx, [rbp - GD_TUP]
     mov rcx, [rcx + PyTupleObject.ob_item]
     mov [rcx + %1 * 8], rax

@@ -916,10 +916,7 @@ DEF_FUNC time_strptime_func, TSP_FRAME
     mov rax, [rbp - TSP_MOD]
     test rax, rax
     jz .tsp_no_impl
-    mov rdi, rax
-    call obj_incref
-    mov rax, [rbp - TSP_MOD]
-    mov [rel tm_strptime_impl], rax
+    mov [rel tm_strptime_impl], rax     ; cache owns ref from dict_get
 
     mov rax, [rbp - TSP_KW]
     mov [gs:ThreadState.kw_names_pending], rax

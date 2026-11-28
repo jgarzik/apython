@@ -803,10 +803,7 @@ DEF_FUNC_LOCAL cew_lookup_warn_explicit, CLW_FRAME
     mov rax, [rbp - CLW_MOD]
     test rax, rax
     jz .clw_none
-    mov rdi, rax
-    call obj_incref             ; the cache holds it for the process
-    mov rax, [rbp - CLW_MOD]
-    mov [rel cew_warn_explicit], rax
+    mov [rel cew_warn_explicit], rax    ; cache owns ref from dict_get
 .clw_done:
     leave
     ret

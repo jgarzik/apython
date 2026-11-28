@@ -733,9 +733,10 @@ DEF_FUNC type_defines_dunder, TDD_FRAME
     jz .tdd_next
     mov rsi, [rbp - TDD_NAME]
     call dict_get_mro
-    V_UNPACK rax, rdx
-    test edx, edx               ; the tag: a hit may be a false-looking payload
-    jnz .tdd_yes
+    test rax, rax
+    jz .tdd_next
+    DECREF_V rax, rcx
+    jmp .tdd_yes
 .tdd_next:
     MRO_NEXT rbx, [rbp - TDD_TYPE]
     jmp .tdd_walk
@@ -791,9 +792,9 @@ DEF_FUNC object_new_staticbase, ONS_FRAME
     lea rdx, [rbp - ONS_OWNER]
     mov qword [rbp - ONS_OWNER], 0
     call dunder_lookup_owner
-    V_UNPACK rax, rdx
-    test edx, edx
+    test rax, rax
     jz .ons_done                ; no __new__ at all: this is the staticbase
+    DECREF_V rax, rcx
     mov rax, [rbp - ONS_OWNER]
     test rax, rax
     jz .ons_done

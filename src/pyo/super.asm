@@ -380,7 +380,7 @@ DEF_FUNC super_lookup, SL_FRAME
     jz .sl_absent
     mov [rbp - SL_ATTR], rax
     mov [rbp - SL_TAG], rdx
-    INCREF_VAL rax, rdx         ; ours from here on
+    ; super_find already returns an owned ref (from dict_get_mro)
 
     cmp qword [rbp - SL_TAG], TAG_PTR
     jne .sl_plain               ; an immediate is never a descriptor

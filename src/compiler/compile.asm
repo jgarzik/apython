@@ -2222,7 +2222,7 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
     call dict_get
     ERR_PENDING .eib_fail       ; the caller's globals hold a key that would not compare
     test rax, rax
-    jnz .present
+    jnz .present_drop
 
     mov rdi, rbx
     mov rsi, r12
@@ -2230,6 +2230,14 @@ DEF_FUNC ev_inject_builtins, 16 ; + 2 pushes = 32
     call dict_set
     ERR_M1 .eib_fail
     mov rax, [rel builtins_dict_global]
+    jmp .present
+.present_drop:
+    ; Drop dict_get's extra ref; globals still owns the entry (refcnt >= 1).
+    push rax
+    sub rsp, 8
+    DECREF_V rax, rcx
+    add rsp, 8
+    pop rax
 .present:
     mov rbx, rax
     mov rdi, r12
@@ -2534,10 +2542,7 @@ DEF_FUNC_LOCAL co_ast_builder, CAB_FRAME
     V_UNPACK rax, rdx
     cmp edx, TAG_PTR
     jne .cab_fail
-    INCREF rax                  ; the cache holds it for the process's life --
-                                ; sys.modules is not an owner anyone can rely
-                                ; on, and import_fresh_module drops entries
-    mov [rel co_from_raw], rax
+    mov [rel co_from_raw], rax      ; cache owns ref from dict_get
 .cab_out:
     leave
     ret

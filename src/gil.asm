@@ -499,6 +499,8 @@ DEF_FUNC gil_fork, GF_FRAME
     mov rdi, [gs:ThreadState.ts_self]
     extern brc_reset_after_fork
     call brc_reset_after_fork
+    extern weakref_reset_after_fork
+    call weakref_reset_after_fork
     mov eax, SYS_gettid_nr
     syscall
     mov [gs:ThreadState.ts_native_id], rax

@@ -306,16 +306,24 @@ DEF_FUNC_LOCAL binop_subclass_first, BSF_FRAME
     mov rsi, [rbp - BSF_RNAME]
     extern dunder_lookup
     call dunder_lookup
-    test rax, rax               ; dunder_lookup answers with a Value; 0 is the miss
+    test rax, rax               ; owned Value; 0 is the miss
     jz .bsf_no
     mov [rbp - BSF_LMETH], rax
     mov rdi, [rbp - BSF_LTYPE]
     mov rsi, [rbp - BSF_RNAME]
     call dunder_lookup
-    V_UNPACK rax, rdx
-    test edx, edx
+    mov r8, rax
+    mov r9, [rbp - BSF_LMETH]
+    push r8
+    push r9
+    DECREF_V r8, rcx
+    mov rdi, [rsp]
+    DECREF_V rdi, rcx
+    pop r9
+    pop r8
+    test r8, r8
     jz .bsf_call                ; only the right type defines it
-    cmp rax, [rbp - BSF_LMETH]
+    cmp r8, r9
     je .bsf_no                  ; the same object: inherited, not overridden
 
 .bsf_call:
@@ -1538,14 +1546,19 @@ DEF_FUNC_BARE op_binary_op
     lea rsi, [rel binop_inplace_dunder_table]
     mov rsi, [rsi + rax*8]    ; inplace dunder name
     call dunder_lookup
-    V_UNPACK rax, rdx           ; returns a Value
     pop r9
-    test edx, edx
+    test rax, rax
     jz .binop_left_dunder      ; not found → fall back to regular dunder
-    test edx, TAG_RC_BIT
-    jz .binop_no_method        ; non-pointer: cannot be called
+    V_TEST_PTR rax, rcx
+    ja .binop_no_method        ; non-pointer: cannot be called
     IS_NONE rax, rcx
     je .binop_no_method        ; __i<op>__ = None blocks the fallback (TypeError)
+    push r9
+    sub rsp, 8
+    mov rdi, rax
+    call obj_decref
+    add rsp, 8
+    pop r9
 
     ; Inplace dunder exists and is callable — call via dunder_call_2
     push r9

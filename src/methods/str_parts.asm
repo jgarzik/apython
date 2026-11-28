@@ -1069,12 +1069,7 @@ DEF_FUNC str_method_translate, TRN_FRAME
     ERR_PENDING .trn_fail           ; a colliding key's __eq__ raised
     test rax, rax
     jz .trn_keep
-    ; dict_get hands back a BORROWED reference where mp_subscript hands back
-    ; an owned one.  Taking one here makes the two paths the same below --
-    ; without it the release after list_append frees the table's own value,
-    ; and the next lookup of it reads freed memory.  The version before this
-    ; one had the same bug and only a dict path to hit it with.
-    INCREF_V rax, rcx
+    ; dict_get already returns an owned Value, matching mp_subscript.
     jmp .trn_have_value
 
 .trn_call_sub:

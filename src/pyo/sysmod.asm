@@ -863,10 +863,15 @@ DEF_FUNC sys_module_init, 40
     pop rax
     test edx, edx
     jz .no_impl_version
+    push rax
+    push rdx
     mov rdi, [rbp - SMI_TMP]
     lea rsi, [rel sm_version]
     mov rdx, rax
     call namespace_set
+    pop rdx
+    pop rdi
+    DECREF_VAL rdi, rdx
 .no_impl_version:
 
     lea rdi, [rel sm_implementation]
