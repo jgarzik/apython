@@ -310,8 +310,12 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     ; pre-hashed, which is what dict_lookup's fast path wants.
     mov rax, [rbp - SIB_HASH]
     mov [rbx + PyStrObject.ob_hash], rax
-    ; One reference for the table and one for the caller.
-    INCREF rbx
+    ; Interned strings never leave si_slots for the life of the process.
+    ; Marking them immortal eliminates all cross-thread refcount contention
+    ; on identifiers, attribute names, dict keys, and [A-Za-z0-9_] literals.
+    mov dword [rbx + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rbx + PyObject.ob_ref_shared], 0
+    mov dword [rbx + PyObject.ob_tid], REF_TID_IMMORTAL
     mov rdi, rbx
     mov rsi, [rbp - SIB_HASH]
     call si_place

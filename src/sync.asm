@@ -23,6 +23,9 @@ extern realloc
 extern aligned_alloc
 extern free
 extern pthread_self
+extern pthread_key_create
+extern pthread_getspecific
+extern pthread_setspecific
 extern pause
 extern fatal_error
 extern obj_dealloc
@@ -50,7 +53,9 @@ rt_threaded:    db 0
 ; 0 is reserved for immortal objects and 0xFFFFFFFF for merged objects.
 global rt_next_tid
 rt_next_tid:    dd 2
-                times 60 db 0
+global rt_tstate_key
+rt_tstate_key:  dd 0            ; pthread_key_t for ThreadState* (0 on foreign threads)
+                times 56 db 0
 
 ; Stop-The-World (STW) coordinator state (cache-line isolated).
 align 64
@@ -1309,22 +1314,17 @@ END_FUNC stw_notify_unlink
 ;; rt_foreign_enter() -> eax = 0 (already attached), 1 (reattached Python
 ;;   thread), or 2 (newly created foreign ThreadState)
 ;;
-;; Entry guard for C-to-Python callbacks (ctypes cx_tramp) that may run either
-;; on a detached Python thread inside ffi_call or on a foreign C pthread whose
-;; gs_base is 0.
+;; Entry guard for C-to-Python callbacks (ctypes cx_tramp).  Uses POSIX
+;; pthread_getspecific(rt_tstate_key) rather than ARCH_GET_GS because Linux
+;; clone() inherits the creator's gs_base onto foreign pthreads whereas
+;; pthread TLS keys are guaranteed NULL on every newly spawned foreign thread.
 ;; ============================================================================
-RFE_GS    equ 8
-RFE_FRAME equ 16                ; + 2 pushes = 32, 16-aligned
 global rt_foreign_enter
-DEF_FUNC rt_foreign_enter, RFE_FRAME
+DEF_FUNC rt_foreign_enter
     push rbx
     push r12
-    mov qword [rbp - RFE_GS], 0
-    mov eax, SYS_arch_prctl
-    mov edi, ARCH_GET_GS
-    lea rsi, [rbp - RFE_GS]
-    syscall
-    mov rax, [rbp - RFE_GS]
+    mov edi, [rel rt_tstate_key]
+    call pthread_getspecific wrt ..plt
     test rax, rax
     jz .rfe_foreign
 
@@ -1363,6 +1363,9 @@ DEF_FUNC rt_foreign_enter, RFE_FRAME
 
     mov rdi, rbx
     call tstate_install
+    mov edi, [rel rt_tstate_key]
+    mov rsi, rbx
+    call pthread_setspecific wrt ..plt
     call rt_tid_alloc
     mov [rbx + ThreadState.ts_tid], eax
     mov ecx, eax
@@ -1442,7 +1445,10 @@ DEF_FUNC rt_foreign_leave, 8            ; + 1 push = 16, 16-aligned
     call alloc_thread_flush
     call tstate_unlink
 
-    ; Clear gs_base back to 0 before freeing ThreadState
+    ; Clear pthread TLS key and gs_base before freeing ThreadState
+    mov edi, [rel rt_tstate_key]
+    xor esi, esi
+    call pthread_setspecific wrt ..plt
     mov eax, SYS_arch_prctl
     mov edi, ARCH_SET_GS
     xor esi, esi

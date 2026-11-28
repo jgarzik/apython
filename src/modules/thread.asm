@@ -70,6 +70,8 @@ extern sysprofile_install
 
 extern pthread_create
 extern pthread_self
+extern pthread_setspecific
+extern rt_tstate_key
 extern pthread_attr_init
 extern pthread_attr_destroy
 extern pthread_attr_setdetachstate
@@ -146,6 +148,9 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
 
     mov rdi, [rbx + ThreadStart.tstate]
     call tstate_install
+    mov edi, [rel rt_tstate_key]
+    mov rsi, [gs:ThreadState.ts_self]
+    call pthread_setspecific
     extern rt_tid_alloc
     call rt_tid_alloc
     mov [gs:ThreadState.ts_tid], eax

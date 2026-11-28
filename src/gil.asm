@@ -25,6 +25,9 @@ ASM_INIT
 extern pause
 extern mallopt
 extern pthread_self
+extern pthread_key_create
+extern pthread_setspecific
+extern rt_tstate_key
 extern fork
 extern __errno_location
 extern sigemptyset
@@ -108,6 +111,12 @@ DEF_FUNC gil_init
     mov [rel tstate_list_head], rax
     mov rdi, rax
     call brc_register_thread
+    lea rdi, [rel rt_tstate_key]
+    xor esi, esi
+    call pthread_key_create
+    mov edi, [rel rt_tstate_key]
+    mov rsi, [gs:ThreadState.ts_self]
+    call pthread_setspecific
     leave
     ret
 END_FUNC gil_init

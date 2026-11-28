@@ -125,12 +125,14 @@ DEF_FUNC_BARE obj_dealloc
 
 .td_enter:
     inc qword [gs:ThreadState.trash_nesting]
-    ; Own the dying object cleanly for any finalizer (__del__ / gen_dealloc)
-    ; so INCREF / obj_decref_no_dealloc operate on local=0, shared=0.
-    mov eax, [gs:ThreadState.ts_tid]
-    mov [rbx + PyObject.ob_tid], eax
+    ; Keep the dying object definitively MERGED with refcount 0 across
+    ; finalization and weakref_clear_for so a concurrent weakref obj_try_incref
+    ; can NEVER resurrect an object that has already entered obj_dealloc.
+    ; INCREF / obj_decref_no_dealloc in obj_call_finalizer & gen_dealloc operate
+    ; atomically on ob_ref_shared while preserving REF_MERGED_BIT.
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
     mov dword [rbx + PyObject.ob_ref_local], 0
-    mov dword [rbx + PyObject.ob_ref_shared], 0
+    mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
 
     ; PEP 442: run __del__ before weakrefs are cleared or fields released.
     ; TYPE_FLAG_HAS_DEL is maintained down every subclass on heaptypes only.
