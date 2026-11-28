@@ -272,3 +272,32 @@ finally:
 assert not pipe_err, f"pipe_err: {pipe_err}"
 assert drained[0] > 0
 print("buffered_file_gc ok")
+
+# 9. Concurrent collections.deque append/popleft/appendleft/pop/rotate
+from collections import deque as _deque
+
+shared_dq = _deque()
+
+
+def deque_racer(tid):
+    for i in range(400):
+        shared_dq.append((tid, i))
+        if i % 2 == 0:
+            try:
+                shared_dq.popleft()
+            except IndexError:
+                pass
+        if i % 5 == 0:
+            shared_dq.appendleft((tid, -i))
+        if i % 7 == 0:
+            try:
+                shared_dq.pop()
+            except IndexError:
+                pass
+        if i % 40 == 0:
+            shared_dq.rotate(3)
+            _ = len(shared_dq)
+
+
+run_threads(deque_racer, 6)
+print("shared_deque ok")

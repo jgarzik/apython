@@ -4,6 +4,7 @@ import ctypes
 import ctypes.util
 import gc
 import threading
+import time
 
 libc_name = ctypes.util.find_library("c") or "libc.so.6"
 libc = ctypes.CDLL(libc_name)
@@ -20,6 +21,7 @@ def gc_bg():
     try:
         while not gc_stop.is_set():
             gc.collect(0)
+            time.sleep(0.002)
     except BaseException as exc:
         errors.append(("gc_bg", repr(exc)))
 
