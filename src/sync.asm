@@ -10,13 +10,32 @@
 ASM_INIT
 
 extern eval_breaker
+extern gil_threaded
+extern gil_finalizing
+extern tstate_main_ptr
 extern tstate_list_head
 extern tstate_list_lock
+extern tstate_install
+extern tstate_link
+extern tstate_unlink
 extern malloc
 extern realloc
+extern aligned_alloc
 extern free
+extern pthread_self
+extern pause
 extern fatal_error
 extern obj_dealloc
+extern obj_decref
+extern ap_free
+extern alloc_thread_flush
+extern sre_cpcache_clear_thread
+
+SYS_arch_prctl  equ 158
+ARCH_SET_GS     equ 0x1001
+ARCH_GET_GS     equ 0x1004
+SYS_gettid_sync equ 186
+TSTATE_ALLOC_SZ equ (ThreadState_size + 63) & ~63
 
 section .data
 align 64
@@ -44,7 +63,7 @@ stw_owner_ts:   dq 0            ; ThreadState* of active STW owner, or 0
                 times 40 db 0
 
 section .bss
-align 64
+alignb 64
 ; 64 cache-line-padded BRC hash buckets.
 ; Each 64-byte entry:
 ;   +0  dword lock  (32-bit futex)
@@ -53,7 +72,7 @@ align 64
 ;   +16..63 padding
 global brc_buckets
 brc_buckets:    resb (BRC_NBUCKETS * BRC_BUCKET_STRIDE)
-align 64
+alignb 64
 brc_pending_total: resq 1
 
 section .text
@@ -61,11 +80,12 @@ section .text
 ;; ============================================================================
 ;; rt_enable_threading() -> nothing
 ;;
-;; Publish rt_threaded = 1 with full memory ordering so every subsequently
-;; started thread and leaf lock observes concurrent mode.
+;; Publish rt_threaded = 1 and gil_threaded = 1 with full memory ordering so
+;; every subsequently started thread and leaf lock observes concurrent mode.
 ;; ============================================================================
 global rt_enable_threading
 DEF_FUNC_BARE rt_enable_threading
+    mov qword [rel gil_threaded], 1
     mov al, 1
     xchg [rel rt_threaded], al
     ret
@@ -1040,6 +1060,12 @@ DEF_FUNC rt_reattach
 .rtr_retry:
     lea rdi, [rel tstate_list_lock]
     call rt_mutex_lock
+    cmp qword [rel gil_finalizing], 0
+    je .rtr_check_stw
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .rtr_shutdown_park
+.rtr_check_stw:
     cmp dword [rel stw_requested], 0
     jne .rtr_wait
     mov rax, [gs:ThreadState.ts_self]
@@ -1061,6 +1087,12 @@ DEF_FUNC rt_reattach
     xor r9d, r9d
     syscall
     jmp .rtr_retry
+.rtr_shutdown_park:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+.rtr_park_forever:
+    call pause wrt ..plt
+    jmp .rtr_park_forever
 END_FUNC rt_reattach
 
 ;; ============================================================================
@@ -1068,7 +1100,7 @@ END_FUNC rt_reattach
 ;;
 ;; Called from eval_breaker_slow (EB_STOP_WORLD) and long native loops (sre,
 ;; timsort).  Parks the calling thread until stw_start_world() clears
-;; stw_requested and wakes all parked threads.
+;; stw_requested and wakes all parked threads (or permanently if shutting down).
 ;; ============================================================================
 global stw_safepoint
 DEF_FUNC stw_safepoint
@@ -1097,6 +1129,11 @@ DEF_FUNC stw_safepoint
 .sp_unlock_wait:
     lea rdi, [rel tstate_list_lock]
     call rt_mutex_unlock
+    cmp qword [rel gil_finalizing], 0
+    je .sp_wait_loop
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .sp_park_forever
 .sp_wait_loop:
     mov eax, SYS_futex
     lea rdi, [rel stw_requested]
@@ -1108,6 +1145,12 @@ DEF_FUNC stw_safepoint
     syscall
     lea rdi, [rel tstate_list_lock]
     call rt_mutex_lock
+    cmp qword [rel gil_finalizing], 0
+    je .sp_recheck_stw
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne .sp_shutdown_unlock
+.sp_recheck_stw:
     cmp dword [rel stw_requested], 0
     jne .sp_unlock_wait
     mov rax, [gs:ThreadState.ts_self]
@@ -1118,6 +1161,12 @@ DEF_FUNC stw_safepoint
 .sp_done:
     leave
     ret
+.sp_shutdown_unlock:
+    lea rdi, [rel tstate_list_lock]
+    call rt_mutex_unlock
+.sp_park_forever:
+    call pause wrt ..plt
+    jmp .sp_park_forever
 END_FUNC stw_safepoint
 
 ;; ============================================================================
@@ -1255,3 +1304,165 @@ DEF_FUNC_BARE stw_notify_unlink
 .snu_done:
     ret
 END_FUNC stw_notify_unlink
+
+;; ============================================================================
+;; rt_foreign_enter() -> eax = 0 (already attached), 1 (reattached Python
+;;   thread), or 2 (newly created foreign ThreadState)
+;;
+;; Entry guard for C-to-Python callbacks (ctypes cx_tramp) that may run either
+;; on a detached Python thread inside ffi_call or on a foreign C pthread whose
+;; gs_base is 0.
+;; ============================================================================
+RFE_GS    equ 8
+RFE_FRAME equ 16                ; + 2 pushes = 32, 16-aligned
+global rt_foreign_enter
+DEF_FUNC rt_foreign_enter, RFE_FRAME
+    push rbx
+    push r12
+    mov qword [rbp - RFE_GS], 0
+    mov eax, SYS_arch_prctl
+    mov edi, ARCH_GET_GS
+    lea rsi, [rbp - RFE_GS]
+    syscall
+    mov rax, [rbp - RFE_GS]
+    test rax, rax
+    jz .rfe_foreign
+
+    ; Known Python thread: check if detached (e.g. inside ALLOW_THREADS ffi_call)
+    cmp byte [rel rt_threaded], 0
+    je .rfe_already
+    cmp dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+    je .rfe_already
+    call rt_reattach
+    mov eax, 1
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rfe_already:
+    xor eax, eax
+    pop r12
+    pop rbx
+    leave
+    ret
+
+.rfe_foreign:
+    ; Foreign C pthread with no ThreadState: allocate, register, and attach.
+    call rt_enable_threading
+    mov edi, 64
+    mov esi, TSTATE_ALLOC_SZ
+    call aligned_alloc wrt ..plt
+    test rax, rax
+    jz .rfe_oom
+    mov rbx, rax
+    mov rdi, rax
+    mov ecx, TSTATE_ALLOC_SZ / 8
+    xor eax, eax
+    rep stosq
+
+    mov rdi, rbx
+    call tstate_install
+    call rt_tid_alloc
+    mov [rbx + ThreadState.ts_tid], eax
+    mov ecx, eax
+    shl rcx, 40
+    mov [rbx + ThreadState.ts_dict_ver], rcx
+    mov dword [rbx + ThreadState.ts_state], TS_STATE_DETACHED
+    mov rdi, rbx
+    call brc_register_thread
+    call pthread_self wrt ..plt
+    mov [rbx + ThreadState.ts_ident], rax
+    mov eax, SYS_gettid_sync
+    syscall
+    mov [rbx + ThreadState.ts_native_id], rax
+    call tstate_link
+    call rt_reattach
+    mov eax, 2
+    pop r12
+    pop rbx
+    leave
+    ret
+.rfe_oom:
+    CSTRING rdi, "out of memory creating foreign ThreadState"
+    call fatal_error
+END_FUNC rt_foreign_enter
+
+;; ============================================================================
+;; rt_foreign_leave(edi = flag from rt_foreign_enter) -> nothing
+;; ============================================================================
+global rt_foreign_leave
+DEF_FUNC rt_foreign_leave, 8            ; + 1 push = 16, 16-aligned
+    push rbx
+    test edi, edi
+    jz .rfl_done
+    cmp edi, 1
+    jne .rfl_foreign
+    call rt_detach
+    jmp .rfl_done
+
+.rfl_foreign:
+    mov rdi, [gs:ThreadState.current_exception]
+    test rdi, rdi
+    jz .rfl_no_exc
+    mov qword [gs:ThreadState.current_exception], 0
+    call obj_decref
+.rfl_no_exc:
+    call sre_cpcache_clear_thread
+    mov rdi, [gs:ThreadState.ts_import_ns_portions]
+    test rdi, rdi
+    jz .rfl_no_ns
+    mov qword [gs:ThreadState.ts_import_ns_portions], 0
+    call obj_decref
+.rfl_no_ns:
+    mov rdi, [gs:ThreadState.ts_dict]
+    test rdi, rdi
+    jz .rfl_no_dict
+    mov qword [gs:ThreadState.ts_dict], 0
+    call obj_decref
+.rfl_no_dict:
+    mov rdi, [gs:ThreadState.frame_datastack_base]
+    test rdi, rdi
+    jz .rfl_no_stack
+    mov qword [gs:ThreadState.frame_datastack_base], 0
+    mov qword [gs:ThreadState.frame_datastack_top], 0
+    mov qword [gs:ThreadState.frame_datastack_end], 0
+    call ap_free
+.rfl_no_stack:
+    mov rdi, [gs:ThreadState.repr_stack]
+    test rdi, rdi
+    jz .rfl_no_repr
+    call ap_free
+.rfl_no_repr:
+    mov rbx, [gs:ThreadState.ts_self]
+    mov rdi, rbx
+    call brc_unregister_thread
+    mov rdi, rbx
+    call brc_drain_thread
+    call alloc_thread_flush
+    call tstate_unlink
+
+    ; Clear gs_base back to 0 before freeing ThreadState
+    mov eax, SYS_arch_prctl
+    mov edi, ARCH_SET_GS
+    xor esi, esi
+    syscall
+
+    mov rdi, [rbx + ThreadState.ssl_pw_buf]
+    test rdi, rdi
+    jz .rfl_no_ssl
+    call free wrt ..plt
+.rfl_no_ssl:
+    mov rdi, [rbx + ThreadState.ts_path_scratch]
+    test rdi, rdi
+    jz .rfl_no_path
+    call free wrt ..plt
+.rfl_no_path:
+    mov rdi, rbx
+    call free wrt ..plt
+
+.rfl_done:
+    pop rbx
+    leave
+    ret
+END_FUNC rt_foreign_leave

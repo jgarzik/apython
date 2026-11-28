@@ -1,48 +1,27 @@
-; gil.asm - the global interpreter lock, and the eval breaker it shares with
-; signals.
+; gil.asm - Free-threaded thread-state lifecycle, eval_breaker dispatch,
+; STW-coordinated blocking-call detach/reattach, and fork safety.
 ;
-; The design is CPython's Python/ceval_gil.c, on a pthread mutex and two
-; condition variables:
+; There is NO global interpreter lock (sys._is_gil_enabled() == False):
+; multiple threads execute Python bytecode in parallel on separate CPU cores.
+; All shared runtime state is protected by per-object/subsystem leaf futex
+; locks (src/sync.asm) and biased reference counting (BRC).
 ;
-;   * A thread that wants the GIL waits on gil_cond with a timeout, the
-;     switch interval.  If the interval passes and the same thread has held
-;     the lock the whole time, the waiter sets EB_GIL_DROP in eval_breaker.
-;   * The holder sees that bit at its next checkpoint (CHECK_EVAL_SIGNALS,
-;     macros.inc) and calls gil_yield, which releases the lock and then WAITS
-;     until another thread has actually taken it.  Without that handshake the
-;     thread that just let go is the one most likely to win the mutex back,
-;     and a waiter starves.
-;   * A blocking call gives the lock up outright (gil_release) and takes it
-;     back afterwards (gil_acquire); see src/include/gil.inc for what code
-;     between the two may not do.
+; ALLOW_THREADS_BEGIN/END (gil_release/gil_acquire) and BLOCKING_CALL
+; (gil_blocking_call) mark threads as TS_STATE_DETACHED around blocking
+; syscalls and long native C calls so Stop-The-World (STW) GC, fork(), and
+; interpreter shutdown never wait on a blocked thread.
 ;
-; pthread primitives rather than a raw futex: glibc's malloc, errno, OpenSSL
-; and libffi all need a real thread descriptor on fs, so threads are made with
-; pthread_create and these come with it; and helgrind understands them.
-;
-; Until a second thread has been started (gil_threaded), gil_release and
-; gil_acquire return at once and nobody waits, so a single-threaded program
-; never touches the mutex after startup.
-;
-; Shutdown: the main thread sets gil_finalizing while holding the lock and
-; never gives it up again.  Any other thread that asks for the lock after
-; that parks for ever -- it would otherwise run Python against an interpreter
-; that is being taken apart -- and exit_group ends it with the process.
-; CPython 3.12 does the same with pthread_exit.
+; Until a second thread or foreign callback closure is admitted (rt_threaded ==
+; 0), detach/reattach are immediate single-branch no-ops.
 
 %include "macros.inc"
 %include "object.inc"
 %include "threadstate.inc"
 %include "gil.inc"
+%include "sync.inc"
 
 ASM_INIT
 
-extern pthread_mutex_lock
-extern pthread_mutex_unlock
-extern pthread_cond_signal
-extern pthread_cond_wait
-extern pthread_cond_timedwait
-extern clock_gettime
 extern pause
 extern mallopt
 extern pthread_self
@@ -53,30 +32,44 @@ extern pthread_sigmask
 extern thread_running_reset
 extern signal_run_pending
 extern fatal_error
-
-ETIMEDOUT_ERRNO equ 110
-NS_PER_SEC      equ 1000000000
+extern rt_threaded
+extern rt_mutex_lock
+extern rt_mutex_unlock
+extern rt_detach
+extern rt_reattach
+extern stw_safepoint
+extern stw_stop_world
+extern stw_start_world
+extern stw_notify_unlink
+extern stw_reset_after_fork
+extern brc_register_thread
+extern brc_drain_thread
+extern brc_reset_after_fork
+extern alloc_reset_after_fork
+extern systrace_after_fork_child
+extern weakref_reset_after_fork
+extern gc_reset_after_fork
+extern subclass_reset_after_fork
+extern type_lock
+extern ap_exited_live
 
 section .data
 align 8
 ; The dispatch loop's checkpoints test this one word against zero.  Bits are
-; EB_* (gil.inc); they are set and cleared with `lock`, because a signal
-; handler and another thread's gil_take both write it.
+; EB_* (gil.inc): EB_SIGNAL, EB_STOP_WORLD, EB_BRC_MERGE.
 global eval_breaker
 eval_breaker:       dq 0
 
-; The switch interval, in nanoseconds.  sys.setswitchinterval writes it.
+; Kept for sys.getswitchinterval / sys.setswitchinterval API compatibility.
 global gil_interval_ns
 gil_interval_ns:    dq 5000000
 
 global gil_threaded
-gil_threaded:       dq 0        ; a second thread has been started, ever
+gil_threaded:       dq 0        ; set alongside rt_threaded when threading starts
 global gil_finalizing
 gil_finalizing:     dq 0        ; the main thread is shutting down
 
-; The thread whose tstate handles signals and owns shutdown.  A variable and
-; not `main_tstate`, because after a fork from another thread that thread is
-; the only one left and becomes it.
+; The thread whose tstate handles signals and owns shutdown.  Updated on fork.
 global tstate_main_ptr
 tstate_main_ptr:    dq 0
 
@@ -88,33 +81,15 @@ global tstate_list_lock
 tstate_list_lock:   dd 0
                     dd 0
 
-section .bss
-align 64
-gil_mutex:          resb 64     ; pthread_mutex_t (40 bytes), zero = unlocked
-gil_cond:           resb 64     ; pthread_cond_t (48 bytes): the GIL is free
-gil_switch_cond:    resb 64     ; pthread_cond_t: the GIL has a new holder
-gil_locked:         resq 1      ; 1 while some thread holds it
-gil_last_holder:    resq 1      ; the ThreadState that took it last
-global gil_holder
-gil_holder:         resq 1      ; the ThreadState holding it now, or 0
-gil_switch_number:  resq 1      ; bumped each time a DIFFERENT thread takes it
-gil_waiters:        resq 1      ; threads inside gil_take's wait
-
 section .text
 
 ;; ============================================================================
 ;; gil_init() -> nothing
 ;;
-;; Called once by main, after tstate_install: the calling thread becomes the
-;; main thread and holds the GIL.  No locking -- nothing else exists yet, and
-;; the mutex and condition variables are valid as zeroes.
-;;
-;; It also holds glibc's malloc to ONE arena.  Left alone, glibc gives each
-;; new thread an arena of its own and reserves 64 MiB of address space for
-;; it; sixty threads then need 4 GiB of address space to hold a few kilobytes
-;; each, and under a `ulimit -v` the next allocation fails.  Nearly every
-;; allocation here is made with the GIL held, so a second arena would buy no
-;; concurrency anyway.
+;; Called once by main after tstate_install: registers the main thread with
+;; ts_tid = 1, ts_state = TS_STATE_ATTACHED, and bounds glibc malloc arenas
+;; to 8 so high thread counts stay within virtual-memory limits while still
+;; allowing parallel libc allocations.
 ;; ============================================================================
 M_ARENA_MAX equ -8
 DEF_FUNC gil_init
@@ -125,14 +100,13 @@ DEF_FUNC gil_init
     mov [gs:ThreadState.ts_ident], rax
     mov rax, [gs:ThreadState.ts_self]
     mov dword [rax + ThreadState.ts_tid], 1
-    mov dword [rax + ThreadState.ts_state], 0
+    mov dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
+    mov ecx, 1
+    shl rcx, 40
+    mov [rax + ThreadState.ts_dict_ver], rcx
     mov [rel tstate_main_ptr], rax
-    mov [rel gil_last_holder], rax
-    mov [rel gil_holder], rax
     mov [rel tstate_list_head], rax
-    mov qword [rel gil_locked], 1
     mov rdi, rax
-    extern brc_register_thread
     call brc_register_thread
     leave
     ret
@@ -141,11 +115,10 @@ END_FUNC gil_init
 ;; ============================================================================
 ;; tstate_link() -> nothing
 ;;
-;; Put the calling thread's ThreadState at the head of the list.
+;; Put the calling thread's ThreadState at the head of tstate_list_head.
 ;; ============================================================================
 DEF_FUNC tstate_link
     lea rdi, [rel tstate_list_lock]
-    extern rt_mutex_lock
     call rt_mutex_lock
     mov rax, [gs:ThreadState.ts_self]
     mov rcx, [rel tstate_list_head]
@@ -157,7 +130,6 @@ DEF_FUNC tstate_link
 .tl_head:
     mov [rel tstate_list_head], rax
     lea rdi, [rel tstate_list_lock]
-    extern rt_mutex_unlock
     call rt_mutex_unlock
     leave
     ret
@@ -166,8 +138,8 @@ END_FUNC tstate_link
 ;; ============================================================================
 ;; tstate_unlink() -> nothing
 ;;
-;; Take the calling thread's ThreadState off the list and fold its residual
-;; ts_alloc_live delta into ap_exited_live atomically under tstate_list_lock.
+;; Remove calling thread's ThreadState, fold residual ts_alloc_live delta into
+;; ap_exited_live, and notify any waiting STW coordinator under tstate_list_lock.
 ;; ============================================================================
 DEF_FUNC tstate_unlink
     lea rdi, [rel tstate_list_lock]
@@ -190,10 +162,8 @@ DEF_FUNC tstate_unlink
     mov qword [rax + ThreadState.ts_prev], 0
     mov rdx, [rax + ThreadState.ts_alloc_live]
     mov qword [rax + ThreadState.ts_alloc_live], 0
-    extern ap_exited_live
     add [rel ap_exited_live], rdx
     mov rdi, rax
-    extern stw_notify_unlink
     call stw_notify_unlink
     lea rdi, [rel tstate_list_lock]
     call rt_mutex_unlock
@@ -202,174 +172,45 @@ DEF_FUNC tstate_unlink
 END_FUNC tstate_unlink
 
 ;; ============================================================================
-;; gil_take() -> nothing; returns holding the GIL
+;; gil_take() -> nothing
 ;;
-;; Wait for the lock, asking the holder to drop it once a switch interval has
-;; gone by with no change of hands.  The calling thread's gs must already
-;; point at its ThreadState.  Preserves nothing caller-saved.
+;; Attach the calling thread to the free-threaded runtime (blocking if a STW
+;; pause is active, or parking permanently if shutdown is in progress).
 ;; ============================================================================
-GT_TS    equ 16                 ; struct timespec: tv_sec, then tv_nsec above it
-GT_SAVED equ 24                 ; the switch number when this wait began
-GT_FRAME equ 24                 ; + 1 push = 32, 16-aligned
-DEF_FUNC gil_take, GT_FRAME
-    push rbx
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_lock
-    inc qword [rel gil_waiters]
-
-.gt_loop:
-    ; Shutting down, and this is not the thread doing it: never run again.
+DEF_FUNC_BARE gil_take
     cmp qword [rel gil_finalizing], 0
-    je .gt_live
+    je rt_reattach
     mov rax, [gs:ThreadState.ts_self]
     cmp rax, [rel tstate_main_ptr]
-    jne .gt_park
-.gt_live:
-    cmp qword [rel gil_locked], 0
-    je .gt_free
-
-    mov rax, [rel gil_switch_number]
-    mov [rbp - GT_SAVED], rax
-    xor edi, edi                ; CLOCK_REALTIME, which the timed wait measures
-    lea rsi, [rbp - GT_TS]
-    call clock_gettime
-    mov rax, [rbp - GT_TS + 8]
-    add rax, [rel gil_interval_ns]
-.gt_carry:
-    cmp rax, NS_PER_SEC
-    jb .gt_deadline
-    sub rax, NS_PER_SEC
-    inc qword [rbp - GT_TS]
-    jmp .gt_carry
-.gt_deadline:
-    mov [rbp - GT_TS + 8], rax
-    lea rdi, [rel gil_cond]
-    lea rsi, [rel gil_mutex]
-    lea rdx, [rbp - GT_TS]
-    call pthread_cond_timedwait
-    cmp eax, ETIMEDOUT_ERRNO
-    jne .gt_loop
-    ; A whole interval, the lock still held, and by the same thread as when
-    ; the wait began: ask it to let go.
-    cmp qword [rel gil_locked], 0
-    je .gt_loop
-    mov rax, [rel gil_switch_number]
-    cmp rax, [rbp - GT_SAVED]
-    jne .gt_loop
-    lock or qword [rel eval_breaker], EB_GIL_DROP
-    jmp .gt_loop
-
-.gt_free:
-    dec qword [rel gil_waiters]
-    mov qword [rel gil_locked], 1
-    lock and qword [rel eval_breaker], ~EB_GIL_DROP
-    mov rax, [gs:ThreadState.ts_self]
-    cmp rax, [rel gil_last_holder]
-    je .gt_same
-    mov [rel gil_last_holder], rax
-    inc qword [rel gil_switch_number]
-.gt_same:
-    mov [rel gil_holder], rax
-    lea rdi, [rel gil_switch_cond]
-    call pthread_cond_signal
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_unlock
-    pop rbx
-    leave
-    ret
-
+    je rt_reattach
 .gt_park:
-    dec qword [rel gil_waiters]
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_unlock
-.gt_park_loop:
     call pause
-    jmp .gt_park_loop
+    jmp .gt_park
 END_FUNC gil_take
 
 ;; ============================================================================
-;; gil_drop() -> nothing; returns NOT holding the GIL
+;; gil_drop() -> nothing
 ;;
-;; Let go and wake one waiter.  The caller must not touch interpreter state
-;; until it has called gil_take again.
+;; Detach the calling thread from the free-threaded runtime.
 ;; ============================================================================
-DEF_FUNC gil_drop
-    ; Only the holder may let go.  A second release from a thread that has
-    ; already given the lock up would hand it to a waiter while the real
-    ; holder is still running -- two threads in the interpreter, and a
-    ; failure that surfaces far from here.  So it is checked, and fatal.
-    mov rax, [gs:ThreadState.ts_self]
-    cmp rax, [rel gil_holder]
-    jne .gd_not_holder
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_lock
-    mov qword [rel gil_holder], 0
-    mov qword [rel gil_locked], 0
-    lea rdi, [rel gil_cond]
-    call pthread_cond_signal
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_unlock
-    leave
-    ret
-.gd_not_holder:
-    CSTRING rdi, "GIL released by a thread that does not hold it"
-    call fatal_error
+DEF_FUNC_BARE gil_drop
+    jmp rt_detach
 END_FUNC gil_drop
-
-;; ============================================================================
-;; gil_yield() -> nothing; returns holding the GIL
-;;
-;; Hand the lock to a waiting thread and take it back afterwards.  The wait on
-;; gil_switch_cond is the forced switch: this thread does not ask for the
-;; lock again until some other thread has had it.  With nobody waiting it
-;; returns at once.
-;; ============================================================================
-GY_FRAME equ 8                  ; + 1 push = 16, 16-aligned
-DEF_FUNC gil_yield, GY_FRAME
-    push rbx
-    lock and qword [rel eval_breaker], ~EB_GIL_DROP
-    cmp qword [rel gil_finalizing], 0
-    jne .gy_out                 ; shutting down: the main thread keeps it
-    cmp qword [rel gil_waiters], 0
-    je .gy_out
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_lock
-    mov qword [rel gil_holder], 0
-    mov qword [rel gil_locked], 0
-    mov rbx, [rel gil_switch_number]
-    lea rdi, [rel gil_cond]
-    call pthread_cond_signal
-.gy_wait:
-    cmp qword [rel gil_waiters], 0
-    je .gy_retake               ; the waiter left without taking it
-    cmp rbx, [rel gil_switch_number]
-    jne .gy_retake              ; another thread has it now, or has had it
-    lea rdi, [rel gil_switch_cond]
-    lea rsi, [rel gil_mutex]
-    call pthread_cond_wait
-    jmp .gy_wait
-.gy_retake:
-    lea rdi, [rel gil_mutex]
-    call pthread_mutex_unlock
-    call gil_take
-.gy_out:
-    pop rbx
-    leave
-    ret
-END_FUNC gil_yield
 
 ;; ============================================================================
 ;; gil_release() -> nothing
 ;;
-;; ALLOW_THREADS_BEGIN: give the GIL up before a call that may block.  A
-;; no-op until a second thread exists, and during shutdown.
+;; ALLOW_THREADS_BEGIN: detach before a blocking call so STW pauses do not
+;; wait for this thread.  No-op while rt_threaded == 0 or main is shutting down.
 ;; ============================================================================
 DEF_FUNC_BARE gil_release
-    cmp qword [rel gil_threaded], 0
+    cmp byte [rel rt_threaded], 0
     je .gr_out
     cmp qword [rel gil_finalizing], 0
-    jne .gr_out
-    jmp gil_drop
+    je rt_detach
+    mov rax, [gs:ThreadState.ts_self]
+    cmp rax, [rel tstate_main_ptr]
+    jne rt_detach
 .gr_out:
     ret
 END_FUNC gil_release
@@ -377,31 +218,27 @@ END_FUNC gil_release
 ;; ============================================================================
 ;; gil_acquire() -> nothing; rax and rdx are preserved
 ;;
-;; ALLOW_THREADS_END: take the GIL back after the blocking call, whose result
-;; is usually still in rax.  A no-op exactly when gil_release was one for
-;; this thread, so the two agree about whether the lock changed hands.
+;; ALLOW_THREADS_END: reattach after a blocking call (waiting out any active
+;; STW pause, or parking permanently if shutdown began while detached).
 ;; ============================================================================
 GA_RAX   equ 8
 GA_RDX   equ 16
 GA_FRAME equ 16                 ; + 0 pushes = 16, 16-aligned
 DEF_FUNC gil_acquire, GA_FRAME
-    cmp qword [rel gil_threaded], 0
+    cmp byte [rel rt_threaded], 0
     je .ga_out
     cmp qword [rel gil_finalizing], 0
-    je .ga_take
-    ; Shutting down.  The main thread never let go (gil_release was a no-op
-    ; for it), so it has nothing to take back.  Any OTHER thread gave the
-    ; lock up before shutdown began and is now coming back from its blocking
-    ; call: it must not simply carry on -- that would be Python running with
-    ; no lock at all, beside the main thread -- so it goes to gil_take, which
-    ; parks it.
+    je .ga_attach
     mov rcx, [gs:ThreadState.ts_self]
     cmp rcx, [rel tstate_main_ptr]
     je .ga_out
-.ga_take:
+.ga_park:
+    call pause
+    jmp .ga_park
+.ga_attach:
     mov [rbp - GA_RAX], rax
     mov [rbp - GA_RDX], rdx
-    call gil_take
+    call rt_reattach
     mov rax, [rbp - GA_RAX]
     mov rdx, [rbp - GA_RDX]
 .ga_out:
@@ -412,39 +249,30 @@ END_FUNC gil_acquire
 ;; ============================================================================
 ;; eval_breaker_slow() -> eax = 1 when a signal handler raised, else 0
 ;;
-;; Where CHECK_EVAL_SIGNALS lands when eval_breaker is non-zero.  Hands the
-;; GIL over if a thread asked for it, then runs pending signal handlers --
-;; on the main thread only, which is where Python promises they run.  Another
-;; thread that sees a signal pending yields, so the main thread gets to it.
+;; Where CHECK_EVAL_SIGNALS lands when eval_breaker is non-zero:
+;;   1. EB_STOP_WORLD: park at STW safepoint (GC / fork / shutdown).
+;;   2. EB_SIGNAL: run pending signal handlers on the main thread only
+;;      (worker threads never yield or block for signals).
+;;   3. EB_BRC_MERGE: drain this thread's remote BRC merge queue.
 ;; ============================================================================
 DEF_FUNC eval_breaker_slow
     test qword [rel eval_breaker], EB_STOP_WORLD
-    jz .ebs_gil
-    extern stw_safepoint
-    call stw_safepoint
-.ebs_gil:
-    test qword [rel eval_breaker], EB_GIL_DROP
     jz .ebs_signals
-    call gil_yield
+    call stw_safepoint
 .ebs_signals:
     test qword [rel eval_breaker], EB_SIGNAL
     jz .ebs_brc
     mov rax, [gs:ThreadState.ts_self]
     cmp rax, [rel tstate_main_ptr]
-    jne .ebs_not_main
+    jne .ebs_brc
     leave
     jmp signal_run_pending
-.ebs_not_main:
-    call gil_yield
 .ebs_brc:
-    ; Drain BRC only after signals (a __del__ triggered by draining must not
-    ; swallow a pending signal exception destined for the interrupted frame).
     test qword [rel eval_breaker], EB_BRC_MERGE
     jz .ebs_none
     mov rdi, [gs:ThreadState.ts_self]
     cmp qword [rdi + ThreadState.ts_brc_len], 0
     je .ebs_none
-    extern brc_drain_thread
     call brc_drain_thread
 .ebs_none:
     xor eax, eax
@@ -455,74 +283,75 @@ END_FUNC eval_breaker_slow
 ;; ============================================================================
 ;; gil_fork() -> rax = the child's pid, 0 in the child, or -errno
 ;;
-;; fork(2) through glibc, not the raw syscall: with threads, some OTHER
-;; thread may hold one of glibc's own locks -- malloc's, stdio's -- at the
-;; instant of the fork, and the child would inherit it locked with nobody
-;; left to release it.  glibc's fork takes and resets those.
-;;
-;; The child has exactly one thread, the one that forked, whatever it was in
-;; the parent.  It becomes the main thread there, and everything about the
-;; GIL is put back to "one thread, holding it": the mutex and the condition
-;; variables may have been caught mid-operation by a thread that no longer
-;; exists.
+;; When threaded, pauses all other Python threads via stw_stop_world() before
+;; calling glibc fork() so no runtime leaf futex is held across fork().
+;; Resumes the world in the parent; resets single-threaded runtime state in
+;; the child.
 ;; ============================================================================
 GF_SET   equ 128                ; a sigset_t
 GF_PID   equ 136
-GF_FRAME equ 144                ; + 0 pushes = 144, 16-aligned
-SYS_gettid_nr equ 186
+GF_STW   equ 144                ; 1 if we called stw_stop_world before fork
+GF_ERR   equ 152                ; saved -errno on fork failure
+GF_FRAME equ 160                ; + 0 pushes = 160, 16-aligned
+SYS_gettid_nr   equ 186
 SIG_SETMASK_HOW equ 2
 DEF_FUNC gil_fork, GF_FRAME
+    mov qword [rbp - GF_STW], 0
+    cmp byte [rel rt_threaded], 0
+    je .gf_do_fork
+    call stw_stop_world
+    mov qword [rbp - GF_STW], 1
+.gf_do_fork:
     call fork
     mov [rbp - GF_PID], rax
     test eax, eax
     jz .gf_child
-    jns .gf_out
+    jns .gf_parent_ok
     call __errno_location
     mov eax, [rax]
     neg rax
+    mov [rbp - GF_ERR], rax
+    cmp qword [rbp - GF_STW], 0
+    je .gf_err_ret
+    call stw_start_world
+.gf_err_ret:
+    mov rax, [rbp - GF_ERR]
+    leave
+    ret
+
+.gf_parent_ok:
+    cmp qword [rbp - GF_STW], 0
+    je .gf_out
+    call stw_start_world
+.gf_out:
+    mov rax, [rbp - GF_PID]
     leave
     ret
 
 .gf_child:
-    lea rdi, [rel gil_mutex]
-    mov ecx, (64 * 3) / 8       ; the mutex and both condition variables
-    xor eax, eax
-    rep stosq
-    mov qword [rel gil_waiters], 0
-    mov qword [rel gil_locked], 1
     mov qword [rel gil_threaded], 0
-    lock and qword [rel eval_breaker], ~EB_GIL_DROP
     mov rax, [gs:ThreadState.ts_self]
-    mov [rel gil_last_holder], rax
-    mov [rel gil_holder], rax
+    mov dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
     mov [rel tstate_list_head], rax
     mov dword [rel tstate_list_lock], 0
     mov qword [rax + ThreadState.ts_next], 0
     mov qword [rax + ThreadState.ts_prev], 0
-    extern alloc_reset_after_fork
     call alloc_reset_after_fork
     call thread_running_reset
-    extern systrace_after_fork_child
     call systrace_after_fork_child
     mov rdi, [gs:ThreadState.ts_self]
-    extern brc_reset_after_fork
     call brc_reset_after_fork
-    extern weakref_reset_after_fork
     call weakref_reset_after_fork
-    extern stw_reset_after_fork
     call stw_reset_after_fork
-    extern gc_reset_after_fork
     call gc_reset_after_fork
-    extern subclass_reset_after_fork
     call subclass_reset_after_fork
-    extern type_lock
     mov dword [rel type_lock], 0
     mov eax, SYS_gettid_nr
     syscall
     mov [gs:ThreadState.ts_native_id], rax
 
-    ; A thread other than the main one was created with every signal
-    ; blocked.  As the child's only thread it has to take them.
+    ; A non-main thread was created with all signals blocked; as the child's
+    ; sole thread it becomes the main thread and unblocks signals.
     mov rax, [gs:ThreadState.ts_self]
     cmp rax, [rel tstate_main_ptr]
     je .gf_child_done
@@ -537,33 +366,27 @@ DEF_FUNC gil_fork, GF_FRAME
     xor eax, eax
     leave
     ret
-.gf_out:
-    mov rax, [rbp - GF_PID]
-    leave
-    ret
 END_FUNC gil_fork
 
 ;; ============================================================================
-;; gil_blocking_call(rax = function, rdi, rsi, rdx, rcx, r8, r9 = its
-;;   arguments) -> rax, rdx = whatever the function returned
+;; gil_blocking_call(rax = function, rdi..r9 = args) -> rax, rdx
 ;;
-;; BLOCKING_CALL (gil.inc): call a function that may block, with the GIL
-;; given up for the duration.  The six argument registers reach the function
-;; as they were.  Meant for the raw syscall wrappers in runtime.asm, which
-;; touch no interpreter state and report failure as -errno in rax -- so there
-;; is no errno to lose while the GIL is being taken back.
-;;
-;; Until a second thread exists this is a tail jump to the function.
+;; BLOCKING_CALL (gil.inc): detach around a blocking native syscall wrapper
+;; when rt_threaded != 0.  Single-threaded: one branch + tail jump.
 ;; ============================================================================
 GBC_FN    equ 8
 GBC_ARGS  equ 56                ; six words, rdi lowest
 GBC_FRAME equ 64                ; + 0 pushes = 64, 16-aligned
 global gil_blocking_call
 gil_blocking_call:
-    cmp qword [rel gil_threaded], 0
+    cmp byte [rel rt_threaded], 0
     je .gbc_direct
     cmp qword [rel gil_finalizing], 0
-    jne .gbc_direct
+    je .gbc_detach
+    mov r10, [gs:ThreadState.ts_self]
+    cmp r10, [rel tstate_main_ptr]
+    je .gbc_direct
+.gbc_detach:
     push rbp
     mov rbp, rsp
     sub rsp, GBC_FRAME
@@ -574,7 +397,7 @@ gil_blocking_call:
     mov [rbp - GBC_ARGS + 24], rcx
     mov [rbp - GBC_ARGS + 32], r8
     mov [rbp - GBC_ARGS + 40], r9
-    call gil_drop
+    call rt_detach
     mov rdi, [rbp - GBC_ARGS]
     mov rsi, [rbp - GBC_ARGS + 8]
     mov rdx, [rbp - GBC_ARGS + 16]

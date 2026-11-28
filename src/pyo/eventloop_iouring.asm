@@ -6,6 +6,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "eventloop.inc"
+%include "gil.inc"
 
 extern sys_io_uring_setup
 extern sys_io_uring_enter
@@ -442,7 +443,7 @@ DEF_FUNC uring_wait_and_drain
     mov ecx, IORING_ENTER_GETEVENTS
     xor r8d, r8d
     xor r9d, r9d
-    call sys_io_uring_enter
+    BLOCKING_CALL sys_io_uring_enter
 
     ; Drain CQ ring
     mov rax, [gs:ThreadState.uring_cq_head]

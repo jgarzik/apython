@@ -33,18 +33,9 @@ extern tuple_type
 ; cache that remembers "this dict, unchanged" in a version alone cannot be
 ; satisfied by a different dict.  LOAD_GLOBAL_BUILTIN is that cache.
 %macro DICT_STAMP_VERSION 2
-    extern rt_threaded
-    cmp byte [rel rt_threaded], 0
-    jne %%atomic
-    mov %2, [rel dict_version_clock]
+    mov %2, [gs:ThreadState.ts_dict_ver]
     inc %2
-    mov [rel dict_version_clock], %2
-    jmp %%store
-%%atomic:
-    mov %2, 1
-    lock xadd [rel dict_version_clock], %2
-    inc %2
-%%store:
+    mov [gs:ThreadState.ts_dict_ver], %2
     mov [%1 + PyDictObject.dk_version], %2
 %endmacro
 
@@ -677,6 +668,55 @@ DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
     leave
     ret
 END_FUNC dict_get_mro
+
+;; ============================================================================
+;; dict_get_mro_nolock(rdi = immutable all-str dict, rsi = str key) -> rax =
+;;   owned Value, or 0 if absent
+;;
+;; Lock-free lookup for static immutable builtin type tp_dicts (which never
+;; mutate after methods_init).  Avoids OBJ_LOCK contention across threads
+;; calling methods like list.append / dict.get on private containers.
+;; ============================================================================
+global dict_get_mro_nolock
+DEF_FUNC_BARE dict_get_mro_nolock
+    cmp qword [rdi + PyDictObject.dk_kind], 0
+    je dict_get_mro
+    mov r8, [rsi + PyStrObject.ob_hash]
+    cmp r8, -1
+    je dict_get_mro
+    mov r9, [rdi + PyDictObject.dk_indices]
+    mov r10, [rdi + PyDictObject.entries]
+    mov r11, [rdi + PyDictObject.capacity]
+    dec r11                             ; mask
+    mov rdx, r8                         ; perturb = hash
+    mov rcx, r8
+    and rcx, r11                        ; slot = hash & mask
+.dgmn_probe:
+    mov rax, [r9 + rcx*8]
+    test rax, rax
+    js .dgmn_no_entry
+    lea rax, [rax + rax*2]
+    lea rax, [r10 + rax*8]              ; DictEntry*
+    cmp r8, [rax + DictEntry.hash]
+    jne .dgmn_next
+    cmp [rax + DictEntry.key], rsi
+    je .dgmn_hit
+    ; Same hash, different string object (rare non-interned str): slow path
+    jmp dict_get_mro
+.dgmn_no_entry:
+    cmp rax, DICT_IX_EMPTY
+    je .dgmn_miss
+.dgmn_next:
+    DICT_PROBE_NEXT rcx, rdx, r11
+    jmp .dgmn_probe
+.dgmn_hit:
+    mov rax, [rax + DictEntry.value]
+    INCREF_V rax, rdx
+    ret
+.dgmn_miss:
+    xor eax, eax
+    ret
+END_FUNC dict_get_mro_nolock
 
 ;; ============================================================================
 ;; dict_lookup(rdi = dict, rsi = key Value) -> rax = entries index, or -1,

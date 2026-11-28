@@ -18,11 +18,11 @@
 %include "macros.inc"
 %include "object.inc"
 %include "gil.inc"
+%include "sync.inc"
 %include "sqlite3.inc"
 
 ASM_INIT
 
-extern gil_holder
 extern gil_acquire
 extern gil_release
 extern sq_callback_tracebacks
@@ -126,7 +126,7 @@ section .text
 ;; ============================================================================
 DEF_FUNC sq_cb_gil_enter
     mov rax, [gs:ThreadState.ts_self]
-    cmp rax, [rel gil_holder]
+    cmp dword [rax + ThreadState.ts_state], TS_STATE_ATTACHED
     je .already_held
     call gil_acquire
     mov eax, 1

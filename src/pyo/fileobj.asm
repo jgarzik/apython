@@ -3,6 +3,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 extern ap_malloc
 extern ap_free
 extern obj_decref
@@ -237,7 +238,7 @@ DEF_FUNC_LOCAL fileobj_write_all, FWA_FRAME
     mov rdi, [rbp - FWA_FD]
     mov rsi, [rbp - FWA_BUF]
     mov rdx, [rbp - FWA_LEN]
-    call sys_write
+    BLOCKING_CALL sys_write
     test rax, rax
     js .fwa_out                 ; rax is already -errno
     jz .fwa_stalled
@@ -723,7 +724,7 @@ DEF_FUNC fileobj_read, FR_FRAME
     lea rsi, [rbp - FR_FRAME]
     mov edx, 8192
     mov edi, r12d
-    call sys_read
+    BLOCKING_CALL sys_read
     ; rax = bytes read
     test rax, rax
     jle .fr_empty
@@ -758,7 +759,7 @@ END_FUNC fileobj_read
 ;; fileobj_readline(PyObject **args, int64_t nargs) -> str
 ;; Read one line from file
 ;; ============================================================================
-FRL_FRAME equ 8208          ; + 3 pushes = 8232, not 16-aligned
+FRL_FRAME equ 8208          ; + 2 pushes at entry = 8224, 16-aligned
 DEF_FUNC fileobj_readline, FRL_FRAME
     push rdi
     push rsi
@@ -792,7 +793,7 @@ DEF_FUNC fileobj_readline, FRL_FRAME
     add rsi, r13
     mov edx, 1
     mov edi, r12d
-    call sys_read
+    BLOCKING_CALL sys_read
     test rax, rax
     jle .frl_done               ; EOF or error
 

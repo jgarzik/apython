@@ -1250,6 +1250,7 @@ DEF_FUNC sys_module_init, 40
     SYS_ADD_FUNC sys_getrefcount_func, sm_getrefcount
     SYS_ADD_FUNC sys_getallocatedblocks_func, sm_getallocatedblocks
     SYS_ADD_FUNC sys_is_finalizing_func, sm_is_finalizing
+    SYS_ADD_FUNC sys_is_gil_enabled_func, sm_is_gil_enabled
     SYS_ADD_FUNC_ALIAS sys_unraisablehook_func, sm_unraisablehook, \
                        sm_dunder_unraisablehook
     SYS_ADD_FUNC sys_get_asyncgen_hooks_func, sm_get_asyncgen_hooks
@@ -2266,6 +2267,7 @@ sm_dunder_displayhook: db "__displayhook__", 0
 sm_getrefcount:  db "getrefcount", 0
 sm_getallocatedblocks: db "getallocatedblocks", 0
 sm_is_finalizing: db "is_finalizing", 0
+sm_is_gil_enabled: db "_is_gil_enabled", 0
 sm_underscore:   db "_", 0
 sm_dunder_stdout: db "__stdout__", 0
 sm_dunder_stderr: db "__stderr__", 0
@@ -2402,6 +2404,23 @@ DEF_FUNC sys_getrefcount_func
     leave
     ret
 END_FUNC sys_getrefcount_func
+
+;; ============================================================================
+;; sys_is_gil_enabled_func(args, nargs) -> False (free-threaded runtime)
+;; Fails: 0
+;; ============================================================================
+DEF_FUNC sys_is_gil_enabled_func
+    test rsi, rsi
+    jnz .sge_args
+    RET_FALSE
+    leave
+    V_PACK rax, rdx
+    ret
+.sge_args:
+    SET_EXC exc_TypeError_type, "_is_gil_enabled() takes no arguments"
+    leave
+    ret
+END_FUNC sys_is_gil_enabled_func
 
 ;; ============================================================================
 ;; sys_getallocatedblocks_func(args, nargs) -> Value: live allocator blocks

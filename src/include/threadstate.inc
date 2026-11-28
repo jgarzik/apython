@@ -109,6 +109,7 @@ struc ThreadState
     .ts_native_id:        resq 1  ; gettid()
     .ts_tid:              resd 1  ; compact monotonic owner ID (main=1; 0=immortal)
     .ts_state:            resd 1  ; TS_STATE_ATTACHED / DETACHED / PARKED
+    .ts_dict_ver:         resq 1  ; thread-local dict version clock ((tid<<40)|seq)
     .ts_brc_hash_next:    resq 1  ; next ThreadState* in brc_buckets[tid & 63]
     .ts_brc_buf:          resq 1  ; libc-malloc'd PyObject** BRC merge queue
     .ts_brc_len:          resq 1  ; queued object count in ts_brc_buf

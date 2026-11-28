@@ -222,8 +222,16 @@ DEF_FUNC type_lookup_cached, TLC_FRAME
     mov [rbp - TLC_TYPE], rdi
     mov [rbp - TLC_NAME], rsi
 
-    ; Quick unversioned check (static types have version 0).
+    ; Quick unversioned check, and in free-threaded mode bypass type_cache_locks
+    ; for static immutable builtin types (their tp_dicts never mutate after init,
+    ; so dict_get_mro_nolock is 100% lock-free and avoids bucket contention).
     mov rax, [rdi + PyTypeObject.tp_flags]
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    je .tlc_check_ver
+    test rax, TYPE_FLAG_HEAPTYPE
+    jz .tlc_walk_only
+.tlc_check_ver:
     shr rax, TYPE_VERSION_SHIFT
     test eax, eax
     jz .tlc_walk_only
@@ -347,7 +355,14 @@ DEF_FUNC_BARE tc_walk
     test rdi, rdi
     jz .tcw_next
     mov rsi, r12
+    test qword [rbx + PyTypeObject.tp_flags], TYPE_FLAG_HEAPTYPE
+    jnz .tcw_locked
+    extern dict_get_mro_nolock
+    call dict_get_mro_nolock
+    jmp .tcw_unpack
+.tcw_locked:
     call dict_get_mro
+.tcw_unpack:
     V_UNPACK rax, rdx
     test edx, edx
     jnz .tcw_found

@@ -34,6 +34,7 @@
 
 %include "macros.inc"
 %include "object.inc"
+%include "gil.inc"
 
 ASM_INIT
 
@@ -511,11 +512,13 @@ DEF_FUNC cx_call, PC_FRAME
     je .cc_call
     call cx_swap_errno
 .cc_call:
+    ALLOW_THREADS_BEGIN
     mov rdi, [rbp - PC_V]
     mov rsi, [rbp - PC_V + 8]
     mov rdx, [rbp - PC_V + 16]
     mov rcx, [rbp - PC_V + 24]
     call ffi_call wrt ..plt
+    ALLOW_THREADS_END
     cmp qword [rbp - PC_V + 32], 0
     je .cc_done
     call cx_swap_errno
@@ -614,11 +617,17 @@ CT_UD    equ 8
 CT_ARGS  equ 16
 CT_V1    equ 24                 ; the Value pair, V0 below V1
 CT_V0    equ 32
-CT_FRAME equ 32                 ; + 0 pushes = 32, 16-aligned
+CT_RET   equ 40
+CT_FLAG  equ 48                 ; rt_foreign_enter flag (0/1/2)
+CT_FRAME equ 48                 ; + 0 pushes = 48, 16-aligned
 DEF_FUNC cx_tramp, CT_FRAME
     mov [rbp - CT_UD], rcx
     mov [rbp - CT_ARGS], rdx
-    mov rdi, rsi
+    mov [rbp - CT_RET], rsi
+    extern rt_foreign_enter
+    call rt_foreign_enter
+    mov [rbp - CT_FLAG], eax
+    mov rdi, [rbp - CT_RET]
     call int_from_i64
     V_PACK rax, rdx
     mov [rbp - CT_V0], rax
@@ -646,6 +655,9 @@ DEF_FUNC cx_tramp, CT_FRAME
     DECREF_V rax, rcx
     mov rax, [rbp - CT_V1]
     DECREF_V rax, rcx
+    mov edi, [rbp - CT_FLAG]
+    extern rt_foreign_leave
+    call rt_foreign_leave
     leave
     ret
 END_FUNC cx_tramp

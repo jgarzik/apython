@@ -365,6 +365,9 @@ DEF_FUNC dict_add_builtin_func, 8            ; 3 pushes, so rsp is 16-aligned
     mov rdi, r13
     mov rsi, r12
     call builtin_func_new
+    mov dword [rax + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rax + PyObject.ob_ref_shared], 0
+    mov dword [rax + PyObject.ob_tid], REF_TID_IMMORTAL
     push rax                ; save func obj
 
     ; Create key string from name
@@ -423,6 +426,9 @@ DEF_FUNC dict_add_getset
     mov rdx, rax
     extern getset_descr_new
     call getset_descr_new
+    mov dword [rax + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rax + PyObject.ob_ref_shared], 0
+    mov dword [rax + PyObject.ob_tid], REF_TID_IMMORTAL
     push rax
 
     mov rdi, rbx
@@ -472,6 +478,9 @@ DEF_FUNC dict_add_getattr, DGA_FRAME
     xor esi, esi                ; no setter
     mov rdx, rax                ; the name
     call getset_descr_new
+    mov dword [rax + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rax + PyObject.ob_ref_shared], 0
+    mov dword [rax + PyObject.ob_tid], REF_TID_IMMORTAL
     mov [rbp - DGA_DESC], rax
     mov qword [rax + PyGetSetDescrObject.gs_flags], GS_NAMED
 
@@ -512,6 +521,9 @@ DEF_FUNC add_method_to_dict_checked, 8            ; 3 pushes, so rsp is 16-align
     ; rcx = max_args (from r8)
     mov rcx, r8
     call builtin_func_new_checked
+    mov dword [rax + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rax + PyObject.ob_ref_shared], 0
+    mov dword [rax + PyObject.ob_tid], REF_TID_IMMORTAL
     push rax                ; save func obj
 
     ; Create key string from name
@@ -564,6 +576,9 @@ DEF_FUNC_LOCAL add_staticmethod, ASM_FRAME
     mov rdi, r13
     mov rsi, r12
     call builtin_func_new
+    mov dword [rax + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rax + PyObject.ob_ref_shared], 0
+    mov dword [rax + PyObject.ob_tid], REF_TID_IMMORTAL
     mov [rbp - ASM_FUNC], rax
 
     mov edi, PyStaticMethodObject_size
@@ -1981,6 +1996,9 @@ DEF_FUNC methods_init
     mov rdx, rax
     extern getset_descr_new
     call getset_descr_new
+    mov dword [rax + PyObject.ob_ref_local], REF_IMMORTAL_LOCAL
+    mov dword [rax + PyObject.ob_ref_shared], 0
+    mov dword [rax + PyObject.ob_tid], REF_TID_IMMORTAL
     push rax
     mov rdi, rbx
     mov rsi, [rsp + 8]

@@ -8,8 +8,8 @@ types, the argument checking and its wordings, the bootstrap every thread
 runs under, the sentinels Thread.join waits on, thread-local storage and the
 excepthook.
 
-One thread runs Python at a time: there is a GIL (src/gil.asm), handed over
-every switch interval and around anything that blocks.
+Free-threaded runtime: multiple threads run Python bytecode concurrently on
+separate CPU cores with per-object locking and biased reference counting.
 """
 
 import _threadcore as _core
@@ -335,6 +335,7 @@ def _excepthook(args):
 
 
 _local_seq = 0
+_local_seq_lock = lock()
 
 
 class _local:
@@ -353,8 +354,10 @@ class _local:
             raise TypeError("Initialization arguments are not supported")
         global _local_seq
         self = object.__new__(cls)
-        _local_seq += 1
-        object.__setattr__(self, "_local__key", _local_seq)
+        with _local_seq_lock:
+            _local_seq += 1
+            key = _local_seq
+        object.__setattr__(self, "_local__key", key)
         object.__setattr__(self, "_local__args", (args, kw))
         return self
 

@@ -80,6 +80,13 @@ extern obj_try_incref
     RT_UNLOCK_GATED weakref_lock
 %endmacro
 
+WR_BLOOM_SIZE equ 2048
+WR_BLOOM_MASK equ (WR_BLOOM_SIZE - 1)
+
+section .bss
+alignb 64
+weakref_bucket_cnt: resd WR_BLOOM_SIZE
+
 section .text
 
 ;; ============================================================================
@@ -265,6 +272,15 @@ global weakref_detach_for
 DEF_FUNC weakref_detach_for, WC_FRAME
     push rbx
     push r12
+    ; Lock-free pre-filter: 99.9% of freed objects have no weakrefs in their
+    ; hash bucket, avoiding global weakref_lock contention on every obj_dealloc.
+    mov rax, rdi
+    shr rax, 4
+    and eax, WR_BLOOM_MASK
+    lea rcx, [rel weakref_bucket_cnt]
+    cmp dword [rcx + rax*4], 0
+    je .wdf_fast_none
+
     mov [rbp - WC_OBJ], rdi
 
     WR_LOCK
@@ -308,6 +324,11 @@ DEF_FUNC weakref_detach_for, WC_FRAME
     mov rsi, [rbp - WC_OBJ]
     add rsi, [rel v_int_bias]
     call dict_del             ; err: an int key in a table of ints; its entry was found above
+    mov rax, [rbp - WC_OBJ]
+    shr rax, 4
+    and eax, WR_BLOOM_MASK
+    lea rcx, [rel weakref_bucket_cnt]
+    lock dec dword [rcx + rax*4]
     mov rax, [rel weakref_table]
     mov rax, [rax + PyDictObject.ob_size]
     mov [rel weakref_live], rax
@@ -320,6 +341,7 @@ DEF_FUNC weakref_detach_for, WC_FRAME
     ret
 .wdf_none:
     WR_UNLOCK
+.wdf_fast_none:
     xor eax, eax
     pop r12
     pop rbx
@@ -634,6 +656,11 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
     add rsi, [rel v_int_bias]
     mov rdx, [rsp]
     call dict_set_str
+    mov rax, [rbp - WM_OBJ]
+    shr rax, 4
+    and eax, WR_BLOOM_MASK
+    lea rcx, [rel weakref_bucket_cnt]
+    lock inc dword [rcx + rax*4]
     pop rax
     push rax
     mov rdi, rax

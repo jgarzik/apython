@@ -6,6 +6,7 @@
 %include "macros.inc"
 %include "object.inc"
 %include "eventloop.inc"
+%include "gil.inc"
 
 extern ap_malloc
 extern ap_realloc
@@ -467,11 +468,13 @@ DEF_FUNC poll_wait_and_drain, 8            ; 3 pushes, so rsp is 16-aligned
     ret
 
 .pwd_do_poll:
-    ; Call poll(poll_fds, nfds, timeout_ms)
+    ; Call poll(poll_fds, nfds, timeout_ms) detached so STW pauses do not wait
+    ALLOW_THREADS_BEGIN
     mov rdi, [gs:ThreadState.poll_fds]
     mov esi, [gs:ThreadState.poll_nfds]
     mov edx, r12d
     call poll
+    ALLOW_THREADS_END
     ; rax = number of fds ready (or -1 on error)
 
     ; Process expired timers first
