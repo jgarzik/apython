@@ -1956,6 +1956,7 @@ struc PyBuiltinObject
     ; has one, so the type it belongs to and which kind it is are fields.
     .func_owner:  resq 1  ; +56: the type whose method this is, or 0
     .func_kind:   resq 1  ; +64: 0 plain function, 1 method, 2 slot wrapper
+    .func_module: resq 1  ; +72: module name str (owned) for non-builtins, or 0
 endstruc
 
 BUILTIN_KIND_FUNCTION equ 0

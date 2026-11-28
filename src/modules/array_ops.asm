@@ -1812,3 +1812,339 @@ DEF_FUNC array_m_deepcopy
     leave
     ret
 END_FUNC array_m_deepcopy
+
+;; ============================================================================
+;; array_float_arg(rdi = Value) -> xmm0 = double, eax = 1 on success or 0 raising
+;; Fails: 0
+;; Accepts float/int/bool/subclasses, __float__, or __index__; rejects None,
+;; str, etc. with TypeError (unlike raw float_to_f64 which returns 0.0).
+;; ============================================================================
+AFA_VAL   equ 8
+AFA_EXC   equ 16
+AFA_TMP   equ 24
+AFA_FRAME equ 32                ; 0 pushes, 16-aligned
+extern float_binop_accepts
+extern float_to_f64
+extern float_type
+extern dunder_call_1
+extern obj_as_index_object
+global array_float_arg
+DEF_FUNC array_float_arg, AFA_FRAME
+    mov [rbp - AFA_VAL], rdi
+    V_UNPACK rdi, rsi
+    call float_binop_accepts
+    test eax, eax
+    jz .afa_try_dunder
+    mov rdi, [rbp - AFA_VAL]
+    V_UNPACK rdi, rsi
+    call float_to_f64
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .afa_fail
+    mov eax, 1
+    leave
+    ret
+
+.afa_try_dunder:
+    mov rdi, [rbp - AFA_VAL]
+    V_TEST_PTR rdi, rax
+    ja .afa_bad_type
+
+    ; Try __float__ on heap object
+    DUNDER_EXC_SAVE [rbp - AFA_EXC]
+    CSTRING rsi, "__float__"
+    call dunder_call_1          ; err: checked via DUNDER_RAISED below
+    test rax, rax
+    jnz .afa_got_float
+    DUNDER_RAISED [rbp - AFA_EXC], .afa_fail
+
+    ; No __float__: try nb_index (e.g. Intable)
+    mov rdi, [rbp - AFA_VAL]
+    mov rcx, [rdi + PyObject.ob_type]
+    mov rcx, [rcx + PyTypeObject.tp_as_number]
+    test rcx, rcx
+    jz .afa_bad_type
+    cmp qword [rcx + PyNumberMethods.nb_index], 0
+    je .afa_bad_type
+    V_UNPACK rdi, rdx
+    call obj_as_index_object
+    ERR_NULL .afa_fail
+    mov [rbp - AFA_TMP], rax
+    mov rdi, rax
+    V_UNPACK rdi, rsi
+    call float_to_f64
+    sub rsp, 16
+    movsd [rsp], xmm0
+    mov rdi, [rbp - AFA_TMP]
+    DECREF_V rdi, rcx
+    movsd xmm0, [rsp]
+    add rsp, 16
+    cmp qword [gs:ThreadState.current_exception], 0
+    jne .afa_fail
+    mov eax, 1
+    leave
+    ret
+
+.afa_got_float:
+    ; __float__ returned owned Value in rax; must be float (or float subclass)
+    mov [rbp - AFA_TMP], rax
+    V_IS_FLOAT rax, rcx
+    jb .afa_conv_float
+    V_TEST_PTR rax, rcx
+    ja .afa_bad_dunder_ret
+    mov rcx, [rax + PyObject.ob_type]
+    lea rdx, [rel float_type]
+    cmp rcx, rdx
+    je .afa_conv_float
+    test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_FLOAT_SUBCLASS
+    jz .afa_bad_dunder_ret
+.afa_conv_float:
+    mov rdi, rax
+    V_UNPACK rdi, rsi
+    call float_to_f64
+    sub rsp, 16
+    movsd [rsp], xmm0
+    mov rdi, [rbp - AFA_TMP]
+    DECREF_V rdi, rcx
+    movsd xmm0, [rsp]
+    add rsp, 16
+    mov eax, 1
+    leave
+    ret
+
+.afa_bad_dunder_ret:
+    mov rdi, [rbp - AFA_TMP]
+    DECREF_V rdi, rcx
+    SET_EXC exc_TypeError_type, "__float__ returned non-float"
+    xor eax, eax
+    leave
+    ret
+.afa_bad_type:
+    SET_EXC exc_TypeError_type, "must be real number"
+.afa_fail:
+    xor eax, eax
+    leave
+    ret
+END_FUNC array_float_arg
+
+;; ============================================================================
+;; array_richcompare_direct(rdi = left, rsi = right, edx = op)
+;;   -> (rax = bool_true/bool_false, edx = TAG_PTR), or (0, 0) on NotImpl/err
+;;
+;; Element-wise comparison without list_richcompare's identity shortcut, so
+;; array('f', [nan]) != array('f', [nan]) is True and ==, <, <=, >, >= are
+;; all False (matching CPython's array_richcompare).
+;; ============================================================================
+ARD_LEFT  equ 8
+ARD_RIGHT equ 16
+ARD_OP    equ 24
+ARD_N1    equ 32
+ARD_N2    equ 40
+ARD_MIN   equ 48
+ARD_IDX   equ 56
+ARD_V1    equ 64
+ARD_V2    equ 72
+ARD_FRAME equ 88                ; + 1 push (rbx) = 96, 16-aligned
+global array_richcompare_direct
+DEF_FUNC array_richcompare_direct, ARD_FRAME
+    push rbx
+    V_TEST_PTR rsi, rax
+    ja .ard_not_impl
+    mov rax, [rsi + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
+    jz .ard_not_impl
+
+    mov [rbp - ARD_LEFT], rdi
+    mov [rbp - ARD_RIGHT], rsi
+    mov [rbp - ARD_OP], rdx
+
+    mov r8, [rdi + PyArrayObject.ob_size]
+    mov r9, [rsi + PyArrayObject.ob_size]
+    mov [rbp - ARD_N1], r8
+    mov [rbp - ARD_N2], r9
+
+    ; Short-circuit EQ/NE when lengths differ
+    cmp rdx, PY_EQ
+    je .ard_chk_len_eq
+    cmp rdx, PY_NE
+    je .ard_chk_len_ne
+    jmp .ard_min_len
+.ard_chk_len_eq:
+    cmp r8, r9
+    jne .ard_ret_false
+    jmp .ard_min_len
+.ard_chk_len_ne:
+    cmp r8, r9
+    jne .ard_ret_true
+
+.ard_min_len:
+    mov rax, r8
+    cmp r9, rax
+    cmovl rax, r9
+    mov [rbp - ARD_MIN], rax
+    mov qword [rbp - ARD_IDX], 0
+
+.ard_loop:
+    mov rbx, [rbp - ARD_IDX]
+    cmp rbx, [rbp - ARD_MIN]
+    jge .ard_prefix_eq
+
+    ; Fetch v1 under lock
+    mov rdi, [rbp - ARD_LEFT]
+    OBJ_LOCK rdi
+    cmp rbx, [rdi + PyArrayObject.ob_size]
+    jge .ard_unlock1_prefix
+    mov rsi, rbx
+    call array_item_value
+    mov rcx, [rbp - ARD_LEFT]
+    OBJ_UNLOCK rcx
+    test rax, rax
+    jz .ard_error
+    mov [rbp - ARD_V1], rax
+
+    ; Fetch v2 under lock
+    mov rdi, [rbp - ARD_RIGHT]
+    OBJ_LOCK rdi
+    cmp rbx, [rdi + PyArrayObject.ob_size]
+    jge .ard_unlock2_drop1_prefix
+    mov rsi, rbx
+    call array_item_value
+    mov rcx, [rbp - ARD_RIGHT]
+    OBJ_UNLOCK rcx
+    test rax, rax
+    jz .ard_drop1_error
+    mov [rbp - ARD_V2], rax
+
+    ; Compare v1 == v2 (no identity shortcut for NaN -> nan == nan is False)
+    mov rdi, [rbp - ARD_V1]
+    mov rsi, rax
+    V_IS_FLOAT rdi, rcx
+    jae .ard_cmp_eq
+    mov rax, rdi
+    sub rax, [rel v_f64_off]
+    movq xmm0, rax
+    ucomisd xmm0, xmm0
+    jp .ard_diff
+.ard_cmp_eq:
+    mov edx, PY_EQ
+    call obj_richcompare_bool
+    test eax, eax
+    js .ard_drop12_error
+    jz .ard_diff
+
+    ; Equal: release both and continue
+    mov rdi, [rbp - ARD_V1]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - ARD_V2]
+    DECREF_V rdi, rcx
+    inc qword [rbp - ARD_IDX]
+    jmp .ard_loop
+
+.ard_diff:
+    mov rdx, [rbp - ARD_OP]
+    cmp rdx, PY_EQ
+    je .ard_drop12_false
+    cmp rdx, PY_NE
+    je .ard_drop12_true
+    ; Ordering op on first differing pair
+    mov rdi, [rbp - ARD_V1]
+    mov rsi, [rbp - ARD_V2]
+    call obj_richcompare_bool
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - ARD_V1]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - ARD_V2]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    test eax, eax
+    js .ard_error
+    jz .ard_ret_false
+    jmp .ard_ret_true
+
+.ard_unlock1_prefix:
+    OBJ_UNLOCK rdi
+    jmp .ard_prefix_eq
+.ard_unlock2_drop1_prefix:
+    OBJ_UNLOCK rdi
+    mov rdi, [rbp - ARD_V1]
+    DECREF_V rdi, rcx
+
+.ard_prefix_eq:
+    mov rdi, [rbp - ARD_LEFT]
+    mov r8, [rdi + PyArrayObject.ob_size]
+    mov rsi, [rbp - ARD_RIGHT]
+    mov r9, [rsi + PyArrayObject.ob_size]
+    mov rdx, [rbp - ARD_OP]
+    cmp rdx, PY_EQ
+    je .ard_fin_eq
+    cmp rdx, PY_NE
+    je .ard_fin_ne
+    cmp rdx, PY_LT
+    je .ard_fin_lt
+    cmp rdx, PY_LE
+    je .ard_fin_le
+    cmp rdx, PY_GT
+    je .ard_fin_gt
+    ; PY_GE
+    cmp r8, r9
+    jge .ard_ret_true
+    jmp .ard_ret_false
+.ard_fin_eq:
+    cmp r8, r9
+    je .ard_ret_true
+    jmp .ard_ret_false
+.ard_fin_ne:
+    cmp r8, r9
+    jne .ard_ret_true
+    jmp .ard_ret_false
+.ard_fin_lt:
+    cmp r8, r9
+    jl .ard_ret_true
+    jmp .ard_ret_false
+.ard_fin_le:
+    cmp r8, r9
+    jle .ard_ret_true
+    jmp .ard_ret_false
+.ard_fin_gt:
+    cmp r8, r9
+    jg .ard_ret_true
+    jmp .ard_ret_false
+
+.ard_drop12_true:
+    mov rdi, [rbp - ARD_V1]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - ARD_V2]
+    DECREF_V rdi, rcx
+.ard_ret_true:
+    lea rax, [rel bool_true]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.ard_drop12_false:
+    mov rdi, [rbp - ARD_V1]
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - ARD_V2]
+    DECREF_V rdi, rcx
+.ard_ret_false:
+    lea rax, [rel bool_false]
+    INCREF rax
+    mov edx, TAG_PTR
+    pop rbx
+    leave
+    ret
+.ard_drop12_error:
+    mov rdi, [rbp - ARD_V2]
+    DECREF_V rdi, rcx
+.ard_drop1_error:
+    mov rdi, [rbp - ARD_V1]
+    DECREF_V rdi, rcx
+.ard_error:
+.ard_not_impl:
+    RET_NULL
+    pop rbx
+    leave
+    ret
+END_FUNC array_richcompare_direct

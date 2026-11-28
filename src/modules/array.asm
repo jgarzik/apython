@@ -434,17 +434,20 @@ END_FUNC array_int_from_u64
 ASI_ARR   equ 8
 ASI_IDX   equ 16
 ASI_VAL   equ 24
-ASI_OBJ   equ 32        ; a heap int too wide for an i64, borrowed
+ASI_OBJ   equ 32        ; a heap int too wide for an i64 (borrowed or owned)
 ASI_NEG   equ 40        ; 1 when the refusal is "less than minimum"
 ASI_MSG_ROW equ 40      ; five qwords per row of asi_msgs
 ASI_WIDE  equ 48        ; 1 when it did not even fit the C conversion type
-ASI_FRAME equ 56            ; + 1 push = 64, 16-aligned
+ASI_OWNED equ 56        ; 1 when ASI_OBJ is an owned ref from __index__
+ASI_FRAME equ 72            ; + 1 push = 80, 16-aligned
 global array_store_item
 DEF_FUNC array_store_item, ASI_FRAME
     push rbx
     mov [rbp - ASI_ARR], rdi
     mov [rbp - ASI_IDX], rsi
     mov [rbp - ASI_VAL], rdx
+    mov qword [rbp - ASI_OWNED], 0
+    mov qword [rbp - ASI_OBJ], 0
 
     mov rcx, [rdi + PyArrayObject.ob_kind]
     cmp rcx, AK_FLOAT
@@ -463,6 +466,8 @@ DEF_FUNC array_store_item, ASI_FRAME
     mov qword [rbp - ASI_WIDE], 0
     cmp edx, 2
     je .asi_wide
+    cmp edx, 3
+    je .asi_wide_owned
     mov rbx, rax                ; the value, as an i64
 
     ; Range, by size and signedness.  Out of range is OverflowError, not a
@@ -540,6 +545,11 @@ DEF_FUNC array_store_item, ASI_FRAME
 .asi_unlock_only:
     OBJ_UNLOCK rdi
 .asi_ok:
+    cmp qword [rbp - ASI_OWNED], 0
+    je .asi_ok_ret
+    mov rdi, [rbp - ASI_OBJ]
+    call obj_decref
+.asi_ok_ret:
     mov eax, 1
     pop rbx
     leave
@@ -547,10 +557,9 @@ DEF_FUNC array_store_item, ASI_FRAME
 
 .asi_float:
     mov rdi, rdx
-    V_UNPACK rdi, rsi           ; float_to_f64 takes the pair as well
-    call float_to_f64           ; refuses what is not a number
-    cmp qword [gs:ThreadState.current_exception], 0
-    jne .asi_fail
+    extern array_float_arg
+    call array_float_arg
+    ERR_NULL .asi_fail
     sub rsp, 16
     movsd [rsp], xmm0
     mov rdi, [rbp - ASI_ARR]
@@ -591,10 +600,17 @@ DEF_FUNC array_store_item, ASI_FRAME
     jmp .asi_unlock_ok
 
 .asi_fail:
+    cmp qword [rbp - ASI_OWNED], 0
+    je .asi_fail_ret
+    mov rdi, [rbp - ASI_OBJ]
+    call obj_decref
+.asi_fail_ret:
     xor eax, eax
     pop rbx
     leave
     ret
+.asi_wide_owned:
+    mov qword [rbp - ASI_OWNED], 1
 .asi_wide:
     ; Wider than an i64.  Only an eight-byte UNSIGNED array can still take it:
     ; array('Q', [2**64-1]) is legal, and obj_as_index cannot express it.
@@ -810,8 +826,42 @@ DEF_FUNC_LOCAL array_int_arg
     leave
     ret
 .aia_hand_over:
-    call obj_as_index
-    ERR_M1 .aia_failed
+    ; Use obj_as_index_object so __index__ returning a >63-bit unsigned int
+    ; (e.g. Intable(2**64 - 1) for 'L'/'Q') is handled via the wide path
+    ; instead of overflowing signed ssize_t in obj_as_index.
+    extern obj_as_index_object
+    call obj_as_index_object
+    ERR_NULL .aia_failed
+    V_UNPACK rax, rdx
+    cmp edx, TAG_SMALLINT
+    je .aia_ho_imm
+    push rax
+    sub rsp, 8
+    mov rdi, rax
+    call int_fits_i64
+    add rsp, 8
+    pop rdi
+    test eax, eax
+    jz .aia_ho_wide
+    push rdi
+    sub rsp, 8
+    call int_to_i64
+    add rsp, 8
+    pop rdi
+    push rax
+    sub rsp, 8
+    call obj_decref
+    add rsp, 8
+    pop rax
+    mov edx, 1
+    leave
+    ret
+.aia_ho_wide:
+    mov rax, rdi
+    mov edx, 3                  ; owned wide PyIntObject*
+    leave
+    ret
+.aia_ho_imm:
     mov edx, 1
     leave
     ret
@@ -822,82 +872,7 @@ DEF_FUNC_LOCAL array_int_arg
     ret
 END_FUNC array_int_arg
 
-;; ============================================================================
-;; array_richcompare(rdi = left, rsi = right, edx = op) -> (rax, edx) a Value
-;;
-;; Element-wise, like a list's -- array('i', [1, 2]) == array('i', [1, 2]) is
-;; True in CPython, and with no tp_richcompare at all it was False here, so
-;; every array compared by identity and `<` was a TypeError.
-;;
-;; Delegated to the LISTS, for the reason array_repr is: list_richcompare
-;; already has the lexicographic order, the per-element dispatch and the
-;; recursion guard, and comparing values rather than bytes is what makes
-;; array('i', [1]) == array('f', [1.0]) answer True the way CPython's does.
-;; ============================================================================
-ARC_RIGHT equ 8
-ARC_OP    equ 16
-ARC_L1    equ 24
-ARC_L2    equ 32
-ARC_RES   equ 40
-ARC_TAG   equ 48
-ARC_FRAME equ 64            ; + 0 pushes = 64, 16-aligned
-DEF_FUNC array_richcompare, ARC_FRAME
-    V_TEST_PTR rsi, rax
-    ja .arc_not_impl
-    mov rax, [rsi + PyObject.ob_type]
-    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
-    jz .arc_not_impl
-
-    mov [rbp - ARC_RIGHT], rsi
-    mov [rbp - ARC_OP], rdx
-    mov qword [rbp - ARC_L1], 0
-    mov qword [rbp - ARC_L2], 0
-
-    call array_tolist
-    ERR_NULL .arc_error
-    mov [rbp - ARC_L1], rax
-    mov rdi, [rbp - ARC_RIGHT]
-    call array_tolist
-    ERR_NULL .arc_error
-    mov [rbp - ARC_L2], rax
-
-    mov rdi, [rbp - ARC_L1]
-    mov rsi, rax
-    mov rdx, [rbp - ARC_OP]
-    extern list_richcompare
-    call list_richcompare     ; err: (0, 0) with the exception pending is this slot's answer too
-    mov [rbp - ARC_RES], rax
-    mov [rbp - ARC_TAG], rdx
-    call .arc_drop
-    mov rax, [rbp - ARC_RES]
-    mov rdx, [rbp - ARC_TAG]
-    leave
-    ret
-
-.arc_error:                     ; tp_richcompare: 0 with it pending
-    call .arc_drop
-
-.arc_not_impl:
-    RET_NULL
-    leave
-    ret
-
-    ;; .arc_drop -- release whichever lists were built
-.arc_drop:
-    sub rsp, 8
-    mov rdi, [rbp - ARC_L1]
-    test rdi, rdi
-    jz .arc_drop_two
-    call obj_decref
-.arc_drop_two:
-    mov rdi, [rbp - ARC_L2]
-    test rdi, rdi
-    jz .arc_drop_done
-    call obj_decref
-.arc_drop_done:
-    add rsp, 8
-    ret
-END_FUNC array_richcompare
+extern array_richcompare_direct
 
 ;; ============================================================================
 ;; array_dealloc(rdi = the array) -> nothing
@@ -1496,6 +1471,10 @@ extern array_m_count
 extern array_m_reverse
 extern array_m_copy
 extern array_m_deepcopy
+extern array_m_reduce_ex
+extern array__array_reconstructor
+extern array_reconstructor_func
+extern array_str___dict__
 
 ;; ============================================================================
 ;; array_ass_subscript_int(rdi = the array, rsi = key Value, rdx = value Value)
@@ -1736,7 +1715,7 @@ array_type:
     dq 0                        ; tp_call (set by add_builtin_type)
     dq array_getattr            ; tp_getattr (typecode, itemsize)
     dq 0                        ; tp_setattr
-    dq array_richcompare        ; tp_richcompare
+    dq array_richcompare_direct ; tp_richcompare
     dq array_tp_iter            ; tp_iter
     dq 0                        ; tp_iternext
     dq 0                        ; tp_init
@@ -3010,6 +2989,7 @@ DEF_FUNC array_module_create, AMC_FRAME
     AM_ADD_METHOD array_m_reverse,     "reverse"
     AM_ADD_METHOD array_m_copy,        "__copy__"
     AM_ADD_METHOD array_m_deepcopy,    "__deepcopy__"
+    AM_ADD_METHOD array_m_reduce_ex,   "__reduce_ex__"
     AM_ADD_METHOD array_m_getitem,     "__getitem__"
     AM_ADD_METHOD array_m_setitem,     "__setitem__"
     AM_ADD_METHOD array_m_delitem,     "__delitem__"
@@ -3043,6 +3023,11 @@ DEF_FUNC array_module_create, AMC_FRAME
     test rax, rax
     jz .amc_out
     mov [rel array_str_write], rax
+    CSTRING rdi, "__dict__"
+    call str_from_cstr_heap
+    test rax, rax
+    jz .amc_out
+    mov [rel array_str___dict__], rax
 
     ; ...and the module dict, holding the type and the typecode string.
     call dict_new
@@ -3079,6 +3064,28 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, [rbp - AMC_KEY]
     call obj_decref
 
+    ; _array_reconstructor (with __module__ = "array" for pickle)
+    CSTRING rdi, "_array_reconstructor"
+    call str_from_cstr_heap
+    mov [rbp - AMC_KEY], rax
+    lea rdi, [rel array__array_reconstructor]
+    CSTRING rsi, "_array_reconstructor"
+    call builtin_func_new
+    mov [rbp - AMC_FN], rax
+    mov [rel array_reconstructor_func], rax
+    CSTRING rdi, "array"
+    call str_from_cstr_heap
+    mov rcx, [rbp - AMC_FN]
+    mov [rcx + PyBuiltinObject.func_module], rax
+    mov rdi, r12
+    mov rsi, [rbp - AMC_KEY]
+    mov rdx, rcx
+    call dict_set_str
+    mov rdi, [rbp - AMC_KEY]
+    call obj_decref
+    mov rdi, [rbp - AMC_FN]
+    call obj_decref
+
     CSTRING rdi, "typecodes"
     call str_from_cstr_heap
     mov [rbp - AMC_KEY], rax
@@ -3110,6 +3117,8 @@ DEF_FUNC array_module_create, AMC_FRAME
     mov rdi, r12
     call obj_decref
     mov rax, [rbp - AMC_FN]
+    extern array_module_obj
+    mov [rel array_module_obj], rax
 .amc_out:
     pop r12
     pop rbx
