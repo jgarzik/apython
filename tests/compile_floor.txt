@@ -764,6 +764,7 @@ test_socket
 test_sort_str
 test_sort_timsort
 test_source_import
+test_sqlite3
 test_sre2
 test_sre_bytes
 test_sre_decode_cache

@@ -118,7 +118,7 @@ diff /tmp/expected.txt /tmp/actual.txt
 ```
 
 **Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
-liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, python3.12
+liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, libsqlite3-dev, python3.12
 
 ## Register Convention (eval loop)
 

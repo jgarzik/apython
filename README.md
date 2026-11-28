@@ -41,7 +41,7 @@ x86-64 assembly would not have been feasible for 1 person without LLM.
 ## Quick start
 
 **Dependencies:** nasm, gcc (linker), libgmp-dev, zlib1g-dev, libbz2-dev,
-liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, python3.12
+liblzma-dev, libssl-dev, libexpat1-dev, libffi-dev, libsqlite3-dev, python3.12
 
 ```bash
 make                # build ./apython
@@ -339,6 +339,7 @@ tests/                  the test suite
   behind `_hashlib`'s `pbkdf2_hmac` and `scrypt`
 - `libffi-dev` — the foreign-function calls and callbacks behind `ctypes`
 - `libexpat1-dev` — the XML parser behind `pyexpat` and `xml.etree`
+- `libsqlite3-dev` — SQLite 3, behind `_sqlite3` and `sqlite3`
 - `python3.12` — compiling test `.py` files to `.pyc`
 
 These are what the single `LDFLAGS` line in the Makefile links; the same list
