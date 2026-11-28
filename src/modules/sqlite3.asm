@@ -41,7 +41,45 @@ extern ap_malloc
 extern ap_realloc
 extern ap_free
 extern ap_memset
+extern ap_memcpy
 extern dlsym
+
+extern sq_cb_destroy
+extern sq_cb_func
+extern sq_cb_step
+extern sq_cb_final
+extern sq_cb_value
+extern sq_cb_inverse
+extern sq_cb_collation
+extern sq_cb_authorizer
+extern sq_cb_progress
+extern sq_cb_trace
+extern sq_cb_print_or_clear_pending
+extern sq_set_cb_tracebacks
+extern sq_create_function
+extern sq_create_aggregate
+extern sq_create_window
+extern sq_create_collation
+extern sq_set_authorizer
+extern sq_set_progress
+extern sq_set_trace
+extern sq_limit
+extern sq_db_config
+extern sq_serialize
+extern sq_deserialize
+extern sq_enable_load_ext
+extern sq_load_ext
+extern sq_blob_open
+extern sq_blob_close
+extern sq_blob_bytes
+extern sq_blob_read
+extern sq_blob_write
+extern sq_backup_init
+extern sq_backup_step
+extern sq_backup_finish
+extern sq_backup_remaining
+extern sq_backup_pagecount
+extern sq_sleep
 
 extern none_singleton
 extern bool_true
@@ -98,6 +136,26 @@ extern sqlite3_bind_int64
 extern sqlite3_bind_double
 extern sqlite3_bind_text
 extern sqlite3_bind_blob
+extern sqlite3_create_function_v2
+extern sqlite3_create_collation_v2
+extern sqlite3_set_authorizer
+extern sqlite3_progress_handler
+extern sqlite3_trace_v2
+extern sqlite3_limit
+extern sqlite3_db_config
+extern sqlite3_malloc64
+extern sqlite3_free
+extern sqlite3_blob_open
+extern sqlite3_blob_close
+extern sqlite3_blob_bytes
+extern sqlite3_blob_read
+extern sqlite3_blob_write
+extern sqlite3_backup_init
+extern sqlite3_backup_step
+extern sqlite3_backup_finish
+extern sqlite3_backup_remaining
+extern sqlite3_backup_pagecount
+extern sqlite3_sleep
 
 ; Handle table descriptor layout (24 bytes in .data).
 struc SqTable
@@ -178,6 +236,31 @@ sn_bind_int64:          db "bind_int64", 0
 sn_bind_double:         db "bind_double", 0
 sn_bind_text:           db "bind_text", 0
 sn_bind_blob:           db "bind_blob", 0
+sn_set_cb_tracebacks:   db "set_callback_tracebacks", 0
+sn_create_function:     db "create_function", 0
+sn_create_aggregate:    db "create_aggregate", 0
+sn_create_window:       db "create_window_function", 0
+sn_create_collation:    db "create_collation", 0
+sn_set_authorizer:      db "set_authorizer", 0
+sn_set_progress:        db "set_progress_handler", 0
+sn_set_trace:           db "set_trace_callback", 0
+sn_limit:               db "limit", 0
+sn_db_config:           db "db_config", 0
+sn_serialize:           db "serialize", 0
+sn_deserialize:         db "deserialize", 0
+sn_enable_load_ext:     db "enable_load_extension", 0
+sn_load_ext:            db "load_extension", 0
+sn_blob_open:           db "blob_open", 0
+sn_blob_close:          db "blob_close", 0
+sn_blob_bytes:          db "blob_bytes", 0
+sn_blob_read:           db "blob_read", 0
+sn_blob_write:          db "blob_write", 0
+sn_backup_init:         db "backup_init", 0
+sn_backup_step:         db "backup_step", 0
+sn_backup_finish:       db "backup_finish", 0
+sn_backup_remaining:    db "backup_remaining", 0
+sn_backup_pagecount:    db "backup_pagecount", 0
+sn_sleep:               db "sleep", 0
 
 ; Optional dlsym target names.
 sym_serialize:          db "sqlite3_serialize", 0
@@ -478,11 +561,23 @@ DEF_FUNC sq_arg_bytes_like
     lea rcx, [rel memoryview_type]
     cmp rax, rcx
     je .is_mv
+    mov r8, [rax + PyTypeObject.tp_as_buffer]
+    test r8, r8
+    jnz .is_buf
 .bad:
     lea rdi, [rel exc_TypeError_type]
     lea rsi, [rel sq_e_bytes]
     call set_exception
     xor eax, eax
+    leave
+    ret
+.is_buf:
+    mov esi, BUF_GET
+    call r8
+    test rax, rax
+    jnz .buf_ok
+    lea rax, [rel sq_empty_byte]
+.buf_ok:
     leave
     ret
 .is_bytes:
@@ -682,6 +777,23 @@ DEF_FUNC sq_close, SC_FRAME
     mov [rbp - SC_NODE], rax
     mov rcx, [rax + SqlDb.db]
     mov [rbp - SC_DB], rcx
+
+    ; Detach trace/progress/authorizer hooks before closing so SQLite cannot
+    ; invoke a freed SqlCb during close.
+    mov rdi, rcx
+    mov esi, SQLITE_TRACE_STMT
+    xor edx, edx
+    xor ecx, ecx
+    call sqlite3_trace_v2 wrt ..plt
+    mov rdi, [rbp - SC_DB]
+    xor esi, esi
+    xor edx, edx
+    xor ecx, ecx
+    call sqlite3_progress_handler wrt ..plt
+    mov rdi, [rbp - SC_DB]
+    xor esi, esi
+    xor edx, edx
+    call sqlite3_set_authorizer wrt ..plt
 
     ALLOW_THREADS_BEGIN
     mov rdi, [rbp - SC_DB]
@@ -1117,6 +1229,22 @@ DEF_FUNC sq_step, SST_FRAME
     movsxd rax, eax
     ALLOW_THREADS_END
 
+    ; If a collation callback left a Python exception pending:
+    ;   - on SQLITE_ROW / SQLITE_DONE, propagate it directly (return 0)
+    ;   - on SQLite error, print/clear it and return rc for SQLite error
+    cmp qword [gs:ThreadState.current_exception], 0
+    je .ret_rc
+    cmp rax, SQLITE_ROW
+    je .fail
+    cmp rax, SQLITE_DONE
+    je .fail
+    push rax
+    sub rsp, 8
+    xor edi, edi
+    call sq_cb_print_or_clear_pending
+    add rsp, 8
+    pop rax
+.ret_rc:
     V_PACK_I64 rax, rcx
     leave
     ret
@@ -1988,6 +2116,31 @@ DEF_FUNC sqlite3_module_create, SM_FRAME
     MODULE_ADD_FUNC sq_bind_double,       sn_bind_double
     MODULE_ADD_FUNC sq_bind_text,         sn_bind_text
     MODULE_ADD_FUNC sq_bind_blob,         sn_bind_blob
+    MODULE_ADD_FUNC sq_set_cb_tracebacks, sn_set_cb_tracebacks
+    MODULE_ADD_FUNC sq_create_function,   sn_create_function
+    MODULE_ADD_FUNC sq_create_aggregate,  sn_create_aggregate
+    MODULE_ADD_FUNC sq_create_window,     sn_create_window
+    MODULE_ADD_FUNC sq_create_collation,  sn_create_collation
+    MODULE_ADD_FUNC sq_set_authorizer,    sn_set_authorizer
+    MODULE_ADD_FUNC sq_set_progress,      sn_set_progress
+    MODULE_ADD_FUNC sq_set_trace,         sn_set_trace
+    MODULE_ADD_FUNC sq_limit,             sn_limit
+    MODULE_ADD_FUNC sq_db_config,         sn_db_config
+    MODULE_ADD_FUNC sq_serialize,         sn_serialize
+    MODULE_ADD_FUNC sq_deserialize,       sn_deserialize
+    MODULE_ADD_FUNC sq_enable_load_ext,   sn_enable_load_ext
+    MODULE_ADD_FUNC sq_load_ext,          sn_load_ext
+    MODULE_ADD_FUNC sq_blob_open,         sn_blob_open
+    MODULE_ADD_FUNC sq_blob_close,        sn_blob_close
+    MODULE_ADD_FUNC sq_blob_bytes,        sn_blob_bytes
+    MODULE_ADD_FUNC sq_blob_read,         sn_blob_read
+    MODULE_ADD_FUNC sq_blob_write,        sn_blob_write
+    MODULE_ADD_FUNC sq_backup_init,       sn_backup_init
+    MODULE_ADD_FUNC sq_backup_step,       sn_backup_step
+    MODULE_ADD_FUNC sq_backup_finish,     sn_backup_finish
+    MODULE_ADD_FUNC sq_backup_remaining,  sn_backup_remaining
+    MODULE_ADD_FUNC sq_backup_pagecount,  sn_backup_pagecount
+    MODULE_ADD_FUNC sq_sleep,             sn_sleep
 
     ; Probe optional libsqlite3 entry points via dlsym(RTLD_DEFAULT, name).
     xor edi, edi
