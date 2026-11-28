@@ -107,6 +107,12 @@ struc ThreadState
     .ts_prev:             resq 1  ;   tstate_list_head anchors (src/gil.asm)
     .ts_ident:            resq 1  ; pthread_self(), what get_ident() answers
     .ts_native_id:        resq 1  ; gettid()
+    .ts_tid:              resd 1  ; compact monotonic owner ID (main=1; 0=immortal)
+    .ts_state:            resd 1  ; TS_STATE_ATTACHED / DETACHED / PARKED
+    .ts_brc_hash_next:    resq 1  ; next ThreadState* in brc_buckets[tid & 63]
+    .ts_brc_buf:          resq 1  ; libc-malloc'd PyObject** BRC merge queue
+    .ts_brc_len:          resq 1  ; queued object count in ts_brc_buf
+    .ts_brc_cap:          resq 1  ; capacity of ts_brc_buf
     .ts_dict:             resq 1  ; this thread's own dict, or NULL: where
                                   ;   _thread._local keeps its namespaces
     .import_path_override: resq 1 ; search path for one import, or NULL

@@ -141,6 +141,13 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
 
     mov rdi, [rbx + ThreadStart.tstate]
     call tstate_install
+    extern rt_tid_alloc
+    call rt_tid_alloc
+    mov [gs:ThreadState.ts_tid], eax
+    mov dword [gs:ThreadState.ts_state], 0
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_register_thread
+    call brc_register_thread
     call pthread_self
     mov [gs:ThreadState.ts_ident], rax
     mov eax, SYS_gettid
@@ -217,6 +224,9 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     call sysprofile_install
     call tstate_unlink
     dec qword [rel tc_running]
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_unregister_thread
+    call brc_unregister_thread
 
     ; Past this line the thread holds no GIL and touches no object.  The
     ; ThreadState, ssl_pw_buf and path_scratch came from libc.

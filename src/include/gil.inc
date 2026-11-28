@@ -28,8 +28,10 @@
 %define GIL_INC
 
 ; Bits of eval_breaker, the one word the dispatch loop's checkpoints test.
-EB_SIGNAL   equ 1               ; a signal arrived; the main thread runs handlers
-EB_GIL_DROP equ 2               ; a waiting thread wants the GIL
+EB_SIGNAL     equ 1             ; a signal arrived; the main thread runs handlers
+EB_GIL_DROP   equ 2             ; a waiting thread wants the GIL (retired in FT)
+EB_STOP_WORLD equ 4             ; STW safepoint requested (GC / fork / shutdown)
+EB_BRC_MERGE  equ 8             ; at least one thread has queued BRC merges
 
 ; ALLOW_THREADS_BEGIN -- give the GIL up before a call that may block.
 ; Clobbers every caller-saved register.

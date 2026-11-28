@@ -12,6 +12,7 @@ extern ap_strcmp
 extern value_selftest_main
 extern compile_selftest_main
 extern alloc_selftest_main
+extern sync_selftest_main
 extern dis_main
 extern dis_mode
 extern builtins_init
@@ -207,6 +208,22 @@ DEF_FUNC main, 8
     leave
     ret
 .not_selftest_alloc:
+
+    ; Check for --selftest-sync flag (futex locks + BRC registry self-test)
+    mov rdi, [r15 + 8]
+    lea rsi, [rel selftest_sync_flag]
+    call ap_strcmp
+    test eax, eax
+    jne .not_selftest_sync
+    call sync_selftest_main
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.not_selftest_sync:
 
     ; Check for --dis: compile argv[2] as an expression and print its bytecode.
     ; Fidelity is semantic rather than byte-for-byte, so putting this beside
@@ -1504,6 +1521,7 @@ help_msg:
     db "--selftest-value : run the Value encoding self-test and exit", 10
     db "--selftest-compile : run the source compiler self-test and exit", 10
     db "--selftest-alloc : run the pool allocator self-test and exit", 10
+    db "--selftest-sync : run the synchronization/BRC self-test and exit", 10
     db 10
     db "Arguments:", 10
     db "file   : a .py file to compile and run, or a .pyc file to run directly", 10
@@ -1512,6 +1530,7 @@ help_msg_len equ $ - help_msg
 selftest_flag: db "--selftest-value", 0
 selftest_compile_flag: db "--selftest-compile", 0
 selftest_alloc_flag: db "--selftest-alloc", 0
+selftest_sync_flag: db "--selftest-sync", 0
 dis_flag: db "--dis", 0
 version_msg: db "apython ", VERSION_STR, 10
 version_msg_len equ $ - version_msg

@@ -121,11 +121,16 @@ DEF_FUNC gil_init
     call pthread_self
     mov [gs:ThreadState.ts_ident], rax
     mov rax, [gs:ThreadState.ts_self]
+    mov dword [rax + ThreadState.ts_tid], 1
+    mov dword [rax + ThreadState.ts_state], 0
     mov [rel tstate_main_ptr], rax
     mov [rel gil_last_holder], rax
     mov [rel gil_holder], rax
     mov [rel tstate_list_head], rax
     mov qword [rel gil_locked], 1
+    mov rdi, rax
+    extern brc_register_thread
+    call brc_register_thread
     leave
     ret
 END_FUNC gil_init
@@ -456,6 +461,9 @@ DEF_FUNC gil_fork, GF_FRAME
     call thread_running_reset
     extern systrace_after_fork_child
     call systrace_after_fork_child
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_reset_after_fork
+    call brc_reset_after_fork
     mov eax, SYS_gettid_nr
     syscall
     mov [gs:ThreadState.ts_native_id], rax
