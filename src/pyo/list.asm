@@ -99,10 +99,10 @@ DEF_FUNC list_new_from, 8       ; 3 pushes, so rsp is 16-aligned
     test rax, rax
     jz .alloc_fresh
     ; Pop from pool: reuse ob_refcnt slot as next-link
-    mov rcx, [rax + PyObject.ob_refcnt]
+    mov rcx, [rax]
     mov [rel list_pool_head], rcx
     dec dword [rel list_pool_count]
-    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    INIT_OBJ_RC rax  ; reinit refcount
     mov rbx, rax
     jmp .init_fields
 
@@ -1493,7 +1493,7 @@ DEF_FUNC list_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     call gc_untrack
     ; Push to pool: reuse ob_refcnt as next-pointer
     mov rcx, [rel list_pool_head]
-    mov [rbx + PyObject.ob_refcnt], rcx
+    mov [rbx], rcx
     mov [rel list_pool_head], rbx
     inc dword [rel list_pool_count]
     pop r13
@@ -1788,7 +1788,14 @@ DEF_FUNC_LOCAL list_incref_range_by
     lea rcx, [rax - 1]
     cmp rcx, [rel v_ptr_max_m1]
     ja .lirb_next
-    add [rax + PyObject.ob_refcnt], rdx
+    push rdi
+    push rsi
+    mov rdi, rax
+    mov rsi, rdx
+    extern obj_addref_bulk
+    call obj_addref_bulk
+    pop rsi
+    pop rdi
 .lirb_next:
     add rdi, 8
     cmp rdi, rsi
@@ -2827,7 +2834,8 @@ list_mapping_methods:
 align 8
 global list_type
 list_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq list_name_str        ; tp_name
     dq PyListObject_size    ; tp_basicsize

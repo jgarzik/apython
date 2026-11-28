@@ -221,7 +221,7 @@ END_FUNC asyncio_sleep_func
 ;; ============================================================================
 ;; sleep_awaitable_iter_self — tp_iter for SleepAwaitable (return self)
 DEF_FUNC_BARE sleep_awaitable_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC sleep_awaitable_iter_self
@@ -336,7 +336,7 @@ DEF_FUNC asyncio_wait_fd_func, 40           ; + 1 push = 48, 16-aligned
 END_FUNC asyncio_wait_fd_func
 
 DEF_FUNC_BARE io_wait_awaitable_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC io_wait_awaitable_iter_self
@@ -479,7 +479,7 @@ END_FUNC asyncio_wait_for_func
 ;; wait_for_awaitable_iter_self — tp_iter for WaitForAwaitable (return self)
 ;; ============================================================================
 DEF_FUNC_BARE wait_for_awaitable_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC wait_for_awaitable_iter_self
@@ -873,7 +873,7 @@ END_FUNC ag_set_bad_keyword
 ;; run concurrently regardless of the order this observes them in.
 ;; ============================================================================
 DEF_FUNC_BARE gather_awaitable_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC gather_awaitable_iter_self
@@ -1344,7 +1344,8 @@ section .data
 
 align 8
 io_wait_awaitable_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq io_wait_awaitable_name   ; tp_name
     dq IOWaitAwaitable_size     ; tp_basicsize
@@ -1376,7 +1377,8 @@ io_wait_awaitable_type:
 
 align 8
 sleep_awaitable_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sleep_awaitable_name     ; tp_name
     dq SleepAwaitable_size      ; tp_basicsize
@@ -1409,7 +1411,8 @@ sleep_awaitable_type:
 align 8
 global wait_for_awaitable_type
 gather_awaitable_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq gather_awaitable_name    ; tp_name
     dq GatherAwaitable_size     ; tp_basicsize
@@ -1442,7 +1445,8 @@ gather_awaitable_type:
 align 8
 global gather_awaitable_type
 wait_for_awaitable_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq wait_for_awaitable_name  ; tp_name
     dq WaitForAwaitable_size    ; tp_basicsize

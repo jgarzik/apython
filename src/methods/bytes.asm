@@ -997,10 +997,10 @@ END_FUNC bytes_method_endswith
 ;; ============================================================================
 BC_SELF   equ 8
 BC_SUB    equ 16
-BC_ONE    equ 56            ; a one-byte bytes header, for an int needle
-BC_ARGS   equ 64
-BC_NARGS  equ 72
-BC_FRAME  equ 80            ; + 0 pushes = 80
+BC_ONE    equ 64            ; a one-byte bytes header (33B), for an int needle
+BC_ARGS   equ 72
+BC_NARGS  equ 80
+BC_FRAME  equ 96            ; + 0 pushes = 96, 16-aligned
 
 DEF_FUNC bytes_method_count, BC_FRAME
     cmp rsi, 2
@@ -1198,7 +1198,7 @@ BF_SELF   equ 8
 BF_SUB    equ 16
 BF_ARGS   equ 24
 BF_NARGS  equ 32
-BF_ONE    equ 72            ; a one-byte bytes header, for an int needle
+BF_ONE    equ 80            ; a one-byte bytes header (33B), for an int needle
 ; Derived, not picked: the fabricated header above runs from rbp-BF_ONE
 ; upward, so a hand-chosen 48 landed on its data byte and the int-needle
 ; find() searched for a length instead of a character.

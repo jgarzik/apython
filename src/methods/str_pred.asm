@@ -42,7 +42,8 @@ align 8
 ; builder always has a str object to copy from rather than a bare byte.
 ; Static, and never released -- nothing hands it out.
 str_pad_space:
-    dq 1                        ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq str_type                 ; ob_type
     dq 1                        ; ob_size, in bytes
     dq -1                       ; ob_hash
@@ -593,7 +594,7 @@ DEF_FUNC str_pad_build, SPB_FRAME
     lea rdi, [rbx + PyStrObject.data + 1]
     call ap_malloc
     mov [rbp - SPB_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1

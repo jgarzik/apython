@@ -935,7 +935,7 @@ DEF_FUNC_LOCAL math_new_mpz, 8            ; 1 pushes, so rsp is 16-aligned
     mov edi, PyIntObject_size
     call ap_malloc
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel int_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyIntObject.compact], 0

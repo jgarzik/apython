@@ -1181,7 +1181,8 @@ section .data
 align 8
 global super_type
 super_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sup_name_str             ; tp_name
     dq PySuperObject_size       ; tp_basicsize

@@ -271,7 +271,7 @@ DEF_FUNC builtin_int_fn, BI_FRAME
     jmp .int_ret
 
 .int_from_int:
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov rax, rbx
     mov edx, TAG_PTR
     jmp .int_ret

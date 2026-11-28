@@ -163,7 +163,7 @@ END_FUNC list_iter_dealloc
 ;; tp_iter for iterators: return self with INCREF
 ;; ============================================================================
 DEF_FUNC_BARE iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC iter_self
@@ -289,7 +289,7 @@ DEF_FUNC range_new, RN_FRAME
     call ap_malloc
     mov rbx, rax
 
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel range_obj_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyRangeObject.wide], 0
@@ -332,7 +332,7 @@ DEF_FUNC range_new_v, RNV_FRAME
 
     mov edi, PyRangeObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_obj_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyRangeObject.vstart], rbx
@@ -471,7 +471,7 @@ END_FUNC range_iter_dealloc
 ;; Range iterator returns itself
 ;; ============================================================================
 DEF_FUNC_BARE range_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC range_iter_self
@@ -499,7 +499,7 @@ DEF_FUNC range_obj_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov edi, PyRangeIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_iter_type]
     mov [rax + PyObject.ob_type], rcx
 
@@ -538,7 +538,7 @@ DEF_FUNC range_longiter_new, RLN_FRAME
     call ap_malloc
     test rax, rax
     jz .rln_fail_len
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel longrange_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov rcx, [rbx + PyRangeObject.vstart]
@@ -953,7 +953,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     mov edi, PyRangeIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_iter_type]
     mov [rax + PyObject.ob_type], rcx
 
@@ -1017,7 +1017,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     call ap_malloc
     test rax, rax
     jz .rev_wide_fail
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel longrange_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov rcx, [rbp - RREV_CUR]
@@ -1063,7 +1063,7 @@ DEF_FUNC range_obj_reversed, RREV_FRAME
     ; Empty range: create iterator that's immediately exhausted
     mov edi, PyRangeIterObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel range_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyRangeIterObject.it_current], 0
@@ -2775,7 +2775,8 @@ range_obj_name: db "range", 0
 align 8
 global list_iter_type
 list_iter_type:
-    dq 1                    ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq list_iter_name       ; tp_name
     dq PyListIterObject_size ; tp_basicsize
@@ -2809,7 +2810,8 @@ list_iter_type:
 align 8
 global tuple_iter_type
 tuple_iter_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq tuple_iter_name
     dq PyTupleIterObject_size
@@ -2843,7 +2845,8 @@ tuple_iter_type:
 align 8
 global longrange_iter_type
 longrange_iter_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq longrange_iter_name
     dq PyLongRangeIterObject_size
@@ -2876,7 +2879,8 @@ longrange_iter_type:
 align 8
 global range_iter_type
 range_iter_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq range_iter_name
     dq PyRangeIterObject_size
@@ -2928,7 +2932,8 @@ range_obj_num_methods:
 
 align 8
 range_obj_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq range_obj_name           ; tp_name
     dq PyRangeObject_size       ; tp_basicsize

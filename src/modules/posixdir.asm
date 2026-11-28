@@ -106,15 +106,15 @@ DEF_FUNC direntry_new, DEN_FRAME
     test rax, rax
     jz .den_out
 
-    mov qword [rax + PyDirEntryObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel direntry_type]
     mov [rax + PyDirEntryObject.ob_type], rcx
     mov rcx, [rbp - DEN_NAME]
     mov [rax + PyDirEntryObject.de_name], rcx
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     mov rcx, [rbp - DEN_PATH]
     mov [rax + PyDirEntryObject.de_path], rcx
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     mov rcx, [rbp - DEN_TYPE]
     mov [rax + PyDirEntryObject.de_type], rcx
     mov rcx, [rbp - DEN_INO]
@@ -506,7 +506,7 @@ END_FUNC direntry_m_is_symlink
 ;; is_dir() on every entry it sees.
 DEF_FUNC direntry_m_is_junction
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 END_FUNC direntry_m_is_junction
@@ -525,7 +525,7 @@ END_FUNC direntry_m_inode
 DEF_FUNC direntry_m_fspath
     mov rdi, [rdi]
     mov rax, [rdi + PyDirEntryObject.de_path]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 END_FUNC direntry_m_fspath
@@ -582,7 +582,7 @@ DEF_FUNC direntry_getattr, 16           ; + 2 pushes = 32, 16-aligned
     test eax, eax
     jnz .dga_try_path
     mov rax, [rbx + PyDirEntryObject.de_name]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     jmp .dga_out
 
 .dga_try_path:
@@ -592,7 +592,7 @@ DEF_FUNC direntry_getattr, 16           ; + 2 pushes = 32, 16-aligned
     test eax, eax
     jnz .dga_methods
     mov rax, [rbx + PyDirEntryObject.de_path]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     jmp .dga_out
 
 .dga_methods:
@@ -653,7 +653,7 @@ DEF_FUNC_BARE scandir_iter_next
     jge .sin_done
     mov rdx, [rax + PyListObject.ob_item]
     mov rax, [rdx + rcx*8]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     inc qword [rdi + PyScandirIterObject.sd_index]
     ret
 .sin_done:
@@ -674,7 +674,7 @@ DEF_FUNC scandir_iter_m_close, 8            ; + 1 push = 16, 16-aligned
     call obj_decref
 .sic_out:
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop rbx
     leave
     ret
@@ -683,7 +683,7 @@ END_FUNC scandir_iter_m_close
 ;; scandir_iter_m_enter(rdi = args, rsi = nargs) -> Value (self)
 DEF_FUNC scandir_iter_m_enter
     mov rax, [rdi]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 END_FUNC scandir_iter_m_enter
@@ -944,7 +944,7 @@ DEF_FUNC posix_scandir, PSD_FRAME
     call ap_malloc
     test rax, rax
     jz .psd_fail
-    mov qword [rax + PyScandirIterObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel scandir_iter_type]
     mov [rax + PyScandirIterObject.ob_type], rcx
     mov rcx, [rbp - PSD_LIST]
@@ -1082,7 +1082,7 @@ DEF_FUNC posixdir_register, PDR_FRAME
 .pdr_no_dict:
 
     lea rax, [rel direntry_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov [rbp - PDR_ENT], rax
     lea rdi, [rel pd_n_DirEntry]
     call str_from_cstr_heap
@@ -1133,7 +1133,8 @@ extern iter_self
 
 align 8
 direntry_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq de_name_str              ; tp_name
     dq PyDirEntryObject_size    ; tp_basicsize
@@ -1165,7 +1166,8 @@ direntry_type:
 
 align 8
 scandir_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sd_name_str              ; tp_name
     dq PyScandirIterObject_size ; tp_basicsize

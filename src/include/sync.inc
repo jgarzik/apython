@@ -21,6 +21,23 @@
 %ifndef SYNC_INC
 %define SYNC_INC
 
+; Register-width helper: map a 64-bit GPR token to its 32-bit sub-register
+; via NASM token pasting (`_R32_%+%2`).
+%define _R32_rax eax
+%define _R32_rcx ecx
+%define _R32_rdx edx
+%define _R32_rbx ebx
+%define _R32_rsi esi
+%define _R32_rdi edi
+%define _R32_r8  r8d
+%define _R32_r9  r9d
+%define _R32_r10 r10d
+%define _R32_r11 r11d
+%define _R32_r12 r12d
+%define _R32_r13 r13d
+%define _R32_r14 r14d
+%define _R32_r15 r15d
+
 ; Linux futex ABI
 SYS_futex          equ 202
 FUTEX_WAIT_PRIVATE equ 128

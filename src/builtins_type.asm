@@ -330,7 +330,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
 .isinstance_false:
     call .isi_release_declared
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop r12
     pop rbx
     mov edx, TAG_PTR
@@ -341,7 +341,7 @@ DEF_FUNC builtin_isinstance, ISI_FRAME
 .isinstance_true:
     call .isi_release_declared
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop r12
     pop rbx
     mov edx, TAG_PTR
@@ -522,7 +522,7 @@ DEF_FUNC builtin_issubclass, ISC_FRAME
 
 .issubclass_false:
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop r13
     pop r12
     pop rbx
@@ -533,7 +533,7 @@ DEF_FUNC builtin_issubclass, ISC_FRAME
 
 .issubclass_true:
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop r13
     pop r12
     pop rbx

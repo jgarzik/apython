@@ -828,7 +828,7 @@ DEF_FUNC member_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov edi, PyMemberDescrObject_size
     call ap_malloc
 
-    mov qword [rax + PyMemberDescrObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel member_descr_type]
     mov [rax + PyMemberDescrObject.ob_type], rcx
     mov [rax + PyMemberDescrObject.md_offset], rbx
@@ -988,7 +988,7 @@ DEF_FUNC mappingproxy_new, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi                    ; the dict
     mov edi, PyMappingProxyObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel mappingproxy_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyMappingProxyObject.mp_mapping], rbx
@@ -1124,7 +1124,7 @@ DEF_FUNC getset_descr_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov r13, rdx
     mov edi, PyGetSetDescrObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel getset_descr_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyGetSetDescrObject.gs_get], rbx
@@ -2421,7 +2421,8 @@ section .data
 align 8
 global staticmethod_type
 staticmethod_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq sm_name_str              ; tp_name
     dq PyStaticMethodObject_size ; tp_basicsize
@@ -2455,7 +2456,8 @@ staticmethod_type:
 align 8
 global classmethod_type
 classmethod_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq cm_name_str              ; tp_name
     dq PyClassMethodObject_size ; tp_basicsize
@@ -2489,7 +2491,8 @@ classmethod_type:
 align 8
 global property_type
 property_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq prop_name_str            ; tp_name
     dq PyPropertyObject_size    ; tp_basicsize
@@ -2524,7 +2527,8 @@ md_name_str: db "member_descriptor", 0
 align 8
 global member_descr_type
 member_descr_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq md_name_str                  ; tp_name
     dq PyMemberDescrObject_size     ; tp_basicsize
@@ -2560,7 +2564,8 @@ u_name_str: db "types.UnionType", 0
 align 8
 global union_type
 union_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq u_name_str                   ; tp_name
     dq PyGenericAliasObject_size    ; tp_basicsize
@@ -2627,7 +2632,8 @@ gsd_name_str: db "getset_descriptor", 0
 align 8
 global getset_descr_type
 getset_descr_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq gsd_name_str                 ; tp_name
     dq PyGetSetDescrObject_size     ; tp_basicsize
@@ -2663,7 +2669,8 @@ mp_name_str: db "mappingproxy", 0
 align 8
 global mappingproxy_type
 mappingproxy_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq mp_name_str                  ; tp_name
     dq PyMappingProxyObject_size    ; tp_basicsize

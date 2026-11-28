@@ -102,7 +102,7 @@ DEF_FUNC exc_new, EN_FRAME
     ; sixty-nine builtin ones and false of every class a program writes.  An
     ; uncounted one is freed by the collector out from under live instances,
     ; because a class's only cycle is with its own MRO tuple.
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov [rax + PyExceptionObject.exc_type], rbx
     mov [rax + PyExceptionObject.exc_value], r12
     mov qword [rax + PyExceptionObject.exc_tb], 0
@@ -2782,7 +2782,8 @@ exc_name_EncodingWarning:   db "EncodingWarning", 0
 align 8
 global exc_metatype
 exc_metatype:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq exc_meta_name        ; tp_name
     dq TYPE_OBJECT_SIZE     ; tp_basicsize (PyTypeObject size)
@@ -2841,7 +2842,8 @@ exc_new_name:  db "__new__", 0
 align 8
 global %1
 %1:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq exc_metatype         ; ob_type (metatype with tp_call)
     dq %2                   ; tp_name
     %if %4

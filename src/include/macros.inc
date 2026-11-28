@@ -37,8 +37,9 @@
 %ifndef MACROS_INC
 %define MACROS_INC
 
-%include "value.inc"
 %include "threadstate.inc"
+%include "sync.inc"
+%include "value.inc"
 
 ; Standard global function with RBP frame
 %macro DEF_FUNC 1
@@ -89,36 +90,135 @@
     section .text
 %endmacro
 
-; Reference counting (heap pointers only — callers must not pass SmallInts).
-; INCREF checks nothing: hand it an immediate int or a NULL and it writes
-; through a non-pointer.  Use INCREF_V for a Value whose kind is not
-; established, or obj_incref, which at least checks for NULL.
-%macro INCREF 1
-    inc qword [%1 + PyObject.ob_refcnt]
+; Initialize biased RC + mutex fields on a newly allocated heap PyObject*.
+; Sets ob_ref_local = 1, ob_ref_shared = 0, ob_tid = [gs:ts_tid], ob_mutex = 0.
+; Preserves ALL registers (flags untouched; no caller-saved clobber).
+%macro INIT_OBJ_RC 1            ; %1 = reg holding PyObject*
+    mov qword [%1 + PyObject.ob_ref_local], 1   ; ob_ref_local=1, ob_ref_shared=0
+%ifidni %1, rax
+    push rcx
+    mov ecx, [gs:ThreadState.ts_tid]            ; zero-extends -> ob_mutex=0
+    mov [%1 + PyObject.ob_tid], rcx
+    pop rcx
+%else
+    push rax
+    mov eax, [gs:ThreadState.ts_tid]            ; zero-extends -> ob_mutex=0
+    mov [%1 + PyObject.ob_tid], rax
+    pop rax
+%endif
 %endmacro
 
-%macro DECREF 1
-    dec qword [%1 + PyObject.ob_refcnt]
+; Biased reference counting (heap pointers only — callers must not pass SmallInts).
+; INCREF_OBJ reg, scratch: owner-local plain inc, immortal (ob_tid==0) no-op,
+; remote inline `lock add ob_ref_shared, REF_SHARED_ONE`.
+%macro INCREF_OBJ 2             ; %1 = PyObject* reg, %2 = scratch 64-bit reg
+    mov _R32_%+%2, [%1 + PyObject.ob_tid]
+    cmp _R32_%+%2, [gs:ThreadState.ts_tid]
+    jne %%nonlocal
+    inc dword [%1 + PyObject.ob_ref_local]
+    jmp %%done
+%%nonlocal:
+    test _R32_%+%2, _R32_%+%2
+    jz %%done
+    lock add dword [%1 + PyObject.ob_ref_shared], REF_SHARED_ONE
+%%done:
+%endmacro
+
+%macro INCREF 1                 ; %1 = PyObject* reg (preserves all GPRs)
+%ifidni %1, rax
+    push rcx
+    INCREF_OBJ %1, rcx
+    pop rcx
+%else
+    push rax
+    INCREF_OBJ %1, rax
+    pop rax
+%endif
+%endmacro
+
+; Internal helper for DECREF / DECREF_REG / DECREF_VAL / XDECREF_VAL.
+; %1 = PyObject* reg, %2 = 1 to preserve rdi across slow-path calls (0 otherwise).
+; Preserves ALL GPRs on the owner non-zero and immortal fast paths, and keeps
+; rsp 16-byte aligned across slow-path calls.
+%macro _DECREF_PTR_FAST 2
+%ifidni %1, rax
+    push rcx
+    mov ecx, [%1 + PyObject.ob_tid]
+    cmp ecx, [gs:ThreadState.ts_tid]
+    jne %%nonlocal
+    pop rcx
+    dec dword [%1 + PyObject.ob_ref_local]
     jnz %%skip
+%if %2
+    push rdi
+    push rdi
+%endif
+    mov rdi, %1
+    extern obj_decref_local_zero
+    call obj_decref_local_zero
+%if %2
+    pop rdi
+    pop rdi
+%endif
+    jmp %%skip
+%%nonlocal:
+    test ecx, ecx
+    pop rcx
+    jz %%skip
+    push rdi
+    push rdi
+    mov rdi, %1
+    extern obj_decref_shared_p
+    call obj_decref_shared_p
+    pop rdi
+    pop rdi
+%%skip:
+%else
+    push rax
+    mov eax, [%1 + PyObject.ob_tid]
+    cmp eax, [gs:ThreadState.ts_tid]
+    jne %%nonlocal
+    pop rax
+    dec dword [%1 + PyObject.ob_ref_local]
+    jnz %%skip
+%if %2
+    push rdi
+    push rdi
+%endif
+%ifnidni %1, rdi
+    mov rdi, %1
+%endif
+    extern obj_decref_local_zero
+    call obj_decref_local_zero
+%if %2
+    pop rdi
+    pop rdi
+%endif
+    jmp %%skip
+%%nonlocal:
+    test eax, eax
+    pop rax
+    jz %%skip
+    push rdi
     push rdi
 %ifnidni %1, rdi
     mov rdi, %1
 %endif
-    call obj_dealloc
+    extern obj_decref_shared_p
+    call obj_decref_shared_p
     pop rdi
-    %%skip:
+    pop rdi
+%%skip:
+%endif
 %endmacro
 
-; DECREF for a register operand.  Always clobbers rdi, and the zero path calls
-; obj_dealloc, so every caller-saved register dies there.
+%macro DECREF 1                 ; %1 = PyObject* reg (preserves all GPRs on fast path; preserves rdi on slow path)
+    _DECREF_PTR_FAST %1, 1
+%endmacro
+
+; DECREF for a register operand.  Preserves all GPRs on fast path; clobbers rdi and caller-saved regs on zero.
 %macro DECREF_REG 1
-    dec qword [%1 + PyObject.ob_refcnt]
-    jnz %%skip
-%ifnidni %1, rdi
-    mov rdi, %1
-%endif
-    call obj_dealloc
-    %%skip:
+    _DECREF_PTR_FAST %1, 0
 %endmacro
 
 ; Opcode dispatch - inline decode + jump (direct threading)
@@ -668,15 +768,13 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     add r13, 8
 %endmacro
 
-; Push the None singleton (owned).  No scratch needed: the binary is linked
-; -no-pie, so the address fits an imm32.
+; Push the None singleton (immortal: no refcount write).
 %macro VPUSH_NONE 0
     mov qword [r13], none_singleton
-    inc qword [rel none_singleton]      ; ob_refcnt is at offset 0
     add r13, 8
 %endmacro
 
-; Push True/False (owned) from a 0/1 value.  Clobbers %1.
+; Push True/False (immortal: no refcount write) from a 0/1 value.  Clobbers %1.
 %macro VPUSH_BOOL 1             ; %1 = 0 (False) or 1 (True)
     test %1, %1
     jz %%false
@@ -685,7 +783,6 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 %%false:
     lea %1, [rel bool_false]
 %%store:
-    inc qword [%1 + PyObject.ob_refcnt]
     mov [r13], %1
     add r13, 8
 %endmacro
@@ -722,28 +819,24 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 ; these symbols and must not also extern them).
 ; ==========================================================================
 
-; Fat return of None: (rax = none_singleton, edx = TAG_PTR).  Clobbers rax.
+; Fat return of None (immortal).  Clobbers rax.
 %macro RET_NONE 0
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
 %endmacro
 
-; Fat return of a constant bool.  110 sites open-coded one of these three
-; three-line sequences; RET_NONE already existed, its bool siblings did not.
+; Fat return of a constant bool (immortal).
 %macro RET_TRUE 0
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
 %endmacro
 
 %macro RET_FALSE 0
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
 %endmacro
 
-; Fat return of a bool from a 0/1 value already in rax.  Clobbers rax, rdx.
+; Fat return of a bool from a 0/1 value already in rax (immortal).
 %macro RET_BOOL_RAX 0
     lea rdx, [rel bool_false]
     test rax, rax
@@ -751,7 +844,6 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     lea rdx, [rel bool_true]
 %%false:
     mov rax, rdx
-    inc qword [rax + PyObject.ob_refcnt]
     mov edx, TAG_PTR
 %endmacro
 
@@ -761,10 +853,9 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     cmp %1, %2
 %endmacro
 
-; Load the None singleton (owned) into a register.  Clobbers only %1.
+; Load the None singleton (immortal) into a register.  Clobbers only %1.
 %macro LOAD_NONE 1              ; %1 = dest
     lea %1, [rel none_singleton]
-    inc qword [%1 + PyObject.ob_refcnt]
 %endmacro
 
 ; --- legacy (payload, tag) refcounting and returns ------------------------
@@ -774,22 +865,17 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 %macro INCREF_VAL 2             ; %1 = payload, %2 = tag reg
     test %2, TAG_RC_BIT
     jz %%skip
-    inc qword [%1 + PyObject.ob_refcnt]
-    %%skip:
+    INCREF %1
+%%skip:
 %endmacro
 
-; DECREF a fat value.  Clobbers rdi and all caller-saved regs when the
-; object is freed.
+; DECREF a fat value.  Preserves all GPRs on fast path; clobbers rdi and
+; caller-saved regs when the object is freed.
 %macro DECREF_VAL 2             ; %1 = payload, %2 = tag reg
     test %2, TAG_RC_BIT
     jz %%skip
-    dec qword [%1 + PyObject.ob_refcnt]
-    jnz %%skip
-%ifnidni %1, rdi
-    mov rdi, %1
-%endif
-    call obj_dealloc
-    %%skip:
+    _DECREF_PTR_FAST %1, 0
+%%skip:
 %endmacro
 
 ; NULL-safe DECREF_VAL.
@@ -798,13 +884,8 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
     jz %%skip
     test %1, %1
     jz %%skip
-    dec qword [%1 + PyObject.ob_refcnt]
-    jnz %%skip
-%ifnidni %1, rdi
-    mov rdi, %1
-%endif
-    call obj_dealloc
-    %%skip:
+    _DECREF_PTR_FAST %1, 0
+%%skip:
 %endmacro
 
 ; Fat return of NULL/error: (rax = 0, edx = TAG_NULL = 0).
@@ -848,7 +929,6 @@ TAG_IO_WAIT  equ 8           ; payload = fd | (direction << 32) — async I/O se
 %macro FRAME_PUSH_NONE 2
     mov %2, [%1 + PyFrame.stack_ptr]
     mov qword [%2], none_singleton
-    inc qword [rel none_singleton]      ; ob_refcnt is at offset 0
     add %2, 8
     mov [%1 + PyFrame.stack_ptr], %2
 %endmacro
@@ -1328,7 +1408,6 @@ ASM_INIT
     test %1, %1
     lea %1, [rel bool_false]
     cmovnz %1, %2
-    inc qword [%1 + PyObject.ob_refcnt]
     sub r13, 8
     mov [r13 - 8], %1
 %endmacro
@@ -1378,7 +1457,13 @@ ASM_INIT
     mov r10, [r12 + PyFrame.localsplus + r11*8]
     cmp %1, r10
     jne %2
-    cmp qword [%1 + PyObject.ob_refcnt], 2
+    ; Provably exclusive uniqueness: owned by this thread, local==2, shared==0.
+    mov r10d, [%1 + PyObject.ob_tid]
+    cmp r10d, [gs:ThreadState.ts_tid]
+    jne %2
+    cmp dword [%1 + PyObject.ob_ref_local], 2
+    jne %2
+    cmp dword [%1 + PyObject.ob_ref_shared], 0
     jne %2
     cmp qword [%1 + PyStrObject.ob_hash], -1
     jne %2

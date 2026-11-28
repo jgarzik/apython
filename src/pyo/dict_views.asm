@@ -287,7 +287,7 @@ DEF_FUNC dict_view_repr, DVR_FRAME
     add rdi, PyStrObject.data + 10      ; two brackets, a NUL and slack
     extern ap_malloc
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -739,7 +739,7 @@ DEF_FUNC_LOCAL dict_view_richcompare, DVC_FRAME
 .dvc_false:
     lea rax, [rel bool_false]
 .dvc_answer:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .dvc_fail:
@@ -954,8 +954,7 @@ DEF_FUNC dict_view_isdisjoint, DVJ_FRAME
     call call_iternext
     test rax, rax
     jz .dvj_exhausted
-    V_PACK rax, rdx
-    mov rbx, rax                        ; the item, ours
+    mov rbx, rax                        ; the item Value, ours
 
     ; sq_contains on the view's own type, which is what `x in view` calls.
     mov rdi, [rbp - DVJ_SELF]
@@ -1041,7 +1040,8 @@ section .data
 align 8
 global dict_keys_view_type
 dict_keys_view_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_keys_view_name      ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
@@ -1075,7 +1075,8 @@ dict_keys_view_type:
 align 8
 global dict_values_view_type
 dict_values_view_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_values_view_name    ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize
@@ -1109,7 +1110,8 @@ dict_values_view_type:
 align 8
 global dict_items_view_type
 dict_items_view_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_items_view_name     ; tp_name
     dq PyDictViewObject_size    ; tp_basicsize

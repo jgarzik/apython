@@ -39,7 +39,7 @@ DEF_FUNC fileobj_new, 8            ; 3 pushes, so rsp is 16-aligned
     push rdi                    ; save obj
 
     ; Fill header
-    mov qword [rdi + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rdi
     lea rax, [rel file_type]
     mov [rdi + PyObject.ob_type], rax
     mov [rdi + PyFileObject.file_fd], rbx
@@ -122,7 +122,7 @@ DEF_FUNC_LOCAL fileobj_repr
     mov rax, [rdi + PyFileObject.file_name]
     test rax, rax
     jz .fallback
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .fallback:
@@ -603,7 +603,7 @@ END_FUNC fileobj_seekable
 ;; ============================================================================
 DEF_FUNC fileobj_enter
     mov rax, [rdi]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -882,7 +882,7 @@ DEF_FUNC fileobj_writelines, FWL_FRAME
     cmp qword [gs:ThreadState.current_exception], 0
     jne .fwl_raised
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -1333,7 +1333,7 @@ DEF_FUNC fileobj_getattr
 
 .ret_name:
     mov rax, [rbx + PyFileObject.file_name]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1343,7 +1343,7 @@ DEF_FUNC fileobj_getattr
 
 .ret_mode:
     mov rax, [rbx + PyFileObject.file_mode]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1424,7 +1424,8 @@ section .data
 align 8
 global file_type
 file_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq fileobj_type_name        ; tp_name
     dq PyFileObject_size        ; tp_basicsize

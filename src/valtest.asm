@@ -218,13 +218,16 @@ DEF_FUNC value_selftest, 8            ; 5 pushes, so rsp is 16-aligned
 
     ; A real object: INCREF_V / DECREF_V must move its refcount by one.
     lea rbx, [rel probe_obj]
-    mov qword [rbx + PyObject.ob_refcnt], 7
+    mov dword [rbx + PyObject.ob_ref_local], 7
+    mov dword [rbx + PyObject.ob_ref_shared], 0
+    mov eax, [gs:ThreadState.ts_tid]
+    mov [rbx + PyObject.ob_tid], eax
     INCREF_V rbx, rcx
-    cmp qword [rbx + PyObject.ob_refcnt], 8
+    cmp dword [rbx + PyObject.ob_ref_local], 8
     jne .ptr_fail
     inc r12
     DECREF_V rbx, rcx
-    cmp qword [rbx + PyObject.ob_refcnt], 7
+    cmp dword [rbx + PyObject.ob_ref_local], 7
     jne .ptr_fail
     inc r12
 
@@ -594,5 +597,5 @@ END_FUNC value_selftest_main
 section .data
 align 16
 probe_obj:
-    dq 1            ; ob_refcnt
+    dd 1, 0, 1, 0   ; ob_ref_local=1, ob_ref_shared=0, ob_tid=1, ob_mutex=0
     dq 0            ; ob_type

@@ -2,6 +2,7 @@
 ; Biased Reference Counting (BRC) thread registry and merge queue.
 
 %include "macros.inc"
+%include "object.inc"
 %include "threadstate.inc"
 %include "gil.inc"
 %include "sync.inc"
@@ -13,6 +14,7 @@ extern malloc
 extern realloc
 extern free
 extern fatal_error
+extern obj_dealloc
 
 section .data
 align 64
@@ -39,6 +41,8 @@ align 64
 ;   +16..63 padding
 global brc_buckets
 brc_buckets:    resb (BRC_NBUCKETS * BRC_BUCKET_STRIDE)
+align 64
+brc_pending_total: resq 1
 
 section .text
 
@@ -410,6 +414,7 @@ DEF_FUNC brc_enqueue, BE_FRAME
     mov rdx, [rbp - BE_OBJ]
     mov [rax + rcx*8], rdx
     inc qword [rbx + ThreadState.ts_brc_len]
+    lock inc qword [rel brc_pending_total]
     lock or qword [rel eval_breaker], EB_BRC_MERGE
 
     mov rdi, r12
@@ -464,6 +469,17 @@ DEF_FUNC brc_take_queue
     mov rbx, rax
     mov rdi, r12
     call rt_mutex_unlock
+    mov rdx, [r13]
+    neg rdx
+    mov rax, rdx
+    lock xadd [rel brc_pending_total], rax
+    add rax, rdx
+    jnz .btq_ret
+    lock and qword [rel eval_breaker], ~EB_BRC_MERGE
+    cmp qword [rel brc_pending_total], 0
+    je .btq_ret
+    lock or qword [rel eval_breaker], EB_BRC_MERGE
+.btq_ret:
     mov rax, rbx
     add rsp, 8
     pop r13
@@ -499,6 +515,15 @@ DEF_FUNC brc_reset_after_fork
     mov ecx, (BRC_NBUCKETS * BRC_BUCKET_STRIDE) / 8
     rep stosq
     mov qword [rbx + ThreadState.ts_brc_hash_next], 0
+    mov qword [rel brc_pending_total], 0
+    mov rax, [rbx + ThreadState.ts_brc_len]
+    test rax, rax
+    jz .braf_clear_eb
+    mov [rel brc_pending_total], rax
+    jmp .braf_reg
+.braf_clear_eb:
+    lock and qword [rel eval_breaker], ~EB_BRC_MERGE
+.braf_reg:
     mov byte [rel rt_threaded], 0
     mov rdi, rbx
     call brc_register_thread
@@ -507,3 +532,337 @@ DEF_FUNC brc_reset_after_fork
     leave
     ret
 END_FUNC brc_reset_after_fork
+
+;; ============================================================================
+;; obj_decref_local_zero(rdi = PyObject *obj) -> nothing
+;;
+;; Owner thread just decremented ob_ref_local to 0.  In single-threaded mode
+;; (rt_threaded == 0) with ob_ref_shared == 0, deallocate immediately with no
+;; locked instruction.  In concurrent mode, atomically transition ob_ref_shared
+;; to REF_MERGED and ob_tid to REF_TID_MERGED so a racing weakref try-incref
+;; cannot resurrect the dying object.
+;; ============================================================================
+global obj_decref_local_zero
+DEF_FUNC_BARE obj_decref_local_zero
+    cmp byte [rel rt_threaded], 0
+    jne .odlz_conc
+    cmp dword [rdi + PyObject.ob_ref_shared], 0
+    je obj_dealloc
+.odlz_conc:
+    mov eax, [rdi + PyObject.ob_ref_shared]
+.odlz_cas:
+    mov edx, eax
+    or edx, REF_MERGED_BIT
+    lock cmpxchg [rdi + PyObject.ob_ref_shared], edx
+    jne .odlz_cas
+    mov dword [rdi + PyObject.ob_tid], REF_TID_MERGED
+    cmp edx, REF_MERGED_BIT
+    je obj_dealloc
+    ret
+END_FUNC obj_decref_local_zero
+
+;; ============================================================================
+;; obj_decref_shared(rdi = PyObject *obj) -> nothing
+;;
+;; Non-owner or merged-object decrement on ob_ref_shared.  If a non-merged
+;; object's shared count drops below zero, sets REF_QUEUED_BIT and enqueues
+;; it onto the owner's BRC merge queue (or merges directly if the owner exited).
+;; ============================================================================
+global obj_decref_shared
+DEF_FUNC obj_decref_shared, 8           ; + 1 push (rbx) = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov eax, [rbx + PyObject.ob_ref_shared]
+.ods_cas:
+    test eax, REF_MERGED_BIT
+    jnz .ods_merged
+    mov edx, eax
+    sub edx, REF_SHARED_ONE
+    test edx, edx
+    jns .ods_store
+    test eax, REF_QUEUED_BIT
+    jnz .ods_store
+    or edx, REF_QUEUED_BIT
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .ods_cas
+    mov edi, [rbx + PyObject.ob_tid]
+    mov rsi, rbx
+    call brc_enqueue
+    test eax, eax
+    jnz .ods_done
+    mov r8d, [rbx + PyObject.ob_ref_local]
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    shl r8d, REF_SHARED_SHIFT
+    mov eax, [rbx + PyObject.ob_ref_shared]
+.ods_orphan_cas:
+    mov edx, eax
+    add edx, r8d
+    and edx, ~REF_QUEUED_BIT
+    or edx, REF_MERGED_BIT
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .ods_orphan_cas
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
+    cmp edx, REF_MERGED_BIT
+    jne .ods_done
+    mov rdi, rbx
+    pop rbx
+    leave
+    jmp obj_dealloc
+.ods_store:
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .ods_cas
+.ods_done:
+    pop rbx
+    leave
+    ret
+.ods_merged:
+    mov edx, eax
+    sub edx, REF_SHARED_ONE
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .ods_cas
+    cmp edx, REF_MERGED_BIT
+    jne .ods_done
+    mov rdi, rbx
+    pop rbx
+    leave
+    jmp obj_dealloc
+END_FUNC obj_decref_shared
+
+;; ============================================================================
+;; obj_decref_shared_p(rdi = PyObject *obj) -> nothing
+;;
+;; Register-preserving wrapper around obj_decref_shared for DECREF_V's cold
+;; non-local path.
+;; ============================================================================
+global obj_decref_shared_p
+DEF_FUNC_BARE obj_decref_shared_p
+    push rax
+    push rcx
+    push rdx
+    push rsi
+    push r8
+    push r9
+    push r10
+    push r11
+    sub rsp, 8
+    call obj_decref_shared
+    add rsp, 8
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rax
+    ret
+END_FUNC obj_decref_shared_p
+
+;; ============================================================================
+;; obj_decref_no_dealloc(rdi = PyObject *obj) -> eax = 1 if still alive (>0),
+;;   0 if total refcount reached 0 (does NOT call obj_dealloc)
+;; ============================================================================
+global obj_decref_no_dealloc
+DEF_FUNC obj_decref_no_dealloc, 8       ; + 1 push (rbx) = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    mov eax, [rbx + PyObject.ob_tid]
+    test eax, eax
+    jz .odnd_alive
+    cmp eax, [gs:ThreadState.ts_tid]
+    jne .odnd_nonlocal
+    dec dword [rbx + PyObject.ob_ref_local]
+    jnz .odnd_alive
+    mov eax, [rbx + PyObject.ob_ref_shared]
+.odnd_lcas:
+    mov edx, eax
+    or edx, REF_MERGED_BIT
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .odnd_lcas
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
+    cmp edx, REF_MERGED_BIT
+    je .odnd_dead
+.odnd_alive:
+    mov eax, 1
+    pop rbx
+    leave
+    ret
+.odnd_dead:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+.odnd_nonlocal:
+    mov eax, [rbx + PyObject.ob_ref_shared]
+.odnd_scas:
+    test eax, REF_MERGED_BIT
+    jnz .odnd_smerged
+    mov edx, eax
+    sub edx, REF_SHARED_ONE
+    test edx, edx
+    jns .odnd_sstore
+    test eax, REF_QUEUED_BIT
+    jnz .odnd_sstore
+    or edx, REF_QUEUED_BIT
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .odnd_scas
+    mov edi, [rbx + PyObject.ob_tid]
+    mov rsi, rbx
+    call brc_enqueue
+    test eax, eax
+    jnz .odnd_alive
+    mov r8d, [rbx + PyObject.ob_ref_local]
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    shl r8d, REF_SHARED_SHIFT
+    mov eax, [rbx + PyObject.ob_ref_shared]
+.odnd_ocas:
+    mov edx, eax
+    add edx, r8d
+    and edx, ~REF_QUEUED_BIT
+    or edx, REF_MERGED_BIT
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .odnd_ocas
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
+    cmp edx, REF_MERGED_BIT
+    je .odnd_dead
+    jmp .odnd_alive
+.odnd_sstore:
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .odnd_scas
+    jmp .odnd_alive
+.odnd_smerged:
+    mov edx, eax
+    sub edx, REF_SHARED_ONE
+    lock cmpxchg [rbx + PyObject.ob_ref_shared], edx
+    jne .odnd_scas
+    cmp edx, REF_MERGED_BIT
+    je .odnd_dead
+    jmp .odnd_alive
+END_FUNC obj_decref_no_dealloc
+
+;; ============================================================================
+;; obj_try_incref(rdi = PyObject *obj) -> eax = 1 if incremented, 0 if dying
+;; ============================================================================
+global obj_try_incref
+DEF_FUNC_BARE obj_try_incref
+    mov eax, [rdi + PyObject.ob_tid]
+    test eax, eax
+    jz .oti_ok
+    cmp eax, [gs:ThreadState.ts_tid]
+    jne .oti_shared
+    cmp dword [rdi + PyObject.ob_ref_local], 0
+    je .oti_dead
+    inc dword [rdi + PyObject.ob_ref_local]
+.oti_ok:
+    mov eax, 1
+    ret
+.oti_shared:
+    mov eax, [rdi + PyObject.ob_ref_shared]
+.oti_cas:
+    test eax, REF_MERGED_BIT
+    jz .oti_add
+    mov edx, eax
+    sar edx, REF_SHARED_SHIFT
+    test edx, edx
+    jle .oti_dead
+.oti_add:
+    lea edx, [eax + REF_SHARED_ONE]
+    lock cmpxchg [rdi + PyObject.ob_ref_shared], edx
+    jne .oti_cas
+    mov eax, 1
+    ret
+.oti_dead:
+    xor eax, eax
+    ret
+END_FUNC obj_try_incref
+
+;; ============================================================================
+;; obj_get_refcount(rdi = PyObject *obj) -> rax = total refcount
+;; ============================================================================
+global obj_get_refcount
+DEF_FUNC_BARE obj_get_refcount
+    mov ecx, [rdi + PyObject.ob_tid]
+    test ecx, ecx
+    jz .ogr_immortal
+    mov eax, [rdi + PyObject.ob_ref_shared]
+    sar eax, REF_SHARED_SHIFT
+    movsxd rax, eax
+    cmp ecx, REF_TID_MERGED
+    je .ogr_done
+    mov edx, [rdi + PyObject.ob_ref_local]
+    add rax, rdx
+.ogr_done:
+    ret
+.ogr_immortal:
+    mov eax, 0xFFFFFFFF
+    ret
+END_FUNC obj_get_refcount
+
+;; ============================================================================
+;; obj_addref_bulk(rdi = PyObject *obj, rsi = uint64_t count) -> nothing
+;; ============================================================================
+global obj_addref_bulk
+DEF_FUNC_BARE obj_addref_bulk
+    mov eax, [rdi + PyObject.ob_tid]
+    cmp eax, [gs:ThreadState.ts_tid]
+    jne .oab_nonlocal
+    add dword [rdi + PyObject.ob_ref_local], esi
+    ret
+.oab_nonlocal:
+    test eax, eax
+    jz .oab_done
+    mov ecx, esi
+    shl ecx, REF_SHARED_SHIFT
+    lock add dword [rdi + PyObject.ob_ref_shared], ecx
+.oab_done:
+    ret
+END_FUNC obj_addref_bulk
+
+;; ============================================================================
+;; brc_drain_thread(rdi = ThreadState *ts) -> nothing
+;; ============================================================================
+BDT_LEN   equ 8
+BDT_FRAME equ 24                        ; + 3 pushes = 48, 16-aligned
+global brc_drain_thread
+DEF_FUNC brc_drain_thread, BDT_FRAME
+    push rbx
+    push r12
+    push r13
+    lea rsi, [rbp - BDT_LEN]
+    call brc_take_queue
+    test rax, rax
+    jz .bdt_done
+    mov rbx, rax
+    mov r12, [rbp - BDT_LEN]
+    xor r13d, r13d
+.bdt_loop:
+    cmp r13, r12
+    jae .bdt_free
+    mov rdi, [rbx + r13*8]
+    inc r13
+    mov r8d, [rdi + PyObject.ob_ref_local]
+    mov dword [rdi + PyObject.ob_ref_local], 0
+    shl r8d, REF_SHARED_SHIFT
+    mov eax, [rdi + PyObject.ob_ref_shared]
+.bdt_cas:
+    mov edx, eax
+    add edx, r8d
+    and edx, ~REF_QUEUED_BIT
+    or edx, REF_MERGED_BIT
+    lock cmpxchg [rdi + PyObject.ob_ref_shared], edx
+    jne .bdt_cas
+    mov dword [rdi + PyObject.ob_tid], REF_TID_MERGED
+    cmp edx, REF_MERGED_BIT
+    jne .bdt_loop
+    call obj_dealloc
+    jmp .bdt_loop
+.bdt_free:
+    mov rdi, rbx
+    call free wrt ..plt
+.bdt_done:
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC brc_drain_thread

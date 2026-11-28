@@ -398,7 +398,7 @@ DEF_FUNC eval_breaker_slow
     call gil_yield
 .ebs_signals:
     test qword [rel eval_breaker], EB_SIGNAL
-    jz .ebs_none
+    jz .ebs_brc
     mov rax, [gs:ThreadState.ts_self]
     cmp rax, [rel tstate_main_ptr]
     jne .ebs_not_main
@@ -406,6 +406,16 @@ DEF_FUNC eval_breaker_slow
     jmp signal_run_pending
 .ebs_not_main:
     call gil_yield
+.ebs_brc:
+    ; Drain BRC only after signals (a __del__ triggered by draining must not
+    ; swallow a pending signal exception destined for the interrupted frame).
+    test qword [rel eval_breaker], EB_BRC_MERGE
+    jz .ebs_none
+    mov rdi, [gs:ThreadState.ts_self]
+    cmp qword [rdi + ThreadState.ts_brc_len], 0
+    je .ebs_none
+    extern brc_drain_thread
+    call brc_drain_thread
 .ebs_none:
     xor eax, eax
     leave

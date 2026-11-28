@@ -1629,6 +1629,10 @@ DEF_FUNC tstate_install
     test rax, rax
     jnz .ti_failed
     mov [gs:ThreadState.ts_self], rdi
+    cmp dword [gs:ThreadState.ts_tid], 0
+    jne .ti_have_tid
+    mov dword [gs:ThreadState.ts_tid], 1
+.ti_have_tid:
     call tstate_stack_floor
     leave
     ret

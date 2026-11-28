@@ -86,7 +86,7 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
     mov rbx, rdi
 
     ; Temporarily bump refcount to prevent re-entrant dealloc during __del__
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
 
     ; Call __del__(self) — dunder_call_1 handles lookup + call
     extern dunder_del
@@ -145,10 +145,9 @@ DEF_FUNC obj_call_finalizer, OCF_FRAME
 
     ; Undo the bump, without deallocating: whether anything is left is the
     ; answer this function gives.
-    dec qword [rbx + PyObject.ob_refcnt]
-    xor eax, eax
-    cmp qword [rbx + PyObject.ob_refcnt], 0
-    setne al
+    mov rdi, rbx
+    extern obj_decref_no_dealloc
+    call obj_decref_no_dealloc
 
     pop rbx
     leave
@@ -1160,14 +1159,14 @@ DEF_FUNC type_call
 .type_of_is_type:
     lea rax, [rel type_type]
 .type_of_have_type:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
     ret
 .type_smallint:
     lea rax, [rel int_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1175,7 +1174,7 @@ DEF_FUNC type_call
 .type_float:
     extern float_type
     lea rax, [rel float_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1293,7 +1292,7 @@ DEF_FUNC type_call
 .type_bool:
     extern bool_type
     lea rax, [rel bool_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -1301,7 +1300,7 @@ DEF_FUNC type_call
 .type_none:
     extern none_type
     lea rax, [rel none_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; tp_call returns one Value
@@ -2314,7 +2313,8 @@ user_type_name_str: db "type", 0
 align 8
 global user_type_metatype
 user_type_metatype:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq user_type_metatype       ; ob_type (self-referential)
     dq user_type_name_str       ; tp_name
     dq TYPE_OBJECT_SIZE         ; tp_basicsize
@@ -2355,7 +2355,8 @@ extern object_hash
 
 global object_type
 object_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq object_name_str          ; tp_name
     ; object() has no __dict__, so its instances are the bare header.  This

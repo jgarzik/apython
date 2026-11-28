@@ -107,7 +107,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     pop rdi                            ; source
 
     ; Init header
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
@@ -166,7 +166,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov edi, PyMemoryViewObject_size
     call ap_malloc
     pop rdi
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
@@ -174,7 +174,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
     jz .mv_view_no_src
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     push rax
     push rdi
     mov rdi, rcx
@@ -256,7 +256,7 @@ DEF_FUNC memoryview_type_call, MV_FRAME
     mov edi, PyMemoryViewObject_size
     call ap_malloc
     mov rdi, [rbp - MV_ARG]
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
@@ -1025,7 +1025,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
 .mvg_true:
     lea rax, [rel bool_true]
 .mvg_bool_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1039,7 +1039,7 @@ DEF_FUNC memoryview_getattr, MVG_FRAME
     mov rax, [rdi + PyMemoryViewObject.mv_source]
     test rax, rax
     jz .mvg_none
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1292,7 +1292,7 @@ DEF_FUNC memoryview_method_enter, MVM_FRAME
     jz .mve_argerr
     mov rax, [rdi]
     MV_LIVE_OR rax, .mve_released
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1389,7 +1389,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     call ap_malloc
     test rax, rax
     jz .mvc_badlen
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
@@ -1398,7 +1398,7 @@ DEF_FUNC memoryview_method_cast, MVC_FRAME
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
     jz .mvc_no_src
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     ; cast() is the fourth place a view takes a share of another's source, and
     ; release and dealloc decrement for every view that has one -- so without
     ; the matching acquire this view's release drove a BytesIO's export count
@@ -1519,12 +1519,12 @@ DEF_FUNC memoryview_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     MV_LIVE_OR rbx, .mvi_released
     mov edi, PyBytesIterObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyBytesIterObject.it_seq], rbx
     mov qword [rax + PyBytesIterObject.it_index], 0
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     pop rbx
     leave
     ret
@@ -1723,7 +1723,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     test rax, rax
     jz .ms_fail
 
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
@@ -1759,7 +1759,7 @@ DEF_FUNC memoryview_subscript, MS_FRAME
     mov [rax + PyMemoryViewObject.mv_source], rcx
     test rcx, rcx
     jz .ms_no_source
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     push rax
     push rax                    ; and a pad: the call below stays aligned
     mov rdi, rcx
@@ -2307,7 +2307,8 @@ memoryview_mapping_methods:
 align 8
 global memoryview_type
 memoryview_type:
-    dq 1                             ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                     ; ob_type
     dq mv_name_str                   ; tp_name
     dq PyMemoryViewObject_size       ; tp_basicsize

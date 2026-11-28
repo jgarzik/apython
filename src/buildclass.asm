@@ -793,10 +793,10 @@ TFP_RSP   equ 40 + 88
     mov rdi, [rax + PyObject.ob_type]
     call obj_incref
 
-    ; Zero-fill the type object (skip ob_refcnt and ob_type, already set by gc_alloc)
-    lea rdi, [r12 + 16]
+    ; Zero-fill the type object (skip the 24-byte PyObject header set by gc_alloc)
+    lea rdi, [r12 + OBJ_HEADER_SIZE]
     xor eax, eax
-    mov ecx, (HEAPTYPE_ALLOC_SIZE - 16) / 8
+    mov ecx, (HEAPTYPE_ALLOC_SIZE - OBJ_HEADER_SIZE) / 8
     rep stosq
 
     ; tp_name: point to class_name string's data area.  The reference that

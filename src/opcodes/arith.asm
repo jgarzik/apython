@@ -2526,7 +2526,7 @@ section .text
     DECREF_VAL rdi, rsi
     add rsp, CO_SIZE
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     VPUSH_PTR rax
     add rbx, 2
     DISPATCH
@@ -2540,7 +2540,7 @@ section .text
     DECREF_VAL rdi, rsi
     add rsp, CO_SIZE
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     VPUSH_PTR rax
     add rbx, 2
     DISPATCH
@@ -2702,12 +2702,12 @@ DEF_FUNC_BARE op_unary_not
     jnz .push_false
     jmp .push_true
 .not_of_false:
-    dec qword [rax + PyObject.ob_refcnt]    ; rax is the operand, bool_false
+    ; bool_false is immortal: no refcount update needed.
 .push_true:
     lea rax, [rel bool_true]
     jmp .push_bool
 .not_of_true:
-    dec qword [rax + PyObject.ob_refcnt]    ; rax is the operand, bool_true
+    ; bool_true is immortal: no refcount update needed.
 .push_false:
     lea rax, [rel bool_false]
 .push_bool:

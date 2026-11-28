@@ -811,7 +811,7 @@ DEF_FUNC_BARE op_binary_op_inplace_add_unicode
     mov [r12 + PyFrame.localsplus + rcx*8], rax
     ; The stack's own reference to the left operand goes away.  It was 2 and
     ; the local holds the other, so this can never reach zero.
-    dec qword [rax + PyObject.ob_refcnt]
+    dec dword [rax + PyObject.ob_ref_local]
 
     sub r13, 16                 ; both operands leave the stack
     DECREF_V r15, rcx

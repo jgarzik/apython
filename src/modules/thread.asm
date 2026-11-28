@@ -227,6 +227,9 @@ DEF_FUNC_LOCAL thread_entry, TE_FRAME
     mov rdi, [gs:ThreadState.ts_self]
     extern brc_unregister_thread
     call brc_unregister_thread
+    mov rdi, [gs:ThreadState.ts_self]
+    extern brc_drain_thread
+    call brc_drain_thread
 
     ; Past this line the thread holds no GIL and touches no object.  The
     ; ThreadState, ssl_pw_buf and path_scratch came from libc.

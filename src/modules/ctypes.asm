@@ -155,7 +155,7 @@ END_FUNC cx_ret_int
 ;; ============================================================================
 DEF_FUNC_BARE cx_ret_none
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     ret
 END_FUNC cx_ret_none
 

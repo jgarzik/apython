@@ -329,7 +329,7 @@ DEF_FUNC builtin_pow_fn, POW_FRAME
     mov edi, PyIntObject_size
     call ap_malloc
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel int_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyIntObject.compact], 0

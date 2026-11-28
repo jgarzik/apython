@@ -92,7 +92,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     jmp .ba_alloc_done
 .ba_plain_alloc:
     call ap_malloc
-    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rdx, [rbp - BA_TYPE]
     mov [rax + PyByteArrayObject.ob_type], rdx
 .ba_alloc_done:
@@ -112,7 +112,7 @@ DEF_FUNC bytearray_type_call, BA_FRAME
     rep stosq
 .ba_no_tail:
     mov rdx, [rbp - BA_TYPE]
-    inc qword [rdx + PyObject.ob_refcnt]
+    INCREF rdx
 
     mov rdi, rbx
     mov rsi, [rbp - BA_LEN]
@@ -345,14 +345,14 @@ DEF_FUNC bytearray_new, BAN_FRAME
     test rax, rax
     jz .ban_fail
     mov [rbp - BAN_OBJ], rax
-    mov qword [rax + PyByteArrayObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytearray_type]
     mov [rax + PyByteArrayObject.ob_type], rcx
     mov qword [rax + PyByteArrayObject.ob_size], 0
     mov qword [rax + PyByteArrayObject.ob_cap], 0
     mov qword [rax + PyByteArrayObject.ob_bytes], 0
     mov qword [rax + PyByteArrayObject.ob_exports], 0
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
 
     mov rdi, rax
     mov rsi, [rbp - BAN_LEN]
@@ -1682,7 +1682,7 @@ DEF_FUNC bytearray_inplace_concat, BAO_FRAME
     call bytearray_extend_from
     ERR_NULL .bic2_fail
     mov rax, [rbp - BAO_SELF]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1777,7 +1777,7 @@ DEF_FUNC bytearray_inplace_repeat, BAO_FRAME
     jmp .bir_loop
 .bir_done:
     mov rax, [rbp - BAO_SELF]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -1870,12 +1870,12 @@ DEF_FUNC bytearray_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov edi, PyBytesIterObject_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel bytearray_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyBytesIterObject.it_seq], rbx
     mov qword [rax + PyBytesIterObject.it_index], 0
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     pop rbx
     leave
     ret
@@ -1907,7 +1907,7 @@ DEF_FUNC_BARE bytearray_iter_next
 END_FUNC bytearray_iter_next
 
 DEF_FUNC bytearray_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     leave
     ret
@@ -1970,7 +1970,8 @@ bytearray_number_methods:
 align 8
 global bytearray_type
 bytearray_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ba_name_str                  ; tp_name
     dq PyByteArrayObject_size       ; tp_basicsize (the data is out of line)
@@ -2018,7 +2019,8 @@ mv_iter_name_str: db "memory_iterator", 0
 align 8
 global memoryview_iter_type
 memoryview_iter_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq mv_iter_name_str             ; tp_name
     dq PyBytesIterObject_size       ; tp_basicsize
@@ -2051,7 +2053,8 @@ memoryview_iter_type:
 align 8
 global bytearray_iter_type
 bytearray_iter_type:
-    dq 1                            ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ba_iter_name_str             ; tp_name
     dq PyBytesIterObject_size       ; tp_basicsize

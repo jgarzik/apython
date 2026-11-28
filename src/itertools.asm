@@ -41,25 +41,25 @@ extern type_type
 ;; FilterIterObject:    +0 refcnt, +8 type, +16 it_func, +24 it_iter   (32B)
 ;; ReversedIterObject:  +0 refcnt, +8 type, +16 it_seq, +24 it_index   (32B)
 
-; Offsets (all iterator objects)
-%define IT_FIELD1  16     ; first custom field
-%define IT_FIELD2  24     ; second custom field
-%define ITER_OBJ_SIZE 32
+; Offsets (all iterator objects — derived from PyObject_size = 24)
+%define IT_FIELD1       (PyObject_size)
+%define IT_FIELD2       (PyObject_size + 8)
+%define ITER_OBJ_SIZE   (PyObject_size + 16)
 
 ; Extended sizes for zip (with strict flag) and map (with array+count)
-%define ZIP_OBJ_SIZE    40
-%define ZIP_STRICT      32     ; strict flag (0 or 1)
-%define MAP_FUNC        16     ; function pointer
-%define MAP_ITERS       24     ; iterator array pointer
-%define MAP_COUNT       32     ; number of iterators
-%define MAP_OBJ_SIZE    40
+%define ZIP_OBJ_SIZE    (PyObject_size + 24)
+%define ZIP_STRICT      (PyObject_size + 16)
+%define MAP_FUNC        (PyObject_size)
+%define MAP_ITERS       (PyObject_size + 8)
+%define MAP_COUNT       (PyObject_size + 16)
+%define MAP_OBJ_SIZE    (PyObject_size + 24)
 
 ;; ============================================================================
 ;; Common: iter_self(self) -> self with INCREF
 ;; tp_iter for all our iterator types: return self
 ;; ============================================================================
 itertools_iter_self:
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 
@@ -2600,7 +2600,8 @@ callable_iter_name:  db "callable_iterator", 0
 align 8
 global enumerate_iter_type
 enumerate_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq enumerate_iter_name      ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2634,7 +2635,8 @@ enumerate_iter_type:
 align 8
 global zip_iter_type
 zip_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq zip_iter_name            ; tp_name
     dq ZIP_OBJ_SIZE             ; tp_basicsize
@@ -2668,7 +2670,8 @@ zip_iter_type:
 align 8
 global map_iter_type
 map_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq map_iter_name            ; tp_name
     dq MAP_OBJ_SIZE             ; tp_basicsize
@@ -2702,7 +2705,8 @@ map_iter_type:
 align 8
 global filter_iter_type
 filter_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq filter_iter_name         ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2737,7 +2741,8 @@ align 8
 align 8
 global callable_iter_type
 callable_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq callable_iter_name       ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2770,7 +2775,8 @@ callable_iter_type:
 align 8
 global seq_iter_type
 seq_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq seq_iter_name            ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize
@@ -2804,7 +2810,8 @@ seq_iter_type:
 align 8
 global reversed_iter_type
 reversed_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq reversed_iter_name       ; tp_name
     dq ITER_OBJ_SIZE            ; tp_basicsize

@@ -441,7 +441,7 @@ DEF_FUNC builtin_sub_alloc, BSA_FRAME
 .bsa_plain:
     mov rdi, rsi
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rcx, [rbp - BSA_TYPE]
     mov [rax + PyObject.ob_type], rcx
 
@@ -461,7 +461,7 @@ DEF_FUNC builtin_sub_alloc, BSA_FRAME
 .bsa_zeroed:
     ; The instance holds a reference to its type, as every instance does.
     mov rcx, [rbp - BSA_TYPE]
-    inc qword [rcx + PyObject.ob_refcnt]
+    INCREF rcx
     test qword [rcx + PyTypeObject.tp_flags], TYPE_FLAG_HAVE_GC
     jz .bsa_done
     mov [rbp - BSA_SAVE], rax

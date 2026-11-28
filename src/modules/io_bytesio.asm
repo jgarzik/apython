@@ -823,12 +823,12 @@ DEF_FUNC bytesio_getbuffer_fn
     call ap_malloc
     test rax, rax
     jz .bgb_nomem
-    mov qword [rax + PyMemoryViewObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel memoryview_type]
     mov [rax + PyMemoryViewObject.ob_type], rcx
     mov qword [rax + PyMemoryViewObject.mv_exports], 0
     mov [rax + PyMemoryViewObject.mv_source], rbx
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov rcx, [rbx + PyBytesIOObject.bio_buf]
     mov [rax + PyMemoryViewObject.mv_buf], rcx
     mov rcx, [rbx + PyBytesIOObject.bio_size]
@@ -904,7 +904,7 @@ DEF_FUNC bytesio_closed_get_fn
 .bcg_true:
     lea rax, [rel bool_true]
 .bcg_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -926,7 +926,7 @@ DEF_FUNC bytesio_true_fn
     call bytesio_check
     ERR_M1 .fail
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret

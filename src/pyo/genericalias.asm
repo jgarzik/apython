@@ -2042,7 +2042,7 @@ DEF_FUNC generic_alias_richcompare, GRC_FRAME
 .grc_emit_false:
     lea rax, [rel bool_false]
 .grc_emit_done:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -2074,7 +2074,8 @@ generic_alias_as_mapping:
 align 8
 global generic_alias_type
 generic_alias_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ga_name_str                  ; tp_name
     dq PyGenericAliasObject_size    ; tp_basicsize

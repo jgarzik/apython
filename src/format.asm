@@ -954,7 +954,7 @@ DEF_FUNC format_apply_spec, FS_FRAME
     add rdi, PyStrObject.data + 8
     call ap_malloc
     mov r15, rax
-    mov qword [r15 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r15
     lea rcx, [rel str_type]
     mov [r15 + PyObject.ob_type], rcx
     mov qword [r15 + PyStrObject.ob_hash], -1
@@ -2229,7 +2229,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
 .ffb_dot_append:
     lea rdi, [rcx + PyStrObject.data + 9]
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rdx, [rel str_type]
     mov [rax + PyObject.ob_type], rdx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -2348,7 +2348,7 @@ DEF_FUNC_LOCAL format_float_body, FFB_FRAME
     mov rsi, [rbx + PyStrObject.ob_size]
     lea rdi, [rsi + PyStrObject.data + 9]
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rdx, [rel str_type]
     mov [rax + PyObject.ob_type], rdx
     mov qword [rax + PyStrObject.ob_hash], -1

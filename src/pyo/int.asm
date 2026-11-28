@@ -186,7 +186,7 @@ DEF_FUNC_BARE int_alloc_raw
     test rax, rax
     jz .ial_malloc
     ; The block is dead, so its refcount word is free to hold the next link.
-    mov rcx, [rax + PyObject.ob_refcnt]
+    mov rcx, [rax]
     mov [rel int_freelist], rcx
     dec qword [rel int_freelist_count]
     ret
@@ -209,7 +209,7 @@ DEF_FUNC int_new_compact
     push r12
     mov rbx, rdi
     call int_alloc_raw
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyIntObject.ival], rbx
@@ -495,7 +495,7 @@ DEF_FUNC_BARE int_add
     sub rsp, 8              ; the GMP calls want rsp 16-byte aligned
     call int_alloc_raw
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel int_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyIntObject.compact], 0  ; GMP-backed
@@ -554,7 +554,7 @@ DEF_FUNC_BARE int_add
     ; Allocate result
     call int_alloc_raw
     push rax                ; save result ptr
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -661,7 +661,7 @@ DEF_FUNC_BARE int_sub
 .b_ready:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -754,7 +754,7 @@ DEF_FUNC_BARE int_mul
 .b_ready:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -900,7 +900,7 @@ DEF_FUNC_BARE int_floordiv
 
     call int_alloc_raw
     mov [rbp - FD_NEW], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1049,7 +1049,7 @@ DEF_FUNC_BARE int_mod
 
     call int_alloc_raw
     mov [rbp - MD_NEW], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1114,7 +1114,7 @@ DEF_FUNC_BARE int_pos
     mov rax, rdi
     V_TEST_PTR rax, rcx
     ja .ip_immediate
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 .ip_immediate:
     ret
 END_FUNC int_pos
@@ -1139,7 +1139,7 @@ DEF_FUNC_BARE int_neg
     mov rbx, rdi
     call int_alloc_raw
     mov r12, rax
-    mov qword [r12 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r12
     lea rax, [rel int_type]
     mov [r12 + PyObject.ob_type], rax
     mov qword [r12 + PyIntObject.compact], 0  ; GMP-backed
@@ -1576,7 +1576,7 @@ DEF_FUNC_BARE int_dealloc
     cmp rax, INT_FREELIST_MAX
     jae .really_free
     mov rcx, [rel int_freelist]
-    mov [rbx + PyObject.ob_refcnt], rcx     ; the dead refcount is the link
+    mov [rbx], rcx                          ; dead header word 0 is the link
     mov [rel int_freelist], rbx
     inc qword [rel int_freelist_count]
     pop rbx
@@ -1643,7 +1643,7 @@ DEF_FUNC_BARE int_and
 .b_ok:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1730,7 +1730,7 @@ DEF_FUNC_BARE int_or
 .b_ok:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1818,7 +1818,7 @@ DEF_FUNC_BARE int_xor
 .b_ok:
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -1871,7 +1871,7 @@ DEF_FUNC_BARE int_invert
     mov rbx, rdi
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2077,7 +2077,7 @@ DEF_FUNC int_lshift
     push rcx
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2215,7 +2215,7 @@ DEF_FUNC int_rshift, RS_FRAME
 .gmp_path:
     call int_alloc_raw
     mov [rbp - RS_NEW], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2406,7 +2406,7 @@ DEF_FUNC int_power, IPW_FRAME
     push rcx
     call int_alloc_raw
     push rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel int_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyIntObject.compact], 0  ; GMP-backed
@@ -2778,7 +2778,8 @@ int_number_methods:
 align 8
 global int_type
 int_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq int_name_str         ; tp_name
     dq PyIntObject_size     ; tp_basicsize

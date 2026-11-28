@@ -176,14 +176,14 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov rbx, rax               ; rbx = pattern object
 
     ; Initialize
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rax, [rel sre_pattern_type]
     mov [rbx + PyObject.ob_type], rax
 
     ; Set fields
     mov rax, [rbp - SC_PATTERN]
     mov [rbx + SRE_PatternObject.pattern], rax
-    inc qword [rax + PyObject.ob_refcnt]  ; INCREF pattern string
+    INCREF rax  ; INCREF pattern string
 
     mov rax, [rbp - SC_FLAGS]
     mov [rbx + SRE_PatternObject.flags], eax
@@ -195,14 +195,14 @@ DEF_FUNC sre_compile_func, SC_FRAME
     mov [rbx + SRE_PatternObject.groupindex], rax
     test rax, rax
     jz .no_gi_incref
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 .no_gi_incref:
 
     mov rax, [rbp - SC_IGROUP]
     mov [rbx + SRE_PatternObject.indexgroup], rax
     test rax, rax
     jz .no_ig_incref
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 .no_ig_incref:
 
     mov [rbx + SRE_PatternObject.code], r14

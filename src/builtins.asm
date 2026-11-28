@@ -161,7 +161,7 @@ DEF_FUNC builtin_func_new, 8            ; 3 pushes, so rsp is 16-aligned
     ; rax = new object
 
     ; Fill header
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel builtin_func_type]
     mov [rax + PyObject.ob_type], rcx
 
@@ -1219,7 +1219,7 @@ align 16
 
     ; Return None (with INCREF)
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 
     pop r15
     pop r14
@@ -3218,7 +3218,8 @@ builtin_func_name_str: db "builtin_function_or_method", 0
 align 8
 global builtin_func_type
 builtin_func_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq builtin_func_name_str    ; tp_name
     dq PyBuiltinObject_size     ; tp_basicsize

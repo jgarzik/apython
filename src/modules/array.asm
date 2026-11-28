@@ -154,7 +154,7 @@ DEF_FUNC array_new_empty, 8
     call ap_malloc
     test rax, rax
     jz .ane_out
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel array_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyArrayObject.ob_size], 0
@@ -1483,7 +1483,8 @@ section .data
 
 align 8
 array_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq array_name_str           ; tp_name
     dq PyArrayObject_size       ; tp_basicsize (the data is out of line)

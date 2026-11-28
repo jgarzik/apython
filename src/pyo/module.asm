@@ -348,7 +348,7 @@ DEF_FUNC module_getattr, MG_FRAME
     mov rax, [rbx + PyModuleObject.mod_dict]
     test rax, rax
     jz .not_found
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -831,7 +831,8 @@ global module_type
 
 
 module_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq module_type_name         ; tp_name
     dq PyModuleObject_size      ; tp_basicsize
@@ -1084,7 +1085,7 @@ DEF_FUNC namespace_getattr, NSG_FRAME
     test eax, eax
     jnz .nsg_lookup
     mov rax, [rbx + PySimpleNamespaceObject.ns_dict]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -1394,7 +1395,8 @@ ns_name_str: db "types.SimpleNamespace", 0
 align 8
 global namespace_type
 namespace_type:
-    dq 1                            ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                    ; ob_type
     dq ns_name_str                  ; tp_name
     dq PySimpleNamespaceObject_size ; tp_basicsize
@@ -1776,7 +1778,7 @@ DEF_FUNC module_method_init, MMI_FRAME
     MMI_SET_NONE mtn_spec_key
 
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx

@@ -1661,7 +1661,7 @@ DEF_FUNC set_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     mov edi, PyDictIterObject_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel set_iter_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + PyDictIterObject.it_dict], rbx     ; store set ptr
@@ -1773,7 +1773,7 @@ END_FUNC set_iter_dealloc
 ;; set_iter_self(PyObject *self) -> self with INCREF
 ;; ============================================================================
 DEF_FUNC_BARE set_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC set_iter_self
@@ -2240,7 +2240,8 @@ set_seq_methods:
 align 8
 global set_type
 set_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq set_name_str             ; tp_name
     dq PyDictObject_size        ; tp_basicsize (reuse dict layout)
@@ -2275,7 +2276,8 @@ set_type:
 align 8
 global frozenset_type
 frozenset_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq frozenset_name_str       ; tp_name
     dq PyDictObject_size        ; tp_basicsize (reuse dict layout)
@@ -2309,7 +2311,8 @@ frozenset_type:
 align 8
 global set_iter_type
 set_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq set_iter_name            ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize

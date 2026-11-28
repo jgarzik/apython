@@ -223,7 +223,7 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     mov rdi, [r12 + rcx*8]
     test rdi, rdi
     jz .hold_next
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
 .hold_next:
     inc rcx
     jmp .hold_loop
@@ -287,7 +287,7 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     ; module-lock callback takes a lock with a timeout of -1.
     DUNDER_EXC_SAVE [rbp - WC_EXC]
     mov qword [gs:ThreadState.current_exception], 0
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     sub rsp, 16
     mov [rsp], rbx
     mov rdi, r12
@@ -300,7 +300,8 @@ DEF_FUNC weakref_clear_for, WC_FRAME
     jz .cb_no_result
     DECREF_VAL rax, rdx
 .cb_no_result:
-    dec qword [rbx + PyObject.ob_refcnt]
+    mov rdi, rbx
+    call obj_decref
     ; Whatever the callback left pending is dropped, and the fetched
     ; reference moves back.
     mov rdi, [gs:ThreadState.current_exception]
@@ -435,10 +436,10 @@ DEF_FUNC_LOCAL weakref_make, WM_FRAME
 .size_ok:
     call ap_malloc
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     mov rax, [rbp - WM_TYPE]
     mov [rbx + PyObject.ob_type], rax
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 
 .fields:
     mov rax, [rbp - WM_OBJ]
@@ -539,7 +540,7 @@ DEF_FUNC ref_deref
     mov rax, [rdi + PyWeakRefObject.wr_object]
     test rax, rax
     jz .dead
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -686,7 +687,7 @@ DEF_FUNC_LOCAL ref_richcompare, RC_FRAME
 .false:
     lea rax, [rel bool_false]
 .out_ptr:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx
@@ -1502,7 +1503,8 @@ wrm_cproxy_name: db "weakcallableproxy", 0
 align 8
 global weakref_type
 weakref_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq wrm_ref_name             ; tp_name
     dq PyWeakRefObject_size     ; tp_basicsize
@@ -1535,7 +1537,8 @@ weakref_type:
 align 8
 global proxy_type
 proxy_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq wrm_proxy_name
     dq PyWeakRefObject_size
@@ -1568,7 +1571,8 @@ proxy_type:
 align 8
 global callableproxy_type
 callableproxy_type:
-    dq 1
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq wrm_cproxy_name
     dq PyWeakRefObject_size

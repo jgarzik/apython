@@ -981,7 +981,7 @@ DEF_FUNC list_dunder_setitem
     call list_ass_subscript
     ERR_M1 .ldsi_fail
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .ldsi_fail:
@@ -1570,21 +1570,17 @@ DEF_FUNC list_method_reversed, 8            ; 1 push, so rsp is 16-aligned
 
     mov rbx, [rdi]            ; self (list)
 
-    ; Allocate ReversedIterObject (32 bytes: refcnt, type, it_seq, it_index).
-    ; gc_alloc, and tracked: this is the same type builtin_reversed makes, it
-    ; holds the sequence it walks, and a list can hold the iterator back.
-    ; Allocating it with ap_malloc while its tp_dealloc frees it with
-    ; gc_dealloc handed free() a pointer sixteen bytes past the block.
-    mov edi, 32
+    ; Allocate PyListIterObject (gc_alloc + tracked, same layout as builtin_reversed).
+    mov edi, PyListIterObject_size
     lea rsi, [rel reversed_iter_type]
     extern gc_alloc
     call gc_alloc
 
-    mov [rax + 16], rbx       ; it_seq = self
+    mov [rax + PyListIterObject.it_seq], rbx       ; it_seq = self
     INCREF rbx
     mov rcx, [rbx + PyListObject.ob_size]
     dec rcx                   ; it_index = ob_size - 1
-    mov [rax + 24], rcx
+    mov [rax + PyListIterObject.it_index], rcx
 
     push rax
     mov rdi, rax

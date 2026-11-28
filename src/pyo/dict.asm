@@ -1774,7 +1774,7 @@ END_FUNC dict_iter_dealloc
 ;; dict_iter_self(PyObject *self) -> self with INCREF
 ;; ============================================================================
 dict_iter_self:
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 
@@ -2437,7 +2437,8 @@ dict_sequence_methods:
 align 8
 global dict_type
 dict_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_name_str            ; tp_name
     dq PyDictObject_size        ; tp_basicsize
@@ -2472,7 +2473,8 @@ dict_type:
 align 8
 global dict_iter_type
 dict_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_iter_name           ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
@@ -2509,7 +2511,8 @@ dict_iter_type:
 align 8
 global dict_value_iter_type
 dict_value_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_value_iter_name           ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
@@ -2542,7 +2545,8 @@ dict_value_iter_type:
 align 8
 global dict_item_iter_type
 dict_item_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_item_iter_name           ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize
@@ -2576,7 +2580,8 @@ dict_item_iter_type:
 align 8
 global dict_rev_iter_type
 dict_rev_iter_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq dict_rev_iter_name       ; tp_name
     dq PyDictIterObject_size    ; tp_basicsize

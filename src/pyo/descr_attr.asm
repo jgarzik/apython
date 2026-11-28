@@ -551,7 +551,7 @@ DEF_FUNC descr_wrapper_isabstract
 .dwa_true:
     lea rax, [rel bool_true]
 .dwa_done:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .dwa_raised:
@@ -593,7 +593,7 @@ DEF_FUNC property_isabstract, PIA_FRAME
 .pia_true:
     lea rax, [rel bool_true]
 .pia_done:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .pia_raised:

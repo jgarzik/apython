@@ -429,7 +429,7 @@ DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     call ap_malloc
     ; rax = wrapper
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel async_gen_asend_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenASend.ags_gen], rbx
@@ -440,7 +440,7 @@ DEF_FUNC async_gen_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     mov qword [rax + AsyncGenASend.gi_return_value], 0
 
     ; INCREF the async generator (wrapper holds a ref)
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
 
     pop rbx
     leave
@@ -624,7 +624,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
     lea rax, [rel coro_type]
     cmp [rbx + PyObject.ob_type], rax
     jne .gd_just_free
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     DUNDER_EXC_SAVE r12
     mov qword [gs:ThreadState.current_exception], 0
     mov rdi, rbx
@@ -634,7 +634,7 @@ DEF_FUNC gen_dealloc, GD_FRAME
 .gd_check_suspended:
     cmp qword [rdi + PyFrame.instr_ptr], 0
     je .gd_just_free
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     ; The pending exception is TAKEN OUT for the cleanup: the global is
     ; cleared, so its reference is the register's now, and .gd_close_done
     ; puts the same one back.  This used to take a second reference as well,
@@ -680,7 +680,10 @@ DEF_FUNC gen_dealloc, GD_FRAME
 .gd_close_done:
     ; Put back the exception taken out above, reference and all.
     mov [gs:ThreadState.current_exception], r12
-    dec qword [rbx + PyObject.ob_refcnt]
+    mov rdi, rbx
+    extern obj_decref_no_dealloc
+    call obj_decref_no_dealloc
+    test eax, eax
     jnz .gd_resurrected         ; someone kept it: free nothing
 
 .gd_just_free:
@@ -765,7 +768,7 @@ END_FUNC async_gen_call_finalizer
 ;; tp_iter for generator: return self
 ;; ============================================================================
 DEF_FUNC_BARE gen_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC gen_iter_self
@@ -2287,7 +2290,8 @@ _gen_throw_cache: dq 0
 align 8
 global gen_type
 gen_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq gen_name_str             ; tp_name
     dq PyGenObject_size         ; tp_basicsize
@@ -2320,7 +2324,8 @@ gen_type:
 align 8
 global coro_type
 coro_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq coro_name_str            ; tp_name
     dq PyGenObject_size         ; tp_basicsize
@@ -2353,7 +2358,8 @@ coro_type:
 align 8
 global async_gen_type
 async_gen_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq async_gen_name_str       ; tp_name
     dq PyGenObject_size         ; tp_basicsize
@@ -2390,7 +2396,8 @@ agw_name_str: db "async_generator_wrapped_value", 0
 align 8
 global async_gen_wrapped_type
 async_gen_wrapped_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq agw_name_str             ; tp_name
     dq AsyncGenWrapped_size     ; tp_basicsize
@@ -2400,7 +2407,8 @@ async_gen_wrapped_type:
 align 8
 global async_gen_asend_type
 async_gen_asend_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq ags_name_str             ; tp_name
     dq AsyncGenASend_size       ; tp_basicsize
@@ -2434,7 +2442,8 @@ agt_name_str: db "async_generator_athrow", 0
 align 8
 global async_gen_athrow_type
 async_gen_athrow_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq agt_name_str             ; tp_name
     dq AsyncGenASend_size       ; tp_basicsize -- the same box as asend
@@ -2971,7 +2980,8 @@ section .data
 align 8
 global coro_wrapper_type
 coro_wrapper_type:
-    dq 1                        ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type                ; ob_type
     dq coro_wrapper_name        ; tp_name
     dq PyCoroWrapperObject_size ; tp_basicsize

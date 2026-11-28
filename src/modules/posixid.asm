@@ -886,7 +886,8 @@ section .data
 align 8
 global times_result_type
 times_result_type:
-    dq 1                        ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type
     dq tmr_name
     dq PyTupleObject_size
@@ -1222,7 +1223,7 @@ DEF_FUNC posixid_register, PIR_FRAME
     lea rdi, [rel times_result_type]
     call structseq_init_type
     lea rax, [rel times_result_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov [rbp - PIR_ENT], rax
     lea rdi, [rel pid_n_times_result]
     call str_from_cstr_heap

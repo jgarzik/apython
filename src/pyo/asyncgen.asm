@@ -329,7 +329,7 @@ END_FUNC ags_iternext
 ;; tp_iter for AsyncGenASend: return self (it IS the iterator)
 ;; ============================================================================
 DEF_FUNC_BARE ags_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     mov edx, TAG_PTR
     ret
@@ -345,7 +345,7 @@ DEF_FUNC async_gen_wrap_value, 8            ; 1 pushes, so rsp is 16-aligned
     mov rbx, rdi
     mov edi, AsyncGenWrapped_size
     call ap_malloc
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel async_gen_wrapped_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenWrapped.agw_value], rbx
@@ -557,7 +557,7 @@ DEF_FUNC async_gen_athrow_new               ; 2 pushes, so rsp is 16-aligned
     mov edi, AsyncGenASend_size
     call ap_malloc
 
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel async_gen_athrow_type]
     mov [rax + PyObject.ob_type], rcx
     mov [rax + AsyncGenASend.ags_gen], rbx
@@ -576,7 +576,7 @@ DEF_FUNC async_gen_athrow_new               ; 2 pushes, so rsp is 16-aligned
 .agan_mode_set:
     mov qword [rax + AsyncGenASend.gi_return_value], 0
 
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     INCREF_V r12, rcx
 
     pop r12

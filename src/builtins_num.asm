@@ -134,7 +134,7 @@ DEF_FUNC builtin_abs
     test eax, eax
     jl .abs_gmp_neg
 
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov rax, rbx
     mov edx, TAG_PTR
     add rsp, 8
@@ -1531,7 +1531,7 @@ DEF_FUNC_LOCAL int_round_to_power10, IRP_FRAME
     extern ap_malloc
     call ap_malloc
     mov rbx, rax
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rcx, [rel int_type]
     mov [rbx + PyObject.ob_type], rcx
     mov qword [rbx + PyIntObject.compact], 0

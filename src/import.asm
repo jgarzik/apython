@@ -901,7 +901,7 @@ DEF_FUNC import_module, IF_FRAME
 
 .walk_done:
     mov r12, [rbp - IF_TOPMOD]
-    inc qword [r12 + PyObject.ob_refcnt]
+    INCREF r12
     mov r13, [rbp - IF_LEAF]
 
 .skip_set_parent:
@@ -924,7 +924,7 @@ DEF_FUNC import_module, IF_FRAME
 
     ; fromlist is non-empty -> return leaf module
     mov rax, r13
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     ; DECREF top module
     mov rdi, r12
     call obj_decref
@@ -1068,7 +1068,7 @@ DEF_FUNC import_module, IF_FRAME
 .cached_pop_as_is:
     pop rax
 .cached_as_is:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     jmp .done
 
 .import_error:
@@ -1593,7 +1593,7 @@ DEF_FUNC import_find_and_load_asm, FL_FRAME
     ret
 .fis_real:
     ; Already imported — return INCREF'd reference
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop r15
     pop r14
     pop r13

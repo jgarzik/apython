@@ -144,10 +144,10 @@ DEF_FUNC_BARE op_pop_jump_if_false
     DISPATCH
 
 .pjif_bool_stay:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
     DISPATCH
 .pjif_bool_jump:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
 .pjif_jump:
     lea rbx, [rbx + rcx*2]
     DISPATCH
@@ -193,10 +193,10 @@ DEF_FUNC_BARE op_pop_jump_if_true
     DISPATCH
 
 .pjit_bool_stay:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
     DISPATCH
 .pjit_bool_jump:
-    dec qword [rax + PyObject.ob_refcnt]
+    ; bool_true / bool_false are immortal: no refcount update needed.
 .pjit_jump:
     lea rbx, [rbx + rcx*2]
     DISPATCH
@@ -580,7 +580,7 @@ DEF_FUNC op_build_string, BS_FRAME
     call ap_malloc
     mov rbx, rax               ; rbx = the answer, across the copies below
 
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     extern str_type
     lea rcx, [rel str_type]
     mov [rbx + PyObject.ob_type], rcx

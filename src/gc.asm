@@ -205,7 +205,7 @@ DEF_FUNC gc_alloc
     lea rbx, [rax + GC_HEAD_SIZE]
 
     ; Init ob_refcnt=1, ob_type=type
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     mov [rbx + PyObject.ob_type], r12
 
     mov rax, rbx               ; return obj ptr
@@ -610,8 +610,10 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     je .phase1_done
 
     ; obj = gc + GC_HEAD_SIZE
-    lea rax, [rbx + GC_HEAD_SIZE]
-    mov rcx, [rax + PyObject.ob_refcnt]
+    lea rdi, [rbx + GC_HEAD_SIZE]
+    extern obj_get_refcount
+    call obj_get_refcount
+    mov rcx, rax
 
     ; Store gc_refs in gc_prev, with the COLLECTING bit set.  That bit is
     ; what marks a node as belonging to *this* collection: phase 2 traverses
@@ -887,8 +889,9 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 .res1_loop:
     cmp rbx, r15
     je .res1_done
-    lea rax, [rbx + GC_HEAD_SIZE]
-    mov rcx, [rax + PyObject.ob_refcnt]
+    lea rdi, [rbx + GC_HEAD_SIZE]
+    call obj_get_refcount
+    mov rcx, rax
     shl rcx, GC_PREV_SHIFT
     or rcx, GC_PREV_MASK_COLLECTING
     mov rdx, [rbx + PyGC_Head.gc_prev]
@@ -1058,7 +1061,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
     je .phase5_done
 
     lea r13, [rbx + GC_HEAD_SIZE]          ; r13 = obj
-    inc qword [r13 + PyObject.ob_refcnt]
+    INCREF r13
 
     mov rax, [r13 + PyObject.ob_type]
     mov rax, [rax + PyTypeObject.tp_clear]
@@ -1089,9 +1092,7 @@ DEF_FUNC gc_collect_gen, GCG_FRAME
 
 .phase5_drop:
     mov rdi, r13
-    dec qword [rdi + PyObject.ob_refcnt]
-    jnz .phase5_loop
-    call obj_dealloc
+    call obj_decref
     jmp .phase5_loop
 
 .phase5_done:

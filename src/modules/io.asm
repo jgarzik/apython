@@ -406,7 +406,7 @@ DEF_FUNC io_module_create, IMC_FRAME
     ; BlockingIOError is an ordinary builtin exception; _io re-exports it so
     ; that `from _io import BlockingIOError` works as it does in CPython.
     lea rax, [rel exc_BlockingIOError_type]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     IO_ADD_OBJ im_n_BlockingIO, rax
 
     IO_ADD_INT im_n_defbufsize, IO_DEFAULT_BUFFER_SIZE
@@ -2146,7 +2146,7 @@ DEF_FUNC fileio_isatty_fn, FIT_FRAME
 .fit_false:
     lea rax, [rel bool_false]
 .fit_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -2174,7 +2174,7 @@ DEF_FUNC %1
 %%false:
     lea rax, [rel bool_false]
 %%out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret
@@ -2221,7 +2221,7 @@ DEF_FUNC fileio_seekable_fn
 .fsk_false:
     lea rax, [rel bool_false]
 .fsk_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -2490,7 +2490,7 @@ DEF_FUNC fileio_closed_get_fn
 .fcg_true:
     lea rax, [rel bool_true]
 .fcg_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret

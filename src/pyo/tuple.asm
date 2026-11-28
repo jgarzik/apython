@@ -68,10 +68,10 @@ DEF_FUNC tuple_new
     mov rax, [rcx + TUPLE_POOL_HEAD]  ; head
     test rax, rax
     jz .alloc_fresh
-    mov rdx, [rax + PyObject.ob_refcnt]  ; next link
+    mov rdx, [rax]                      ; next link in dead header
     mov [rcx + TUPLE_POOL_HEAD], rdx
     dec dword [rcx + 8]         ; count--
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     mov rbx, rax
     mov [rbx + PyTupleObject.ob_size], r12
     mov qword [rbx + PyTupleObject.ob_hash], -1
@@ -277,7 +277,7 @@ DEF_FUNC tuple_dealloc, 8            ; 3 pushes, so rsp is 16-aligned
     pop rcx               ; restore pool head ptr
     ; Push to pool: reuse ob_refcnt as next-pointer
     mov rdx, [rcx + TUPLE_POOL_HEAD]
-    mov [rbx + PyObject.ob_refcnt], rdx
+    mov [rbx], rdx
     mov [rcx + TUPLE_POOL_HEAD], rbx
     inc dword [rcx + 8]         ; count++
     pop r13
@@ -722,7 +722,7 @@ DEF_FUNC tuple_repeat
     cmp [rbx + PyObject.ob_type], rax
     jne .rep_not_one
     mov rax, rbx
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop r14
     pop r13
     pop r12
@@ -1221,7 +1221,8 @@ tuple_mapping_methods:
 align 8
 global tuple_type
 tuple_type:
-    dq 1                    ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq tuple_name_str       ; tp_name
     dq PyTupleObject_size    ; tp_basicsize (header)

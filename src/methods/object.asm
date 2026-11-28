@@ -2337,7 +2337,7 @@ DEF_FUNC object_method_eq
     ret
 .ome_notimpl:
     lea rax, [rel notimpl_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -2347,7 +2347,7 @@ DEF_FUNC object_method_eq
     cmp rdi, rbx
     je .ome_true_pop
     lea rax, [rel notimpl_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave
@@ -2431,7 +2431,7 @@ DEF_FUNC object_method_ne
 .omn_same:
     lea rax, [rel bool_false]
 .omn_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave

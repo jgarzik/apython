@@ -1182,7 +1182,7 @@ pw_ret_bool:
 .prb_false:
     lea rax, [rel bool_false]
 .prb_out:
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     ret

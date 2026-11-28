@@ -61,18 +61,18 @@ DEF_FUNC sre_match_new, MN_FRAME
     mov rbx, rax               ; rbx = match object
 
     ; Initialize header
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rax, [rel sre_match_type]
     mov [rbx + PyObject.ob_type], rax
 
     ; Set fields
     mov rax, [rbp - MN_PAT]
     mov [rbx + SRE_MatchObject.pattern], rax
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 
     mov rax, [rbp - MN_STR]
     mov [rbx + SRE_MatchObject.string], rax
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
 
     mov rdi, [rbp - MN_STATE]
     mov rax, [rdi + SRE_State.str_begin]
@@ -119,7 +119,7 @@ DEF_FUNC sre_match_new, MN_FRAME
     mov rax, [r8 + rcx*8]
     V_TEST_PTR rax, rdx
     ja .mn_no_lastgroup         ; None or non-string → NULL
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov [rbx + SRE_MatchObject.lastgroup], rax
 .mn_no_lastgroup:
 
@@ -1198,7 +1198,7 @@ END_FUNC sre_match_expand_method
 DEF_FUNC sre_match_copy_method
     ; rdi = args (fat array), rsi = nargs
     mov rax, [rdi]             ; self payload
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -1436,7 +1436,7 @@ DEF_FUNC sre_match_getattr
     ; --- Attributes ---
 .mga_re:
     mov rax, [rbx + SRE_MatchObject.pattern]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1446,7 +1446,7 @@ DEF_FUNC sre_match_getattr
 
 .mga_string:
     mov rax, [rbx + SRE_MatchObject.string]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1495,7 +1495,7 @@ DEF_FUNC sre_match_getattr
     mov rax, [rbx + SRE_MatchObject.lastgroup]
     test rax, rax
     jz .mga_lastgroup_none
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -1638,7 +1638,8 @@ sre_match_number_methods:
 align 8
 global sre_match_type
 sre_match_type:
-    dq 1                       ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type               ; ob_type
     dq sm_type_name            ; tp_name
     dq SRE_MatchObject_size    ; tp_basicsize

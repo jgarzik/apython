@@ -55,10 +55,10 @@ DEF_FUNC slice_new, 8            ; 5 pushes, so rsp is 16-aligned
     test rax, rax
     jz .alloc_fresh
     ; Pop from pool: reuse ob_refcnt slot as next-link
-    mov rcx, [rax + PyObject.ob_refcnt]
+    mov rcx, [rax]
     mov [rel slice_pool_head], rcx
     dec dword [rel slice_pool_count]
-    mov qword [rax + PyObject.ob_refcnt], 1  ; reinit refcount
+    INIT_OBJ_RC rax  ; reinit refcount
     jmp .fill_fields
 
 .alloc_fresh:
@@ -122,7 +122,7 @@ DEF_FUNC slice_dealloc, 8            ; 1 push, so rsp is 16-aligned
     jge .free_it
     ; Push to pool: reuse ob_refcnt as next-pointer
     mov rcx, [rel slice_pool_head]
-    mov [rbx + PyObject.ob_refcnt], rcx
+    mov [rbx], rcx
     mov [rel slice_pool_head], rbx
     inc dword [rel slice_pool_count]
     pop rbx
@@ -872,7 +872,8 @@ slice_pool_count: dd 0       ; current count
 align 8
 global slice_type
 slice_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type
     dq slice_name_str         ; tp_name
     dq PySliceObject_size     ; tp_basicsize

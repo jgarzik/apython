@@ -724,7 +724,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     test rax, rax
     jz .bd_nomem
     mov [rbp - BD_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -865,7 +865,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     test rax, rax
     jz .bd_nomem
     mov [rbp - BD_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1
@@ -918,7 +918,7 @@ DEF_FUNC _bytes_decode_impl, BD_FRAME
     add rdi, PyStrObject.data + 8
     call ap_malloc
     mov [rbp - BD_OUT], rax
-    mov qword [rax + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rax
     lea rcx, [rel str_type]
     mov [rax + PyObject.ob_type], rcx
     mov qword [rax + PyStrObject.ob_hash], -1

@@ -118,7 +118,7 @@ DEF_FUNC code_new, CN_FRAME
     mov [rbp - CN_CODE], rax
 
     ; --- object header ---
-    mov qword [r12 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r12
     lea rax, [rel code_type]
     mov [r12 + PyObject.ob_type], rax
 
@@ -942,7 +942,8 @@ code_type_name: db "code", 0
 align 8
 global code_type
 code_type:
-    dq 1                ; ob_refcnt
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type        ; ob_type
     dq code_type_name   ; tp_name
     dq PyCodeObject_size ; tp_basicsize

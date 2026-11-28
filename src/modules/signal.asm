@@ -916,7 +916,7 @@ DEF_FUNC signal_default_init, SDI_FRAME
     call signal_default_handler_get
     test rax, rax
     jz .sdi_ignore
-    inc qword [rax + PyObject.ob_refcnt]   ; the SIGINT table owns a reference too
+    INCREF rax   ; the SIGINT table owns a reference too
     lea rcx, [rel signal_handlers]
     mov [rcx + 2*8], rax                    ; SIGINT
     mov edi, 2

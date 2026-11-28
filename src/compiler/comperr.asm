@@ -660,7 +660,7 @@ DEF_FUNC_BARE comp_defer_warnings
     test rax, rax
     jz .cdw_done
     mov [rel cpw_file], rax
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     xor edx, edx
 .cdw_copy:
     cmp edx, ecx

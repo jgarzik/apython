@@ -571,7 +571,7 @@ DEF_FUNC abc_init_func, AI_FRAME
     ERR_M1 .ai_fail
 
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .bad:
@@ -955,13 +955,13 @@ DEF_FUNC abc_subclasscheck_func, SCF_FRAME
     test eax, eax
     jz .false
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop rbx
     leave
     ret
 .false:
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop rbx
     leave
     ret
@@ -1236,13 +1236,13 @@ DEF_FUNC abc_instancecheck_func, IC_FRAME
 .true:
     call .ic_release_declared
     lea rax, [rel bool_true]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .false:
     call .ic_release_declared
     lea rax, [rel bool_false]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .propagate_ref:
@@ -1419,7 +1419,7 @@ DEF_FUNC abc_reset_registry_func
     call abc_fresh_set
     ERR_NULL .fail
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .fail:
@@ -1449,7 +1449,7 @@ DEF_FUNC abc_reset_caches_func, RC_FRAME
     call abc_fresh_set
     ERR_NULL .fail
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     leave
     ret
 .fail:

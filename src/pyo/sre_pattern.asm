@@ -2003,7 +2003,7 @@ DEF_FUNC sre_pattern_subn_method, SN_FRAME
     mov r8, [rbx + PyTupleObject.ob_item]       ; payloads
 
     mov r12, [rbp - SN_RESULT]
-    inc qword [r12 + PyObject.ob_refcnt]
+    INCREF r12
     mov [r8], r12
 
     mov rax, [rbp - SN_NSUBS]
@@ -2531,7 +2531,7 @@ DEF_FUNC sre_pattern_getattr
 .ga_pattern_attr:
     ; Return pattern.pattern (the regex string)
     mov rax, [rbx + SRE_PatternObject.pattern]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -2562,7 +2562,7 @@ DEF_FUNC sre_pattern_getattr
     mov rax, [rbx + SRE_PatternObject.groupindex]
     test rax, rax
     jz .ga_empty_dict
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -2611,7 +2611,7 @@ END_FUNC sre_strcmp
 ;; ============================================================================
 DEF_FUNC sre_pattern_copy_method
     mov rax, [rdi]             ; self payload
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     leave
     V_PACK rax, rdx             ; builtins return one Value
@@ -2860,15 +2860,15 @@ DEF_FUNC sre_scanner_new, 8            ; 5 pushes, so rsp is 16-aligned
     call ap_malloc
     mov rbx, rax
 
-    mov qword [rbx + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC rbx
     lea rax, [rel sre_scanner_type]
     mov [rbx + PyObject.ob_type], rax
 
     mov [rbx + SRE_ScannerObject.pattern], r12
-    inc qword [r12 + PyObject.ob_refcnt]
+    INCREF r12
 
     mov [rbx + SRE_ScannerObject.string], r13
-    inc qword [r13 + PyObject.ob_refcnt]
+    INCREF r13
 
     mov [rbx + SRE_ScannerObject.pos], r14
     mov [rbx + SRE_ScannerObject.endpos], r15
@@ -2932,7 +2932,7 @@ END_FUNC sre_scanner_dealloc
 ;; sre_scanner_iter_self(rdi=self) -> rax (no edx, tp_iter convention)
 ;; ============================================================================
 DEF_FUNC_BARE sre_scanner_iter_self
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rax, rdi
     ret
 END_FUNC sre_scanner_iter_self
@@ -3259,7 +3259,7 @@ DEF_FUNC sre_scanner_getattr
 
 .sga_pattern:
     mov rax, [rbx + SRE_ScannerObject.pattern]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -3277,7 +3277,8 @@ align 8
 ; SRE_Scanner type
 global sre_scanner_type
 sre_scanner_type:
-    dq 1                       ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type               ; ob_type
     dq sc_type_name            ; tp_name
     dq SRE_ScannerObject_size  ; tp_basicsize
@@ -3312,7 +3313,8 @@ align 8
 ; SRE_Pattern type
 global sre_pattern_type
 sre_pattern_type:
-    dq 1                       ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type               ; ob_type
     dq sp_type_name            ; tp_name
     dq SRE_PatternObject_size  ; tp_basicsize

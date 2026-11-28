@@ -30,32 +30,44 @@ extern type_call
 
 
 ;; ============================================================================
-;; obj_incref(PyObject *obj)
-;; Increment reference count; NULL-safe.
-;; Callers must only pass heap pointers (not SmallInts).
+;; obj_incref(PyObject *obj) -> nothing
+;; Biased increment reference count; NULL-safe.  Preserves ALL GPRs (matching
+;; the historical single-instruction `inc` contract callers rely on).
 ;; ============================================================================
 DEF_FUNC_BARE obj_incref
     test rdi, rdi
     jz .skip
-    inc qword [rdi + PyObject.ob_refcnt]
+    push rax
+    INCREF_OBJ rdi, rax
+    pop rax
 .skip:
     ret
 END_FUNC obj_incref
 
 ;; ============================================================================
-;; obj_decref(PyObject *obj)
-;; Decrement reference count; deallocate if zero; NULL-safe.
-;; Callers must only pass heap pointers (not SmallInts).
+;; obj_decref(PyObject *obj) -> nothing
+;; Biased decrement reference count; deallocate if zero; NULL-safe.
+;; Preserves ALL GPRs on NULL, immortal, and non-zero fast paths.
 ;; ============================================================================
+extern obj_decref_local_zero
+extern obj_decref_shared_p
 DEF_FUNC_BARE obj_decref
     test rdi, rdi
     jz .skip
-    dec qword [rdi + PyObject.ob_refcnt]
-    jnz .skip
-    ; refcount hit zero - deallocate
-    jmp obj_dealloc
+    push rax
+    mov eax, [rdi + PyObject.ob_tid]
+    cmp eax, [gs:ThreadState.ts_tid]
+    jne .nonlocal
+    pop rax
+    dec dword [rdi + PyObject.ob_ref_local]
+    jz obj_decref_local_zero
 .skip:
     ret
+.nonlocal:
+    test eax, eax
+    pop rax
+    jz .skip
+    jmp obj_decref_shared_p
 END_FUNC obj_decref
 
 ; The trashcan.
@@ -107,12 +119,18 @@ DEF_FUNC_BARE obj_dealloc
     call gc_untrack
 .td_no_gc:
     mov rax, [gs:ThreadState.trash_later]
-    mov [rbx + PyObject.ob_refcnt], rax
+    mov [rbx], rax
     mov [gs:ThreadState.trash_later], rbx
     jmp .td_out
 
 .td_enter:
     inc qword [gs:ThreadState.trash_nesting]
+    ; Own the dying object cleanly for any finalizer (__del__ / gen_dealloc)
+    ; so INCREF / obj_decref_no_dealloc operate on local=0, shared=0.
+    mov eax, [gs:ThreadState.ts_tid]
+    mov [rbx + PyObject.ob_tid], eax
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_ref_shared], 0
 
     ; PEP 442: __del__ runs before anything is taken apart -- before the weak
     ; references are cleared and before tp_dealloc releases a field -- and if
@@ -150,6 +168,10 @@ DEF_FUNC_BARE obj_dealloc
     jnz .td_leave                   ; resurrected: free nothing
 
 .no_finalizer:
+    ; Mark definitively dead (MERGED with count 0) before weakref_clear_for
+    ; so a concurrent obj_try_incref cannot resurrect the object.
+    mov dword [rbx + PyObject.ob_ref_shared], REF_MERGED_BIT
+    mov dword [rbx + PyObject.ob_tid], REF_TID_MERGED
 
     ; The object is dead: take it out of the collector's lists NOW, before a
     ; single field is released.  This used to happen last, inside gc_dealloc,
@@ -220,9 +242,10 @@ DEF_FUNC_BARE obj_dealloc
     mov rbx, [gs:ThreadState.trash_later]
     test rbx, rbx
     jz .td_drain_done
-    mov rax, [rbx + PyObject.ob_refcnt]
+    mov rax, [rbx]
     mov [gs:ThreadState.trash_later], rax
-    mov qword [rbx + PyObject.ob_refcnt], 0
+    mov dword [rbx + PyObject.ob_ref_local], 0
+    mov dword [rbx + PyObject.ob_ref_shared], 0
     mov rdi, rbx
     call obj_dealloc
     jmp .td_drain_loop
@@ -3086,7 +3109,8 @@ section .data
 align 8
 global type_type
 type_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type (self-referential)
     dq type_type_name         ; tp_name
     dq TYPE_OBJECT_SIZE       ; tp_basicsize

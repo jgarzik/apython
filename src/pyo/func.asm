@@ -1962,7 +1962,8 @@ fn_dunder_name_key: db "__name__", 0
 align 8
 global func_type
 func_type:
-    dq 1                    ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type            ; ob_type
     dq func_name_str        ; tp_name
     dq PyFuncObject_size    ; tp_basicsize
@@ -2362,7 +2363,8 @@ section .data
 align 8
 global cell_type
 cell_type:
-    dq 1                      ; ob_refcnt (immortal)
+    dq 0x00000000FFFFFFFF       ; ob_ref_local=IMMORTAL, ob_ref_shared=0
+    dq 0                        ; ob_tid=0 (immortal), ob_mutex=0
     dq type_type              ; ob_type
     dq cell_name_str          ; tp_name
     dq PyCellObject_size      ; tp_basicsize

@@ -308,7 +308,7 @@ DEF_FUNC str_intern_bytes, SIB_FRAME
     mov rax, [rbp - SIB_HASH]
     mov [rbx + PyStrObject.ob_hash], rax
     ; One reference for the table and one for the caller.
-    inc qword [rbx + PyObject.ob_refcnt]
+    INCREF rbx
     mov rdi, rbx
     mov rsi, [rbp - SIB_HASH]
     call si_place
@@ -422,7 +422,7 @@ DEF_FUNC str_intern, SINT_FRAME
     ; Not present: this object becomes the interned one.  Two references now
     ; exist -- the table's and the caller's.
     mov rdi, [rbp - SINT_SELF]
-    inc qword [rdi + PyObject.ob_refcnt]
+    INCREF rdi
     mov rsi, [rbp - SINT_HASH]
     call si_place
     inc qword [rel si_used]

@@ -393,7 +393,7 @@ DEF_FUNC seqiter_setstate, SSS_FRAME
     mov [rbx + PyListIterObject.it_index], rax
 .sss_done:
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     pop rbx
     leave
     ret

@@ -802,7 +802,7 @@ DEF_FUNC px_parser_child, EC_FRAME
     INCREF_V rdx, rcx
     mov rcx, [rbp - EC_LIST]
     mov [rcx + rax*8], rdx
-    dec qword [rel none_singleton + PyObject.ob_refcnt]
+    ; none_singleton is immortal: no refcount update needed.
     mov rcx, [rbp - EC_H]
     mov [rcx + PxHandle.handlers + rax*8], rdx
     mov rdi, [rcx + PxHandle.parser]

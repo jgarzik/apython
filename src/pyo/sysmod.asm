@@ -250,7 +250,10 @@ DEF_FUNC_LOCAL sm_add_exe_paths, SME_FRAME
     lea rdi, [rel pc_prefix]
     call str_from_cstr_heap
     mov [rbp - SME_STR], rax
-    add qword [rax + PyObject.ob_refcnt], 3
+    mov rdi, rax
+    mov esi, 3
+    extern obj_addref_bulk
+    call obj_addref_bulk
     CSTRING rdi, "prefix"
     mov rsi, [rbp - SME_STR]
     mov rdx, [rbp - SME_DICT]
@@ -1007,7 +1010,7 @@ DEF_FUNC sys_module_init, 40
     je .flags_have_bool
     lea rdx, [rel bool_true]
 .flags_have_bool:
-    inc qword [rdx + PyObject.ob_refcnt]
+    INCREF rdx
     mov rdi, rbx
     mov esi, r12d
     call structseq_set
@@ -2379,7 +2382,8 @@ DEF_FUNC sys_getrefcount_func
     ja .sgr_immortal
     test rdi, rdi
     jz .sgr_immortal
-    mov rax, [rdi + PyObject.ob_refcnt]
+    extern obj_get_refcount
+    call obj_get_refcount
     V_PACK_I64 rax, rcx
     leave
     ret
@@ -2614,7 +2618,7 @@ DEF_FUNC sys_set_asyncgen_hooks_func, SAH_FRAME
 
 .sah_done:
     lea rax, [rel none_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     pop rbx
     leave

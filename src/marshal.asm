@@ -525,7 +525,7 @@ mdo_none:
 mdo_ellipsis:
     extern ellipsis_singleton
     lea rax, [rel ellipsis_singleton]
-    inc qword [rax + PyObject.ob_refcnt]
+    INCREF rax
     mov edx, TAG_PTR
     jmp mfinish
 
@@ -655,7 +655,7 @@ mdo_long:
     mov edi, PyIntObject_size
     call ap_malloc
     mov r15, rax               ; r15 = PyIntObject*
-    mov qword [r15 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r15
     lea rax, [rel int_type]
     mov [r15 + PyObject.ob_type], rax
     mov qword [r15 + PyIntObject.compact], 0  ; GMP-backed
@@ -1366,7 +1366,7 @@ mdo_code:
     mov r13, rax               ; r13 = code object
 
     ; Fill base header
-    mov qword [r13 + PyObject.ob_refcnt], 1
+    INIT_OBJ_RC r13
     lea rax, [rel code_type]
     mov [r13 + PyObject.ob_type], rax
 
