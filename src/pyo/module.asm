@@ -1245,21 +1245,20 @@ DEF_FUNC namespace_repr, NR_FRAME
     test rax, rax
     jz .nr_close
     mov [rbp - NR_DICT], rax
-    mov rcx, [rax + PyDictObject.capacity]
-    mov [rbp - NR_CAP], rcx
 
 .nr_scan:
+    mov r10, [rbp - NR_DICT]
+    OBJ_LOCK r10
     mov rcx, [rbp - NR_IDX]
-    cmp rcx, [rbp - NR_CAP]
-    jge .nr_close
-    mov rax, [rbp - NR_DICT]
-    mov rax, [rax + PyDictObject.entries]
+    cmp rcx, [r10 + PyDictObject.capacity]
+    jge .nr_unlock_close
+    mov rax, [r10 + PyDictObject.entries]
     imul rdx, rcx, DICT_ENTRY_SIZE
     mov rsi, [rax + rdx + DictEntry.key]
     test rsi, rsi
-    jz .nr_next
+    jz .nr_unlock_next
     cmp r13, NR_BUF - 64
-    jae .nr_close
+    jae .nr_unlock_close
 
     ; ", " between items
     cmp qword [rbp - NR_COUNT], 0
@@ -1270,7 +1269,7 @@ DEF_FUNC namespace_repr, NR_FRAME
 .nr_no_sep:
     inc qword [rbp - NR_COUNT]
 
-    ; key -- always a str here
+    ; key -- always a str here; copy bytes while OBJ_LOCK holds entry alive
     mov r8, [rsi + PyStrObject.ob_size]
     lea rsi, [rsi + PyStrObject.data]
     xor ecx, ecx
@@ -1279,8 +1278,8 @@ DEF_FUNC namespace_repr, NR_FRAME
     jge .nr_key_done
     cmp r13, NR_BUF - 40
     jae .nr_key_done
-    movzx eax, byte [rsi + rcx]
-    mov [rbx + r13], al
+    movzx r9d, byte [rsi + rcx]
+    mov [rbx + r13], r9b
     inc r13
     inc rcx
     jmp .nr_key
@@ -1288,13 +1287,20 @@ DEF_FUNC namespace_repr, NR_FRAME
     mov byte [rbx + r13], '='
     inc r13
 
-    ; = repr(value)
-    mov rax, [rbp - NR_DICT]
-    mov rax, [rax + PyDictObject.entries]
-    mov rcx, [rbp - NR_IDX]
-    imul rdx, rcx, DICT_ENTRY_SIZE
+    ; Pin value under OBJ_LOCK before calling obj_repr unlocked
     mov rdi, [rax + rdx + DictEntry.value]
+    INCREF_V rdi, rcx
+    OBJ_UNLOCK r10
+    push rdi
+    push rdi                        ; 16-byte align
     call obj_repr
+    push rax
+    push rax
+    mov rdi, [rsp + 16]
+    DECREF_V rdi, rcx
+    pop rax
+    pop rax
+    add rsp, 16
     V_UNPACK rax, rdx
     test rax, rax
     jz .nr_next
@@ -1314,11 +1320,16 @@ DEF_FUNC namespace_repr, NR_FRAME
 .nr_val_done:
     mov rdi, rax
     call obj_decref
+    jmp .nr_next
 
+.nr_unlock_next:
+    OBJ_UNLOCK r10
 .nr_next:
     inc qword [rbp - NR_IDX]
     jmp .nr_scan
 
+.nr_unlock_close:
+    OBJ_UNLOCK r10
 .nr_close:
     mov byte [rbx + r13], ')'
     inc r13

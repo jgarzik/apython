@@ -733,23 +733,39 @@ DEF_FUNC mw_object, MWO_FRAME
     ; which is why there is no count.
     mov qword [rbp - MWO_I], 0
 .mwo_dict_loop:
+    OBJ_LOCK rbx
     mov rcx, [rbp - MWO_I]
     cmp rcx, [rbx + PyDictObject.capacity]
-    jae .mwo_dict_done
+    jae .mwo_dict_unlock_done
     mov rax, [rbx + PyDictObject.entries]
     imul rdx, rcx, DictEntry_size
     add rax, rdx
-    cmp qword [rax + DictEntry.key], 0
-    je .mwo_dict_next
-    mov [rbp - MWO_OBJ], rax
     mov rdi, [rax + DictEntry.key]
+    test rdi, rdi
+    jz .mwo_dict_unlock_next
+    mov rdx, [rax + DictEntry.value]
+    mov [rbp - MWO_OBJ], rdx
+    INCREF_V rdi, rcx
+    INCREF_V rdx, rcx
+    OBJ_UNLOCK rbx
+    push rdi
+    push rdi
     call mw_object
-    mov rax, [rbp - MWO_OBJ]
-    mov rdi, [rax + DictEntry.value]
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - MWO_OBJ]
     call mw_object
+    mov rdi, [rbp - MWO_OBJ]
+    DECREF_V rdi, rcx
+    jmp .mwo_dict_next
+.mwo_dict_unlock_next:
+    OBJ_UNLOCK rbx
 .mwo_dict_next:
     inc qword [rbp - MWO_I]
     jmp .mwo_dict_loop
+.mwo_dict_unlock_done:
+    OBJ_UNLOCK rbx
 .mwo_dict_done:
     mov edi, MARSHAL_TYPE_NULL
     call mw_byte
@@ -770,20 +786,32 @@ DEF_FUNC mw_object, MWO_FRAME
     call mw_long
     mov qword [rbp - MWO_I], 0
 .mwo_set_loop:
+    OBJ_LOCK rbx
     mov rcx, [rbp - MWO_I]
     cmp rcx, [rbx + PyDictObject.capacity]
-    jae .mwo_out
+    jae .mwo_set_unlock_out
     mov rax, [rbx + PyDictObject.entries]
     mov rdx, rcx
     shl rdx, 4                          ; SET_ENTRY_SIZE, and not DictEntry's
     add rax, rdx
     mov rdi, [rax + MW_SET_ENTRY_KEY]
     test rdi, rdi
-    jz .mwo_set_next
+    jz .mwo_set_unlock_next
+    mov [rbp - MWO_OBJ], rdi
+    INCREF_V rdi, rcx
+    OBJ_UNLOCK rbx
     call mw_object
+    mov rdi, [rbp - MWO_OBJ]
+    DECREF_V rdi, rcx
+    jmp .mwo_set_next
+.mwo_set_unlock_next:
+    OBJ_UNLOCK rbx
 .mwo_set_next:
     inc qword [rbp - MWO_I]
     jmp .mwo_set_loop
+.mwo_set_unlock_out:
+    OBJ_UNLOCK rbx
+    jmp .mwo_out
 
 .mwo_code:
     mov rdi, rbx

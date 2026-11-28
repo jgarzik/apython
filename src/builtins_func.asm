@@ -465,15 +465,16 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
     mov rbx, [rdi + PyTypeObject.tp_dict]
     test rbx, rbx
     jz .tsm_done
+    OBJ_LOCK rbx
 
     mov r12, [rbx + PyDictObject.entries]
     test r12, r12
-    jz .tsm_done
+    jz .tsm_unlock_done
     mov rcx, [rbx + PyDictObject.capacity]
     xor r8d, r8d
 .tsm_loop:
     cmp r8, rcx
-    jge .tsm_done
+    jge .tsm_unlock_done
     mov rax, r8
     imul rax, DICT_ENTRY_SIZE
     add rax, r12
@@ -550,6 +551,8 @@ DEF_FUNC type_stamp_methods, TSM_FRAME
 .tsm_next:
     inc r8
     jmp .tsm_loop
+.tsm_unlock_done:
+    OBJ_UNLOCK rbx
 .tsm_done:
     pop r12
     pop rbx

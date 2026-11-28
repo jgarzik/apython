@@ -426,27 +426,45 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     mov [rbp - CA_DICT], rax
     mov qword [rbp - CA_IDX], 0
 .ca_own_loop:
-    mov rax, [rbp - CA_DICT]
+    mov r8, [rbp - CA_DICT]
+    OBJ_LOCK r8
     mov rcx, [rbp - CA_IDX]
-    cmp rcx, [rax + PyDictObject.dk_nentries]
-    jge .ca_bases
-    mov rdx, [rax + PyDictObject.entries]
+    cmp rcx, [r8 + PyDictObject.dk_nentries]
+    jge .ca_own_unlock_bases
+    mov rdx, [r8 + PyDictObject.entries]
     imul rcx, rcx, DICT_ENTRY_SIZE
     mov rbx, [rdx + rcx + DictEntry.key]
     mov r12, [rdx + rcx + DictEntry.value]
     inc qword [rbp - CA_IDX]
     test rbx, rbx
-    jz .ca_own_loop
+    jz .ca_own_unlock_next
+    INCREF_V rbx, rax
+    INCREF_V r12, rax
+    OBJ_UNLOCK r8
     mov rdi, r12
-    call abc_is_abstract
-    ERR_M1 .ca_fail
+    call abc_is_abstract        ; err: checked below after dropping pins
+    cmp rax, -1
+    je .ca_own_fail_pins
     test eax, eax
-    jz .ca_own_loop
+    jz .ca_own_drop_pins
     mov rdi, [rbp - CA_SET]
     mov rsi, rbx
-    call set_add
-    ERR_M1 .ca_fail
+    call set_add                ; err: checked below after dropping pins
+    cmp rax, -1
+    je .ca_own_fail_pins
+.ca_own_drop_pins:
+    DECREF_V rbx, rcx
+    DECREF_V r12, rcx
     jmp .ca_own_loop
+.ca_own_fail_pins:
+    DECREF_V rbx, rcx
+    DECREF_V r12, rcx
+    jmp .ca_fail
+.ca_own_unlock_next:
+    OBJ_UNLOCK r8
+    jmp .ca_own_loop
+.ca_own_unlock_bases:
+    OBJ_UNLOCK r8
 
 .ca_bases:
     ; Anything a base left abstract and this class did not define concretely.
@@ -467,24 +485,27 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     ja .ca_base_loop
     mov qword [rbp - CA_IDX], 0
 .ca_names_loop:
+    OBJ_LOCK r12
     mov rcx, [rbp - CA_IDX]
     cmp rcx, [r12 + PyDictObject.capacity]
-    jge .ca_base_drop
+    jge .ca_names_unlock_drop
     mov rdx, [r12 + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rax, [rdx + rcx + 8]    ; the key (the hash sits at +0)
     inc qword [rbp - CA_IDX]
     test rax, rax
-    jz .ca_names_loop
+    jz .ca_names_unlock_next
     V_TEST_PTR rax, rcx
-    ja .ca_names_loop
+    ja .ca_names_unlock_next
+    INCREF rax
+    OBJ_UNLOCK r12
     mov [rbp - CA_KEY], rax
     mov rdi, [rbp - CA_CLS]
     mov rsi, rax
     call type_getattr
     V_UNPACK rax, rdx
     test edx, edx
-    jz .ca_names_loop
+    jz .ca_names_drop_key
     push rax
     push rdx
     mov rdi, rax
@@ -497,18 +518,30 @@ DEF_FUNC_LOCAL abc_compute_abstracts, CA_FRAME
     DECREF_VAL rdi, rdx
     pop rcx
     cmp rcx, -1                 ; never an answer
-    je .ca_fail_drop
+    je .ca_fail_drop_key
     test ecx, ecx
-    jz .ca_names_loop
+    jz .ca_names_drop_key
     mov rdi, [rbp - CA_SET]
     mov rsi, [rbp - CA_KEY]
-    call set_add
-    ERR_M1 .ca_fail_drop
+    call set_add                ; err: checked below after dropping key pin
+    cmp rax, -1
+    je .ca_fail_drop_key
+.ca_names_drop_key:
+    mov rdi, [rbp - CA_KEY]
+    call obj_decref
     jmp .ca_names_loop
+.ca_names_unlock_next:
+    OBJ_UNLOCK r12
+    jmp .ca_names_loop
+.ca_names_unlock_drop:
+    OBJ_UNLOCK r12
 .ca_base_drop:
     mov rdi, r12
     call obj_decref
     jmp .ca_base_loop
+.ca_fail_drop_key:
+    mov rdi, [rbp - CA_KEY]
+    call obj_decref
 .ca_fail_drop:
     mov rdi, r12
     call obj_decref
@@ -824,24 +857,37 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov [rbp - SC_REG], rax
     mov qword [rbp - SC_IDX], 0
 .reg_loop:
-    mov rax, [rbp - SC_REG]
+    mov r8, [rbp - SC_REG]
+    OBJ_LOCK r8
     mov rcx, [rbp - SC_IDX]
-    cmp rcx, [rax + PyDictObject.capacity]
-    jge .reg_done_drop
-    mov rdx, [rax + PyDictObject.entries]
+    cmp rcx, [r8 + PyDictObject.capacity]
+    jge .reg_unlock_done_drop
+    mov rdx, [r8 + PyDictObject.entries]
     shl rcx, 4                  ; SET_ENTRY_SIZE
     mov rdi, [rdx + rcx + 8]    ; the entry's key Value (hash sits at +0)
     inc qword [rbp - SC_IDX]
     V_TEST_PTR rdi, rax
-    ja .reg_loop
+    ja .reg_unlock_next
     test rdi, rdi
-    jz .reg_loop
+    jz .reg_unlock_next
+    INCREF rdi
+    OBJ_UNLOCK r8
+    push rdi
+    push rdi                    ; 16-byte align
     call abc_deref              ; a weak reference, unless it could not be one
     test rax, rax
-    jz .reg_loop                ; the registered class has been collected
+    jz .reg_drop_pin            ; the registered class has been collected
     mov rsi, rax                ; the registered class
     mov rdi, [rbp - SC_SUB]
-    call abc_call_issubclass
+    call abc_call_issubclass    ; err: checked below after dropping pin
+    mov rcx, rax
+    pop rdi
+    pop rdi
+    push rcx
+    push rcx
+    call obj_decref
+    pop rax
+    pop rax
     cmp eax, -1
     je .reg_error_drop
     test eax, eax
@@ -849,6 +895,17 @@ DEF_FUNC abc_subclasscheck, SC_FRAME
     mov rdi, [rbp - SC_REG]
     call obj_decref
     jmp .cache_yes
+.reg_drop_pin:
+    pop rdi
+    pop rdi
+    call obj_decref
+    jmp .reg_loop
+.reg_unlock_next:
+    OBJ_UNLOCK r8
+    jmp .reg_loop
+.reg_unlock_done_drop:
+    OBJ_UNLOCK r8
+    jmp .reg_done_drop
 .reg_error_drop:
     mov rdi, [rbp - SC_REG]
     call obj_decref
@@ -1062,13 +1119,14 @@ DEF_FUNC type_abstract_error, TAE_FRAME
 
     ; --- collect the keys, up to TAE_MAX of them ---
     xor r13d, r13d              ; how many collected
+    OBJ_LOCK r12
     mov rcx, [r12 + PyDictObject.entries]
     xor r8d, r8d                ; the slot index
 .tae_scan:
     cmp r8, [r12 + PyDictObject.capacity]
-    jge .tae_sort
+    jge .tae_unlock_sort
     cmp r13, TAE_MAX
-    jge .tae_sort
+    jge .tae_unlock_sort
     mov rax, r8
     shl rax, 4                  ; SET_ENTRY_SIZE
     mov rdx, [rcx + rax + SET_ENTRY_KEY]
@@ -1082,6 +1140,8 @@ DEF_FUNC type_abstract_error, TAE_FRAME
 .tae_scan_next:
     inc r8
     jmp .tae_scan
+.tae_unlock_sort:
+    OBJ_UNLOCK r12
 
     ; --- insertion sort, by the bytes of the names ---
 .tae_sort:

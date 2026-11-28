@@ -712,14 +712,15 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
 
     mov qword [rbp - PEV_POS], 0
     mov qword [rbp - PEV_I], 0
+    OBJ_LOCK rbx
     mov rax, [rbx + PyDictObject.ob_size]
     cmp rax, PXV_MAX
-    jae .pev_toomany
+    jae .pev_unlock_toomany
     xor r12d, r12d                      ; how many pointers are written
 .pev_loop:
     mov rcx, [rbp - PEV_I]
     cmp rcx, [rbx + PyDictObject.capacity]
-    jge .pev_done
+    jge .pev_unlock_done
     mov rax, [rbx + PyDictObject.entries]
     imul rdx, rcx, DictEntry_size
     mov rdi, [rax + rdx + DictEntry.key]
@@ -728,43 +729,33 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     mov rsi, [rax + rdx + DictEntry.value]
 
     V_TEST_PTR rdi, rcx
-    ja .pev_bad
+    ja .pev_unlock_bad
     mov rcx, [rdi + PyObject.ob_type]
     lea rax, [rel str_type]
     cmp rcx, rax
-    jne .pev_bad
+    jne .pev_unlock_bad
     V_TEST_PTR rsi, rcx
-    ja .pev_bad
+    ja .pev_unlock_bad
     mov rcx, [rsi + PyObject.ob_type]
     cmp rcx, rax
-    jne .pev_bad
+    jne .pev_unlock_bad
 
-    ; pev_append copies up to the first NUL, so an embedded one truncates the
-    ; entry where execve reads it -- and a NUL in the KEY produces an entry
-    ; with no '=' in it at all, which is not an environment variable of any
-    ; name.  Both halves are checked here, before anything is written, so a
-    ; refusal leaves no half-built entry in the buffer.
     push rdi
     push rsi                            ; an even count keeps rsp 16-aligned
     mov rsi, [rdi + PyStrObject.ob_size]
     add rdi, PyStrObject.data
     call posix_embedded_nul
     test eax, eax
-    jnz .pev_nul
+    jnz .pev_unlock_nul
     mov rdi, [rsp]                      ; the value
     mov rsi, [rdi + PyStrObject.ob_size]
     add rdi, PyStrObject.data
     call posix_embedded_nul
     test eax, eax
-    jnz .pev_nul
+    jnz .pev_unlock_nul
     pop rsi
     pop rdi
 
-    ; An '=' in the NAME is the same failure wearing a different byte: the
-    ; entry is built as "<key>=<value>", so a key of "FRUIT=ORANGE" with the
-    ; value "lemon" becomes "FRUIT=ORANGE=lemon" -- which sets FRUIT, not the
-    ; variable that was asked for.  CPython refuses it, and names it
-    ; separately because it is not a NUL.
     push rdi
     push rsi                            ; an even count keeps rsp 16-aligned
     mov rcx, [rdi + PyStrObject.ob_size]
@@ -774,7 +765,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     cmp rax, rcx
     jge .pev_eq_ok
     cmp byte [rdi + rax], '='
-    je .pev_badname
+    je .pev_unlock_badname
     inc rax
     jmp .pev_eq_scan
 .pev_eq_ok:
@@ -794,7 +785,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     call pev_append
     pop rsi
     test eax, eax
-    jz .pev_full
+    jz .pev_unlock_full
     mov rcx, [rbp - PEV_POS]
     mov rdx, [rbp - PEV_BUF]
     mov byte [rdx + rcx], '='
@@ -803,7 +794,7 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     add rdi, PyStrObject.data
     call pev_append
     test eax, eax
-    jz .pev_full
+    jz .pev_unlock_full
     mov rcx, [rbp - PEV_POS]
     mov rdx, [rbp - PEV_BUF]
     mov byte [rdx + rcx], 0
@@ -811,6 +802,8 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
 .pev_next:
     inc qword [rbp - PEV_I]
     jmp .pev_loop
+.pev_unlock_done:
+    OBJ_UNLOCK rbx
 .pev_done:
     mov rax, [rbp - PEV_OUT]
     mov qword [rax + r12*8], 0
@@ -819,6 +812,19 @@ DEF_FUNC_LOCAL pxv_env_vector, PEV_FRAME
     pop rbx
     leave
     ret
+.pev_unlock_bad:
+    OBJ_UNLOCK rbx
+    jmp .pev_bad
+.pev_unlock_toomany:
+.pev_unlock_full:
+    OBJ_UNLOCK rbx
+    jmp .pev_full
+.pev_unlock_nul:
+    OBJ_UNLOCK rbx
+    jmp .pev_nul
+.pev_unlock_badname:
+    OBJ_UNLOCK rbx
+    jmp .pev_badname
 
 .pev_sequence:
     mov rdi, rbx

@@ -58,7 +58,8 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     test rsi, rsi
     jz .done
 
-    ; --- snapshot the keys ---
+    ; --- snapshot the keys under OBJ_LOCK ---
+    OBJ_LOCK rsi
     mov r12, [rsi + PyDictObject.capacity]
     mov r13, [rsi + PyDictObject.entries]
     xor ebx, ebx
@@ -75,12 +76,12 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     jmp .count
 .counted:
     test rbx, rbx
-    jz .done
+    jz .unlock_done
     mov [rbp - TSN_N], rbx
     mov rdi, rbx
     call tuple_new
     test rax, rax
-    jz .done
+    jz .unlock_ns_done
     mov [rbp - TSN_KEYS], rax
     mov rdx, [rax + PyTupleObject.ob_item]
     mov rsi, [rbp - TSN_NS]
@@ -102,6 +103,14 @@ DEF_FUNC type_apply_set_name, TSN_FRAME
     inc rcx
     jmp .fill
 .filled:
+    OBJ_UNLOCK rsi
+    jmp .apply_loop
+.unlock_ns_done:
+    mov rsi, [rbp - TSN_NS]
+.unlock_done:
+    OBJ_UNLOCK rsi
+    jmp .done
+.apply_loop:
 
     ; --- call each value's __set_name__, if its TYPE defines one ---
     mov qword [rbp - TSN_I], 0

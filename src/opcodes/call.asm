@@ -682,20 +682,15 @@ DEF_FUNC op_call_function_ex
 
 .cfex_merge_kwargs:
     ; --- Merge positional args + keyword args ---
-    ; Get n_kw from kwargs dict — if empty, take simple path
+    ; Lock kwargs dict across size check, key validation, and copy into merged/kwnames.
     mov rax, [rbp - CFX_KWARGS]
+    OBJ_LOCK rax
     mov rcx, [rax + PyDictObject.ob_size]
     test rcx, rcx
-    jz .cfex_empty_kwargs          ; empty dict → treat as no kwargs
+    jz .cfex_unlock_empty_kwargs   ; empty dict → treat as no kwargs
     mov [rbp - CFX_NKW], rcx
 
-    ; Every key has to be a string, and CPython refuses a call where one is
-    ; not before anything else happens.  DictEntry.key is a full Value and a
-    ; dict takes any hashable key, so `f(**{1: 2})` put an int IMMEDIATE in
-    ; the names tuple and the INCREF below wrote through the number itself --
-    ; one line of Python, and a segfault.  Checked here, before the merged
-    ; buffer and the names tuple exist, so the refusal has nothing to release.
-    mov rsi, [rbp - CFX_KWARGS]
+    mov rsi, rax
     mov r8, [rsi + PyDictObject.entries]
     mov r9, [rsi + PyDictObject.capacity]
     xor ecx, ecx
@@ -719,7 +714,12 @@ DEF_FUNC op_call_function_ex
     inc rcx
     jmp .cfex_kwkey_scan
 .cfex_kwkey_bad:
+    mov rax, [rbp - CFX_KWARGS]
+    OBJ_UNLOCK rax
     RAISE exc_TypeError_type, "keywords must be strings"
+.cfex_unlock_empty_kwargs:
+    OBJ_UNLOCK rax
+    jmp .cfex_empty_kwargs
 .cfex_kwkeys_ok:
 
     ; Get n_pos from args tuple
@@ -809,6 +809,7 @@ DEF_FUNC op_call_function_ex
     jmp .cfex_dict_scan
 
 .cfex_dict_done:
+    OBJ_UNLOCK r12
     ; Set kw_names_pending for the callee
     mov rax, [rbp - CFX_KWNAMES]
     mov [gs:ThreadState.kw_names_pending], rax

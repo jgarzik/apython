@@ -587,87 +587,83 @@ extern obj_decref
 
     ;; --- No __all__: walk dict entries, skip _-prefixed names ---
 .is_no_all:
-    mov rax, [rbp - IS_MODDICT]
-    mov rcx, [rax + PyDictObject.capacity]
-    mov [rbp - IS_LIMIT], rcx
     mov qword [rbp - IS_IDX], 0
 
 .is_dict_loop:
+    mov r10, [rbp - IS_MODDICT]
+    OBJ_LOCK r10
     mov rcx, [rbp - IS_IDX]
-    cmp rcx, [rbp - IS_LIMIT]
-    jge .is_done
+    cmp rcx, [r10 + PyDictObject.capacity]
+    jge .is_dict_unlock_done
 
-    ; Entry address: entries + idx * DICT_ENTRY_SIZE (40)
-    mov rax, [rbp - IS_MODDICT]
-    mov rsi, [rax + PyDictObject.entries]
+    mov rsi, [r10 + PyDictObject.entries]
     imul rcx, DICT_ENTRY_SIZE
-    lea rbx, [rsi + rcx]              ; rbx = entry ptr (callee-saved)
+    lea rbx, [rsi + rcx]              ; rbx = entry ptr
 
-    ; Skip an empty or tombstoned slot.  This tested r8 -- left over from the
-    ; previous iteration since the key-tag load it guarded was removed -- so
-    ; `from mod import *` bound nothing at all.
     mov rsi, [rbx + DictEntry.key]
     test rsi, rsi
-    jz .is_dict_next
-    V_UNPACK rsi, r8
+    jz .is_dict_unlock_next
+    mov rdx, [rbx + DictEntry.value]
+    mov rax, rsi
+    V_UNPACK rax, r8
 
     ; Skip names starting with '_'
     cmp r8d, TAG_PTR
-    jne .is_dict_copy                 ; non-string → copy
-    ; Heap string: check first data byte
-    cmp byte [rsi + PyStrObject.data], '_'
-    je .is_dict_next
+    jne .is_dict_pin                  ; non-string → copy
+    cmp byte [rax + PyStrObject.data], '_'
+    je .is_dict_unlock_next
 
-.is_dict_copy:
-    ; A MODULE's namespace is its dict, so the value comes straight from the
-    ; entry.  Anything else only lent its __dict__ for the NAMES: CPython
-    ; getattr's each of them off the object, and for an object whose __dict__
-    ; is not its namespace -- one that builds a fresh dict on every read --
-    ; the two answer differently, and CPython's answer is the object's.
+.is_dict_pin:
+    ; Pin key (and value if taking from entry) under OBJ_LOCK before unlocking
+    mov [rbp - IS_SUBNAME], rsi
+    INCREF_V rsi, rax
     cmp qword [rbp - IS_OWNDICT], 0
-    je .is_dict_from_entry
+    jne .is_dict_pin_own
+    INCREF_V rdx, rax
+    OBJ_UNLOCK r10
+    mov rbx, rdx                      ; save owned value in callee-saved rbx
+    mov rdi, [rbp - IS_LOCALS]
+    call dict_set                     ; err: checked below after dropping pins
+    mov r10, rax
+    mov rdi, [rbp - IS_SUBNAME]
+    DECREF_V rdi, rcx
+    DECREF_V rbx, rcx
+    mov rax, r10
+    ERR_M1_JUMP
+    jmp .is_dict_next
+
+.is_dict_pin_own:
+    OBJ_UNLOCK r10
     mov rdi, [rbp - IS_MOD]
-    ; A key that is not a str cannot be an attribute name; CPython's
-    ; PyObject_GetAttr refuses it, and so does obj_getattr_opt by answering 0.
+    mov rsi, [rbp - IS_SUBNAME]
     call obj_getattr_opt
     test rax, rax
     jz .is_dict_no_attr
-    mov rdx, rax
-    push rdx
-    push rdx                          ; and a pad: the frame here is odd
+    mov rbx, rax                      ; owned attr value
     mov rdi, [rbp - IS_LOCALS]
-    mov rsi, [rbx + DictEntry.key]
-    call dict_set
+    mov rsi, [rbp - IS_SUBNAME]
+    mov rdx, rbx
+    call dict_set                     ; err: checked below after dropping pins
+    mov r10, rax
+    mov rdi, [rbp - IS_SUBNAME]
+    DECREF_V rdi, rcx
+    DECREF_V rbx, rcx
+    mov rax, r10
     ERR_M1_JUMP
-    pop rdi
-    pop rdi
-    DECREF_V rdi, rcx                 ; dict_set took its own reference
     jmp .is_dict_next
 
-.is_dict_from_entry:
-    ; dict_set(locals, key Value, value Value)
-    mov rdi, [rbp - IS_LOCALS]
-    ; rsi = key Value (already set), value comes straight from the entry
-    mov rdx, [rbx + DictEntry.value]
-    call dict_set
-    ERR_M1_JUMP
-
+.is_dict_unlock_next:
+    OBJ_UNLOCK r10
 .is_dict_next:
     inc qword [rbp - IS_IDX]
     jmp .is_dict_loop
 
+.is_dict_unlock_done:
+    OBJ_UNLOCK r10
+    jmp .is_done
+
 .is_dict_no_attr:
-    ; The name was in __dict__ and the object will not answer it.  CPython
-    ; lets PyObject_GetAttr's AttributeError out, naming the attribute.
-    ;
-    ; The name belongs to the dict, and dropping the dict is what frees it --
-    ; rbx points INTO its entry array -- so the name is taken first and the
-    ; entry is not read again.  That one reference is leaked: raise_no_attribute
-    ; abandons this frame, as every RAISE in the tree does, and leaking a name
-    ; is the smaller of the two things that can be leaked here.
-    mov rsi, [rbx + DictEntry.key]
-    INCREF_V rsi, rax
-    mov [rbp - IS_SUBNAME], rsi
+    ; IS_SUBNAME is already owned (pinned above); drop owndict and raise.
     IS_DROP_OWNDICT
     PUBLISH_SP
     mov rdi, [rbp - IS_MOD]

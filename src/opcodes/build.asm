@@ -2188,32 +2188,27 @@ DEF_FUNC op_dict_update
     xor ebx, ebx              ; index
 
 .du_loop:
-    ; The bound AND the entry array come from the source header every turn.
-    ; dict_set runs user code -- __hash__ and __eq__ on the target's keys --
-    ; and that code can clear the source, which frees the table this used to
-    ; hold in a frame slot and points the dict at the one-slot read-only
-    ; dict_empty_entries.  Cached, the walk then read a freed array to a
-    ; stale bound and inserted what it found.
-    mov rax, [rbp - DU_SRC]
-    cmp rbx, [rax + PyDictObject.dk_nentries]
-    jge .du_done
+    mov r10, [rbp - DU_SRC]
+    OBJ_LOCK r10
+    cmp rbx, [r10 + PyDictObject.dk_nentries]
+    jge .du_unlock_done
 
-    ; Check if entry has a key and value_tag != TAG_NULL
-    mov rax, [rax + PyDictObject.entries]
+    ; Check if entry has a key and pin both under OBJ_LOCK
+    mov rax, [r10 + PyDictObject.entries]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
-    jz .du_next
+    jz .du_unlock_next
     mov rdx, [rax + DictEntry.value]
 
-    ; Both are borrowed out of that table, so both are held for the call.
     mov [rbp - DU_KEYV], rsi
     mov [rbp - DU_VALV], rdx
     INCREF_V rsi, rcx
     INCREF_V rdx, rcx
+    OBJ_UNLOCK r10
 
-    ; dict_set(target, key, value, value_tag, key_tag)
+    ; dict_set(target, key, value)
     push rbx
     mov rdi, [rbp - DU_DICT]
     call dict_set
@@ -2232,11 +2227,16 @@ DEF_FUNC op_dict_update
     mov rax, [rax + PyDictObject.dk_nentries]
     cmp rax, [rbp - DU_ORIGN]
     jne .du_mutated
+    jmp .du_next
 
+.du_unlock_next:
+    OBJ_UNLOCK r10
 .du_next:
     inc rbx
     jmp .du_loop
 
+.du_unlock_done:
+    OBJ_UNLOCK r10
 .du_done:
     ; DECREF the mapping.  The pad is the alignment: the loop above reaches
     ; its calls one push deep, so the frame is sized for that, and a call made
@@ -2422,28 +2422,25 @@ DEF_FUNC op_dict_merge
     xor ebx, ebx              ; index
 
 .dm_loop:
-    ; Read from the source header every turn, and hold the two Values across
-    ; both calls; see op_dict_update above for what a cached table costs.
-    ; This loop makes TWO calls into user code per entry, dict_get's probe
-    ; and dict_set's, so it had two chances at it.
-    mov rax, [rbp - DM_SRC]
-    cmp rbx, [rax + PyDictObject.dk_nentries]
-    jge .dm_done
+    mov r10, [rbp - DM_SRC]
+    OBJ_LOCK r10
+    cmp rbx, [r10 + PyDictObject.dk_nentries]
+    jge .dm_unlock_done
 
-    mov rax, [rax + PyDictObject.entries]
+    mov rax, [r10 + PyDictObject.entries]
     imul rcx, rbx, DictEntry_size
     add rax, rcx
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
-    jz .dm_next
+    jz .dm_unlock_next
     mov rdx, [rax + DictEntry.value]
     mov [rbp - DM_KEYV], rsi
     mov [rbp - DM_VALV], rdx
     INCREF_V rsi, rcx
     INCREF_V rdx, rcx
+    OBJ_UNLOCK r10
 
-    ; Check for duplicate: dict_get(target, key, key_tag).  dict_get returns
-    ; its tag in edx, so the key tag must not be restored over it.
+    ; Check for duplicate: dict_get(target, key)
     push rbx
     mov rdi, [rbp - DM_DICT]          ; target dict
     call dict_get
@@ -2454,7 +2451,7 @@ DEF_FUNC op_dict_merge
     jmp .dm_dup_error           ; key already exists in target
 .dm_no_dup:
 
-    ; dict_set(target, key, value, value_tag, key_tag)
+    ; dict_set(target, key, value)
     pop rbx
     mov rsi, [rbp - DM_KEYV]
     mov rdx, [rbp - DM_VALV]
@@ -2474,11 +2471,16 @@ DEF_FUNC op_dict_merge
     mov rax, [rax + PyDictObject.dk_nentries]
     cmp rax, [rbp - DM_ORIGN]
     jne .dm_mutated
+    jmp .dm_next
 
+.dm_unlock_next:
+    OBJ_UNLOCK r10
 .dm_next:
     inc rbx
     jmp .dm_loop
 
+.dm_unlock_done:
+    OBJ_UNLOCK r10
 .dm_done:
     ; DECREF the mapping.  The pad is the alignment: the loop above reaches
     ; its calls one push deep, so the frame is sized for that, and a call made
@@ -2883,28 +2885,46 @@ DEF_FUNC op_set_update
 .su_set_loop:
     test r14, r14
     jz .su_set_done
-    cmp rbx, [rbp - SU_CAP]
-    jge .su_set_done
+    mov r10, [rbp - SU_SET]         ; source set
+    OBJ_LOCK r10
+    cmp rbx, [r10 + PyDictObject.capacity]
+    jge .su_set_unlock_done
 
-    mov rax, [rbp - SU_SET]         ; source set
-    mov rax, [rax + PyDictObject.entries]
+    mov rax, [r10 + PyDictObject.entries]
     lea rcx, [rbx + rbx]      ; SET_ENTRY_SIZE = 16, which two lea reach
 
-    ; Check if entry has a key
+    ; Check if entry has a key and pin under OBJ_LOCK
     mov rsi, [rax + rcx*8 + 8]      ; SET_ENTRY_KEY offset = 8
     test rsi, rsi
-    jz .su_set_next
+    jz .su_set_unlock_next
     dec r14
+    INCREF_V rsi, rcx
+    OBJ_UNLOCK r10
 
-    ; The loop index is callee-saved, so the call needs no push.
+    push rsi
+    push rsi                        ; keep 16-byte aligned (odd frame + 2 pushes)
     mov rdi, [rbp - SU_SOURCE]
-    call set_add
+    call set_add                    ; err: checked below after dropping pinned key
+    mov r10, rax
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rcx
+    cmp r10, -1
+    je .su_set_add_err
+    jmp .su_set_next
+
+.su_set_add_err:
+    mov rax, -1
     ERR_M1_JUMP
 
+.su_set_unlock_next:
+    OBJ_UNLOCK r10
 .su_set_next:
     inc rbx
     jmp .su_set_loop
 
+.su_set_unlock_done:
+    OBJ_UNLOCK r10
 .su_set_done:
     ; DECREF iterable (tag-aware)
     mov rdi, [rbp - SU_SET]

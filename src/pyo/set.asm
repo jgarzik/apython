@@ -398,6 +398,8 @@ END_FUNC set_keys_equal
 ;; reusable slot (dl_probe's DL_FREE).
 ;; ============================================================================
 SFS_FREE    equ 8               ; first tombstone seen on this probe, or 0
+SFS_VER     equ 16              ; dk_version saved across __eq__ unlock
+SFS_KEY     equ 24              ; pinned stored key Value across __eq__
 SFS_FRAME   equ 24              ; 24 + 5 pushes keeps rsp 16-aligned
 DEF_FUNC_LOCAL set_find_slot
     sub rsp, SFS_FRAME
@@ -410,6 +412,9 @@ DEF_FUNC_LOCAL set_find_slot
     mov rbx, rdi                ; set
     mov r12, rsi                ; the key, a Value
     mov r13, rdx                ; hash
+
+    ; Leaf lock acquired here; returned HELD on non-NULL, UNLOCKED on NULL (error).
+    OBJ_LOCK rbx
 
 .sfs_restart:
     mov qword [rbp - SFS_FREE], 0   ; no reusable slot seen yet
@@ -484,40 +489,41 @@ DEF_FUNC_LOCAL set_find_slot
     je .found_existing
 
     ; Different Values still need the real question asked: 1.0 == 1, and a
-    ; user class decides for itself.
-    ; The perturb is caller-saved, so it goes on the stack -- but only here,
-    ; on the path where a hash matched and the two keys are not the same
-    ; object, which is rare.
+    ; user class decides for itself.  Release OBJ_LOCK across __eq__, pinning
+    ; the stored key so another thread or __eq__ cannot free it.
+    mov rdx, [rbx + PyDictObject.dk_version]
+    mov [rbp - SFS_VER], rdx
+    mov [rbp - SFS_KEY], rdi
+    INCREF_V rdi, rdx
     push rcx                    ; save slot
     push rax                    ; save entry ptr
     push r8                     ; perturb; caller-saved, and the walk needs it
     push r8                     ; pad, so the call stays 16-aligned
+    OBJ_UNLOCK rbx
     mov rsi, r12                ; b = the lookup key
-    call set_keys_equal
-    ERR_M1 .sfs_raised
+    call set_keys_equal         ; err: checked below after dropping pinned key
+    push rax                    ; save equality result (-1/0/1)
+    push rax                    ; alignment pad
+    mov rdi, [rbp - SFS_KEY]
+    DECREF_V rdi, rcx
+    pop rax                     ; pad
+    pop rax                     ; equality result
+    cmp eax, -1
+    je .sfs_raised              ; already UNLOCKED
     mov edi, eax                ; save equality result (survives pops)
     pop r8                      ; pad
     pop r8
     pop rax                     ; entry ptr
     pop rcx                     ; slot
 
-    ; __eq__ is arbitrary Python and may have added to THIS set: a resize
-    ; frees the entry array and rehashes into a new one, which leaves the
-    ; entry pointer just restored dangling and the mask, the slot and the
-    ; remembered free slot all describing a table that no longer exists.
-    ; The probe starts again rather than trusting any of it -- a set whose
-    ; keys collide and whose __eq__ grows it used to walk the freed array and
-    ; end at fatal_error("set: hash table full").  r14 IS the array the walk
-    ; began on, so the check needs no frame slot of its own.
+    OBJ_LOCK rbx
+    mov rdx, [rbp - SFS_VER]
+    cmp rdx, [rbx + PyDictObject.dk_version]
+    jne .sfs_restart
     cmp r14, [rbx + PyDictObject.entries]
     jne .sfs_restart
     test edi, edi
     jnz .found_existing
-    ; An occupied slot holding a DIFFERENT key.  Keep probing -- and jump,
-    ; rather than falling through: the arm below records a reusable slot, and
-    ; a live entry recorded there is handed back as free by .found_empty and
-    ; then overwritten.  That reads as a set whose len() counts a key its
-    ; iteration no longer contains.
     jmp .find_next
 
 .find_vacant:
@@ -752,12 +758,15 @@ END_FUNC set_resize
 ;; left alone.
 ;; ============================================================================
 global set_reserve
-DEF_FUNC_BARE set_reserve
-    mov rax, [rdi + PyDictObject.ob_size]
-    add rax, [rdi + PyDictObject.dk_tombstones]
+DEF_FUNC set_reserve, 8         ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    OBJ_LOCK rbx
+    mov rax, [rbx + PyDictObject.ob_size]
+    add rax, [rbx + PyDictObject.dk_tombstones]
     add rax, rsi
     lea rax, [rax + rax*4]      ; what the table will hold, times five
-    mov rcx, [rdi + PyDictObject.capacity]
+    mov rcx, [rbx + PyDictObject.capacity]
     mov rdx, rcx
     lea rdx, [rdx + rdx*2]      ; capacity * 3
     cmp rax, rdx
@@ -773,9 +782,13 @@ DEF_FUNC_BARE set_reserve
     add rcx, rcx
     jmp .srv_grow
 .srv_resize:
+    mov rdi, rbx
     mov rsi, rcx
-    jmp set_resize_to
+    call set_resize_to
 .srv_done:
+    OBJ_UNLOCK rbx
+    pop rbx
+    leave
     ret
 END_FUNC set_reserve
 
@@ -804,6 +817,7 @@ DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
 
     mov rbx, rdi                ; dst
     mov r12, rsi                ; src
+    OBJ_LOCK2 rbx, r12
 
     cmp qword [r12 + PyDictObject.ob_size], 0
     je .sci_done                ; nothing to carry; the default table is right
@@ -837,6 +851,7 @@ DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
     mov [rbx + PyDictObject.ob_size], rax
     mov rax, [r12 + PyDictObject.dk_tombstones]
     mov [rbx + PyDictObject.dk_tombstones], rax
+    inc qword [rbx + PyDictObject.dk_version]
 
     ; One reference for each key the copy now holds.  A tombstone carries a
     ; zero key and owns nothing.  ob_size is exactly how many live keys are
@@ -856,6 +871,7 @@ DEF_FUNC set_clone_into, 16             ; + 4 pushes = 48, 16-aligned
     jmp .sci_loop
 
 .sci_done:
+    OBJ_UNLOCK2 rbx, r12
     pop r14
     pop r13
     pop r12
@@ -870,7 +886,6 @@ END_FUNC set_clone_into
 ;;
 ;; It fails when the key cannot be hashed or a key's __eq__ raises.
 ;; ============================================================================
-SAD_TABLE equ 8             ; the entries array the probe started on
 SAD_FRAME equ 16            ; + 4 pushes = 48, 16-aligned
 DEF_FUNC set_add, SAD_FRAME
     push rbx
@@ -883,72 +898,63 @@ DEF_FUNC set_add, SAD_FRAME
 
     SET_HASH_VALUE r12, r13, .sad_fail      ; r13 = hash
 
-.sad_retry:
-    ; Make the room BEFORE probing rather than after inserting.
-    ;
-    ; A fresh set points at the shared read-only empty table, so the free
-    ; slot a probe would hand back is in .rodata.  Resizing first is what
-    ; gives the set a table it may write to, and it means no write path
-    ; anywhere has to test for the shared one: by the time a slot has been
-    ; handed out, the table under it is this set's own.
-    ;
-    ; (ob_size + tombstones + 1) * 5 >= capacity * 3, which is the same
-    ; three-fifths rule one insert earlier.
-    mov rax, [rbx + PyDictObject.ob_size]
-    add rax, [rbx + PyDictObject.dk_tombstones]
-    inc rax
-    lea rax, [rax + rax*4]      ; (fill + 1) * 5
-    mov rcx, [rbx + PyDictObject.capacity]
-    lea rcx, [rcx + rcx*2]      ; capacity * 3
-    cmp rax, rcx
-    jl .have_room
-    mov rdi, rbx
-    call set_resize
-.have_room:
-    mov rcx, [rbx + PyDictObject.entries]
-    mov [rbp - SAD_TABLE], rcx
-
-    ; Find slot
+    ; Find slot (acquires OBJ_LOCK rbx; returns HELD on non-NULL, UNLOCKED on NULL)
     mov rdi, rbx                ; set
     mov rsi, r12                ; the key
     mov rdx, r13                ; hash
     call set_find_slot
     ERR_NULL .sad_fail
-    ; rax = entry ptr, edx = 1 if existing, 0 if empty
-
-    ; set_find_slot runs the keys' __eq__, and that is arbitrary Python: it
-    ; can `.clear()` this very set, which frees the entries array and installs
-    ; the shared read-only empty table.  set_find_slot restarts its own probe
-    ; when the table moves, but it then answers about the NEW table -- and if
-    ; that is the shared one, the free slot it hands back is in .rodata and
-    ; the store below is a fault at a mapped-read-only address.  Making the
-    ; room again is what gives the set a table of its own, so start over.
-    mov rcx, [rbx + PyDictObject.entries]
-    cmp rcx, [rbp - SAD_TABLE]
-    jne .sad_retry
+    ; rax = entry ptr, edx = 1 if existing, 0 if empty; OBJ_LOCK rbx is HELD
 
     test edx, edx
-    jnz .done                   ; key already exists, do nothing
+    jnz .sad_unlock_done        ; key already exists, do nothing
 
+    ; Ensure room under OBJ_LOCK rbx (handles fresh shared empty table too:
+    ; (0 + 0 + 1)*5 = 5 >= 1*3 = 3 always triggers resize).
+    mov rcx, [rbx + PyDictObject.ob_size]
+    add rcx, [rbx + PyDictObject.dk_tombstones]
+    inc rcx
+    lea rcx, [rcx + rcx*4]      ; (fill + 1) * 5
+    mov rdx, [rbx + PyDictObject.capacity]
+    lea rdx, [rdx + rdx*2]      ; capacity * 3
+    cmp rcx, rdx
+    jl .sad_insert
+
+    mov rdi, rbx
+    call set_resize
+    ; Fresh table has no tombstones and no duplicates; pure integer probe.
+    mov r14, [rbx + PyDictObject.entries]
+    mov rdx, [rbx + PyDictObject.capacity]
+    dec rdx                     ; mask
+    mov r8, r13                 ; perturb = hash
+    mov rcx, r13
+    and rcx, rdx                ; i = hash & mask
+.sad_clean_probe:
+    lea rax, [rcx + rcx]
+    lea rax, [r14 + rax*8]
+    cmp qword [rax + SET_ENTRY_KEY], 0
+    je .sad_insert
+    shr r8, PERTURB_SHIFT
+    lea rcx, [rcx + rcx*4]
+    add rcx, r8
+    inc rcx
+    and rcx, rdx
+    jmp .sad_clean_probe
+
+.sad_insert:
     ; --- Insert new entry ---
-    ; The slot may be a reused tombstone rather than a never-used one; both
-    ; arrive here with key 0, and only the tombstone carries hash -1.  Taking
-    ; one back has to be counted, because dk_tombstones feeds the load factor
-    ; below -- left standing it would resize a table with room to spare, and
-    ; the capacity would climb on every add.
     cmp qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
     jne .fresh_slot
     dec qword [rbx + PyDictObject.dk_tombstones]
 .fresh_slot:
-    ; Store the hash and the key; the entries hold Values, which is what the
-    ; key already is.
     mov [rax + SET_ENTRY_HASH], r13
     INCREF_V r12, rcx
     mov [rax + SET_ENTRY_KEY], r12
-
-    ; Increment ob_size.  The load factor was settled on the way in.
     inc qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_version]
 
+.sad_unlock_done:
+    OBJ_UNLOCK rbx
 .done:
     xor eax, eax
 .sad_out:
@@ -1028,9 +1034,9 @@ DEF_FUNC set_contains, SCT_FRAME
     mov rdx, r13                ; hash
     call set_find_slot
     ERR_NULL .sct_raised
-    ; rax = entry ptr, edx = 1 if found, 0 if empty slot
-
+    ; rax = entry ptr, edx = 1 if found, 0 if empty slot; OBJ_LOCK rbx HELD
     mov eax, edx                ; return 1 if found, 0 if not
+    OBJ_UNLOCK rbx
 
     ; The frozenset built for a set key, if there was one.
     mov rdi, [rbp - SCT_TMP]
@@ -1145,16 +1151,11 @@ DEF_FUNC set_richcompare, SRC_FRAME
     mov r13, [rbx + PyDictObject.ob_size]   ; live elements still to visit
     xor ecx, ecx               ; index
 .src_eq_loop:
-    ; The walk ends when every live element has been seen rather than at the
-    ; end of the table.  set_resize sizes from the live count and overshoots
-    ; by four, so a set is a quarter full at most; r13 counts the live ones
-    ; down.  The capacity and the entry array are still read INSIDE the loop
-    ; because set_contains runs __eq__, which can resize the set being
-    ; walked -- the counter is only a bound, never a pointer.
     test r13, r13
     jz .src_true
+    OBJ_LOCK rbx
     cmp rcx, [rbx + PyDictObject.capacity]
-    jge .src_true
+    jge .src_eq_unlock_true
     mov [rbp - SRC_IDX], rcx
 
     ; Get entry at index
@@ -1163,11 +1164,12 @@ DEF_FUNC set_richcompare, SRC_FRAME
     ; Occupied entries have a non-zero key Value
     mov rsi, [rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .src_eq_next
+    jz .src_eq_unlock_next
     dec r13
 
-    ; Entry is occupied — check if key is in other set
-    INCREF_V rsi, rax                    ; ours across __eq__
+    ; Pin key under OBJ_LOCK before calling set_contains unlocked
+    INCREF_V rsi, rax
+    OBJ_UNLOCK rbx
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12               ; other set
     call set_contains
@@ -1180,17 +1182,20 @@ DEF_FUNC set_richcompare, SRC_FRAME
     pop rcx
     test eax, eax
     jz .src_false              ; not found → not equal
+    jmp .src_eq_next
 
+.src_eq_unlock_next:
+    OBJ_UNLOCK rbx
 .src_eq_next:
     mov rcx, [rbp - SRC_IDX]
     inc rcx
     jmp .src_eq_loop
+.src_eq_unlock_true:
+    OBJ_UNLOCK rbx
+    jmp .src_true
 
 .src_le:
     ; self <= other: self is subset of other (every elem of self in other)
-    ; A set with more elements than the other cannot be a subset of it, and
-    ; that is two loads where the walk below is a lookup per element.
-    ; CPython's set_issubset opens with the same test.
     mov rax, [rdi + PyDictObject.ob_size]
     cmp rax, [rsi + PyDictObject.ob_size]
     ja .src_false
@@ -1201,16 +1206,18 @@ DEF_FUNC set_richcompare, SRC_FRAME
 .src_le_loop:
     test r13, r13
     jz .src_true
+    OBJ_LOCK rbx
     cmp rcx, [rbx + PyDictObject.capacity]
-    jge .src_true
+    jge .src_le_unlock_true
     mov [rbp - SRC_IDX], rcx
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
     mov rsi, [rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .src_le_next
+    jz .src_le_unlock_next
     dec r13
-    INCREF_V rsi, rax                    ; ours across __eq__
+    INCREF_V rsi, rax
+    OBJ_UNLOCK rbx
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12
     call set_contains
@@ -1223,10 +1230,16 @@ DEF_FUNC set_richcompare, SRC_FRAME
     pop rcx
     test eax, eax
     jz .src_false
+    jmp .src_le_next
+.src_le_unlock_next:
+    OBJ_UNLOCK rbx
 .src_le_next:
     mov rcx, [rbp - SRC_IDX]
     inc rcx
     jmp .src_le_loop
+.src_le_unlock_true:
+    OBJ_UNLOCK rbx
+    jmp .src_true
 
 .src_ge:
     ; self >= other: other is subset of self → swap and do <=
@@ -1240,16 +1253,18 @@ DEF_FUNC set_richcompare, SRC_FRAME
 .src_ge_loop:
     test r13, r13
     jz .src_true
+    OBJ_LOCK rbx
     cmp rcx, [rbx + PyDictObject.capacity]
-    jge .src_true
+    jge .src_ge_unlock_true
     mov [rbp - SRC_IDX], rcx
     imul rax, rcx, SET_ENTRY_SIZE
     add rax, [rbx + PyDictObject.entries]
     mov rsi, [rax + SET_ENTRY_KEY]
     test rsi, rsi                        ; occupied?
-    jz .src_ge_next
+    jz .src_ge_unlock_next
     dec r13
-    INCREF_V rsi, rax                    ; ours across __eq__
+    INCREF_V rsi, rax
+    OBJ_UNLOCK rbx
     mov [rbp - SRC_KEY], rsi
     mov rdi, r12
     call set_contains
@@ -1262,10 +1277,16 @@ DEF_FUNC set_richcompare, SRC_FRAME
     pop rcx
     test eax, eax
     jz .src_false
+    jmp .src_ge_next
+.src_ge_unlock_next:
+    OBJ_UNLOCK rbx
 .src_ge_next:
     mov rcx, [rbp - SRC_IDX]
     inc rcx
     jmp .src_ge_loop
+.src_ge_unlock_true:
+    OBJ_UNLOCK rbx
+    jmp .src_true
 
 .src_lt:
     ; self < other: proper subset (self <= other AND len(self) < len(other))
@@ -1368,23 +1389,25 @@ DEF_FUNC set_remove
     mov rdi, rbx
     mov rsi, r12
     mov rdx, r13
-    call set_find_slot          ; rax = entry, edx = 1 if the key is there
-    ERR_NULL .sr_not_found      ; -1, with the exception pending
+    call set_find_slot          ; rax = entry, edx = 1 if present; OBJ_LOCK rbx HELD
+    ERR_NULL .sr_not_found      ; -1, with the exception pending (already unlocked)
     test edx, edx
-    jz .sr_not_found
+    jz .sr_unlock_not_found
 
-    ; Tombstone the entry, release the key, and count both sides of it.  An
-    ; EMPTY here rather than a tombstone would end any probe run passing
-    ; through this slot, and every key beyond it would stop being findable.
-    mov rdi, [rax + SET_ENTRY_KEY]
+    ; Tombstone under OBJ_LOCK, then release key outside lock.
+    mov r14, [rax + SET_ENTRY_KEY]
     mov qword [rax + SET_ENTRY_KEY], 0
     mov qword [rax + SET_ENTRY_HASH], ENTRY_TOMBSTONE_HASH
-    DECREF_V rdi, rsi
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
+    inc qword [rbx + PyDictObject.dk_version]
+    OBJ_UNLOCK rbx
+    DECREF_V r14, rsi
     xor eax, eax                ; 0 = removed
     jmp .sr_done
 
+.sr_unlock_not_found:
+    OBJ_UNLOCK rbx
 .sr_not_found:
     mov rax, -1
 
@@ -1671,7 +1694,9 @@ DEF_FUNC set_tp_iter, 8            ; 1 push, so rsp is 16-aligned
     ; `for` walks a rebuilt entry array with a stale index; nothing checked,
     ; so `for x in s: s.add(2)` quietly finished with whatever it happened to
     ; visit where CPython raises.
+    OBJ_LOCK rbx
     mov rcx, [rbx + PyDictObject.ob_size]
+    OBJ_UNLOCK rbx
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the set
@@ -1693,15 +1718,16 @@ END_FUNC set_tp_iter
 ;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC_BARE set_iter_next
-    mov rax, [rdi + PyDictIterObject.it_dict]      ; set
-    test rax, rax
+    mov r11, [rdi + PyDictIterObject.it_dict]      ; set
+    test r11, r11
     jz .si_done                 ; already dropped, or cleared by the collector
-    mov rcx, [rax + PyDictObject.ob_size]
+    OBJ_LOCK r11
+    mov rcx, [r11 + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
-    jne .si_mutation_error
+    jne .si_unlock_mutation_error
     mov rcx, [rdi + PyDictIterObject.it_index]      ; current index
-    mov rdx, [rax + PyDictObject.capacity]          ; capacity
-    mov rsi, [rax + PyDictObject.entries]            ; entries ptr
+    mov rdx, [r11 + PyDictObject.capacity]          ; capacity
+    mov rsi, [r11 + PyDictObject.entries]           ; entries ptr
 
 .si_scan:
     cmp rcx, rdx
@@ -1713,11 +1739,12 @@ DEF_FUNC_BARE set_iter_next
     mov r8, [rax + SET_ENTRY_KEY]
     SET_ENTRY_CLASSIFY rax, .si_skip, .si_skip
 
-    ; Found a valid entry -- return the key Value
+    ; Found a valid entry -- pin key under OBJ_LOCK, then unlock
     inc rcx
     mov [rdi + PyDictIterObject.it_index], rcx
     mov rax, r8
     INCREF_V rax, rdx
+    OBJ_UNLOCK r11
     ret
 
 .si_skip:
@@ -1725,13 +1752,12 @@ DEF_FUNC_BARE set_iter_next
     jmp .si_scan
 
 .si_exhausted:
-    ; Drop the set at exhaustion, as CPython's setiter does, so a __del__ on
-    ; the last reference runs while the iterator can still say "exhausted".
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov rax, [rdi + PyDictIterObject.it_dict]
+    OBJ_UNLOCK r11
+    xor eax, eax
+    xchg [rdi + PyDictIterObject.it_dict], rax
     test rax, rax
     jz .si_done
-    mov qword [rdi + PyDictIterObject.it_dict], 0
     push rdi
     mov rdi, rax
     call obj_decref
@@ -1740,6 +1766,8 @@ DEF_FUNC_BARE set_iter_next
     RET_NULL
     ret
 
+.si_unlock_mutation_error:
+    OBJ_UNLOCK r11
 .si_mutation_error:
     extern exc_RuntimeError_type
     sub rsp, 8                  ; no frame here; the call wants rsp aligned
@@ -2098,6 +2126,7 @@ DEF_FUNC set_swap_storage, 8        ; rsp 16-aligned at the call the macros belo
     sub rsp, 8                  ; 8 + 16 = 24; + the pushed rbp = aligned
     mov rbx, rdi
     mov r12, rsi
+    OBJ_LOCK rbx
 
     mov rax, [rbx + PyDictObject.ob_size]
     mov rcx, [r12 + PyDictObject.ob_size]
@@ -2137,6 +2166,7 @@ DEF_FUNC set_swap_storage, 8        ; rsp 16-aligned at the call the macros belo
     ; not travel -- but it does have to move, or an iterator that is mid-walk
     ; will not notice that the set changed under it.
     inc qword [rbx + PyDictObject.dk_version]
+    OBJ_UNLOCK rbx
 
     DECREF_REG r12              ; releases the old table and its keys
     mov rax, rbx
@@ -2408,19 +2438,22 @@ DEF_FUNC set_clear_gc, SCG_FRAME
     push r14
 
     mov rbx, rdi
+    OBJ_LOCK rbx
     mov r12, [rbx + PyDictObject.entries]
     mov r13, [rbx + PyDictObject.capacity]
     mov r14, [rbx + PyDictObject.ob_size]   ; live keys still to release
     mov qword [rbx + PyDictObject.ob_size], 0
+    inc qword [rbx + PyDictObject.dk_version]
     lea rax, [rel set_empty_entries]
     cmp r12, rax
-    je .sc_done                             ; the shared table holds nothing
+    je .sc_unlock_done                      ; the shared table holds nothing
     mov [rbp - SCG_BASE], r12
     mov [rbx + PyDictObject.entries], rax
     mov qword [rbx + PyDictObject.capacity], SET_EMPTY_CAP
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     mov qword [rbx + SET_FINGER], 0
     mov qword [rbx + SET_HASH], -1
+    OBJ_UNLOCK rbx
 .sc_loop:
     test r14, r14
     jz .sc_free
@@ -2437,6 +2470,9 @@ DEF_FUNC set_clear_gc, SCG_FRAME
 .sc_free:
     mov rdi, [rbp - SCG_BASE]
     call ap_free
+    jmp .sc_done
+.sc_unlock_done:
+    OBJ_UNLOCK rbx
 .sc_done:
     pop r14
     pop r13

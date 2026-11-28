@@ -33,9 +33,18 @@ extern tuple_type
 ; cache that remembers "this dict, unchanged" in a version alone cannot be
 ; satisfied by a different dict.  LOAD_GLOBAL_BUILTIN is that cache.
 %macro DICT_STAMP_VERSION 2
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne %%atomic
     mov %2, [rel dict_version_clock]
     inc %2
     mov [rel dict_version_clock], %2
+    jmp %%store
+%%atomic:
+    mov %2, 1
+    lock xadd [rel dict_version_clock], %2
+    inc %2
+%%store:
     mov [%1 + PyDictObject.dk_version], %2
 %endmacro
 
@@ -125,8 +134,9 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
 
     ; An empty source needs no table at all: the shared one is already right.
     ; This also skips the tracking below, deliberately -- see the docblock.
+    OBJ_LOCK rbx
     cmp qword [rbx + PyDictObject.ob_size], 0
-    je .dcs_done
+    je .dcs_unlock_done
 
     mov rdi, r12
     mov rsi, [rbx + PyDictObject.capacity]
@@ -176,10 +186,16 @@ DEF_FUNC dict_copy_shallow      ; 4 pushes, so rsp stays 16-aligned
     ; Tracked when the source is: the copy holds the same objects.  Only a
     ; non-empty source reaches here.
     cmp qword [rbx - GC_HEAD_SIZE + PyGC_Head.gc_next], 0
-    je .dcs_done
+    setne r14b
+    OBJ_UNLOCK rbx
+    test r14b, r14b
+    jz .dcs_done
     mov rdi, r12
     call gc_track
+    jmp .dcs_done
 
+.dcs_unlock_done:
+    OBJ_UNLOCK rbx
 .dcs_done:
     mov rax, r12
 .dcs_out:
@@ -243,6 +259,7 @@ DCA_FRAME   equ 56             ; + 1 push = 64, 16-aligned
 DEF_FUNC dict_clear_all, DCA_FRAME
     push rbx
     mov rbx, rdi
+    OBJ_LOCK rbx
 
     mov rax, [rbx + PyDictObject.entries]
     mov rcx, [rbx + PyDictObject.dk_indices]
@@ -272,6 +289,7 @@ DEF_FUNC dict_clear_all, DCA_FRAME
     mov qword [rbx + PyDictObject.dk_nentries], 0
     mov qword [rbx + PyDictObject.dk_tombstones], 0
     DICT_STAMP_VERSION rbx, rax
+    OBJ_UNLOCK rbx
 
 .dca_loop:
     cmp qword [rbp - DCA_COUNT], 0
@@ -605,62 +623,52 @@ DEF_FUNC dict_get, 8            ; + 1 push = 16, 16-aligned
     ; attribute lookup, and the frame carries the alignment instead.
     push rbx
     mov rbx, rdi
-    call dict_lookup            ; rax = entries index, -1, or -2
+    call dict_lookup            ; rax = entries index (locked), -1 (locked), or -2 (unlocked)
     test rax, rax
     js .dgr_miss
     mov rcx, [rbx + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     mov rax, [rcx + rax + DictEntry.value]
     INCREF_V rax, rdx
+    OBJ_UNLOCK rbx
     pop rbx
     leave
     ret
 .dgr_miss:                      ; absent, or 0 with the exception pending
     mov rdx, rax                ; -1 or -2: which of the two
+    cmp rax, -1
+    jne .dgr_unlocked
+    OBJ_UNLOCK rbx
+.dgr_unlocked:
     xor eax, eax
     pop rbx
     leave
     ret
 END_FUNC dict_get
 
-;; ============================================================================
-;; dict_get_mro(rdi=dict, rsi=name) -> rax = value Value (borrowed), or 0
-;;
-;; A TYPE's namespace, probed on the way along an MRO, where a failure is
-;; "not here".  A class body can put anything into its namespace --
-;; `type('C', (), {Odd(): 1})` -- so a name can collide with a key whose
-;; __eq__ raises.  CPython's _PyType_Lookup clears that error and answers
-;; "not found", because nothing that asks it expects one; so `C.x` is an
-;; AttributeError there and `len(c)` a TypeError, and so they are here.
-;; It used to unwind with the key's own exception.
-;;
-;; The same price as dict_get on a hit and on a miss: the failure is told
-;; apart in the miss path, from the register dict_lookup answered in.
-;;
-;; dict_get_quiet is the same code under the name its other use reads by: a
-;; lookup that stands in for a C FIELD in CPython -- OSError's errno and
-;; filename live in the exception's dict here -- where there is nothing that
-;; could fail there, so a failure here is "absent" as well.
-;; ============================================================================
     global dict_get_quiet:function
 dict_get_quiet:
 DEF_FUNC dict_get_mro, 8        ; + 1 push = 16, 16-aligned
     push rbx
     mov rbx, rdi
-    call dict_lookup            ; rax = entries index, -1, or -2
+    call dict_lookup            ; rax = entries index (locked), -1 (locked), or -2 (unlocked)
     test rax, rax
     js .dgm_miss
     mov rcx, [rbx + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     mov rax, [rcx + rax + DictEntry.value]
     INCREF_V rax, rdx
+    OBJ_UNLOCK rbx
     pop rbx
     leave
     ret
 .dgm_miss:
     cmp rax, -1
-    je .dgm_absent
-    xor edi, edi                ; drop what the key's __eq__ raised
+    jne .dgm_clear_exc
+    OBJ_UNLOCK rbx
+    jmp .dgm_absent
+.dgm_clear_exc:
+    xor edi, edi                ; drop what the key's __eq__ raised (already unlocked)
     extern exc_restore
     call exc_restore
 .dgm_absent:
@@ -711,9 +719,11 @@ DL_HASH  equ 8
 DL_FREE  equ 16
 DL_IX    equ 24            ; the candidate index, across a comparison call
 DL_DICT  equ 32            ; ... and the dict, to see whether it moved
-DL_CMPKEY equ 40           ; ... and the key that was compared
+DL_CMPKEY equ 40           ; ... and the key that was compared (owned across unlock)
 DL_PERT  equ 48            ; the probe recurrence's remaining hash bits
-DL_FRAME equ 56            ; + 5 pushes = 96, 16-aligned
+DL_NENT  equ 56            ; dk_nentries snapshot across __eq__ unlock
+DL_SIZE  equ 64            ; ob_size snapshot across __eq__ unlock
+DL_FRAME equ 72            ; + 5 pushes = 112, 16-aligned
 
 ; rbx = dk_indices, r12 = entries, r13 = the key, r14 = slot, r15 = mask
 %macro DL_SETUP 0
@@ -772,17 +782,13 @@ DEF_FUNC dict_lookup, DL_FRAME
     cmp rax, -1
     je .dl_hash_generic
     mov [rbp - DL_HASH], rax
+    OBJ_LOCK rdi
     cmp qword [rdi + PyDictObject.dk_kind], 0
     je .dl_generic_setup        ; a key of some other type is in the table
     DL_SETUP
     jmp .dls_probe
 
 .dl_int_key:
-    ; An int immediate IS its own hash: int_hash_i64 answers v whenever
-    ; |v| is below PYHASH_MODULUS, and +-2^50 is well inside that.  The only
-    ; exception is CPython's, that hash(-1) is -2.  This used to be a call to
-    ; obj_hash, which unpacked the Value, walked a tag ladder and tail-jumped
-    ; to int_hash_i64 to compute v from v.
     mov rax, rsi
     V_TO_I64 rax
     cmp rax, -1
@@ -800,6 +806,7 @@ DEF_FUNC dict_lookup, DL_FRAME
     pop rdi
 .dl_have_hash:
     mov [rbp - DL_HASH], rax
+    OBJ_LOCK rdi
 .dl_generic_setup:
     DL_SETUP
     jmp .dlg_probe
@@ -852,32 +859,50 @@ DEF_FUNC dict_lookup, DL_FRAME
     mov rdi, [rcx + DictEntry.key]
     cmp rdi, r13
     je .dl_out_found            ; identical Values are equal, whatever they are
-    ; obj_richcompare_bool, reached directly.  dict_keys_equal was a whole
-    ; extra frame whose entire body was to set edx and test the answer for -1.
+    ; Release OBJ_LOCK across obj_richcompare_bool (__eq__ is arbitrary Python).
+    ; Pin the stored key with INCREF_V so concurrent deletion cannot UAF it.
     mov [rbp - DL_IX], rax
     mov [rbp - DL_CMPKEY], rdi
+    mov rcx, [rbp - DL_DICT]
+    mov rax, [rcx + PyDictObject.dk_nentries]
+    mov [rbp - DL_NENT], rax
+    mov rax, [rcx + PyDictObject.ob_size]
+    mov [rbp - DL_SIZE], rax
+    INCREF_V rdi, rax
+    OBJ_UNLOCK rcx
     mov rsi, r13
     mov edx, PY_EQ
     call obj_richcompare_bool
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - DL_CMPKEY]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
     cmp eax, -1
     je .dl_error
 
-    ; THE TABLE MAY HAVE MOVED.  __eq__ is arbitrary Python and may insert
-    ; into the very dict being probed; a resize frees both arrays and
-    ; rehashes into new ones, which leaves the two pointers and the mask in
-    ; registers stale.  This is the only comparison in either loop that can
-    ; run Python -- the str loop compares bytes -- and it is why the old code
-    ; reloaded the arrays from the header on EVERY probe.  Ask once, here,
-    ; and start again if the answer changed: CPython returns DKIX_KEY_CHANGED
-    ; and its caller does the same.
+    ; Reacquire OBJ_LOCK and revalidate structural state (entries, dk_indices,
+    ; dk_nentries, ob_size, and the compared entry's key).  Value-only updates
+    ; in place (which bump dk_version without altering keys/slots) must NOT
+    ; restart, or a colliding __eq__ that overwrites existing keys livelocks.
     mov rcx, [rbp - DL_DICT]
+    OBJ_LOCK rcx
+    cmp r12, [rcx + PyDictObject.entries]
+    jne .dl_restart
     cmp rbx, [rcx + PyDictObject.dk_indices]
     jne .dl_restart
-    mov rcx, [rbp - DL_IX]
-    DL_ENTRY rcx, rcx
-    mov rcx, [rcx + DictEntry.key]
-    cmp rcx, [rbp - DL_CMPKEY]
-    jne .dl_restart             ; the entry itself was deleted or rebound
+    mov rdx, [rbp - DL_NENT]
+    cmp rdx, [rcx + PyDictObject.dk_nentries]
+    jne .dl_restart
+    mov rdx, [rbp - DL_SIZE]
+    cmp rdx, [rcx + PyDictObject.ob_size]
+    jne .dl_restart
+    mov rdx, [rbp - DL_IX]
+    DL_ENTRY r8, rdx
+    mov rdx, [rbp - DL_CMPKEY]
+    cmp rdx, [r8 + DictEntry.key]
+    jne .dl_restart
 
     test eax, eax
     jz .dlg_next
@@ -944,13 +969,24 @@ END_FUNC dict_lookup
 ;; plain miss), which ERR_DICT_IDX reads so a global that lives in builtins
 ;; does not cost a load from the thread state.
 ;; ============================================================================
-DEF_FUNC dict_get_index, 16     ; + 0 pushes = 16, 16-aligned
+DEF_FUNC dict_get_index, 8      ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
     call dict_lookup
     test rax, rax
-    jns .dgir_done
+    js .dgir_miss
+    OBJ_UNLOCK rbx
+    pop rbx
+    leave
+    ret
+.dgir_miss:
     mov rdx, rax                ; -1 or -2: which of the two
+    cmp rax, -1
+    jne .dgir_unlocked
+    OBJ_UNLOCK rbx
+.dgir_unlocked:
     mov rax, -1
-.dgir_done:
+    pop rbx
     leave
     ret
 END_FUNC dict_get_index
@@ -1087,10 +1123,13 @@ END_FUNC dict_resize
 ;; already has the room is left alone, which is what makes it safe to call on
 ;; the shared empty table with nothing coming.
 ;; ============================================================================
-DEF_FUNC_BARE dict_reserve
-    mov rax, [rdi + PyDictObject.dk_nentries]
+DEF_FUNC dict_reserve, 8        ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    OBJ_LOCK rbx
+    mov rax, [rbx + PyDictObject.dk_nentries]
     add rax, rsi
-    mov rcx, [rdi + PyDictObject.capacity]
+    mov rcx, [rbx + PyDictObject.capacity]
     mov rdx, rcx
     shr rdx, 2
     lea rdx, [rdx + rdx*2]      ; capacity * 3/4
@@ -1108,9 +1147,13 @@ DEF_FUNC_BARE dict_reserve
     shl rcx, 1
     jmp .drv_grow
 .drv_resize:
+    mov rdi, rbx
     mov rsi, rcx
-    jmp dict_resize_to
+    call dict_resize_to
 .drv_done:
+    OBJ_UNLOCK rbx
+    pop rbx
+    leave
     ret
 END_FUNC dict_reserve
 
@@ -1228,16 +1271,18 @@ DEF_FUNC dict_set, DS_FRAME
     mov rcx, [rbx + PyDictObject.entries]
     imul rax, rax, DICT_ENTRY_SIZE
     add rcx, rax
-    mov rdi, [rcx + DictEntry.value]
+    mov r12, [rcx + DictEntry.value]    ; old value, released after OBJ_UNLOCK
     mov rsi, [rbp - DS_VAL]
     mov [rcx + DictEntry.value], rsi
     INCREF_V rsi, rax
-    DECREF_V rdi, rax
-    jmp .ds_bump
+    DICT_STAMP_VERSION rbx, rax
+    OBJ_UNLOCK rbx
+    DECREF_V r12, rax
+    jmp .ds_done
 
 .ds_insert:
     cmp rax, -1
-    jne .ds_raised
+    jne .ds_raised              ; -2: already unlocked by dict_lookup
     mov r12, rdx                ; the indices slot to claim
     mov r13, r8                 ; hash
 
@@ -1322,6 +1367,7 @@ DEF_FUNC dict_set, DS_FRAME
 
 .ds_bump:
     DICT_STAMP_VERSION rbx, rax
+    OBJ_UNLOCK rbx
 .ds_done:
     xor eax, eax
     pop r13
@@ -1559,6 +1605,7 @@ DEF_FUNC dict_del, DD_FRAME
     dec qword [rbx + PyDictObject.ob_size]
     inc qword [rbx + PyDictObject.dk_tombstones]
     DICT_STAMP_VERSION rbx, rax
+    OBJ_UNLOCK rbx
 
 .dd_release:
     ; The table no longer refers to either of these, so whatever a __del__
@@ -1575,7 +1622,8 @@ DEF_FUNC dict_del, DD_FRAME
 
 .dd_missing:
     cmp rax, -1
-    jne .dd_fail                ; -2: __eq__ raised, and it is pending
+    jne .dd_fail                ; -2: __eq__ raised (already unlocked)
+    OBJ_UNLOCK rbx
     cmp qword [rbp - DD_QUIET], 0
     je .dd_raise
 .dd_fail:
@@ -1618,7 +1666,9 @@ DEF_FUNC dict_tp_iter, 8            ; 1 pushes, so rsp is 16-aligned
     ; RuntimeError.  ob_size is sufficient on its own -- a resize only ever
     ; happens on an insert, and an insert always changes ob_size, so a
     ; rebuilt entry array cannot slip past a size comparison.
+    OBJ_LOCK rbx
     mov rcx, [rbx + PyDictObject.ob_size]
+    OBJ_UNLOCK rbx
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
@@ -1647,18 +1697,19 @@ END_FUNC dict_tp_iter
 extern exc_RuntimeError_type
 
 DEF_FUNC_BARE dict_iter_next
-    ; Mutation detection: compare saved version with current
-    mov rax, [rdi + PyDictIterObject.it_dict]         ; dict
-    test rax, rax
+    ; Mutation detection: lock underlying dict while scanning
+    mov r11, [rdi + PyDictIterObject.it_dict]         ; dict
+    test r11, r11
     jz .di_done                 ; already dropped, or cleared by the collector
-    mov rcx, [rax + PyDictObject.ob_size]
+    OBJ_LOCK r11
+    mov rcx, [r11 + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .di_mutation_error
 
     mov r10, [rdi + PyDictIterObject.it_kind]         ; 0=keys, 1=values, 2=items
     mov rcx, [rdi + PyDictIterObject.it_index]        ; current index
-    mov rdx, [rax + PyDictObject.capacity]            ; capacity
-    mov rsi, [rax + PyDictObject.entries]              ; entries ptr
+    mov rdx, [r11 + PyDictObject.capacity]            ; capacity
+    mov rsi, [r11 + PyDictObject.entries]             ; entries ptr
 
 .di_scan:
     cmp rcx, rdx
@@ -1681,40 +1732,32 @@ DEF_FUNC_BARE dict_iter_next
     ; kind=0: return key
     mov rax, [rax + DictEntry.key]
     INCREF_V rax, rdx
+    OBJ_UNLOCK r11
     ret
 
 .di_return_value:
     ; kind=1: return value
     mov rax, [rax + DictEntry.value]
     INCREF_V rax, rdx
+    OBJ_UNLOCK r11
     ret
 
 .di_return_item:
-    ; kind=2: return (key, value) 2-tuple
-    ; rax = entry ptr — need to allocate tuple, so must save entry
+    ; kind=2: pin both key and value under lock, unlock, then allocate 2-tuple
     push rbx
     push r12
-    mov rbx, rax                ; save entry ptr
+    mov rbx, [rax + DictEntry.key]
+    INCREF_V rbx, rdx
+    mov r12, [rax + DictEntry.value]
+    INCREF_V r12, rdx
+    OBJ_UNLOCK r11
 
-    ; Allocate 2-tuple
     mov edi, 2
     extern tuple_new
     call tuple_new
-    mov r12, rax                ; r12 = new tuple
-
-    mov r9, [r12 + PyTupleObject.ob_item]
-
-    ; tuple[0] = key
-    mov rax, [rbx + DictEntry.key]
-    INCREF_V rax, rdx
-    mov [r9], rax
-
-    ; tuple[1] = value
-    mov rax, [rbx + DictEntry.value]
-    INCREF_V rax, rdx
-    mov [r9 + 8], rax
-
-    mov rax, r12
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], rbx
+    mov [r9 + 8], r12
 
     pop r12
     pop rbx
@@ -1725,15 +1768,12 @@ DEF_FUNC_BARE dict_iter_next
     jmp .di_scan
 
 .di_exhausted:
-    ; Drop the dict at exhaustion, as CPython's dictiter does: it is what
-    ; lets a __del__ holding the last reference run while the iterator can
-    ; still answer "exhausted".  Clear before releasing -- list_iter_next
-    ; carries the reason in full.
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov rax, [rdi + PyDictIterObject.it_dict]
+    OBJ_UNLOCK r11
+    xor eax, eax
+    xchg [rdi + PyDictIterObject.it_dict], rax
     test rax, rax
     jz .di_done
-    mov qword [rdi + PyDictIterObject.it_dict], 0
     push rdi
     mov rdi, rax
     call obj_decref
@@ -1743,6 +1783,7 @@ DEF_FUNC_BARE dict_iter_next
     ret
 
 .di_mutation_error:
+    OBJ_UNLOCK r11
     sub rsp, 8                  ; no frame here; the call wants rsp aligned
     SET_EXC exc_RuntimeError_type, "dictionary changed size during iteration"
     add rsp, 8
@@ -1784,20 +1825,75 @@ dict_iter_self:
 ;; Fails: -1
 ;; For the 'in' operator: checks if key exists in dict.
 ;; ============================================================================
-DEF_FUNC_BARE dict_contains
-    sub rsp, 8                  ; a bare function: the call wants rsp aligned
-    call dict_lookup            ; rax = entries index, -1 (miss), or -2 (raised)
-    add rsp, 8
+DEF_FUNC dict_contains, 8       ; + 1 push = 16, 16-aligned
+    push rbx
+    mov rbx, rdi
+    call dict_lookup            ; rax = entries index (locked), -1 (locked), or -2 (unlocked)
     cmp rax, -2
     je .dc_raised
+    OBJ_UNLOCK rbx
     cmp rax, -1
     setne al
     movzx eax, al
+    pop rbx
+    leave
     ret
 .dc_raised:
     mov rax, -1
+    pop rbx
+    leave
     ret
 END_FUNC dict_contains
+
+;; dict_pop_key(rdi=dict, rsi=key Value) -> rax = owned value Value, or 0
+;;   rdx = -1 on miss, -2 on error (exception pending).  Atomic lookup+delete.
+DPK_VAL   equ 8
+DPK_FRAME equ 24                ; + 3 pushes = 48, 16-aligned
+global dict_pop_key
+DEF_FUNC dict_pop_key, DPK_FRAME
+    push rbx
+    push r12
+    push r13
+    mov rbx, rdi
+    call dict_lookup
+    test rax, rax
+    js .dpk_miss
+    mov r12, rdx                ; indices slot
+    mov rcx, [rbx + PyDictObject.entries]
+    imul rax, rax, DICT_ENTRY_SIZE
+    add rcx, rax
+    mov r13, [rcx + DictEntry.key]
+    mov rax, [rcx + DictEntry.value]
+    mov [rbp - DPK_VAL], rax    ; owned value to return
+    mov qword [rcx + DictEntry.key], 0
+    mov qword [rcx + DictEntry.value], 0
+    mov qword [rcx + DictEntry.hash], ENTRY_TOMBSTONE_HASH
+    mov rcx, [rbx + PyDictObject.dk_indices]
+    mov qword [rcx + r12*8], DICT_IX_DUMMY
+    dec qword [rbx + PyDictObject.ob_size]
+    inc qword [rbx + PyDictObject.dk_tombstones]
+    DICT_STAMP_VERSION rbx, rax
+    OBJ_UNLOCK rbx
+    DECREF_V r13, rcx           ; release key outside lock
+    mov rax, [rbp - DPK_VAL]
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+.dpk_miss:
+    mov rdx, rax                ; -1 or -2
+    cmp rax, -1
+    jne .dpk_unlocked
+    OBJ_UNLOCK rbx
+.dpk_unlocked:
+    xor eax, eax
+    pop r13
+    pop r12
+    pop rbx
+    leave
+    ret
+END_FUNC dict_pop_key
 
 
 ;; ============================================================================
@@ -1845,34 +1941,56 @@ DEF_FUNC dict_nb_or, DNO_FRAME
     call dict_reserve
 
 .dno_copy_right_start:
-    ; Copy all entries from right dict (overrides left), over the DENSE array
-    mov rdi, [rbp - DNO_RIGHT]
-    mov r8, [rdi + PyDictObject.dk_nentries]
+    ; Copy all entries from right dict (overrides left), locking per entry fetch
     xor ecx, ecx
 .dno_copy_right:
-    cmp rcx, r8
-    jge .dno_done
+    mov rdi, [rbp - DNO_RIGHT]
+    OBJ_LOCK rdi
+    cmp rcx, [rdi + PyDictObject.dk_nentries]
+    jge .dno_unlock_done
 
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .dno_right_next
+    mov rsi, [rax + DictEntry.key]
+    test rsi, rsi                        ; occupied?
+    jz .dno_unlock_next
+    mov rdx, [rax + DictEntry.value]
+    INCREF_V rsi, r8
+    INCREF_V rdx, r8
+    OBJ_UNLOCK rdi
 
     push rcx
-    push r8
-    push rdi
+    push rsi
+    push rdx
+    sub rsp, 8
     mov rdi, [rbp - DNO_NEW]
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
-    call dict_set
-    ERR_M1 .dno_raised
-    pop rdi
+    call dict_set               ; err: tested below after releasing key/val
+    mov r8, rax
+    add rsp, 8
+    pop rdi                     ; val
+    push r8
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop r8
+    pop rdi                     ; key
+    push r8
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
     pop r8
     pop rcx
-
-.dno_right_next:
+    test r8, r8
+    jnz .dno_raised
     inc rcx
     jmp .dno_copy_right
+
+.dno_unlock_next:
+    OBJ_UNLOCK rdi
+    inc rcx
+    jmp .dno_copy_right
+.dno_unlock_done:
+    OBJ_UNLOCK rdi
 
 .dno_done:
     mov rax, [rbp - DNO_NEW]
@@ -1927,33 +2045,55 @@ DEF_FUNC dict_nb_ior, DIO_FRAME
     mov rsi, [rbp - DIO_RIGHT]
     mov rsi, [rsi + PyDictObject.ob_size]
     call dict_reserve
-    mov rdi, [rbp - DIO_RIGHT]
-    mov r8, [rdi + PyDictObject.dk_nentries]
     xor ecx, ecx
 .dio_loop:
-    cmp rcx, r8
-    jge .dio_done
+    mov rdi, [rbp - DIO_RIGHT]
+    OBJ_LOCK rdi
+    cmp rcx, [rdi + PyDictObject.dk_nentries]
+    jge .dio_unlock_done
 
     imul rax, rcx, DICT_ENTRY_SIZE
     add rax, [rdi + PyDictObject.entries]
-    cmp qword [rax + DictEntry.key], 0   ; occupied?
-    je .dio_next
+    mov rsi, [rax + DictEntry.key]
+    test rsi, rsi                        ; occupied?
+    jz .dio_unlock_next
+    mov rdx, [rax + DictEntry.value]
+    INCREF_V rsi, r8
+    INCREF_V rdx, r8
+    OBJ_UNLOCK rdi
 
     push rcx
-    push r8
-    push rdi
+    push rsi
+    push rdx
+    sub rsp, 8
     mov rdi, [rbp - DIO_LEFT]
-    mov rsi, [rax + DictEntry.key]
-    mov rdx, [rax + DictEntry.value]
-    call dict_set
-    ERR_M1 .nb_ior_failed
-    pop rdi
+    call dict_set               ; err: tested below after releasing key/val
+    mov r8, rax
+    add rsp, 8
+    pop rdi                     ; val
+    push r8
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop r8
+    pop rdi                     ; key
+    push r8
+    sub rsp, 8
+    DECREF_V rdi, rcx
+    add rsp, 8
     pop r8
     pop rcx
-
-.dio_next:
+    test r8, r8
+    jnz .nb_ior_failed
     inc rcx
     jmp .dio_loop
+
+.dio_unlock_next:
+    OBJ_UNLOCK rdi
+    inc rcx
+    jmp .dio_loop
+.dio_unlock_done:
+    OBJ_UNLOCK rdi
 
 .dio_done:
     ; Return left dict with INCREF (caller will DECREF both operands)
@@ -2100,19 +2240,20 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
 
 .drc_loop:
     mov rdi, [rbp - DRC_LEFT]
+    OBJ_LOCK rdi
     mov rax, [rbp - DRC_IDX]
     cmp rax, [rdi + PyDictObject.capacity]
-    jge .drc_equal
+    jge .drc_unlock_equal
     mov rcx, [rdi + PyDictObject.entries]
     test rcx, rcx
-    jz .drc_equal                   ; emptied under us: nothing left to walk
+    jz .drc_unlock_equal            ; emptied under us: nothing left to walk
     imul rax, rax, DICT_ENTRY_SIZE
     add rax, rcx
 
     ; Occupied?  An empty slot and a tombstone both have a NULL key.
     mov rsi, [rax + DictEntry.key]
     test rsi, rsi
-    jz .drc_next
+    jz .drc_unlock_next
 
     ; Hold the key and the left value for the turn.  A key is a Value like any
     ; other -- an int key is an immediate -- so it is INCREF_V, not INCREF.
@@ -2121,6 +2262,7 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     mov r11, [rax + DictEntry.value]
     mov [rbp - DRC_LVAL], r11
     INCREF_V r11, rax
+    OBJ_UNLOCK rdi
 
     ; Look the key up in the right dict.  dict_get hands back a borrowed
     ; Value, or 0 when the key is not there.
@@ -2161,6 +2303,8 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     js .drc_raised                  ; -1: the comparison raised
     jz .drc_not_equal
 
+.drc_unlock_next:
+    OBJ_UNLOCK rdi
 .drc_next:
     inc qword [rbp - DRC_IDX]
     jmp .drc_loop
@@ -2196,6 +2340,8 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     leave
     ret
 
+.drc_unlock_equal:
+    OBJ_UNLOCK rdi
 .drc_equal:
     ; Return based on op: EQ→True, NE→False
     cmp dword [rbp - DRC_OP], 3     ; NE?
@@ -2230,18 +2376,15 @@ DEF_FUNC dict_reversed
     call gc_alloc
 
     mov [rax + PyDictIterObject.it_dict], rbx
-    ; Set it_index to capacity - 1 (start from end)
+    mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
+    ; Snapshot capacity and SIZE together under OBJ_LOCK so it_index is
+    ; consistent with the table size.
+    OBJ_LOCK rbx
     mov rcx, [rbx + PyDictObject.capacity]
     dec rcx
     mov [rax + PyDictIterObject.it_index], rcx
-    mov qword [rax + PyDictIterObject.it_kind], 0  ; 0 = keys
-    ; Snapshot the SIZE for mutation detection, as CPython's dictiter does.
-    ; dk_version was the wrong field: dict_set bumps it on every write, the
-    ; update-in-place branch included, so `for k in d: d[k] = f(d[k])` raised
-    ; RuntimeError.  ob_size is sufficient on its own -- a resize only ever
-    ; happens on an insert, and an insert always changes ob_size, so a
-    ; rebuilt entry array cannot slip past a size comparison.
     mov rcx, [rbx + PyDictObject.ob_size]
+    OBJ_UNLOCK rbx
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF the dict
@@ -2267,16 +2410,17 @@ END_FUNC dict_reversed
 ;; Fails: 0?
 ;; ============================================================================
 DEF_FUNC_BARE dict_rev_iter_next
-    ; Mutation detection
-    mov rax, [rdi + PyDictIterObject.it_dict]
-    test rax, rax
+    ; Mutation detection: lock underlying dict while scanning
+    mov r11, [rdi + PyDictIterObject.it_dict]
+    test r11, r11
     jz .dri_done                ; already dropped, or cleared by the collector
-    mov rcx, [rax + PyDictObject.ob_size]
+    OBJ_LOCK r11
+    mov rcx, [r11 + PyDictObject.ob_size]
     cmp rcx, [rdi + PyDictIterObject.it_version]
     jne .dri_mutation_error
 
     mov rcx, [rdi + PyDictIterObject.it_index]        ; current index
-    mov rsi, [rax + PyDictObject.entries]              ; entries ptr
+    mov rsi, [r11 + PyDictObject.entries]             ; entries ptr
 
 .dri_scan:
     test rcx, rcx
@@ -2291,10 +2435,6 @@ DEF_FUNC_BARE dict_rev_iter_next
     dec rcx
     mov [rdi + PyDictIterObject.it_index], rcx
 
-    ; Which half, or both: the same it_kind the forward iterator reads.  This
-    ; walked keys unconditionally, because reversed(d) was its only caller --
-    ; and then reversed(d.values()) and reversed(d.items()), once the views
-    ; grew a __reversed__, quietly answered with keys.
     mov r10, [rdi + PyDictIterObject.it_kind]
     cmp r10, 1
     je .dri_return_value
@@ -2303,29 +2443,28 @@ DEF_FUNC_BARE dict_rev_iter_next
     ; Return key
     mov rax, [rax + DictEntry.key]
     INCREF_V rax, rdx
+    OBJ_UNLOCK r11
     ret
 
 .dri_return_value:
     mov rax, [rax + DictEntry.value]
     INCREF_V rax, rdx
+    OBJ_UNLOCK r11
     ret
 
 .dri_return_item:
-    ; A (key, value) pair, as the forward iterator builds it.
     push rbx
     push r12
-    mov rbx, rax                ; save the entry
+    mov rbx, [rax + DictEntry.key]
+    INCREF_V rbx, rdx
+    mov r12, [rax + DictEntry.value]
+    INCREF_V r12, rdx
+    OBJ_UNLOCK r11
     mov edi, 2
     call tuple_new
-    mov r12, rax
-    mov r9, [r12 + PyTupleObject.ob_item]
-    mov rax, [rbx + DictEntry.key]
-    INCREF_V rax, rdx
-    mov [r9], rax
-    mov rax, [rbx + DictEntry.value]
-    INCREF_V rax, rdx
-    mov [r9 + 8], rax
-    mov rax, r12
+    mov r9, [rax + PyTupleObject.ob_item]
+    mov [r9], rbx
+    mov [r9 + 8], r12
     mov edx, TAG_PTR
     pop r12
     pop rbx
@@ -2336,12 +2475,12 @@ DEF_FUNC_BARE dict_rev_iter_next
     jmp .dri_scan
 
 .dri_exhausted:
-    ; Drop the dict at exhaustion, as dict_iter_next does.
     mov [rdi + PyDictIterObject.it_index], rcx
-    mov rax, [rdi + PyDictIterObject.it_dict]
+    OBJ_UNLOCK r11
+    xor eax, eax
+    xchg [rdi + PyDictIterObject.it_dict], rax
     test rax, rax
     jz .dri_done
-    mov qword [rdi + PyDictIterObject.it_dict], 0
     push rdi
     mov rdi, rax
     call obj_decref
@@ -2351,6 +2490,7 @@ DEF_FUNC_BARE dict_rev_iter_next
     ret
 
 .dri_mutation_error:
+    OBJ_UNLOCK r11
     sub rsp, 8                  ; no frame here; the call wants rsp aligned
     SET_EXC exc_RuntimeError_type, "dictionary changed size during iteration"
     add rsp, 8
@@ -2691,65 +2831,6 @@ DEF_FUNC dict_traverse, 8        ; rsp 16-aligned at the call the macros below e
     ret
 END_FUNC dict_traverse
 
-DEF_FUNC dict_clear_gc, 8        ; rsp 16-aligned at the call the macros below expand to
-    push rbx
-    push r12
-    push r13
-
-    mov rbx, rdi
-    mov r12, [rbx + PyDictObject.entries]
-    mov r13, [rbx + PyDictObject.capacity]
-
-    test r13, r13
-    jz .done
-.loop:
-    dec r13
-    ENTRY_CLASSIFY r12, .next, .next
-
-    ; DECREF key
-    push r12
-    push r13
-    mov rdi, [r12 + DictEntry.key]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-    pop r13
-    pop r12
-
-    ; DECREF value
-    push r12
-    push r13
-    mov rdi, [r12 + DictEntry.value]
-    V_UNPACK rdi, rsi
-    DECREF_VAL rdi, rsi
-    pop r13
-    pop r12
-
-    ; Clear entry.  It has to become a *tombstone*, not just a zeroed key:
-    ; ENTRY_CLASSIFY reads key==0 with any hash other than -1 as "empty",
-    ; which ends a probe early, so a surviving key further along the chain
-    ; becomes unreachable.
-    mov qword [r12 + DictEntry.key], 0
-    mov qword [r12 + DictEntry.value], 0
-    mov qword [r12 + DictEntry.hash], ENTRY_TOMBSTONE_HASH
-
-.next:
-    add r12, DICT_ENTRY_SIZE
-    test r13, r13
-    jnz .loop
-.done:
-    ; The table is empty now, so give it back rather than rewriting it.  The
-    ; tombstones above still had to be written: a DECREF can run Python that
-    ; looks this dict up while the walk is only half done.
-    mov rdi, rbx
-    call dict_release_tables
-    mov qword [rbx + PyDictObject.ob_size], 0
-    mov qword [rbx + PyDictObject.dk_nentries], 0
-    mov qword [rbx + PyDictObject.dk_tombstones], 0
-    DICT_STAMP_VERSION rbx, rax
-
-    pop r13
-    pop r12
-    pop rbx
-    leave
-    ret
+DEF_FUNC_BARE dict_clear_gc
+    jmp dict_clear_all
 END_FUNC dict_clear_gc

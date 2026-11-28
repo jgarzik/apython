@@ -166,7 +166,9 @@ DEF_FUNC dict_view_iter
     mov [rax + PyObject.ob_type], rdx
 .dvi_kind_done:
     ; The SIZE, not the version: see dict_tp_iter.
+    OBJ_LOCK rdi
     mov rcx, [rdi + PyDictObject.ob_size]
+    OBJ_UNLOCK rdi
     mov [rax + PyDictIterObject.it_version], rcx
 
     ; INCREF dict
@@ -860,15 +862,15 @@ DEF_FUNC dict_view_reversed, DVREV_FRAME
     pop rdi                         ; rdi = the dict again
 
     mov [rax + PyDictIterObject.it_dict], rdi
-    ; From the end, as dict_reversed does: the scan walks the entry array down.
+    mov rcx, [rbx + PyDictViewObject.dv_kind]
+    mov [rax + PyDictIterObject.it_kind], rcx
+    ; Snapshot capacity and SIZE together under OBJ_LOCK so it_index matches.
+    OBJ_LOCK rdi
     mov rcx, [rdi + PyDictObject.capacity]
     dec rcx
     mov [rax + PyDictIterObject.it_index], rcx
-    mov rcx, [rbx + PyDictViewObject.dv_kind]
-    mov [rax + PyDictIterObject.it_kind], rcx
-    ; The SIZE, for mutation detection -- see dict_reversed on why not
-    ; dk_version.
     mov rcx, [rdi + PyDictObject.ob_size]
+    OBJ_UNLOCK rdi
     mov [rax + PyDictIterObject.it_version], rcx
 
     push rax

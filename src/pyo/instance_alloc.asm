@@ -380,9 +380,18 @@ DEF_FUNC builtin_sub_init_base, 8            ; 1 pushes, so rsp is 16-aligned
     ; DICT_STAMP_VERSION in dict.asm): a zeroed one is shared by every dict
     ; subclass instance that has not been written to yet.
     extern dict_version_clock
+    extern rt_threaded
+    cmp byte [rel rt_threaded], 0
+    jne .bsib_ver_atomic
     mov rax, [rel dict_version_clock]
     inc rax
     mov [rel dict_version_clock], rax
+    jmp .bsib_ver_store
+.bsib_ver_atomic:
+    mov eax, 1
+    lock xadd [rel dict_version_clock], rax
+    inc rax
+.bsib_ver_store:
     mov [rbx + PyDictObject.dk_version], rax
     jmp .bsib_done
 

@@ -1024,18 +1024,19 @@ END_FUNC dictrev_length_hint
 ;; set and the key clear, so one test covers both kinds of hole.
 ;; ============================================================================
 DEF_FUNC_LOCAL dlh_count, 16
-    mov rax, [rdi + PyDictIterObject.it_dict]
-    test rax, rax
+    mov r11, [rdi + PyDictIterObject.it_dict]
+    test r11, r11
     jz .dlc_zero                    ; dropped, or cleared by the collector
+    OBJ_LOCK r11
     mov rcx, [rdi + PyDictIterObject.it_index]
-    mov rsi, [rax + PyDictObject.entries]
+    mov rsi, [r11 + PyDictObject.entries]
     test r9, r9
     jnz .dlc_back
-    mov rdx, [rax + PyDictObject.capacity]
+    mov rdx, [r11 + PyDictObject.capacity]
     xor r10d, r10d
 .dlc_fwd:
     cmp rcx, rdx
-    jge .dlc_done
+    jge .dlc_unlock_done
     mov rax, rcx
     imul rax, r8
     add rax, rsi
@@ -1052,7 +1053,7 @@ DEF_FUNC_LOCAL dlh_count, 16
     xor r10d, r10d
 .dlc_bck:
     test rcx, rcx
-    js .dlc_done
+    js .dlc_unlock_done
     mov rax, rcx
     imul rax, r8
     add rax, rsi
@@ -1062,6 +1063,8 @@ DEF_FUNC_LOCAL dlh_count, 16
 .dlc_bck_next:
     dec rcx
     jmp .dlc_bck
+.dlc_unlock_done:
+    OBJ_UNLOCK r11
 
 .dlc_done:
     mov rdi, r10

@@ -1442,22 +1442,28 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov r12, rax                    ; the table being built
     xor r13d, r13d                  ; the source entry index
 .smt_dict_loop:
+    OBJ_LOCK rbx
     cmp r13, [rbx + PyDictObject.capacity]
-    jge .smt_dict_done
+    jge .smt_dict_unlock_done
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r13, DictEntry_size
     add rax, rcx
     mov rdi, [rax + DictEntry.key]
     test rdi, rdi
-    jz .smt_dict_next               ; empty, or a tombstone
+    jz .smt_dict_unlock_next        ; empty, or a tombstone
     mov rdx, [rax + DictEntry.value]
-    mov [rbp - SMT_TO], rdx         ; the value travels through untouched
+    mov [rbp - SMT_TO], rdx         ; pin both across dict_set
+    INCREF_V rdi, rcx
+    INCREF_V rdx, rcx
+    OBJ_UNLOCK rbx
+    push rdi
+    push rdi                        ; 16-byte align (save pinned key)
 
     ; An int key is its own ordinal.
     V_IS_INT rdi, rax
     jae .smt_key_ready
     V_TEST_PTR rdi, rax
-    ja .smt_key_bad
+    ja .smt_key_bad_pop
     mov rax, [rdi + PyObject.ob_type]
     lea rcx, [rel int_type]
     cmp rax, rcx
@@ -1472,7 +1478,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     je .smt_key_str
     test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_STR_SUBCLASS
     jnz .smt_key_str
-    jmp .smt_key_bad
+    jmp .smt_key_bad_pop
 
 .smt_key_int_obj:
     ; An int key is copied as it stands -- CPython's maketrans({True: 'x'})
@@ -1481,7 +1487,7 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
 
 .smt_key_str:
     cmp qword [rdi + PyStrObject.ob_length], 1
-    jne .smt_key_len
+    jne .smt_key_len_pop
     push rdi
     lea rdi, [rdi + PyStrObject.data]
     mov esi, 4
@@ -1494,11 +1500,42 @@ DEF_FUNC str_staticmethod_maketrans, SMT_FRAME
     mov rsi, rdi
     mov rdx, [rbp - SMT_TO]
     mov rdi, r12
-    call dict_set               ; the key may be an int SUBCLASS, whose
-    ERR_M1 .smt_fail_table          ; __hash__ is Python
+    call dict_set                   ; err: checked below after releasing pinned pair
+    push rax
+    push rax
+    mov rdi, [rsp + 16]             ; pinned key
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - SMT_TO]         ; pinned value
+    DECREF_V rdi, rcx
+    pop rax
+    pop rax
+    add rsp, 16                     ; drop saved key + pad
+    cmp rax, -1
+    je .smt_fail_table
+    jmp .smt_dict_next
+
+.smt_key_bad_pop:
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - SMT_TO]
+    DECREF_V rdi, rcx
+    jmp .smt_key_bad
+.smt_key_len_pop:
+    pop rdi
+    pop rdi
+    DECREF_V rdi, rcx
+    mov rdi, [rbp - SMT_TO]
+    DECREF_V rdi, rcx
+    jmp .smt_key_len
+
+.smt_dict_unlock_next:
+    OBJ_UNLOCK rbx
 .smt_dict_next:
     inc r13
     jmp .smt_dict_loop
+.smt_dict_unlock_done:
+    OBJ_UNLOCK rbx
 .smt_dict_done:
     mov rax, r12
     mov edx, TAG_PTR

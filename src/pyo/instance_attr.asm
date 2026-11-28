@@ -335,40 +335,49 @@ DEF_FUNC dict_has_data_descr
     push r13
     push r14
     mov rbx, rdi
-    mov r13, [rbx + PyDictObject.capacity]
     xor r14d, r14d
 .dhdd_loop:
-    cmp r14, r13
-    jge .dhdd_no
+    OBJ_LOCK rbx
+    cmp r14, [rbx + PyDictObject.capacity]
+    jge .dhdd_unlock_no
     mov rax, [rbx + PyDictObject.entries]
     imul rcx, r14, DICT_ENTRY_SIZE
     add rax, rcx
     mov r12, [rax + DictEntry.key]
     test r12, r12
-    jz .dhdd_next
+    jz .dhdd_unlock_next
     mov rdi, [rax + DictEntry.value]
-    ; __dict__ and __weakref__ are in nearly every class's dict and must not
-    ; make this answer yes for all of them -- see GS_LAYOUT in object.inc.
-    ; attr_may_be_data_descr still says yes for them, which is what the live
-    ; ranking check and the per-name inline-cache question need; this is the
-    ; cached per-class over-approximation, and only it skips them.
     V_TEST_PTR rdi, rcx
     ja .dhdd_ask
     test rdi, rdi
-    jz .dhdd_next
+    jz .dhdd_unlock_next
     mov rcx, [rdi + PyObject.ob_type]
     lea rdx, [rel getset_descr_type]
     cmp rcx, rdx
     jne .dhdd_ask
     test qword [rdi + PyGetSetDescrObject.gs_flags], GS_LAYOUT
-    jnz .dhdd_next
+    jnz .dhdd_unlock_next
 .dhdd_ask:
+    mov r13, rdi
+    INCREF_V r13, rcx
+    OBJ_UNLOCK rbx
+    mov rdi, r13
     call attr_may_be_data_descr
+    push rax
+    push rax
+    DECREF_V r13, rcx
+    pop rax
+    pop rax
     test eax, eax
     jnz .dhdd_yes
+    jmp .dhdd_next
+.dhdd_unlock_next:
+    OBJ_UNLOCK rbx
 .dhdd_next:
     inc r14
     jmp .dhdd_loop
+.dhdd_unlock_no:
+    OBJ_UNLOCK rbx
 .dhdd_no:
     xor eax, eax
     jmp .dhdd_out
