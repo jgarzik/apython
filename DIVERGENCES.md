@@ -277,11 +277,11 @@ than against CPython, because CPython cannot serve as an oracle for them:
 Any *new* recorded-oracle test needs the same justification, or it risks
 blessing a divergence instead of catching it.
 
-## Threads run under a GIL, with these differences
+## Free-threaded execution differences
 
-Threads are real: `_thread.start_new_thread` starts a pthread, one thread at a
-time runs Python under a global interpreter lock (`src/gil.asm`, a port of
-CPython's `ceval_gil.c`), and CPython's own `threading.py`, `queue.py` and
+Threads are real pthreads executing Python bytecode in parallel with no global
+interpreter lock (`sys._is_gil_enabled() -> False`; `src/sync.asm` and
+`src/gil.asm`), and CPython's own `threading.py`, `queue.py` and
 `concurrent.futures` run on it unchanged.  What differs from CPython:
 
 - **Signals are blocked in every thread but the main one.**  CPython leaves
@@ -293,11 +293,11 @@ CPython's `ceval_gil.c`), and CPython's own `threading.py`, `queue.py` and
   waiting for readiness.** Each receive pins the buffer for the syscall.
   If it would block, the Python socket wrapper waits and retries with a new
   export. CPython holds one export across the entire wait.
-- **Not every blocking call gives up the GIL.**  The ones that do are sleep,
-  lock waits, `read`/`write`, the socket calls, `poll`/`epoll`, `connect`,
-  `waitpid`, `flock`, `pause`, `input()` and the four OpenSSL calls that do
-  socket I/O.  `open()` on a FIFO, `fsync`, compression of a large buffer and
-  a ctypes foreign call still hold it.
+- **Not every blocking call detaches for STW safepoints.**  The ones that do
+  are sleep, lock waits, `read`/`write`, the socket calls, `poll`/`epoll`,
+  `io_uring_enter`, `connect`, `waitpid`, `flock`, `pause`, `input()`,
+  `sqlite3`, `ffi_call` and the OpenSSL calls that do socket I/O.  `open()` on
+  a FIFO, `fsync` and compression of a large buffer do not yet detach.
 - **`_thread._local`, `RLock` and the lock type are Python classes** over
   `_threadcore`, where CPython's are C types.  Their behaviour is the
   stdlib's; their `type()` is an ordinary class.

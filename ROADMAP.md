@@ -29,45 +29,6 @@ and aborted in `test_tracemalloc`.
 The package, source, curated CPython-source and stdlib gates pass. The
 aggregate macro benchmark measured 1.41x CPython and the core suite 1.52x.
 
-### Earlier aggregate snapshot
-
-| Gate | Result |
-|---|---|
-| `make check` | green |
-| `make check-cpython` | green |
-| `make check-source` | green; floor not raised for the newest test files |
-| `make check-cpython-source` | green |
-| `make check-stdlib` | green |
-| `make check-pkg` | **red**: `test_capi`, `test_cext`, `test_cppext`, `test_inspect` below their floors; thirteen directories above theirs and unrecorded |
-| lint, the three selftests | green |
-| stdlib modules that import | 545 of the 592 CPython imports on this machine |
-
-The measurement the mission is judged by, both halves of `Lib/test`:
-
-| Corpus | CPython passes | apython passes | Headline | Strict |
-|---|---|---|---|---|
-| `test_*.py` files (`tests/rc_sweep.sh`) | 31,996 | 27,854 | 87.1% | 82% |
-| `test_*/` packages (`-m unittest test.<pkg>`) | 12,524 | 9,326 | 74.5% | 66% |
-| **Both** | **44,520** | **37,180** | **83.5%** | **77%** |
-
-*Headline* counts a test as passing when it ran and did not fail.  *Strict*
-also subtracts the tests apython **skipped** and CPython ran: about 1,750 in
-the files and 1,080 in the packages.  A skip is a missing feature that the
-test suite was polite about, and the headline has been overstating progress by
-six points because of it.  **Strict is the number to steer by.**  Reaching 95%
-strict means closing roughly 8,000 of the 10,300 tests now failing or skipped.
-
-One crash (`test_yield_from`, SIGSEGV), one core dump (`test_resource`), one
-fatal out-of-memory (`test_fstring`, intermittent), two hangs
-(`test_cmd_line_script`, `test_zipfile64`).  Each was re-run by hand against
-the same binary.  Of the 367 file modules where CPython passes anything,
-101 are at full parity; 156 are within ten tests of it.
-
-Performance: macro suite 1.34x CPython, core 1.40x, int 1.78x, float 2.06x,
-list 1.33x, str 1.11x, dict 1.05x, set 1.02x.  The suites are above 1.00x in
-aggregate and carry individual rows well below it (listed under
-[performance](#performance)).
-
 ### How to re-measure
 
 ```bash
@@ -120,25 +81,6 @@ Ordered by tests unlocked per unit of work.  Counts are strict (failures plus
 excess skips) and overlap a little between rows.  Each phase ends with the
 full gate set, both sweeps and the benchmarks.
 
-### Phase 0 -- Make the instrument honest
-
-- The matched report counts shared passing test IDs and ranks skip reasons.
-  The scope file records the exclusions and selectively re-enables
-  behavioural cases behind `cpython_only`.
-- The package and source floors record the verified gains. Returning code
-  position iterators restored the `test_inspect` floor. The excluded C API
-  packages still run and count toward the crash check.
-- `test_yield_from` completes after guarding a delegating generator during
-  `throw()` and `close()`. `test_resource` passes after ignoring SIGXFSZ
-  at startup. Deep Python recursion now raises on both the main stack and
-  a worker stack.
-- `test_cmd_line_script` completes and passes its four stream-flush cases.
-  `test_zipfile64` passed all four tests with a 300-second budget. An
-  isolated apython run took 126 seconds.
-- The quiet-run `test_fstring` OOM came from numeric format specs reaching the
-  integer formatter with a tuple or function. The fallback now raises
-  `TypeError` for a nonempty spec on objects using `object.__format__`.
-
 ### Phase 1 -- Whole modules behind one missing piece
 
 Each item is a single absent name or module with hundreds of tests behind it.
@@ -146,7 +88,7 @@ Each item is a single absent name or module with hundreds of tests behind it.
 | Item | Tests | Work |
 |---|---|---|
 | `array._array_reconstructor`, and `array.__reduce_ex__` to match | 814 | `test_array` dies at import on the one name.  Pickling an `array` fails today too |
-| `_multiprocessing` (`SemLock`), `_posixshmem`, fd passing over `sendmsg` | ~1,500 | Unlocks the three `test_multiprocessing_*` packages, `test_concurrent_futures` (255), `ProcessPoolExecutor`, `test_multiprocessing_main_handling`, `compileall -j` |
+| `_multiprocessing` (`SemLock`), `_posixshmem`, fd passing over `recvmsg` | ~1,500 | Unlocks the three `test_multiprocessing_*` packages, `test_concurrent_futures` (255), `ProcessPoolExecutor`, `test_multiprocessing_main_handling`, `compileall -j` |
 | `_gdbm`, `_dbm` | ~230 | Shims over libgdbm.  `test_shelve` silently runs half its classes without them; `test_dbm`, `test_dbm_gnu`, `test_dbm_ndbm` |
 | C-accelerator stand-ins: `_functools` (96), `_uuid` (37), `_queue` (28), `_heapq` (25), `_bisect` (22), `_statistics` (20), `_elementtree` (19), `_stat` (6), `_opcode` (3), `_json`'s five names (12) | ~270 | Mostly re-exports under the C name.  `_json`, `_bisect` and `_stat` are imported as `None` by fresh-module tests today and take the test class with them |
 | `_curses`, `_curses_panel` | 79 | Shim over ncurses |
@@ -222,9 +164,9 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 
 ### Phase 4 -- Code objects, the compiler's public face, tracing
 
-- **Code-object parity.** `co_lines()` and `co_positions()` now return
-  iterators. `test_dis` still fails at import because a fixture finds
-  an integer where CPython's constants tuple contains a nested code object.
+- **Code-object parity.** `test_dis` still fails at import because a fixture
+  finds an integer where CPython's constants tuple contains a nested code
+  object.
 - **`dis.stack_effect`** (`_opcode`), `co_lnotab`, `_varname_from_oparg`,
   `code.replace()` for the three name tuples.
 - **The optimiser.** No constant folding (`2 * 3` stays two constants),
@@ -238,13 +180,7 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 - **Tracing.** `frame.f_lineno` cannot be assigned, so `pdb`'s `jump` and
   `JumpTestCase` fail (61 errors, two of which loop until memory runs out);
   trace events differ on 176 `test_sys_settrace` assertions; `test_pdb` 41,
-  `test_bdb` 5, `test_cprofile` 20.  **A keyword call made while a trace or
-  profile function is installed hands its keywords to that function**:
-  `bytes.decode("utf-8", errors="replace")` under `cProfile` raises
-  `Profiler._dispatch() got an unexpected keyword argument 'errors'`, and a
-  tracer sees `capture_locals=` the same way.  That is a defect in the
-  dispatch, not a missing feature, and it is what kills `test_cprofile` at
-  import.  Assigning `f_lineno` is
+  `test_bdb` 5, `test_cprofile` 10.  Assigning `f_lineno` is
   CPython's `frame_setlineno`: `marklines`, then `mark_stacks`, an abstract
   interpretation of the block stack to a fixpoint.
 - **`sys.monitoring`** (PEP 669) is absent; `sys.audit` hooks never fire
@@ -299,10 +235,8 @@ One model change with a wide reach: `inspect`, `pydoc`, `doctest`, `pickle`,
 
 - **Generators and coroutines.** `send(non-None)` to a fresh generator is
   accepted; a finished coroutine can be awaited again; PEP 479 is not applied
-  (a `StopIteration` escaping a generator stays one); `RuntimeWarning: never
-  awaited` is never issued; `test_yield_from` segfaults after "generator
-  already executing".  `test_asyncgen` 29, `test_coroutines` 29,
-  `test_generators` 10.
+  (a `StopIteration` escaping a generator stays one).  `test_asyncgen` 29,
+  `test_coroutines` 25, `test_generators` 10.
 - **Finalisation warnings.** No `ResourceWarning` for an unclosed file or
   socket (`test_io`, `test_fileio`, `test_socket`, `test_logging`).
 - **Errors the compiler does not raise.** `test_except_star` 33,
@@ -365,9 +299,9 @@ of them are missing argument validation of one kind.
   dead.
 - **`V_PACK` / `TAG_*` scaffolding** left from the NaN-box migration.
 - **Stack alignment outside the GMP paths** (see defects).
-- **GIL coverage:** `ffi_call`, `fsync`, FIFO `open` and compression of a
-  large buffer hold the lock; ctypes' `errno` is global; helgrind has never
-  been run.
+- **STW detach coverage:** `fsync`, FIFO `open` and compression of a large
+  buffer do not detach for STW safepoints; ctypes' `errno` is global;
+  helgrind/tsan has never been run.
 - **Docblocks without a signature line**, ratcheted by
   `tests/docblock_floor.txt`.
 
@@ -389,11 +323,6 @@ rows are owed.  Ratios are apython speed over CPython's.
 - **Float parse** 0.56x; `rfind`/`rindex` are still O(n*m).
 
 ## Open defects
-
-Carried over from `bugs.md`, each re-run on the date above.  Entries that no
-longer reproduced were dropped: the `test.test_module` collector segfault, the
-`pdb` hang on a piped stdin, `array`'s unsigned 64-bit range, and the
-`__bool__` wording.
 
 - **Calls made with a misaligned stack, everywhere except the paths into
   GMP.**  `INT_NEED_MPZ` calls at the wrong parity in every expansion;
@@ -435,13 +364,6 @@ above: the single builtin callable type and bound-builtin `method` (Phase 3),
 (Phase 7), the standard streams and the REPL (Phase 6), `sys.monitoring` and
 the un-inlined comprehension (Phase 4), and the accelerator stand-ins
 (Phase 1).  Their entries stay in that file for the reasoning until the work
-lands.
-
-Entries that were stale or wholly carried here were removed from it: the
-`posix` subset, `subprocess` credentials and `marshal.load()` (now above), and
-six that no longer reproduced -- the filesystem encoding, the list-backed
-deque and generator-function itertools, the class `__dict__` keys, "C code
-cannot catch a Python exception", the PEP 563 source slice, and the missing
-transform and idna codecs.  What remains is layout and wording that no test
-in scope asks about; treat each as a description, not a decision, and re-open
-any that a sweep shows costing tests.
+lands.  What remains is layout and wording that no test in scope asks about;
+treat each as a description, not a decision, and re-open any that a sweep
+shows costing tests.
