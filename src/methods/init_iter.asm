@@ -157,6 +157,9 @@ extern dictiter_length_hint
 extern setiter_length_hint
 extern dictrev_length_hint
 extern reversed_length_hint
+extern seq_iter_reduce
+extern reversed_iter_reduce
+extern reversed_iter_setstate
 
 align 8
 iter_type_table:
@@ -183,7 +186,7 @@ iter_type_table:
     ITER_ROW map_iter
     ITER_ROW filter_iter
     ITER_ROW callable_iter
-    ITER_ROW seq_iter
-    ITER_ROW_PICKLE reversed_iter, 0, 0, reversed_length_hint
+    ITER_ROW_PICKLE seq_iter, seq_iter_reduce, seqiter_setstate, 0
+    ITER_ROW_PICKLE reversed_iter, reversed_iter_reduce, reversed_iter_setstate, reversed_length_hint
     ITER_ROW sre_scanner
 ITER_TYPE_COUNT equ ($ - iter_type_table) / ITER_ROW_SIZE

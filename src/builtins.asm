@@ -173,6 +173,7 @@ DEF_FUNC builtin_func_new, 8            ; 3 pushes, so rsp is 16-aligned
     mov qword [rax + PyBuiltinObject.max_args], -1 ; -1 = no max check
     mov qword [rax + PyBuiltinObject.func_owner], 0
     mov qword [rax + PyBuiltinObject.func_kind], BUILTIN_KIND_FUNCTION
+    mov qword [rax + PyBuiltinObject.func_module], 0
 
     pop r13
     pop r12

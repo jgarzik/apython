@@ -406,10 +406,13 @@ No hand-written file exceeds 100k bytes; only generated asm may.
   `CALL_INTRINSIC_1`/`_2` handlers in `src/opcodes/match.asm`, the same split
   `_iocore`/`_io` and `_socketcore`/`_socket` use
 - `src/modules/*.asm` — one file per built-in module, named for the module:
-  `errno.asm`, `gc.asm`, `io.asm`, `math.asm`, `posix.asm` (+ `posixproc.asm`),
-  `signal.asm`, `socket.asm`, `sre.asm`, `zlib.asm`.  `table.asm` is the list
-  every one of them is registered from -- `import_init` and
-  `sys.builtin_module_names` both read it, and they used to disagree
+  `array.asm` (+ `array_ops.asm` for sequence ops, extended slicing, rich
+  comparison, and mutation methods; + `array_pickle.asm` for
+  `_array_reconstructor`, `__reduce_ex__`, and lazy `MutableSequence` ABC
+  registration), `errno.asm`, `gc.asm`, `io.asm`, `math.asm`, `posix.asm`
+  (+ `posixproc.asm`), `signal.asm`, `socket.asm`, `sre.asm`, `zlib.asm`.
+  `table.asm` is the list every one of them is registered from -- `import_init`
+  and `sys.builtin_module_names` both read it, and they used to disagree
 - `src/pyo/exc_oserror.asm` — what OSError does that no other exception does:
   the constructor that rewrites its own class from the errno, the four named
   attributes beside `.args`, the message assembled from them, and CPython's

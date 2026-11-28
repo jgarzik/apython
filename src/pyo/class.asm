@@ -350,6 +350,20 @@ DEF_FUNC instance_dealloc, ID_FRAME
     call ap_free
 .id_no_bytes:
 
+    ; An array.array subclass owns its out-of-line scalar buffer (ob_data)
+    ; the same way a bytearray subclass owns ob_bytes.
+    mov rax, [rbx + PyObject.ob_type]
+    test qword [rax + PyTypeObject.tp_flags], TYPE_FLAG_ARRAY_SUBCLASS
+    jz .id_no_array_data
+    mov rdi, [rbx + PyArrayObject.ob_data]
+    test rdi, rdi
+    jz .id_no_array_data
+    mov qword [rbx + PyArrayObject.ob_data], 0
+    mov qword [rbx + PyArrayObject.ob_cap], 0
+    mov qword [rbx + PyArrayObject.ob_size], 0
+    call ap_free
+.id_no_array_data:
+
     ; The same shape for the three containers that keep their storage out of
     ; line.  A dict, list or set subclass instance owns tables the slot walk
     ; above knows nothing about, and the base's own dealloc never runs for a

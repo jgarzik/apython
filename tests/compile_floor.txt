@@ -13,6 +13,7 @@ test_argument_messages
 test_arithmetic
 test_arity_messages
 test_array_file
+test_array_parity
 test_array
 test_asend_methods
 test_ast_mangling
@@ -101,6 +102,7 @@ test_bz2
 test_call_arg_order
 test_call_arg_ownership
 test_call_ex
+test_call_ex_unwind
 test_call_instance
 test_call_kwargs_errors
 test_call_recursion
@@ -251,6 +253,7 @@ test_dict_copy
 test_dict_display_mapping
 test_dict_dunder_args
 test_dict_empty
+test_dict_eq_threaded
 test_dict_fromkeys_class
 test_dict_fromkeys
 test_dict_int_keys

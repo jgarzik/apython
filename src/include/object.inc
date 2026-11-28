@@ -1675,6 +1675,9 @@ TYPE_FLAG_OWNS_NUMBER   equ 0x4000000
 TYPE_FLAG_OWNS_SEQUENCE equ 0x8000000
 TYPE_FLAG_OWNS_MAPPING  equ 0x10000000
 TYPE_FLAG_OSERROR_SUBCLASS equ 0x20000000
+; array.array keeps its scalar buffer out of line, so subclass instances own
+; ob_data that instance_dealloc must free and array ops must recognise.
+TYPE_FLAG_ARRAY_SUBCLASS   equ 0x40000000
 
 ; The type's VERSION lives in the high 32 bits of tp_flags, which the flags
 ; above leave free. It is a stamp from one global
@@ -1953,6 +1956,7 @@ struc PyBuiltinObject
     ; has one, so the type it belongs to and which kind it is are fields.
     .func_owner:  resq 1  ; +56: the type whose method this is, or 0
     .func_kind:   resq 1  ; +64: 0 plain function, 1 method, 2 slot wrapper
+    .func_module: resq 1  ; +72: module name str (owned) for non-builtins, or 0
 endstruc
 
 BUILTIN_KIND_FUNCTION equ 0

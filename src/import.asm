@@ -1045,6 +1045,19 @@ IMW_CALL_ARG equ 16
     pop rax
     pop rax                     ; the owned module
 .cached_ready:
+    ; Register array.array with collections.abc.MutableSequence on first
+    ; `import array` (after sys.path is configured, matching CPython's
+    ; array_modexec).
+    extern array_module_obj
+    cmp rax, [rel array_module_obj]
+    jne .cached_not_array
+    push rax
+    sub rsp, 8
+    extern array_register_abc
+    call array_register_abc
+    add rsp, 8
+    pop rax
+.cached_not_array:
 
     ; Found in sys.modules.  With an empty fromlist a dotted import still
     ; evaluates to the *top* package -- `import a.b` binds `a` -- so a cache

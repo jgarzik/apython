@@ -2342,6 +2342,7 @@ DEF_FUNC_LOCAL dict_richcompare_inner, DRC_FRAME
     test eax, eax
     js .drc_raised                  ; -1: the comparison raised
     jz .drc_not_equal
+    jmp .drc_next                   ; already unlocked above; do not unlock DRC_RVAL
 
 .drc_unlock_next:
     OBJ_UNLOCK rdi

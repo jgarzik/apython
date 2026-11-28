@@ -352,6 +352,7 @@ DEF_SEQITER_REDUCE tuple_iter,     ir_empty_tuple,     0
 DEF_SEQITER_REDUCE str_iter,       ir_empty_str,       1
 DEF_SEQITER_REDUCE bytes_iter,     ir_empty_bytes,     0
 DEF_SEQITER_REDUCE bytearray_iter, ir_empty_bytearray, 0
+DEF_SEQITER_REDUCE seq_iter,       ir_empty_tuple,     0
 
 ;; ============================================================================
 ;; seqiter_setstate(rdi = args Value[], rsi = nargs) -> rax = None
@@ -937,6 +938,7 @@ END_FUNC range_iter_length_hint
 section .bss
 ir_iter_cached: resq 1
 ir_getattr_cached: resq 1
+ir_reversed_cached: resq 1
 
 section .text
 
@@ -1079,20 +1081,175 @@ DEF_FUNC_LOCAL dlh_count, 16
 END_FUNC dlh_count
 
 ;; ============================================================================
+;; ir_reversed_builtin() -> rax = the `reversed` builtin object, borrowed, or 0
+;; ============================================================================
+DEF_FUNC ir_reversed_builtin, IIB_FRAME
+    mov rax, [rel ir_reversed_cached]
+    test rax, rax
+    jnz .irb_done
+    mov rdi, [rel builtins_dict_global]
+    test rdi, rdi
+    jz .irb_none
+    mov [rbp - IIB_DICT], rdi
+    CSTRING rdi, "reversed"
+    call str_from_cstr_heap
+    mov [rbp - IIB_NAME], rax
+    mov rdi, [rbp - IIB_DICT]
+    mov rsi, rax
+    call dict_get       ; err: a 0 goes to .irb_none either way
+    mov [rbp - IIB_DICT], rax
+    mov rdi, [rbp - IIB_NAME]
+    call obj_decref
+    mov rax, [rbp - IIB_DICT]
+    test rax, rax
+    jz .irb_none
+    mov [rel ir_reversed_cached], rax
+.irb_done:
+    leave
+    ret
+.irb_none:
+    xor eax, eax
+    leave
+    ret
+END_FUNC ir_reversed_builtin
+
+;; ============================================================================
+;; reversed_iter_reduce(rdi = args Value[], rsi = nargs)
+;;   -> rax = (reversed, (seq,), index) or (reversed, ((),))
+;; Fails: 0
+;; ============================================================================
+REVR_SELF  equ 8
+REVR_ARGS  equ 16
+REVR_STATE equ 24
+REVR_FRAME equ 40               ; + 1 push (rbx) = 48, 16-aligned
+global reversed_iter_reduce
+DEF_FUNC reversed_iter_reduce, REVR_FRAME
+    push rbx
+    test rsi, rsi
+    jz .revr_args
+    mov rax, [rdi]
+    mov [rbp - REVR_SELF], rax
+
+    call ir_reversed_builtin
+    test rax, rax
+    jz .revr_fail
+    mov rbx, rax                ; rbx = reversed builtin (borrowed)
+
+    mov rdi, [rbp - REVR_SELF]
+    mov rdi, [rdi + PyListIterObject.it_seq]
+    test rdi, rdi
+    jz .revr_exhausted
+
+    call obj_incref
+    mov rdi, [rbp - REVR_SELF]
+    mov rdi, [rdi + PyListIterObject.it_seq]
+    call ir_one_tuple
+    test rax, rax
+    jz .revr_fail
+    mov [rbp - REVR_ARGS], rax
+
+    mov rdi, [rbp - REVR_SELF]
+    mov rdi, [rdi + PyListIterObject.it_index]
+    call int_from_i64
+    V_PACK rax, rdx
+    mov [rbp - REVR_STATE], rax
+
+    mov rdi, rbx
+    mov rsi, [rbp - REVR_ARGS]
+    mov rdx, rax
+    mov ecx, 1
+    call ir_reduce_tuple
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - REVR_STATE]
+    DECREF_V rdi, rcx
+    add rsp, 8
+    pop rax
+    pop rbx
+    leave
+    ret
+
+.revr_exhausted:
+    call ir_empty_tuple
+    test rax, rax
+    jz .revr_fail
+    mov rdi, rax
+    call ir_one_tuple
+    test rax, rax
+    jz .revr_fail
+    mov rdi, rbx
+    mov rsi, rax
+    xor edx, edx
+    xor ecx, ecx
+    call ir_reduce_tuple
+    pop rbx
+    leave
+    ret
+
+.revr_args:
+    SET_EXC exc_TypeError_type, "__reduce__() takes exactly one argument"
+.revr_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC reversed_iter_reduce
+
+;; ============================================================================
+;; reversed_iter_setstate(rdi = args Value[], rsi = nargs) -> rax = None
+;; Fails: 0
+;; Clamps below -1 to -1 (matching CPython Objects/enumobject.c).
+;; ============================================================================
+global reversed_iter_setstate
+DEF_FUNC reversed_iter_setstate, SSS_FRAME
+    push rbx
+    cmp rsi, 2
+    jl .riss_args
+    mov rbx, [rdi]
+    mov rdi, [rdi + 8]
+    V_UNPACK rdi, rdx
+    call obj_as_index
+    ERR_M1 .riss_fail
+    cmp qword [rbx + PyListIterObject.it_seq], 0
+    je .riss_done
+    cmp rax, -1
+    jge .riss_store
+    mov rax, -1
+.riss_store:
+    mov [rbx + PyListIterObject.it_index], rax
+.riss_done:
+    lea rax, [rel none_singleton]
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.riss_args:
+    SET_EXC exc_TypeError_type, "__setstate__() takes exactly one argument"
+.riss_fail:
+    xor eax, eax
+    pop rbx
+    leave
+    ret
+END_FUNC reversed_iter_setstate
+
+;; ============================================================================
 ;; reversed_length_hint(rdi = args Value[], rsi = nargs) -> rax = an int Value
 ;; Fails: 0
 ;;
 ;; A reversed iterator counts DOWN, so what is left is the index plus one --
-;; and an index of -1 is exhaustion, which answers 0 rather than a negative.
+;; and an index of -1 (or a dropped seq) is exhaustion, which answers 0.
 ;; ============================================================================
 RLH_FRAME equ 16            ; + 0 pushes = 16, 16-aligned
 DEF_FUNC reversed_length_hint, RLH_FRAME
     test rsi, rsi
     jz .rlh_args
     mov rdi, [rdi]
+    cmp qword [rdi + PyDictIterObject.it_dict], 0
+    je .rlh_zero
     mov rax, [rdi + PyDictIterObject.it_index]
     inc rax
     jns .rlh_have
+.rlh_zero:
     xor eax, eax
 .rlh_have:
     mov rdi, rax

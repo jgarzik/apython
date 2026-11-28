@@ -1998,7 +1998,9 @@ section .text
 END_FUNC builtin_reversed
 
 ;; reversed_iternext(self) -> rax = Value or NULL
-DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
+RI_EXC   equ 8
+RI_FRAME equ 24            ; + 1 push = 32, 16-aligned
+DEF_FUNC_LOCAL reversed_iternext, RI_FRAME
     push rbx
 
     mov rbx, rdi            ; self
@@ -2013,6 +2015,8 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     cmp qword [rbx + IT_FIELD1], 0
     je .revi_done
 
+    DUNDER_EXC_SAVE [rbp - RI_EXC]
+
     ; Get item at index using sq_item or __getitem__
     mov rdi, [rbx + IT_FIELD1]   ; it_seq
     mov rsi, [rbx + IT_FIELD2]   ; index
@@ -2025,6 +2029,8 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     jz .revi_try_getitem
     call rcx
     V_UNPACK rax, rdx          ; sq_item returns a Value
+    test edx, edx
+    jz .revi_check_exc
     jmp .revi_got_item
 
 .revi_try_getitem:
@@ -2035,10 +2041,10 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     lea rdx, [rel dunder_getitem]
     mov ecx, TAG_SMALLINT
     extern dunder_call_2
-    call dunder_call_2          ; err: 0, absent or raised, goes to .revi_exhausted
+    call dunder_call_2          ; err: 0, absent or raised, goes to .revi_check_exc
     V_UNPACK rax, rdx           ; returns a Value
     test edx, edx
-    jz .revi_exhausted           ; __getitem__ failed
+    jz .revi_check_exc          ; __getitem__ failed
 
 .revi_got_item:
     ; Decrement index
@@ -2050,7 +2056,38 @@ DEF_FUNC_LOCAL reversed_iternext, 8            ; 1 pushes, so rsp is 16-aligned
     leave
     ret
 
+.revi_check_exc:
+    DUNDER_RAISED [rbp - RI_EXC], .revi_raised
+    jmp .revi_exhausted
+.revi_raised:
+    mov rax, [gs:ThreadState.current_exception]
+    test rax, rax
+    jz .revi_exhausted
+    mov rcx, [rax + PyObject.ob_type]
+    extern exc_IndexError_type
+    lea rdx, [rel exc_IndexError_type]
+    cmp rcx, rdx
+    je .revi_clear_exc
+    lea rdx, [rel exc_StopIteration_type]
+    cmp rcx, rdx
+    je .revi_clear_exc
+    ; Non-exhaustion exception: propagate without clearing IT_FIELD1
+    jmp .revi_done
+.revi_clear_exc:
+    push rax
+    sub rsp, 8
+    mov rdi, [rbp - RI_EXC]
+    test rdi, rdi
+    jz .revi_no_restore
+    call obj_incref
+.revi_no_restore:
+    mov rcx, [rbp - RI_EXC]
+    mov [gs:ThreadState.current_exception], rcx
+    add rsp, 8
+    pop rdi
+    call obj_decref
 .revi_exhausted:
+    mov qword [rbx + IT_FIELD2], -1
     xor eax, eax
     xchg [rbx + IT_FIELD1], rax
     test rax, rax
@@ -2069,10 +2106,12 @@ DEF_FUNC_LOCAL reversed_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
-    ; DECREF the sequence
+    ; DECREF the sequence (may be NULL after exhaustion or tp_clear)
     mov rdi, [rbx + IT_FIELD1]
+    test rdi, rdi
+    jz .revd_free
     call obj_decref
-
+.revd_free:
     ; Free self
     mov rdi, rbx
     call gc_dealloc
@@ -2493,6 +2532,10 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     push rbx
     mov rbx, rdi                   ; self
 
+    ; Already exhausted (or cleared by GC)?
+    cmp qword [rbx + IT_FIELD1], 0
+    je .si_exhausted
+
     ; Snapshot first.  current_exception is also the exception BEING HANDLED,
     ; so inside an `except` block this saw one on the very first item, decided
     ; it was not an IndexError, and reported exhaustion: sorted(seq) answered
@@ -2523,11 +2566,11 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     ; Only an exception THIS call raised counts; anything that was already
     ; pending belongs to whoever is handling it.
     DUNDER_RAISED [rbp - SI_EXC], .si_raised
-    jmp .si_exhausted
+    jmp .si_drop_seq
 .si_raised:
     mov rax, [gs:ThreadState.current_exception]
     test rax, rax
-    jz .si_exhausted               ; no exception, clean exhaustion
+    jz .si_drop_seq                ; no exception, clean exhaustion
     mov rcx, [rax + PyObject.ob_type]
     extern exc_IndexError_type
     lea rdx, [rel exc_IndexError_type]
@@ -2536,7 +2579,7 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     lea rdx, [rel exc_StopIteration_type]
     cmp rcx, rdx
     je .si_clear_exc               ; StopIteration → normal exhaustion
-    ; Other exception — leave it, return NULL
+    ; Other exception — leave it, do not drop IT_FIELD1, return NULL
     jmp .si_exhausted
 
 .si_clear_exc:
@@ -2545,6 +2588,7 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
     ; old one, so storing the bare pointer back would leave the global
     ; holding a reference nobody owns.
     push rax
+    sub rsp, 8
     mov rdi, [rbp - SI_EXC]
     test rdi, rdi
     jz .si_no_restore
@@ -2552,7 +2596,18 @@ DEF_FUNC_LOCAL seq_iter_iternext, SI_FRAME
 .si_no_restore:
     mov rcx, [rbp - SI_EXC]
     mov [gs:ThreadState.current_exception], rcx
+    add rsp, 8
     pop rdi
+    call obj_decref
+.si_drop_seq:
+    ; Drop the underlying sequence on exhaustion (matches CPython seqiter_iternext):
+    ; subsequent next() and __setstate__ stay exhausted and pickle reduces to
+    ; (iter, ((),)).
+    xor eax, eax
+    xchg [rbx + IT_FIELD1], rax
+    test rax, rax
+    jz .si_exhausted
+    mov rdi, rax
     call obj_decref
 .si_exhausted:
     RET_NULL
@@ -2566,10 +2621,12 @@ DEF_FUNC_LOCAL seq_iter_dealloc, 8            ; 1 pushes, so rsp is 16-aligned
     push rbx
     mov rbx, rdi
 
-    ; DECREF the source object
+    ; DECREF the source object (may be NULL after exhaustion or tp_clear)
     mov rdi, [rbx + IT_FIELD1]
+    test rdi, rdi
+    jz .sid_free
     call obj_decref
-
+.sid_free:
     ; Free self
     mov rdi, rbx
     extern gc_dealloc

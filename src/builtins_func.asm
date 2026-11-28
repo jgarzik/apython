@@ -253,9 +253,18 @@ DEF_FUNC builtin_func_getattr, 216      ; + 1 push = 224, 16-aligned
     ret
 
 .bfg_module:
-    ; CPython gives a plain builtin "builtins" and a method None.
+    ; CPython gives a plain builtin its module name ("builtins" by default)
+    ; and a method None.
     cmp qword [rbx + PyBuiltinObject.func_owner], 0
     jne .bfg_none
+    mov rax, [rbx + PyBuiltinObject.func_module]
+    test rax, rax
+    jz .bfg_mod_default
+    INCREF rax
+    pop rbx
+    leave
+    ret
+.bfg_mod_default:
     CSTRING rdi, "builtins"
     call str_from_cstr_heap
     pop rbx
@@ -309,6 +318,11 @@ DEF_FUNC builtin_func_dealloc, 8            ; 1 push, so rsp is 16-aligned
     jz .no_name
     call obj_decref
 .no_name:
+    mov rdi, [rbx + PyBuiltinObject.func_module]
+    test rdi, rdi
+    jz .no_mod
+    call obj_decref
+.no_mod:
 
     ; Free the object
     mov rdi, rbx
